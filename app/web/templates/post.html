@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Post
+      <span class="badge {{ 'supportive' if status == 'published' else ('hostile' if status == 'failed' else '') }}"
+            style="margin-left: 8px; vertical-align: middle;">{{ status }}</span>
+    </h1>
+    <div class="sub">
+      <a href="/posts">← Back to Posts</a>
+      {% if channel_sign %} · from
+        <a href="/video/{{ candidate_id }}">{{ channel_sign }}</a>{% endif %}
+      {% if video_title %} · {{ video_title[:80] }}{% endif %}
+      {% if source == "threads" %} · <span class="badge">Threads history</span>{% endif %}
+    </div>
+  </div>
+</div>
+
+{% if error %}<div class="card" style="border-color: var(--danger);">
+  <div class="card-title" style="color: var(--danger);">Last error</div>
+  <div class="meta">{{ error }}</div></div>{% endif %}
+
+<div class="row">
+  <div style="width: 420px; max-width: 100%;">
+    {% if has_clip %}
+      <video src="/media/clip/{{ candidate_id }}" controls preload="metadata"></video>
+    {% else %}
+      <div class="empty" style="min-height: 160px;"><span class="icon">▷</span>
+        <strong>No local clip</strong>
+        {% if source == "threads" %}This post was made outside the app.{% else %}The clip file isn't on disk.{% endif %}</div>
+    {% endif %}
+    <div class="btn-group" style="margin-top: 8px; flex-wrap: wrap;">
+      {% if has_clip %}<a class="sm" href="/post/{{ pid }}/download-clip" download>⤓ Download clip</a>{% endif %}
+      {% if caption %}<button type="button" class="sm" id="copy-caption-btn"
+              data-caption="{{ caption }}" onclick="copyPostCaption(this)">⧉ Copy caption</button>{% endif %}
+      {% if permalink %}<a class="sm" href="{{ permalink }}" target="_blank">Open on Threads ↗</a>{% endif %}
+    </div>
+  </div>
+
+  <div class="grow">
+    {# ---- Caption ---- #}
+    <div class="card tight">
+      <div class="card-title">Caption</div>
+      {% if status in ("draft", "scheduled", "failed") %}
+        <textarea form="sched-form" name="caption" id="caption">{{ caption }}</textarea>
+        <div class="meta" style="margin-top: 6px;">Caption edits are saved when you
+          {{ "reschedule" if status == "scheduled" else "schedule" }} below.</div>
+      {% else %}
+        <div style="white-space: pre-wrap;">{{ caption }}</div>
+      {% endif %}
+    </div>
+
+    {# ---- Timing / scheduling ---- #}
+    <div class="card tight" style="margin-top: 14px;">
+      <div class="card-title">Timing</div>
+      {% if status in ("draft", "scheduled", "failed") %}
+        <div class="meta" style="margin-bottom: 8px;">
+          {% if status == "scheduled" and scheduled_at %}
+            Currently scheduled for {{ scheduled_at.strftime("%b %-d, %H:%M UTC") }}. Change it below.
+          {% elif status == "draft" %}This is a draft — pick a time to schedule it, or post now.
+          {% elif status == "failed" %}Publishing failed. Retry now or reschedule.{% endif %}
+        </div>
+        <form method="post" action="/post/{{ pid }}/schedule" id="sched-form" class="btn-group"
+              style="align-items: center; flex-wrap: wrap;" onsubmit="return validateSchedule()">
+          <input type="hidden" name="next" value="/post/{{ pid }}">
+          <input type="datetime-local" name="scheduled_at" id="scheduled_at" value="{{ sched_local }}">
+          <button class="primary">{{ "Reschedule" if status == "scheduled" else "Schedule" }}</button>
+        </form>
+        <div class="btn-group" style="align-items: center; flex-wrap: wrap; margin-top: 10px;">
+          <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
+            <input type="hidden" name="next" value="/post/{{ pid }}">
+            <button class="approve" onclick="return confirm('Publish to Threads now?')">Post now</button></form>
+          <form class="inline" method="post" action="/post/{{ pid }}/cancel">
+            <input type="hidden" name="next" value="/posts">
+            <button class="reject sm" onclick="return confirm('Delete this {{ status }} post?')">Delete</button></form>
+        </div>
+      {% elif status == "published" %}
+        <div class="meta">Published {{ published_at.strftime("%b %-d, %Y at %H:%M UTC") if published_at else "—" }}.</div>
+      {% else %}
+        <div class="meta">Status: {{ status }}{% if scheduled_at %} · queued for {{ scheduled_at.strftime("%b %-d, %H:%M UTC") }}{% endif %}</div>
+      {% endif %}
+    </div>
+
+    {# ---- Stats ---- #}
+    {% if status == "published" %}
+    <div class="card tight" style="margin-top: 14px;">
+      <div class="card-title" style="display:flex; align-items:center; gap:10px;">
+        Stats
+        <form class="inline" method="post" action="/post/{{ pid }}/refresh-stats" style="margin-left:auto;">
+          <input type="hidden" name="next" value="/post/{{ pid }}">
+          <button class="sm">↻ Refresh</button></form>
+      </div>
+      {% if metrics %}
+        <div class="kpi-grid" style="margin-top: 6px;">
+          {% for label, key in [("Views","views"),("Likes","likes"),("Replies","replies"),("Reposts","reposts"),("Quotes","quotes"),("Shares","shares")] %}
+          <div class="kpi"><div class="kpi-label">{{ label }}</div>
+            <div class="kpi-value">{{ "{:,}".format(metrics[key]) if metrics[key] is not none else "—" }}</div></div>
+          {% endfor %}
+        </div>
+        <div class="meta" style="margin-top: 8px;">
+          Last captured {{ metrics_captured.strftime("%b %-d, %H:%M UTC") if metrics_captured else "—" }}
+          · {{ snapshot_count }} snapshot{{ "s" if snapshot_count != 1 else "" }} on record.</div>
+      {% else %}
+        <div class="meta">No metrics yet. Hit Refresh to pull the latest insights from Threads.</div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {# ---- Replies ---- #}
+    {% if status == "published" or comments %}
+    <div class="card tight" style="margin-top: 14px;">
+      <div class="card-title" style="display:flex; align-items:center; gap:10px;">
+        Replies ({{ comments|length }})
+        {% if status == "published" %}
+        <form class="inline" method="post" action="/post/{{ pid }}/sync-replies" style="margin-left:auto;">
+          <input type="hidden" name="next" value="/post/{{ pid }}">
+          <button class="sm">↻ Sync replies</button></form>
+        {% endif %}
+      </div>
+      {% if comments %}
+      <div class="table-wrap" style="margin-top: 6px;">
+      <table>
+        <tr><th>When</th><th>From</th><th>Comment</th><th>Type</th><th>Your reply</th></tr>
+        {% for cm in comments %}
+        <tr>
+          <td class="meta" style="white-space: nowrap;">{{ cm.commented_at.strftime("%b %-d %H:%M") if cm.commented_at else "—" }}</td>
+          <td class="meta">{{ cm.username or "—" }}</td>
+          <td>{{ cm.text }}</td>
+          <td>{% if cm.classification %}<span class="badge">{{ cm.classification }}</span>{% endif %}</td>
+          <td>
+            {% if cm.reply_status == "posted" %}<span class="badge supportive">replied</span>
+              {% if cm.reply_text %}<div class="meta">{{ cm.reply_text }}</div>{% endif %}
+            {% else %}<span class="badge">{{ cm.reply_status }}</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+      </div>
+      <div class="meta" style="margin-top: 8px;">Approve or edit drafted replies from the
+        <a href="/engagement">Engagement</a> queue.</div>
+      {% else %}
+        <div class="meta">No replies pulled yet. Use Sync replies to check for new ones.</div>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+  async function copyPostCaption(btn) {
+    const text = btn.dataset.caption || '';
+    if (!text.trim()) { alert('No caption to copy.'); return; }
+    const original = btn.textContent;
+    try { await navigator.clipboard.writeText(text); }
+    catch (e) { alert('Copy failed: ' + e); return; }
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  }
+
+  (function () {
+    const el = document.getElementById('scheduled_at');
+    if (!el) return;
+    const pad = n => String(n).padStart(2, '0');
+    const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+      + `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const now = new Date();
+    el.min = fmt(now);
+    if (!el.value) el.value = fmt(new Date(now.getTime() + 60 * 60 * 1000));
+  })();
+
+  function validateSchedule() {
+    const when = document.getElementById('scheduled_at');
+    const cap = document.getElementById('caption');
+    if (cap && !cap.value.trim()) { alert('Add a caption first.'); return false; }
+    if (!when.value) { alert('Pick a date and time.'); return false; }
+    if (new Date(when.value) <= new Date()) { alert('Pick a time in the future.'); return false; }
+    return true;
+  }
+</script>
+{% endblock %}

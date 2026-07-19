@@ -41,7 +41,7 @@
   {% for p in drafts %}
   <tr>
     <td class="meta" style="white-space: nowrap;">💾 {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</td>
-    <td>{{ p.caption[:100] }}</td>
+    <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a></td>
     <td class="meta">
       {% if p.candidate %}<a href="/video/{{ p.candidate.id }}">{{ p.candidate.channel.call_sign }}</a>{% else %}—{% endif %}
     </td>
@@ -87,7 +87,7 @@
   {% for p in scheduled %}
   <tr>
     <td class="meta" style="white-space: nowrap;">⏱ {{ p.scheduled_at.strftime("%b %-d %H:%M UTC") if p.scheduled_at else "—" }}</td>
-    <td>{{ p.caption[:100] }}</td>
+    <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a></td>
     <td class="meta">
       {% if p.candidate %}<a href="/video/{{ p.candidate.id }}">{{ p.candidate.channel.call_sign }}</a>{% else %}—{% endif %}
     </td>
@@ -123,7 +123,7 @@
   {% for p in posts %}
   <tr>
     <td class="meta" style="white-space: nowrap;">{{ p.published_at.strftime("%b %-d %H:%M") if p.published_at else "—" }}</td>
-    <td>{{ p.caption[:100] }}</td>
+    <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a></td>
     <td class="meta">
       {% if p.candidate %}<a href="/video/{{ p.candidate.id }}">{{ p.candidate.channel.call_sign }}</a>
       {% elif p.source == "threads" %}<span class="badge">Threads history</span>

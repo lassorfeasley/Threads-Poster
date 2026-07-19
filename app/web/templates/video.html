@@ -598,7 +598,12 @@ function renderSegments() {
 // ---- Per-segment mini waveform (zoomed to one segment, drag edges to trim) ----
 // The window shows the segment plus a little context padding so you can nudge an
 // edge slightly outward as well as inward.
+// While an edge is being dragged we freeze the window to this fixed scope so the
+// waveform stays static and the edge can be dropped precisely (see initSegWave).
+let frozenSegIdx = null, frozenSegWin = null;
+
 function segWindow(i) {
+  if (frozenSegWin && frozenSegIdx === i) return frozenSegWin;
   const s = segments[i];
   const len = s.end - s.start;
   const pad = Math.min(Math.max(len * 0.25, 2), 10);
@@ -689,7 +694,14 @@ function initSegWave(i, canvas) {
     if (selectedSeg !== i) { selectedSeg = i; highlightSelectedRow(); }
     const edge = edgeAt(ev.clientX);
     const { t } = winX(ev.clientX);
-    if (edge) { pushUndo(); drag = edge; setSegEdge(i, edge, t); drawSegWave(i); }
+    if (edge) {
+      pushUndo(); drag = edge;
+      // Lock the current scope so the waveform doesn't shift while dragging.
+      // Clear first so an interrupted prior drag can't leave a stale lock.
+      frozenSegWin = null; frozenSegIdx = null;
+      frozenSegWin = segWindow(i); frozenSegIdx = i;
+      setSegEdge(i, edge, t); drawSegWave(i);
+    }
     else {
       // Play from the clicked point up to the end line, then stop, so you can
       // hear the lead-in and check the out-transition. Clicking past the end
@@ -713,7 +725,10 @@ function initSegWave(i, canvas) {
       activeStop = segments[i].end;
       player.play();
     }
-    if (drag && drag !== 'scrub') renderSegments();
+    const wasEdge = drag && drag !== 'scrub';
+    // Release the frozen scope so the view re-centers on the new bounds.
+    frozenSegWin = null; frozenSegIdx = null;
+    if (wasEdge) renderSegments();
     drag = null;
   });
   sizeSegWave(i);

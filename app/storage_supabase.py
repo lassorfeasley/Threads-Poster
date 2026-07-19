@@ -24,6 +24,29 @@ def _client():
     return create_client(url, key)
 
 
+def _ensure_bucket(client, bucket: str) -> None:
+    """Create the private clip bucket on first use so publishing works without
+    any manual Supabase dashboard setup. Per-file size is governed by the
+    project's global upload limit, so we don't set a bucket-level cap here."""
+    try:
+        client.storage.get_bucket(bucket)
+        return  # already exists
+    except Exception:
+        pass  # not found (or transient) — try to create it below
+    try:
+        client.storage.create_bucket(bucket, options={"public": False})
+        log.info("Created Supabase storage bucket %r", bucket)
+    except Exception as exc:
+        # A concurrent create (or an existing-but-unreadable bucket) is fine.
+        if "exist" in str(exc).lower() or "duplicate" in str(exc).lower():
+            return
+        raise RuntimeError(
+            f"Supabase bucket {bucket!r} is missing and could not be created "
+            f"automatically: {exc}. Create it once in the Supabase dashboard "
+            f"(Storage \u2192 New bucket, name {bucket!r}, keep it private)."
+        ) from exc
+
+
 def upload_trimmed_clip(local_path: str | Path, object_key: str) -> str:
     """Upload the clip and return a signed URL. Idempotent via upsert."""
     settings = load_settings()
@@ -32,6 +55,7 @@ def upload_trimmed_clip(local_path: str | Path, object_key: str) -> str:
     local_path = Path(local_path)
 
     client = _client()
+    _ensure_bucket(client, bucket)
     storage = client.storage.from_(bucket)
     with open(local_path, "rb") as f:
         storage.upload(object_key, f.read(), {"content-type": "video/mp4", "upsert": "true"})

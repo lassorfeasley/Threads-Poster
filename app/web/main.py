@@ -41,6 +41,7 @@ from ..models import (
     STATUS_REJECTED,
     Candidate,
     Channel,
+    MetricSnapshot,
     ThreadsComment,
     ThreadsPost,
     Trait,
@@ -737,7 +738,26 @@ def schedule_to_threads(candidate_id: int, caption: str = Form(...),
         if c is None or not c.trimmed_clip_path:
             return _flash(f"/video/{candidate_id}", "Export a clip first")
         try:
-            schedule_clip(session, c, c.trimmed_clip_path, caption, when)
+            # Reuse (move) an existing not-yet-published post for this clip rather
+            # than creating a duplicate — otherwise the clip shows on the calendar
+            # at both the old and new times. Any extra stragglers are removed so a
+            # single calendar entry moves cleanly.
+            existing = session.execute(
+                select(ThreadsPost).where(
+                    ThreadsPost.candidate_pk == c.id,
+                    ThreadsPost.status.in_(["scheduled", "draft", "failed"]),
+                ).order_by(ThreadsPost.created_at.desc())
+            ).scalars().all()
+            if existing:
+                keep = existing[0]
+                keep.caption = caption
+                keep.scheduled_at = when
+                keep.status = "scheduled"
+                keep.error = ""
+                for extra in existing[1:]:
+                    session.delete(extra)
+            else:
+                schedule_clip(session, c, c.trimmed_clip_path, caption, when)
         except Exception as exc:
             return _flash(f"/video/{candidate_id}?step=post", f"Schedule failed: {exc}")
     local = when.astimezone()
@@ -780,7 +800,7 @@ def cancel_scheduled_post(post_id: int, next: str = Form("/posts")):
 @app.post("/post/{post_id}/schedule")
 def schedule_existing_post(post_id: int, scheduled_at: str = Form(...),
                            caption: str = Form(""), next: str = Form("/posts")):
-    """Turn a draft (or failed) post into a scheduled one."""
+    """Schedule a draft/failed post, or reschedule an already-scheduled one."""
     when = _parse_local_datetime(scheduled_at)
     if when is None:
         return _flash(next, "Pick a valid date and time")
@@ -788,15 +808,29 @@ def schedule_existing_post(post_id: int, scheduled_at: str = Form(...),
         return _flash(next, "Scheduled time must be in the future")
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
-        if p is None or p.status not in ("draft", "failed"):
-            return _flash(next, "Only a draft can be scheduled")
+        if p is None or p.status not in ("draft", "failed", "scheduled"):
+            return _flash(next, "Only a draft, failed, or scheduled post can be (re)scheduled")
+        was_scheduled = p.status == "scheduled"
         if caption.strip():
             p.caption = caption.strip()
         p.status = "scheduled"
         p.scheduled_at = when
         p.error = ""
+        # Keep one calendar entry per clip: drop other not-yet-published posts
+        # for the same source video so a reschedule moves rather than duplicates.
+        if p.candidate_pk is not None:
+            dupes = session.execute(
+                select(ThreadsPost).where(
+                    ThreadsPost.candidate_pk == p.candidate_pk,
+                    ThreadsPost.id != p.id,
+                    ThreadsPost.status.in_(["scheduled", "draft", "failed"]),
+                )
+            ).scalars().all()
+            for extra in dupes:
+                session.delete(extra)
     local = when.astimezone()
-    return _flash(next, f"Scheduled for {local.strftime('%b %-d, %-I:%M %p')}")
+    verb = "Rescheduled" if was_scheduled else "Scheduled"
+    return _flash(next, f"{verb} for {local.strftime('%b %-d, %-I:%M %p')}")
 
 
 @app.post("/post/{post_id}/publish-now")
@@ -811,6 +845,106 @@ def publish_scheduled_now(post_id: int, next: str = Form("/posts")):
             return _flash(next, f"Published: {p.permalink or p.threads_media_id}")
         except Exception as exc:
             return _flash(next, f"Publish failed: {exc}")
+
+
+_POST_METRICS = ("views", "likes", "replies", "reposts", "quotes", "shares")
+
+
+def _fmt_local_input(when: dt.datetime | None) -> str:
+    """Format a UTC datetime for a <input type=datetime-local> (operator local)."""
+    if when is None:
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    return when.astimezone().strftime("%Y-%m-%dT%H:%M")
+
+
+@app.get("/post/{post_id}", response_class=HTMLResponse)
+def post_detail(request: Request, post_id: int, msg: str = ""):
+    """A single post's profile: reschedule before it publishes, and once it's
+    live, see its stats and the replies it received."""
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return _flash("/posts", "Post not found")
+
+        cand = p.candidate
+        has_clip = bool(
+            (p.clip_local_path and Path(p.clip_local_path).exists())
+            or (cand and cand.trimmed_clip_path and Path(cand.trimmed_clip_path).exists())
+        )
+        snap = session.execute(
+            select(MetricSnapshot).where(MetricSnapshot.post_pk == p.id)
+            .order_by(MetricSnapshot.captured_at.desc()).limit(1)
+        ).scalar_one_or_none()
+        metrics = {m: getattr(snap, m) for m in _POST_METRICS} if snap else None
+        snapshot_count = session.execute(
+            select(func.count(MetricSnapshot.id)).where(MetricSnapshot.post_pk == p.id)
+        ).scalar_one()
+        comments = session.execute(
+            select(ThreadsComment).where(ThreadsComment.post_pk == p.id)
+            .order_by(ThreadsComment.created_at.desc())
+        ).scalars().all()
+        comment_rows = [
+            {"username": c.username, "text": c.text,
+             "classification": c.classification, "reply_status": c.reply_status,
+             "reply_text": c.reply_text_posted,
+             "commented_at": c.commented_at}
+            for c in comments
+        ]
+        ctx = {
+            "pid": p.id, "status": p.status, "caption": p.caption or "",
+            "permalink": p.permalink, "source": p.source, "error": p.error,
+            "candidate_id": cand.id if cand else None,
+            "channel_sign": cand.channel.call_sign if (cand and cand.channel) else "",
+            "video_title": cand.title if cand else "",
+            "has_clip": has_clip,
+            "scheduled_at": p.scheduled_at, "published_at": p.published_at,
+            "created_at": p.created_at,
+            "sched_local": _fmt_local_input(p.scheduled_at),
+            "metrics": metrics, "metrics_captured": snap.captured_at if snap else None,
+            "snapshot_count": snapshot_count,
+            "comments": comment_rows,
+        }
+    return templates.TemplateResponse(
+        request, "post.html", {**ctx, "msg": msg, "active": "posts"}
+    )
+
+
+@app.post("/post/{post_id}/refresh-stats")
+def refresh_post_stats(post_id: int, next: str = Form("")):
+    """Force a fresh metric snapshot for one published post."""
+    dest = next or f"/post/{post_id}"
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None or p.status != "published" or not p.threads_media_id:
+            return _flash(dest, "No published post to refresh")
+        try:
+            data = threads_api.fetch_insights(p.threads_media_id)
+        except Exception as exc:
+            return _flash(dest, f"Refresh failed: {exc}")
+        if not data:
+            return _flash(dest, "No insights returned yet")
+        session.add(MetricSnapshot(
+            post_pk=p.id,
+            views=data.get("views"), likes=data.get("likes"),
+            replies=data.get("replies"), reposts=data.get("reposts"),
+            quotes=data.get("quotes"), shares=data.get("shares"),
+        ))
+    return _flash(dest, "Stats refreshed")
+
+
+@app.post("/post/{post_id}/sync-replies")
+def sync_post_replies(post_id: int, next: str = Form("")):
+    """Pull and classify the replies on this (and other) published posts."""
+    dest = next or f"/post/{post_id}"
+    with session_scope() as session:
+        try:
+            result = sync_comments(session)
+            return _flash(dest, f"Synced: {result['new_comments']} new replies, "
+                                f"{result['drafts']} drafts")
+        except Exception as exc:
+            return _flash(dest, f"Reply sync failed: {exc}")
 
 
 def _clean_auth_code(raw: str) -> str:
@@ -984,7 +1118,12 @@ def posts_page(request: Request, msg: str = ""):
             .order_by(ThreadsPost.created_at.desc()).limit(100)
         ).scalars().all()
         for p in [*scheduled, *drafts, *posts]:
-            _ = p.candidate
+            # Touch the nested relationships while the session is open so the
+            # template can render them after the session closes.
+            if p.candidate is not None:
+                _ = p.candidate.id, p.candidate.trimmed_clip_path
+                if p.candidate.channel is not None:
+                    _ = p.candidate.channel.call_sign
     return templates.TemplateResponse(
         request, "posts.html",
         {"posts": posts, "scheduled": scheduled, "drafts": drafts,
