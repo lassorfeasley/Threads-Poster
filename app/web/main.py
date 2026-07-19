@@ -514,11 +514,15 @@ def approve(candidate_id: int):
 
 
 @app.post("/video/{candidate_id}/reject")
-def reject(candidate_id: int):
+def reject(request: Request, candidate_id: int):
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c:
             c.status = STATUS_REJECTED
+    # AJAX callers (dashboard delete buttons) get a light JSON reply so the page
+    # can drop the row in place instead of reloading and re-fetching filmstrips.
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"ok": True})
     return _flash("/", "Rejected")
 
 

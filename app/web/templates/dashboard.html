@@ -125,6 +125,7 @@
 </div>
 
 {% if in_progress %}
+<div id="in-progress-section">
 <h2>In progress</h2>
 {% for c, state in in_progress %}
 <div class="vrow" tabindex="0" role="link"
@@ -142,6 +143,8 @@
       {% elif state.current == "trim" %}<span class="badge score-lo">ready to trim</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
       <a class="btn sm" href="/video/{{ c.id }}" onclick="event.stopPropagation()">Continue →</a>
+      <button class="reject sm" title="Delete this clip from your workflow"
+              onclick="event.stopPropagation(); deleteRow({{ c.id }}, this, 'Remove this clip from your workflow? You can restore it later from Archive.')">✕</button>
     </span>
   </div>
   <div class="filmstrip mini" data-cid="{{ c.id }}"></div>
@@ -159,6 +162,7 @@
   </div>
 </div>
 {% endfor %}
+</div>
 {% endif %}
 
 <h2>{{ "Results" if filtering else "New matches" }}
@@ -196,8 +200,10 @@
       {{ c.published_at.strftime("%b %-d %H:%M") if c.published_at else "?" }}
       {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
     {% if c.status == "new" %}
-    <form class="inline vx" method="post" action="/video/{{ c.id }}/reject">
-      <button class="reject sm" title="Reject" onclick="event.stopPropagation()">✕</button></form>
+    <span class="vx">
+      <button class="reject sm" title="Reject"
+              onclick="event.stopPropagation(); deleteRow({{ c.id }}, this)">✕</button>
+    </span>
     {% endif %}
   </div>
   <div class="filmstrip mini" data-cid="{{ c.id }}"></div>
@@ -218,6 +224,30 @@
 {% endfor %}
 
 <script>
+// Remove a clip in place (no full-page reload, so we don't re-fetch every
+// row's filmstrip). Rejected clips can be restored from Archive.
+async function deleteRow(cid, btn, confirmMsg) {
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/video/${cid}/reject`, {
+      method: 'POST', headers: { 'Accept': 'application/json' },
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const row = btn.closest('.vrow');
+    row.style.transition = 'opacity .15s ease';
+    row.style.opacity = '0';
+    setTimeout(() => {
+      const section = document.getElementById('in-progress-section');
+      row.remove();
+      if (section && !section.querySelector('.vrow')) section.remove();
+    }, 150);
+  } catch (e) {
+    alert('Delete failed: ' + e);
+    btn.disabled = false;
+  }
+}
+
 // Lazy-load mini filmstrips as rows scroll into view, max 2 fetches at a
 // time (uncached storyboards trigger a yt-dlp metadata extraction).
 const TILE_W = 64, TILE_GAP = 3;
