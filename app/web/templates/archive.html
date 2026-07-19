@@ -60,7 +60,7 @@
         {% if state.posted %}<span class="badge supportive">posted</span>
         {% elif state.trimmed %}<span class="badge info">clip exported — not posted</span>
         {% else %}<span class="badge score-lo">not trimmed yet</span>{% endif %}
-        {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
+        {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
       </div>
     </div>
     <div>

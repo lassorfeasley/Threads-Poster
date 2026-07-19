@@ -74,7 +74,6 @@ class Candidate(Base):
     matched_keywords: Mapped[str] = mapped_column(Text, default="")  # comma-separated
     relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     relevance_rationale: Mapped[str] = mapped_column(Text, default="")
-    climate_topic: Mapped[str] = mapped_column(String(60), default="")  # LLM-tagged theme
 
     status: Mapped[str] = mapped_column(String(20), default=STATUS_NEW)
     approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -118,13 +117,24 @@ class ThreadsPost(Base):
     caption: Mapped[str] = mapped_column(Text, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase Storage object key
     clip_local_path: Mapped[str] = mapped_column(Text, default="")
-    # draft | scheduled | publishing | published | failed
+    # draft | queued | publishing | published | failed
+    # (legacy "scheduled" is migrated to "queued" on startup)
     status: Mapped[str] = mapped_column(String(20), default="draft")
     source: Mapped[str] = mapped_column(String(20), default="app")  # app | threads (imported history)
     error: Mapped[str] = mapped_column(Text, default="")
-    # When set (and status == scheduled), the scheduler publishes at/after this time (UTC).
+    # Legacy exact-time field; unused by the adaptive window scheduler.
     scheduled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Adaptive queue: breaking posts bypass window/hot deferral (spacing floor still applies).
+    is_breaking: Mapped[bool] = mapped_column(Boolean, default=False)
+    # How many times this queued post has been deferred because the last post was hot.
+    defer_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_deferred_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Optional pin to a specific upcoming window key (``YYYY-MM-DD#N`` in scheduler TZ).
+    # Lets the operator drag a queued post onto an open calendar slot; unpinned posts
+    # fill remaining windows FIFO. Cleared on publish.
+    pinned_window_key: Mapped[str] = mapped_column(String(40), default="")
 
     # Structured attributes for analytics slicing.
     caption_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -141,6 +151,27 @@ class ThreadsPost(Base):
     candidate: Mapped[Candidate | None] = relationship(back_populates="threads_posts")
     comments: Mapped[list["ThreadsComment"]] = relationship(back_populates="post")
     metrics: Mapped[list["MetricSnapshot"]] = relationship(back_populates="post")
+
+
+class SchedulerState(Base):
+    """Singleton row tracking adaptive-scheduler progress across restarts.
+
+    ``last_window_key`` is ``YYYY-MM-DD#N`` (ET date + 0-based window index) so
+    each posting window is acted on at most once. ``last_publish_at`` enforces
+    the spacing floor. Hot-check fields power the Posts status panel.
+    """
+
+    __tablename__ = "scheduler_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    last_window_key: Mapped[str] = mapped_column(String(40), default="")
+    last_publish_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_metrics_poll_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_hot_check_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_hot_result: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_hot_likes_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_action: Mapped[str] = mapped_column(String(80), default="")
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ThreadsComment(Base):
@@ -208,6 +239,33 @@ class TraitWeight(Base):
     # Fractional lift vs. the overall average: (avg_metric - overall) / overall.
     lift: Mapped[float | None] = mapped_column(Float, nullable=True)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MonitorRun(Base):
+    """Durable record of a monitor (discovery) pass, so the dashboard can show
+    an accurate running/last-run state that survives page refreshes and server
+    restarts. A pass runs in an in-process background thread, so any row left
+    ``running`` after a restart is reconciled to ``interrupted`` on startup.
+    """
+
+    __tablename__ = "monitor_runs"
+
+    STATUS_RUNNING = "running"
+    STATUS_DONE = "done"
+    STATUS_FAILED = "failed"
+    STATUS_INTERRUPTED = "interrupted"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), default=STATUS_RUNNING)
+    scope: Mapped[str] = mapped_column(String(60), default="")  # e.g. "since last check"
+    lookback_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    channels_checked: Mapped[int] = mapped_column(Integer, default=0)
+    candidates_stored: Mapped[int] = mapped_column(Integer, default=0)
+    vision_scored: Mapped[int] = mapped_column(Integer, default=0)
+    result: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MetricSnapshot(Base):

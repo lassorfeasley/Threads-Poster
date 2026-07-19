@@ -43,15 +43,23 @@ from ..models import (
     Candidate,
     Channel,
     MetricSnapshot,
+    MonitorRun,
+    SchedulerState,
     ThreadsComment,
     ThreadsPost,
     Trait,
     utcnow,
 )
 from ..monitor import run_monitor_once
-from ..publishing import publish_clip, publish_post, record_post, schedule_clip
+from ..publishing import publish_clip, publish_post, queue_clip, record_post
 from ..ranking import load_trait_weights, order_expr, sort_candidates, trait_guidance_text
-from ..scheduler import start_scheduler_thread
+from ..scheduler import (
+    build_window_plan,
+    pin_post_to_window,
+    scheduler_status,
+    spacing_allows_publish,
+    start_scheduler_thread,
+)
 from ..scrape import archive_candidate
 from ..vision import apply_visual_score
 
@@ -71,14 +79,56 @@ init_db()
 with session_scope() as _s:
     sync_channels_from_config(_s)
     sync_traits_from_config(_s)
+    # A monitor pass runs in an in-process thread, so any run still marked
+    # "running" here was killed by a restart/crash — reconcile it to
+    # "interrupted" so the dashboard doesn't show a spinner that never resolves.
+    for _run in _s.execute(
+        select(MonitorRun).where(MonitorRun.status == MonitorRun.STATUS_RUNNING)
+    ).scalars().all():
+        _run.status = MonitorRun.STATUS_INTERRUPTED
+        _run.finished_at = utcnow()
+        if not _run.result:
+            _run.result = "Interrupted — the server restarted while the pass was running."
 
-# Publish scheduled posts in the background while the dashboard runs.
+# Adaptive window scheduler (queue + hotness + metrics poll) while the dashboard runs.
 start_scheduler_thread()
 
 
 def _flash(url: str, msg: str) -> RedirectResponse:
     sep = "&" if "?" in url else "?"
     return RedirectResponse(f"{url}{sep}msg={msg}", status_code=303)
+
+
+def _scrape_in_thread(candidate_id: int) -> None:
+    session = SessionLocal()
+    try:
+        candidate = session.get(Candidate, candidate_id)
+        if candidate:
+            archive_candidate(session, candidate)
+            session.commit()
+    except Exception:
+        session.rollback()
+        log.exception("Background scrape failed for candidate %s", candidate_id)
+    finally:
+        session.close()
+
+
+def _resume_stalled_scrapes() -> None:
+    """Restart downloads left in ``approved`` after a server restart.
+
+    Approve kicks off an in-process thread; a restart kills it and leaves the
+    row looking like it's still downloading forever. Resume those here.
+    """
+    with session_scope() as session:
+        stalled = session.execute(
+            select(Candidate.id).where(Candidate.status == STATUS_APPROVED)
+        ).scalars().all()
+    for cid in stalled:
+        log.info("Resuming stalled scrape for candidate %s", cid)
+        threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
+
+
+_resume_stalled_scrapes()
 
 
 # --- Workflow step helpers ----------------------------------------------------
@@ -121,14 +171,14 @@ def _parse_date(value: str) -> dt.datetime | None:
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, q: str = "", channel_id: int = 0,
-              topic: list[str] = Query(default=[]),
+              keyword: list[str] = Query(default=[]),
               region: str = "", country: str = "", scope: str = "",
               status: str = "new", date_from: str = "", date_to: str = "",
               show_hidden: int = 0, msg: str = ""):
     settings = load_settings()
     threshold = settings.get("matching.score_threshold", 0.5)
-    topic = [t for t in topic if t.strip()]
-    filtering = bool(q or channel_id or topic or region or country or scope
+    keyword = [k for k in keyword if k.strip()]
+    filtering = bool(q or channel_id or keyword or region or country or scope
                      or date_from or date_to or status != "new")
 
     # On a bare visit (no query string), default the view to today + yesterday by
@@ -158,10 +208,10 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
             )
         if channel_id:
             query = query.where(Candidate.channel_pk == channel_id)
-        if topic:
-            # climate_topic is a CSV list; match rows containing ANY selected topic.
+        if keyword:
+            # matched_keywords is a CSV list; match rows containing ANY selected keyword.
             query = query.where(or_(
-                *[("," + Candidate.climate_topic + ",").like(f"%,{t},%") for t in topic]
+                *[("," + Candidate.matched_keywords + ",").like(f"%,{k},%") for k in keyword]
             ))
         channel_filters = []
         if region:
@@ -197,15 +247,14 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
         for c in candidates:
             _ = c.channel
 
-        # Filter dropdown options: only channels/topics that actually have candidates.
+        # Filter dropdown options: only channels that actually have candidates.
         filter_channels = session.execute(
             select(Channel).join(Candidate, Candidate.channel_pk == Channel.id)
             .distinct().order_by(Channel.call_sign)
         ).scalars().all()
-        raw_topic_values = session.execute(select(Candidate.climate_topic).distinct()).all()
-        topics = sorted({
-            t.strip() for (v,) in raw_topic_values for t in (v or "").split(",") if t.strip()
-        })
+        # Keyword filter chips come from the active keyword list (what we monitor
+        # for), so removed/legacy terms never show up as filters.
+        keywords_options = sorted(load_keywords())
         regions = [
             r for (r,) in session.execute(
                 select(Channel.region).distinct().order_by(Channel.region)
@@ -229,18 +278,32 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
             for c in in_progress:
                 state = workflow_state(session, c)
                 # Drop it from "In progress" once the clip has been dealt with:
-                # posted, scheduled, or saved as a draft for later. (A failed
-                # post stays so it can be retried.)
-                handled = session.execute(
+                # trimmed clip exported/saved ("ready to post"), posted,
+                # queued, or saved as a draft. A candidate with a FAILED
+                # post stays visible so it can be retried.
+                post_failed = session.execute(
                     select(ThreadsPost.id).where(
                         ThreadsPost.candidate_pk == c.id,
-                        ThreadsPost.status.in_(["published", "scheduled", "publishing", "draft"]),
+                        ThreadsPost.status == "failed",
                     ).limit(1)
                 ).scalar_one_or_none() is not None
-                if handled:
-                    continue
+                if post_failed:
+                    state["post_failed"] = True  # keep the row visible for retry
+                elif state["current"] == "post":
+                    continue  # clip exported/saved — workflow is done
+                else:
+                    handled = session.execute(
+                        select(ThreadsPost.id).where(
+                            ThreadsPost.candidate_pk == c.id,
+                            ThreadsPost.status.in_(["published", "queued", "publishing", "draft"]),
+                        ).limit(1)
+                    ).scalar_one_or_none() is not None
+                    if handled:
+                        continue
                 in_progress_rows.append((c, state))
                 _ = c.channel
+
+        monitor_running, monitor_result = _monitor_view_state(session)
 
     return templates.TemplateResponse(
         request, "dashboard.html",
@@ -249,41 +312,89 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
          "undesirable_traits": undesirable_traits,
          "date_defaulted": date_defaulted,
          "show_hidden": show_hidden, "filtering": filtering,
-         "q": q, "channel_id": channel_id, "topic": topic, "region": region,
+         "q": q, "channel_id": channel_id, "keyword": keyword, "region": region,
          "country": country, "scope": scope, "status": status,
          "date_from": date_from, "date_to": date_to,
-         "filter_channels": filter_channels, "topics": topics, "regions": regions,
+         "filter_channels": filter_channels, "keywords_options": keywords_options,
+         "regions": regions,
          "countries": countries, "scopes": ["local", "national", "international"],
-         "monitor_running": _monitor_state["running"],
-         "monitor_result": _monitor_state["last_result"],
+         "monitor_running": monitor_running,
+         "monitor_result": monitor_result,
          "msg": msg, "active": "dashboard"},
     )
 
 
-# Monitor passes run in a background thread; state is read by the dashboard.
-_monitor_state = {"running": False, "last_result": ""}
+# Monitor passes run in a background thread. Progress is persisted to the
+# MonitorRun table (durable across refreshes and restarts); this in-memory flag
+# only guards against starting a second pass within the SAME process.
+_monitor_running = threading.Event()
 
 
-def _monitor_in_thread(days: int | None) -> None:
-    scope = f"last {days} days" if days else "since last check"
+def _monitor_in_thread(run_id: int, days: int | None) -> None:
     try:
         result = run_monitor_once(days)
-        _monitor_state["last_result"] = (
-            f"Last pass ({scope}): {result['channels_checked']} channels checked, "
+        summary = (
+            f"{result['channels_checked']} channels checked, "
             f"{result['candidates_stored']} new candidates, "
             f"{result.get('vision_scored', 0)} vision-scored "
             f"(spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today)"
         )
+        with session_scope() as session:
+            run = session.get(MonitorRun, run_id)
+            if run is not None:
+                run.status = MonitorRun.STATUS_DONE
+                run.channels_checked = result["channels_checked"]
+                run.candidates_stored = result["candidates_stored"]
+                run.vision_scored = result.get("vision_scored", 0)
+                run.result = summary
+                run.finished_at = utcnow()
     except Exception as exc:
         log.exception("Monitor pass failed")
-        _monitor_state["last_result"] = f"Monitor pass failed: {exc}"
+        with session_scope() as session:
+            run = session.get(MonitorRun, run_id)
+            if run is not None:
+                run.status = MonitorRun.STATUS_FAILED
+                run.error = str(exc)
+                run.result = f"Monitor pass failed: {exc}"
+                run.finished_at = utcnow()
     finally:
-        _monitor_state["running"] = False
+        _monitor_running.clear()
+
+
+def _latest_monitor_run(session) -> MonitorRun | None:
+    return session.execute(
+        select(MonitorRun).order_by(MonitorRun.started_at.desc()).limit(1)
+    ).scalar_one_or_none()
+
+
+def _monitor_view_state(session) -> tuple[bool, str]:
+    """(running, message) for the dashboard, derived from durable run state.
+
+    ``running`` is true only when a pass is genuinely in flight in THIS process,
+    so a restart can never leave a spinner stuck on.
+    """
+    run = _latest_monitor_run(session)
+    running = _monitor_running.is_set() and run is not None and run.status == MonitorRun.STATUS_RUNNING
+    if run is None:
+        return running, ""
+    when = run.finished_at or run.started_at
+    stamp = when.strftime("%b %-d %H:%M") if when else ""
+    scope = run.scope or "since last check"
+    if run.status == MonitorRun.STATUS_DONE:
+        return running, f"Last pass ({scope}, {stamp}): {run.result}"
+    if run.status == MonitorRun.STATUS_FAILED:
+        return running, run.result or "Last pass failed."
+    if run.status == MonitorRun.STATUS_INTERRUPTED:
+        return running, (
+            f"Last pass ({scope}, started {stamp}) was interrupted by a server "
+            "restart. Run the monitor again to finish checking."
+        )
+    return running, ""  # currently running: badge is shown instead
 
 
 @app.post("/monitor/run")
 def monitor_now(lookback_days: str = Form("")):
-    if _monitor_state["running"]:
+    if _monitor_running.is_set():
         return _flash("/", "A monitor pass is already running — refresh to see progress")
     days: int | None = None
     if lookback_days.strip():
@@ -291,25 +402,30 @@ def monitor_now(lookback_days: str = Form("")):
             days = max(1, min(int(lookback_days), 30))
         except ValueError:
             days = None
-    _monitor_state["running"] = True
-    _monitor_state["last_result"] = ""
-    threading.Thread(target=_monitor_in_thread, args=(days,), daemon=True).start()
-    scope = f"backfilling {days} days" if days else "checking since last run"
-    return _flash("/", f"Monitor started ({scope}) — running in the background, refresh for updates")
+    scope = f"last {days} days" if days else "since last check"
+    with session_scope() as session:
+        run = MonitorRun(status=MonitorRun.STATUS_RUNNING, scope=scope, lookback_days=days)
+        session.add(run)
+        session.flush()
+        run_id = run.id
+    _monitor_running.set()
+    threading.Thread(target=_monitor_in_thread, args=(run_id, days), daemon=True).start()
+    verb = f"backfilling {days} days" if days else "checking since last run"
+    return _flash("/", f"Monitor started ({verb}) — running in the background, refresh for updates")
 
 
 # --- Triage mode (one at a time, keyboard-driven) --------------------------------
 
 @app.get("/triage", response_class=HTMLResponse)
 def triage(request: Request, q: str = "", channel_id: int = 0,
-           topic: list[str] = Query(default=[]),
+           keyword: list[str] = Query(default=[]),
            region: str = "", country: str = "", scope: str = "",
            date_from: str = "", date_to: str = "",
            show_hidden: int = 0, msg: str = ""):
     """Focused review: new candidates one at a time with keyboard actions."""
     settings = load_settings()
     threshold = settings.get("matching.score_threshold", 0.5)
-    topic = [t for t in topic if t.strip()]
+    keyword = [k for k in keyword if k.strip()]
 
     with session_scope() as session:
         query = (
@@ -326,9 +442,9 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
             )
         if channel_id:
             query = query.where(Candidate.channel_pk == channel_id)
-        if topic:
+        if keyword:
             query = query.where(or_(
-                *[("," + Candidate.climate_topic + ",").like(f"%,{t},%") for t in topic]
+                *[("," + Candidate.matched_keywords + ",").like(f"%,{k},%") for k in keyword]
             ))
         channel_filters = []
         if region:
@@ -366,8 +482,7 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
                 "visual_score": c.visual_score,
                 "visual_traits": [t for t in (c.visual_traits or "").split(",") if t],
                 "visual_rationale": c.visual_rationale,
-                "topics": [t for t in (c.climate_topic or "").split(",") if t],
-                "keywords": c.matched_keywords,
+                "keywords": [k for k in (c.matched_keywords or "").split(",") if k],
                 "rationale": c.relevance_rationale,
             }
             for c in candidates
@@ -469,6 +584,9 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
             except Exception:
                 pass
 
+        # Transcript covering just the exported segments, in clip order.
+        clip_transcript = _excerpt_segments(transcript_segments, segments) if segments else []
+
         posts = session.execute(
             select(ThreadsPost).where(ThreadsPost.candidate_pk == c.id)
             .order_by(ThreadsPost.created_at.desc())
@@ -479,6 +597,7 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
         request, "video.html",
         {"c": c, "state": state, "step": active_step,
          "transcript_segments": transcript_segments, "saved_segments": segments,
+         "clip_transcript": clip_transcript,
          "undesirable_traits": undesirable_traits,
          "posts": posts, "threads_ok": threads_api.is_authenticated(),
          "auth_url": "" if threads_api.is_authenticated() else threads_api.authorize_url(),
@@ -486,18 +605,7 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
     )
 
 
-def _scrape_in_thread(candidate_id: int) -> None:
-    session = SessionLocal()
-    try:
-        candidate = session.get(Candidate, candidate_id)
-        if candidate:
-            archive_candidate(session, candidate)
-            session.commit()
-    except Exception:
-        session.rollback()
-        log.exception("Background scrape failed for candidate %s", candidate_id)
-    finally:
-        session.close()
+
 
 
 _UPLOAD_EXTS = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
@@ -728,6 +836,34 @@ def export_clip(candidate_id: int, segments_json: str = Form(...)):
 
 # --- Caption suggestion + posting -------------------------------------------------
 
+def _excerpt_segments(all_segments: list[dict], windows: list[dict]) -> list[dict]:
+    """Transcript lines overlapping the trimmed windows, in clip (window) order.
+
+    Each returned line is tagged with ``clip_start`` — its position in seconds
+    within the exported supercut — so it can seek the joined clip on playback.
+    """
+    out: list[dict] = []
+    clip_offset = 0.0
+    for window in windows:
+        try:
+            ws, we = float(window["start"]), float(window["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for s in all_segments:
+            try:
+                s_start, s_end = float(s["start"]), float(s["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if s_end >= ws and s_start <= we:
+                out.append({
+                    "start": s_start,
+                    "text": s.get("text", ""),
+                    "clip_start": round(clip_offset + max(0.0, s_start - ws), 2),
+                })
+        clip_offset += max(0.0, we - ws)
+    return out
+
+
 def _transcript_excerpt(c: Candidate, segments: list[dict]) -> str:
     """Transcript text inside the trimmed windows (falls back to full text)."""
     try:
@@ -736,12 +872,7 @@ def _transcript_excerpt(c: Candidate, segments: list[dict]) -> str:
         return c.transcript_text[:3000]
     if not segments:
         return c.transcript_text[:3000]
-    parts = []
-    for window in segments:
-        ws, we = float(window["start"]), float(window["end"])
-        for s in all_segments:
-            if s["end"] >= ws and s["start"] <= we:
-                parts.append(s["text"])
+    parts = [s["text"] for s in _excerpt_segments(all_segments, segments)]
     return " ".join(parts)[:3000] or c.transcript_text[:3000]
 
 
@@ -773,79 +904,76 @@ def post_to_threads(candidate_id: int, caption: str = Form(...)):
     if not caption:
         return _flash(f"/video/{candidate_id}?step=post", "Caption is empty")
     with session_scope() as session:
+        ok, wait_min = spacing_allows_publish(session)
+        if not ok:
+            return _flash(
+                f"/video/{candidate_id}?step=post",
+                f"Spacing floor: wait ~{wait_min} more minute{'s' if wait_min != 1 else ''} "
+                f"before publishing another post",
+            )
         c = session.get(Candidate, candidate_id)
         if c is None or not c.trimmed_clip_path:
             return _flash(f"/video/{candidate_id}", "Export a clip first")
         try:
             post = publish_clip(session, c, c.trimmed_clip_path, caption)
+            state = session.get(SchedulerState, 1)
+            if state is None:
+                state = SchedulerState(id=1)
+                session.add(state)
+            state.last_publish_at = utcnow()
+            state.last_action = f"manual_publish:post={post.id}"
+            state.updated_at = utcnow()
             return _flash(f"/video/{candidate_id}?step=post",
                           f"Published: {post.permalink or post.threads_media_id}")
         except Exception as exc:
             return _flash(f"/video/{candidate_id}?step=post", f"Publish failed: {exc}")
 
 
-def _parse_local_datetime(value: str) -> dt.datetime | None:
-    """Parse an <input type=datetime-local> value (naive, in the operator's
-    local timezone) into an aware UTC datetime. This is a localhost, single-
-    operator app, so the browser and server share the same local timezone."""
-    value = (value or "").strip()
-    if not value:
-        return None
-    try:
-        naive = dt.datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    # astimezone() on a naive datetime interprets it as system local time.
-    return naive.astimezone(dt.timezone.utc)
-
-
-@app.post("/video/{candidate_id}/schedule")
-def schedule_to_threads(candidate_id: int, caption: str = Form(...),
-                        scheduled_at: str = Form(...)):
-    """Queue the exported clip to publish at a future time (no immediate post)."""
+@app.post("/video/{candidate_id}/queue")
+def queue_to_threads(candidate_id: int, caption: str = Form(...),
+                     is_breaking: str = Form("")):
+    """Add the exported clip to the adaptive FIFO queue (no immediate post)."""
     caption = caption.strip()
     if not caption:
         return _flash(f"/video/{candidate_id}?step=post", "Caption is empty")
-    when = _parse_local_datetime(scheduled_at)
-    if when is None:
-        return _flash(f"/video/{candidate_id}?step=post", "Pick a valid date and time")
-    if when <= utcnow():
-        return _flash(f"/video/{candidate_id}?step=post", "Scheduled time must be in the future")
+    breaking = str(is_breaking).lower() in ("1", "true", "on", "yes")
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c is None or not c.trimmed_clip_path:
             return _flash(f"/video/{candidate_id}", "Export a clip first")
         try:
-            # Reuse (move) an existing not-yet-published post for this clip rather
-            # than creating a duplicate — otherwise the clip shows on the calendar
-            # at both the old and new times. Any extra stragglers are removed so a
-            # single calendar entry moves cleanly.
+            # Reuse an existing not-yet-published post for this clip rather than
+            # creating a duplicate queue entry.
             existing = session.execute(
                 select(ThreadsPost).where(
                     ThreadsPost.candidate_pk == c.id,
-                    ThreadsPost.status.in_(["scheduled", "draft", "failed"]),
+                    ThreadsPost.status.in_(["queued", "draft", "failed"]),
                 ).order_by(ThreadsPost.created_at.desc())
             ).scalars().all()
             if existing:
                 keep = existing[0]
                 keep.caption = caption
-                keep.scheduled_at = when
-                keep.status = "scheduled"
+                keep.status = "queued"
+                keep.scheduled_at = None
+                keep.is_breaking = breaking
+                keep.defer_count = 0
+                keep.last_deferred_at = None
+                keep.pinned_window_key = ""
                 keep.error = ""
                 for extra in existing[1:]:
                     session.delete(extra)
             else:
-                schedule_clip(session, c, c.trimmed_clip_path, caption, when)
+                queue_clip(session, c, c.trimmed_clip_path, caption, is_breaking=breaking)
         except Exception as exc:
-            return _flash(f"/video/{candidate_id}?step=post", f"Schedule failed: {exc}")
-    local = when.astimezone()
+            return _flash(f"/video/{candidate_id}?step=post", f"Queue failed: {exc}")
+    note = " (breaking — publishes ASAP)" if breaking else ""
     return _flash(f"/video/{candidate_id}?step=post",
-                  f"Scheduled for {local.strftime('%b %-d, %-I:%M %p')}")
+                  f"Added to the posting queue{note}")
 
 
 @app.post("/video/{candidate_id}/save-draft")
 def save_draft(candidate_id: int, caption: str = Form(...)):
-    """Save the exported clip + caption as a draft to publish or schedule later."""
+    """Save the exported clip + caption as a draft to publish or queue later."""
     caption = caption.strip()
     if not caption:
         return _flash(f"/video/{candidate_id}?step=post", "Caption is empty")
@@ -858,57 +986,87 @@ def save_draft(candidate_id: int, caption: str = Form(...)):
         except Exception as exc:
             return _flash(f"/video/{candidate_id}?step=post", f"Save failed: {exc}")
     return _flash(f"/video/{candidate_id}?step=post",
-                  "Saved as draft — publish or schedule it any time from Posts")
+                  "Saved as draft — publish or queue it any time from Posts")
 
 
 @app.post("/post/{post_id}/cancel")
-def cancel_scheduled_post(post_id: int, next: str = Form("/posts")):
-    """Remove a scheduled or draft (not-yet-published) post."""
+def cancel_queued_post(post_id: int, next: str = Form("/posts")):
+    """Remove a queued or draft (not-yet-published) post."""
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None:
             return _flash(next, "Post not found")
-        if p.status not in ("scheduled", "draft"):
-            return _flash(next, "Only scheduled or draft posts can be removed")
+        if p.status not in ("queued", "draft"):
+            return _flash(next, "Only queued or draft posts can be removed")
         was = p.status
         session.delete(p)
-    return _flash(next, f"{'Scheduled post' if was == 'scheduled' else 'Draft'} removed")
+    return _flash(next, f"{'Queued post' if was == 'queued' else 'Draft'} removed")
 
 
-@app.post("/post/{post_id}/schedule")
-def schedule_existing_post(post_id: int, scheduled_at: str = Form(...),
-                           caption: str = Form(""), next: str = Form("/posts")):
-    """Schedule a draft/failed post, or reschedule an already-scheduled one."""
-    when = _parse_local_datetime(scheduled_at)
-    if when is None:
-        return _flash(next, "Pick a valid date and time")
-    if when <= utcnow():
-        return _flash(next, "Scheduled time must be in the future")
+@app.post("/post/{post_id}/queue")
+def queue_existing_post(post_id: int, caption: str = Form(""),
+                        is_breaking: str = Form(""), next: str = Form("/posts")):
+    """Move a draft/failed post into the adaptive queue (or update a queued one)."""
+    breaking = str(is_breaking).lower() in ("1", "true", "on", "yes")
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
-        if p is None or p.status not in ("draft", "failed", "scheduled"):
-            return _flash(next, "Only a draft, failed, or scheduled post can be (re)scheduled")
-        was_scheduled = p.status == "scheduled"
+        if p is None or p.status not in ("draft", "failed", "queued"):
+            return _flash(next, "Only a draft, failed, or queued post can be (re)queued")
         if caption.strip():
             p.caption = caption.strip()
-        p.status = "scheduled"
-        p.scheduled_at = when
+        p.status = "queued"
+        p.scheduled_at = None
+        p.is_breaking = breaking
+        if breaking:
+            p.pinned_window_key = ""
         p.error = ""
-        # Keep one calendar entry per clip: drop other not-yet-published posts
-        # for the same source video so a reschedule moves rather than duplicates.
         if p.candidate_pk is not None:
             dupes = session.execute(
                 select(ThreadsPost).where(
                     ThreadsPost.candidate_pk == p.candidate_pk,
                     ThreadsPost.id != p.id,
-                    ThreadsPost.status.in_(["scheduled", "draft", "failed"]),
+                    ThreadsPost.status.in_(["queued", "draft", "failed"]),
                 )
             ).scalars().all()
             for extra in dupes:
                 session.delete(extra)
-    local = when.astimezone()
-    verb = "Rescheduled" if was_scheduled else "Scheduled"
-    return _flash(next, f"{verb} for {local.strftime('%b %-d, %-I:%M %p')}")
+    note = " as breaking" if breaking else ""
+    return _flash(next, f"Added to the posting queue{note}")
+
+
+@app.post("/post/{post_id}/toggle-breaking")
+def toggle_breaking(post_id: int, next: str = Form("/posts")):
+    """Flip the breaking-news flag on a queued/draft post."""
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None or p.status not in ("queued", "draft", "failed"):
+            return _flash(next, "Only a queued, draft, or failed post can be marked breaking")
+        p.is_breaking = not bool(p.is_breaking)
+        if p.is_breaking:
+            p.pinned_window_key = ""
+        if p.status in ("draft", "failed"):
+            p.status = "queued"
+            p.scheduled_at = None
+            p.error = ""
+        flag = p.is_breaking
+    return _flash(next, "Marked breaking — will publish ASAP" if flag else "Cleared breaking flag")
+
+
+@app.post("/post/{post_id}/pin-window")
+def pin_window(request: Request, post_id: int, window_key: str = Form(...),
+               next: str = Form("/calendar")):
+    """Pin a queued post to an upcoming window (calendar drag-and-drop)."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with session_scope() as session:
+        try:
+            msg = pin_post_to_window(session, post_id, window_key)
+        except ValueError as exc:
+            if wants_json:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            return _flash(next, str(exc))
+    if wants_json:
+        return JSONResponse({"ok": True, "message": msg, "window_key": window_key})
+    return _flash(next, msg)
 
 
 def _publish_in_thread(post_id: int) -> None:
@@ -920,21 +1078,36 @@ def _publish_in_thread(post_id: int) -> None:
             return
         try:
             publish_post(session, p)
+            state = session.get(SchedulerState, 1)
+            if state is None:
+                state = SchedulerState(id=1)
+                session.add(state)
+            state.last_publish_at = utcnow()
+            state.last_action = f"manual_publish:post={post_id}"
+            state.updated_at = utcnow()
         except Exception:
             log.exception("Background publish failed for post %s", post_id)
 
 
 @app.post("/post/{post_id}/publish-now")
 def publish_scheduled_now(request: Request, post_id: int, next: str = Form("/posts")):
-    """Publish a scheduled, draft, or previously failed post immediately.
+    """Publish a queued, draft, or previously failed post immediately.
 
     Publishing a video can take minutes (upload + Threads-side processing), so we
     kick it off in the background and return right away. The post flips to a
     'publishing' state that the UI can poll via /post/{id}/status."""
     wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
+        ok, wait_min = spacing_allows_publish(session)
+        if not ok:
+            msg = (
+                f"Spacing floor: wait ~{wait_min} more minute{'s' if wait_min != 1 else ''} "
+                f"before publishing another post"
+            )
+            return (JSONResponse({"error": msg}, status_code=409)
+                    if wants_json else _flash(next, msg))
         p = session.get(ThreadsPost, post_id)
-        if p is None or p.status not in ("scheduled", "failed", "draft"):
+        if p is None or p.status not in ("queued", "failed", "draft"):
             return (JSONResponse({"error": "Nothing to publish"}, status_code=409)
                     if wants_json else _flash(next, "Nothing to publish"))
         p.status = "publishing"
@@ -962,19 +1135,10 @@ def post_status(post_id: int):
 _POST_METRICS = ("views", "likes", "replies", "reposts", "quotes", "shares")
 
 
-def _fmt_local_input(when: dt.datetime | None) -> str:
-    """Format a UTC datetime for a <input type=datetime-local> (operator local)."""
-    if when is None:
-        return ""
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=dt.timezone.utc)
-    return when.astimezone().strftime("%Y-%m-%dT%H:%M")
-
-
 @app.get("/post/{post_id}", response_class=HTMLResponse)
 def post_detail(request: Request, post_id: int, msg: str = ""):
-    """A single post's profile: reschedule before it publishes, and once it's
-    live, see its stats and the replies it received."""
+    """A single post's profile: manage the queue before it publishes, and once
+    it's live, see its stats and the replies it received."""
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None:
@@ -1013,7 +1177,9 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "has_clip": has_clip,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
-            "sched_local": _fmt_local_input(p.scheduled_at),
+            "is_breaking": bool(p.is_breaking),
+            "defer_count": int(p.defer_count or 0),
+            "last_deferred_at": p.last_deferred_at,
             "metrics": metrics, "metrics_captured": snap.captured_at if snap else None,
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
@@ -1151,7 +1317,7 @@ def threads_import_history():
 
 @app.get("/calendar", response_class=HTMLResponse)
 def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""):
-    """Month grid of scheduled + published posts, in the operator's local time."""
+    """Month grid of window slots + linear posting queue (local time)."""
     import calendar as _cal
 
     now_local = dt.datetime.now()
@@ -1164,40 +1330,35 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
 
     first_local = dt.datetime(y, m, 1)
     next_first_local = dt.datetime(y + 1, 1, 1) if m == 12 else dt.datetime(y, m + 1, 1)
-    start_utc = first_local.astimezone(dt.timezone.utc)
-    end_utc = next_first_local.astimezone(dt.timezone.utc)
 
     events: dict[int, list[dict]] = {}
     drafts_count = 0
+    queue_count = 0
+    linear: list[dict] = []
+    status = {}
+    windows_et: list[str] = []
     with session_scope() as session:
-        rows = session.execute(
-            select(ThreadsPost).where(
-                or_(
-                    and_(ThreadsPost.scheduled_at >= start_utc, ThreadsPost.scheduled_at < end_utc),
-                    and_(ThreadsPost.published_at >= start_utc, ThreadsPost.published_at < end_utc),
-                )
-            )
-        ).scalars().all()
         drafts_count = session.execute(
             select(func.count()).select_from(ThreadsPost).where(ThreadsPost.status == "draft")
         ).scalar_one()
-        for p in rows:
-            # Published posts show at their publish time; everything else
-            # (scheduled, publishing, and FAILED) shows at its scheduled time so
-            # a failed post stays visible (in red) instead of vanishing.
-            when = p.published_at or p.scheduled_at
-            if when is None:
-                continue
-            local = when.astimezone()
-            events.setdefault(local.day, []).append({
-                "time": local.strftime("%-I:%M %p"),
-                "sort": local,
-                "caption": (p.caption or "").strip(),
-                "status": p.status,
-                "post_id": p.id,
-                "video_id": p.candidate.id if p.candidate else None,
-                "permalink": p.permalink,
-            })
+        queue_count = session.execute(
+            select(func.count()).select_from(ThreadsPost).where(ThreadsPost.status == "queued")
+        ).scalar_one()
+        status = scheduler_status(session)
+        windows_et = list(status.get("windows") or [])
+
+        plan = build_window_plan(session, first_local, next_first_local)
+        for e in plan:
+            # Calendar grid: published history + upcoming filled/open windows.
+            if e["kind"] == "breaking":
+                continue  # breaking is ASAP — linear only
+            events.setdefault(e["day"], []).append(e)
+
+        # Linear queue: breaking + upcoming windows only (not published history).
+        linear = [e for e in plan if e["kind"] in ("breaking", "queued", "open")]
+        # Cap the linear list to the next ~21 slots so it stays scannable.
+        linear = linear[:21]
+
     for day in events:
         events[day].sort(key=lambda e: e["sort"])
 
@@ -1214,35 +1375,39 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
          "year": y, "month": m, "month_name": _cal.month_name[m],
          "prev_y": prev_y, "prev_m": prev_m, "next_y": next_y, "next_m": next_m,
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
-         "drafts_count": drafts_count, "msg": msg, "active": "calendar"},
+         "drafts_count": drafts_count, "queue_count": queue_count,
+         "linear": linear, "scheduler": status, "windows_et": windows_et,
+         "msg": msg, "active": "calendar"},
     )
 
 
 @app.get("/posts", response_class=HTMLResponse)
 def posts_page(request: Request, msg: str = ""):
     with session_scope() as session:
-        scheduled = session.execute(
-            select(ThreadsPost).where(ThreadsPost.status.in_(["scheduled", "publishing"]))
-            .order_by(ThreadsPost.scheduled_at.asc())
+        queued = session.execute(
+            select(ThreadsPost).where(ThreadsPost.status.in_(["queued", "publishing"]))
+            .order_by(ThreadsPost.created_at.asc())
         ).scalars().all()
         drafts = session.execute(
             select(ThreadsPost).where(ThreadsPost.status == "draft")
             .order_by(ThreadsPost.created_at.desc())
         ).scalars().all()
         posts = session.execute(
-            select(ThreadsPost).where(ThreadsPost.status.notin_(["scheduled", "publishing", "draft"]))
+            select(ThreadsPost).where(ThreadsPost.status.notin_(["queued", "publishing", "draft"]))
             .order_by(ThreadsPost.created_at.desc()).limit(100)
         ).scalars().all()
-        for p in [*scheduled, *drafts, *posts]:
+        for p in [*queued, *drafts, *posts]:
             # Touch the nested relationships while the session is open so the
             # template can render them after the session closes.
             if p.candidate is not None:
                 _ = p.candidate.id, p.candidate.trimmed_clip_path
                 if p.candidate.channel is not None:
                     _ = p.candidate.channel.call_sign
+        status = scheduler_status(session)
     return templates.TemplateResponse(
         request, "posts.html",
-        {"posts": posts, "scheduled": scheduled, "drafts": drafts,
+        {"posts": posts, "queued": queued, "drafts": drafts,
+         "scheduler": status,
          "authenticated": threads_api.is_authenticated(),
          "auth_url": threads_api.authorize_url() if not threads_api.is_authenticated() else "",
          "msg": msg, "active": "posts"},

@@ -73,34 +73,24 @@ def _json_chat(model: str, system: str, user: str, max_tokens: int = 1000) -> di
     return _parse_json(_text_chat(model, system, user, max_tokens=max_tokens))
 
 
-TOPIC_TAXONOMY = [
-    "wildfire", "flood", "heat", "drought", "hurricane", "sea_level",
-    "storms", "clean_energy", "emissions_policy", "air_quality", "ecosystem", "other",
-]
-
-
 def score_relevance(model: str, title: str, description: str, matched_keywords: list[str]) -> dict:
-    """Return {score: float 0-1, rationale: str, topics: [str, ...]}."""
+    """Return {score: float 0-1, rationale: str}."""
     system = (
         "You score local TV news videos for genuine climate-change relevance. "
         "A video is relevant if it covers climate change, its impacts (extreme weather, "
         "wildfire, flood, heat, drought, sea level), clean energy, emissions, or climate "
         "policy. It is NOT relevant if the keyword is incidental ('political climate', "
         "'business climate', a sports team name, routine weather forecasts with no "
-        "climate angle). Tag 1-3 topics that genuinely apply, most central first. "
-        "JSON shape: {\"score\": 0.0-1.0, \"rationale\": \"one line\", "
-        f"\"topics\": [\"1-3 of: {', '.join(TOPIC_TAXONOMY)}\"]}}"
+        "climate angle). "
+        "JSON shape: {\"score\": 0.0-1.0, \"rationale\": \"one line\"}"
     )
     user = json.dumps(
         {"title": title, "description": description[:2000], "matched_keywords": matched_keywords}
     )
     data = _json_chat(model, system, user)
-    raw_topics = data.get("topics") or ([data["topic"]] if data.get("topic") else [])
-    topics = [t for t in (str(x).strip() for x in raw_topics) if t in TOPIC_TAXONOMY][:3]
     return {
         "score": max(0.0, min(1.0, float(data.get("score", 0.0)))),
         "rationale": str(data.get("rationale", ""))[:500],
-        "topics": topics or ["other"],
     }
 
 
@@ -264,7 +254,7 @@ def write_digest(model: str, stats_payload: dict, min_sample_size: int) -> str:
         "You are a careful social media analyst writing a performance digest for a "
         "single-operator Threads account posting climate news clips. Using ONLY the "
         "provided data: report top and bottom performers per metric; surface patterns "
-        "across attribute slices (topic, region, clip length, caption traits, day/time, "
+        "across attribute slices (keywords, region, clip length, caption traits, day/time, "
         "and visual/footage traits such as fire, flood, crowds, action); "
         "state hypotheses for WHY, clearly labeled as hypotheses, never as proven cause; "
         "label all patterns as correlational. "

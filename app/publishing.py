@@ -1,8 +1,9 @@
 """Part 2 publishing flow: operator-provided trimmed clip + caption -> Threads.
 
 Every post here is created only on explicit operator action (post now or
-schedule). ``schedule_clip`` records a post to publish later; the scheduler
-module (app/scheduler.py) calls ``publish_post`` once its time arrives.
+add to queue). ``queue_clip`` records a post for the adaptive window scheduler;
+``app/scheduler.py`` calls ``publish_post`` when a window fires (or for
+breaking-news overrides).
 """
 from __future__ import annotations
 
@@ -38,9 +39,9 @@ def _object_key(clip: Path) -> str:
 
 
 def record_post(session, candidate: Candidate | None, clip_path: str, caption: str,
-                *, status: str, scheduled_at: dt.datetime | None = None) -> ThreadsPost:
-    """Create a ThreadsPost row without contacting Threads. Used for both the
-    immediate-post and schedule paths; publishing happens in ``publish_post``."""
+                *, status: str, is_breaking: bool = False) -> ThreadsPost:
+    """Create a ThreadsPost row without contacting Threads. Used for immediate
+    post, draft, and queue paths; publishing happens in ``publish_post``."""
     clip = Path(clip_path).expanduser()
     if not clip.exists():
         raise FileNotFoundError(f"Clip not found: {clip}")
@@ -50,7 +51,7 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         clip_local_path=str(clip),
         clip_object_path=_object_key(clip),
         status=status,
-        scheduled_at=scheduled_at,
+        is_breaking=is_breaking,
     )
     session.add(post)
     session.flush()
@@ -80,7 +81,7 @@ def _apply_post_attributes(post: ThreadsPost) -> None:
 
 def publish_post(session, post: ThreadsPost) -> ThreadsPost:
     """Upload the post's clip to Supabase and publish it to Threads. Works for a
-    fresh draft or a due scheduled post. Sets status=failed + error on failure."""
+    fresh draft or a due queued post. Sets status=failed + error on failure."""
     clip = Path(post.clip_local_path).expanduser()
     if not clip.exists():
         post.status = "failed"
@@ -116,8 +117,8 @@ def publish_clip(session, candidate: Candidate | None, clip_path: str, caption: 
     return publish_post(session, post)
 
 
-def schedule_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
-                  scheduled_at: dt.datetime) -> ThreadsPost:
-    """Record a post to be published later by the scheduler. Nothing is sent now."""
+def queue_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
+               *, is_breaking: bool = False) -> ThreadsPost:
+    """Add a post to the adaptive FIFO queue. The window scheduler publishes it."""
     return record_post(session, candidate, clip_path, caption,
-                        status="scheduled", scheduled_at=scheduled_at)
+                       status="queued", is_breaking=is_breaking)

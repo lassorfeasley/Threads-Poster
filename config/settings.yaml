@@ -180,6 +180,36 @@ engagement:
     Always include the word "Renewables.org" verbatim so it links. Never be
     pushy or argumentative. Keep the whole reply under 500 characters.
 
+scheduler:
+  # Adaptive posting: publish the FIFO queue at fixed ET windows, deferring when
+  # the most-recent post is still "hot." Disable to pause automatic publishing.
+  enabled: true
+  # All window times are interpreted in this zone (DST handled automatically).
+  timezone: America/New_York
+  # Active hours in the scheduler timezone (24h HH:MM). Outside this range the
+  # scheduler never publishes (breaking override still respects the spacing floor).
+  active_hours_start: "08:00"
+  active_hours_end: "22:00"
+  # Daily posting windows (local to timezone above). Tune later against insights.
+  windows:
+    - "10:00"
+    - "14:30"
+    - "19:00"
+  # Never publish two posts less than this many minutes apart (any path).
+  spacing_floor_minutes: 90
+  # Cap consecutive hot-deferrals for the queue head; after this, publish anyway.
+  max_deferrals: 2
+  # "Hot" = last published post gained more than ``threshold`` of ``metric``
+  # over the trailing ``window_minutes`` (computed from MetricSnapshot deltas).
+  hot:
+    metric: likes
+    window_minutes: 60
+    threshold: 100
+  # How often to re-pull insights for recently published posts (feeds hotness).
+  metrics_poll_interval_minutes: 15
+  # Only poll posts published within this many hours for the hotness signal.
+  metrics_poll_recency_hours: 6
+
 analytics:
   # How often the metrics puller re-snapshots each post's stats (hours).
   snapshot_interval_hours: 12

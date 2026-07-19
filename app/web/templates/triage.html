@@ -30,7 +30,6 @@
       <div id="title" style="font-weight: 650; font-size: 16px; line-height: 1.4;"></div>
       <div class="meta" id="sub" style="margin: 8px 0;"></div>
       <div id="badges" class="badges" style="margin: 10px 0;"></div>
-      <div class="meta" id="keywords"></div>
       <div class="meta" id="rationale" style="margin-top: 6px;"></div>
       <div class="meta" id="visual-line" style="margin-top: 6px;"></div>
       <div style="margin-top: 8px;">
@@ -105,8 +104,6 @@ function render() {
   document.getElementById('sub').textContent =
     `${c.channel} · ${c.published}${c.duration ? ' · ' + c.duration : ''}`;
   renderBadges(c);
-  document.getElementById('keywords').innerHTML =
-    c.keywords ? `Keywords: <span class="kw">${c.keywords}</span>` : '';
   document.getElementById('rationale').textContent = c.rationale || '';
   renderVisual(c);
   document.getElementById('progress').textContent = `Reviewing ${idx + 1} of ${queue.length}`;
@@ -125,7 +122,7 @@ function renderBadges(c) {
   if (c.visual_score !== null && c.visual_score !== undefined)
     badges.push(`<span class="badge ${c.visual_score >= 0.5 ? 'score-hi' : 'score-lo'}" title="Visual appeal">👁 ${c.visual_score.toFixed(2)}</span>`);
   (c.visual_traits || []).forEach(t => badges.push(`<span class="badge ${UNDESIRABLE.has(t) ? 'hostile' : 'info'}">${t}</span>`));
-  c.topics.forEach(t => badges.push(`<span class="badge">${t}</span>`));
+  (c.keywords || []).forEach(k => badges.push(`<span class="badge" title="matched keyword">${k}</span>`));
   document.getElementById('badges').innerHTML = badges.join(' ');
 }
 

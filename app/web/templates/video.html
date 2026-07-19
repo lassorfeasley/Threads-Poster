@@ -54,10 +54,9 @@
               id="visual-badge" title="Visual appeal">👁 {{ "%.2f"|format(c.visual_score) }}</span>
       {% endif %}
       {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
-      {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
+      {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
       <span class="badge">{{ c.status }}</span>
     </div>
-    <div class="meta">Keywords: <span class="kw">{{ c.matched_keywords }}</span></div>
     {% if c.relevance_rationale %}<div class="meta">{{ c.relevance_rationale }}</div>{% endif %}
     <div class="meta" id="visual-line">{% if c.visual_rationale %}Visuals: {{ c.visual_rationale }}{% endif %}</div>
     <div style="margin-top: 8px;">
@@ -834,7 +833,7 @@ renderSegments();
 {% else %}
 <div class="row">
   <div style="width: 420px; max-width: 100%;">
-    <video src="/media/clip/{{ c.id }}" controls preload="metadata"></video>
+    <video id="clip-player" src="/media/clip/{{ c.id }}" controls preload="metadata"></video>
     <div class="btn-group" style="margin-top: 8px; flex-wrap: wrap;">
       <a class="sm" href="/video/{{ c.id }}/download-clip" download>⤓ Download clip</a>
       <button type="button" class="sm" id="copy-caption-btn"
@@ -842,7 +841,32 @@ renderSegments();
     </div>
     <div class="meta" style="margin-top: 8px;">Your exported clip. Download it and copy the
       caption to post manually elsewhere, or publish to Threads below. Re-trim any time to replace it.</div>
+
+    <div style="margin-top: 14px;">
+      <div class="card-title" style="margin-bottom: 4px;">Clip transcript</div>
+      {% if clip_transcript %}
+        <div class="meta" style="margin-bottom: 8px;">Transcript covering the
+          {{ saved_segments|length }} exported segment{{ "s" if saved_segments|length != 1 }} —
+          click a line to jump to it in the clip.</div>
+        <div class="transcript-box" style="max-height: 300px;">
+          {% for s in clip_transcript %}
+            <div class="tline" onclick="clipSeek({{ s.clip_start }})">
+              <span class="ts">{{ "%d:%02d"|format(s.clip_start // 60, s.clip_start % 60) }}</span>{{ s.text }}</div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="meta">No transcript available for the exported segments.</div>
+      {% endif %}
+    </div>
   </div>
+  <script>
+    function clipSeek(t) {
+      const p = document.getElementById('clip-player');
+      if (!p) return;
+      p.currentTime = t;
+      p.play();
+    }
+  </script>
   <div class="grow">
     {% if not threads_ok %}
       <div class="card">
@@ -868,16 +892,20 @@ renderSegments();
           <button class="sm" formaction="/video/{{ c.id }}/save-draft" formnovalidate
                   onclick="return validateDraft()">💾 Save as draft</button>
         </div>
-        <div class="meta" style="margin-top: 6px;">Three ways to finish: post now, save a draft to
-          publish/schedule later, or schedule it below.</div>
+        <div class="meta" style="margin-top: 6px;">Three ways to finish: post now, save a draft, or
+          add it to the adaptive posting queue below.</div>
 
         <div class="card tight" style="margin-top: 14px;">
-          <div class="card-title">Or schedule for later</div>
+          <div class="card-title">Add to posting queue</div>
+          <div class="meta" style="margin-bottom: 8px;">Publishes at the next open window
+            (≈10am / 2:30pm / 7pm ET), deferring if the last post is still hot.</div>
+          <label class="inline-label" style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+            <input type="checkbox" name="is_breaking" value="1" id="is_breaking">
+            Breaking news — publish ASAP (ignores windows; still respects the 90-min spacing floor)
+          </label>
           <div class="btn-group" style="align-items: center; flex-wrap: wrap;">
-            <input type="datetime-local" name="scheduled_at" id="scheduled_at">
-            <button class="sm" formaction="/video/{{ c.id }}/schedule" formnovalidate
-                    onclick="return validateSchedule()">⏱ Schedule post</button>
-            <span class="meta">Publishes automatically at the time you pick (your local time).</span>
+            <button class="sm" formaction="/video/{{ c.id }}/queue" formnovalidate
+                    onclick="return validateQueue()">⏱ Add to queue</button>
           </div>
         </div>
       </form>
@@ -893,24 +921,13 @@ renderSegments();
           } catch (e) { alert('Suggestion failed: ' + e); }
           btn.disabled = false; btn.textContent = 'Regenerate caption';
         }
-        // Default the picker to one hour out and prevent past times.
-        (function () {
-          const el = document.getElementById('scheduled_at');
-          if (!el) return;
-          const pad = n => String(n).padStart(2, '0');
-          const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-            + `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-          const now = new Date();
-          el.min = fmt(now);
-          el.value = fmt(new Date(now.getTime() + 60 * 60 * 1000));
-        })();
-        function validateSchedule() {
+        function validateQueue() {
           const cap = document.getElementById('caption');
-          const when = document.getElementById('scheduled_at');
           if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
-          if (!when.value) { alert('Pick a date and time.'); return false; }
-          if (new Date(when.value) <= new Date()) { alert('Pick a time in the future.'); return false; }
-          return confirm('Schedule this clip to post at ' + new Date(when.value).toLocaleString() + '?');
+          const breaking = document.getElementById('is_breaking')?.checked;
+          return confirm(breaking
+            ? 'Add as breaking news? It will publish as soon as the spacing floor allows.'
+            : 'Add this clip to the posting queue?');
         }
         function validateDraft() {
           const cap = document.getElementById('caption');
@@ -922,36 +939,42 @@ renderSegments();
 
     {% if posts %}
       <h2>Posts from this video</h2>
-      <div class="table-wrap">
-      <table>
+      <div class="video-posts">
         {% for p in posts %}
-        <tr>
-          <td class="meta" style="white-space: nowrap;">
-            {% if p.status in ("scheduled", "publishing") and p.scheduled_at %}
-              ⏱ {{ p.scheduled_at.strftime("%b %-d %H:%M UTC") }}
-            {% elif p.status == "draft" %}💾 draft
-            {% else %}{{ p.published_at.strftime("%b %-d %H:%M") if p.published_at else "—" }}{% endif %}
-          </td>
-          <td><a href="/post/{{ p.id }}" title="Open this post's profile">{{ p.caption[:70] or "(open post)" }}</a></td>
-          <td><span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else '') }}">{{ p.status }}</span></td>
-          <td>
-            <a class="badge" href="/post/{{ p.id }}">details →</a>
-            {% if p.permalink %}<a href="{{ p.permalink }}" target="_blank">open ↗</a>{% endif %}
-            {% if p.status in ("scheduled", "draft") %}
+        <div class="video-post">
+          <div class="video-post-main">
+            <div class="video-post-meta">
+              <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
+              {% if p.is_breaking %}<span class="badge hostile">breaking</span>{% endif %}
+              {% if p.defer_count %}<span class="badge">deferred {{ p.defer_count }}×</span>{% endif %}
+              <span class="meta">
+                {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
+                {% elif p.status == "publishing" %}publishing…
+                {% elif p.created_at %}added {{ p.created_at.strftime("%b %-d") }}
+                {% endif %}
+              </span>
+            </div>
+            <a class="video-post-caption" href="/post/{{ p.id }}" title="{{ p.caption }}">{{ p.caption or "(untitled)" }}</a>
+          </div>
+          <div class="video-post-actions">
+            <a class="sm" href="/post/{{ p.id }}">Details</a>
+            {% if p.permalink %}<a class="sm" href="{{ p.permalink }}" target="_blank">Open ↗</a>{% endif %}
+            {% if p.status in ("queued", "draft") %}
               <form class="inline" method="post" action="/post/{{ p.id }}/publish-now">
                 <input type="hidden" name="next" value="/video/{{ c.id }}?step=post">
-                <button class="sm" onclick="return confirm('Publish to Threads now?')">Post now</button></form>
+                <button class="sm" onclick="return confirm('Publish to Threads now?')">Post now</button>
+              </form>
               {% if p.status == "draft" %}
-              <a class="badge" href="/post/{{ p.id }}" title="Schedule this draft from its profile page">Schedule ↗</a>
+              <a class="sm" href="/post/{{ p.id }}">Queue</a>
               {% endif %}
               <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
                 <input type="hidden" name="next" value="/video/{{ c.id }}?step=post">
-                <button class="reject sm" onclick="return confirm('Remove this {{ p.status }} post?')">Delete</button></form>
+                <button class="reject sm" onclick="return confirm('Remove this {{ p.status }} post?')">Delete</button>
+              </form>
             {% endif %}
-          </td>
-        </tr>
+          </div>
+        </div>
         {% endfor %}
-      </table>
       </div>
     {% endif %}
   </div>

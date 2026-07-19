@@ -3,7 +3,7 @@
 <div class="page-head">
   <div class="titles">
     <h1>Posts</h1>
-    <div class="sub">Your Threads connection and everything published from this app.</div>
+    <div class="sub">Your Threads connection, the adaptive posting queue, and publish history.</div>
   </div>
 </div>
 
@@ -33,11 +33,40 @@
 </div>
 {% endif %}
 
+{% if scheduler %}
+<div class="card tight" style="margin-top: 14px;">
+  <div class="card-title">Adaptive scheduler</div>
+  <div class="meta" style="display:flex; flex-wrap:wrap; gap:14px 28px;">
+    <span>{% if scheduler.enabled %}<span class="badge supportive">enabled</span>{% else %}<span class="badge hostile">paused</span>{% endif %}
+      · windows {{ scheduler.windows|join(', ') }} {{ scheduler.timezone }}</span>
+    <span>Next window:
+      {% if scheduler.next_window_local %}
+        {% if scheduler.due_now %}<span class="badge">due now</span> {% endif %}
+        {{ scheduler.next_window_local.strftime("%a %-I:%M %p %Z") }}
+      {% else %}—{% endif %}
+    </span>
+    <span>Queue: {{ scheduler.queue_count }}</span>
+    <span>Last publish:
+      {% if scheduler.last_publish_at %}{{ scheduler.last_publish_at.astimezone().strftime("%b %-d %-I:%M %p") }}
+      {% else %}—{% endif %}
+    </span>
+    <span>Hot check:
+      {% if scheduler.current_likes_delta is not none %}
+        {% if scheduler.current_hot %}<span class="badge hostile">hot</span>{% else %}<span class="badge supportive">cool</span>{% endif %}
+        · +{{ scheduler.current_likes_delta }} likes / {{ scheduler.hot_window_minutes }}m
+        (threshold {{ scheduler.hot_threshold }})
+      {% else %}<span class="meta">no delta yet</span>{% endif %}
+    </span>
+    {% if scheduler.last_action %}<span class="meta">Last action: {{ scheduler.last_action }}</span>{% endif %}
+  </div>
+</div>
+{% endif %}
+
 {% if drafts %}
 <h2>Drafts</h2>
 <div class="table-wrap">
 <table>
-  <tr><th>Saved</th><th>Caption</th><th>From</th><th>Publish or schedule</th></tr>
+  <tr><th>Saved</th><th>Caption</th><th>From</th><th>Actions</th></tr>
   {% for p in drafts %}
   <tr>
     <td class="meta" style="white-space: nowrap;">💾 {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</td>
@@ -51,10 +80,9 @@
               data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
           <input type="hidden" name="next" value="/posts">
           <button class="sm">Post now</button></form>
-        <form class="inline" method="post" action="/post/{{ p.id }}/schedule" style="display:inline-flex; gap:6px; align-items:center;">
+        <form class="inline" method="post" action="/post/{{ p.id }}/queue">
           <input type="hidden" name="next" value="/posts">
-          <input type="datetime-local" class="sched-input" name="scheduled_at" required>
-          <button class="sm">⏱ Schedule</button></form>
+          <button class="sm">⏱ Add to queue</button></form>
         <a class="sm" href="/post/{{ p.id }}/download-clip" download>⤓ Clip</a>
         <button type="button" class="sm" data-caption="{{ p.caption }}"
                 onclick="copyPostCaption(this)">⧉ Caption</button>
@@ -67,44 +95,40 @@
   {% endfor %}
 </table>
 </div>
-<script>
-  (function () {
-    const pad = n => String(n).padStart(2, '0');
-    const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    const now = new Date();
-    document.querySelectorAll('.sched-input').forEach(el => {
-      el.min = fmt(now);
-      el.value = fmt(new Date(now.getTime() + 60 * 60 * 1000));
-    });
-  })();
-</script>
 {% endif %}
 
-{% if scheduled %}
-<h2>Scheduled</h2>
+{% if queued %}
+<h2>Queue <span class="meta">(FIFO · oldest first)</span></h2>
 <div class="table-wrap">
 <table>
-  <tr><th>Posts at</th><th>Caption</th><th>From</th><th>Status</th><th>Actions</th></tr>
-  {% for p in scheduled %}
+  <tr><th>#</th><th>Added</th><th>Caption</th><th>From</th><th>Status</th><th>Actions</th></tr>
+  {% for p in queued %}
   <tr>
-    <td class="meta" style="white-space: nowrap;">⏱ {{ p.scheduled_at.strftime("%b %-d %H:%M UTC") if p.scheduled_at else "—" }}</td>
-    <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a></td>
+    <td class="meta">{{ loop.index }}</td>
+    <td class="meta" style="white-space: nowrap;">{{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</td>
+    <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
+      {% if p.is_breaking %}<span class="badge hostile">breaking</span>{% endif %}
+      {% if p.defer_count %}<span class="badge">deferred {{ p.defer_count }}×</span>{% endif %}
+    </td>
     <td class="meta">
       {% if p.candidate %}<a href="/video/{{ p.candidate.id }}">{{ p.candidate.channel.call_sign }}</a>{% else %}—{% endif %}
     </td>
     <td><span class="badge">{{ p.status }}</span></td>
     <td style="white-space: nowrap;">
-      {% if p.status == "scheduled" %}
+      {% if p.status == "queued" %}
       <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
             data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
         <input type="hidden" name="next" value="/posts">
         <button class="sm">Post now</button></form>
+      <form class="inline" method="post" action="/post/{{ p.id }}/toggle-breaking">
+        <input type="hidden" name="next" value="/posts">
+        <button class="sm">{{ "Clear breaking" if p.is_breaking else "Mark breaking" }}</button></form>
       <a class="sm" href="/post/{{ p.id }}/download-clip" download>⤓ Clip</a>
       <button type="button" class="sm" data-caption="{{ p.caption }}"
               onclick="copyPostCaption(this)">⧉ Caption</button>
       <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
         <input type="hidden" name="next" value="/posts">
-        <button class="reject sm" onclick="return confirm('Cancel this scheduled post?')">Cancel</button></form>
+        <button class="reject sm" onclick="return confirm('Remove this from the queue?')">Remove</button></form>
       {% else %}<span class="meta">publishing…</span>{% endif %}
     </td>
   </tr>

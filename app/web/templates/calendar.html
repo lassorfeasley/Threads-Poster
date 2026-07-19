@@ -3,52 +3,204 @@
 <div class="page-head">
   <div class="titles">
     <h1>Calendar</h1>
-    <div class="sub">Scheduled and published posts, shown in your local time.</div>
+    <div class="sub">Posting windows
+      {% if windows_et %}({{ windows_et|join(' · ') }} ET){% endif %}
+      — drag a queued post onto an open window to pin it there.</div>
   </div>
 </div>
 
-<div class="cal-toolbar">
-  <a class="btn" href="/calendar?year={{ prev_y }}&month={{ prev_m }}">← Prev</a>
-  <div class="cal-title">{{ month_name }} {{ year }}</div>
-  <a class="btn" href="/calendar?year={{ next_y }}&month={{ next_m }}">Next →</a>
-  <a class="btn" href="/calendar" style="margin-left: auto;">Today</a>
-</div>
+<div class="cal-layout">
+  <section class="cal-month">
+    <div class="cal-toolbar">
+      <a class="btn" href="/calendar?year={{ prev_y }}&month={{ prev_m }}">← Prev</a>
+      <div class="cal-title">{{ month_name }} {{ year }}</div>
+      <a class="btn" href="/calendar?year={{ next_y }}&month={{ next_m }}">Next →</a>
+      <a class="btn" href="/calendar" style="margin-left: auto;">Today</a>
+    </div>
 
-<div class="cal-legend">
-  <span><i class="dot sched"></i> Scheduled</span>
-  <span><i class="dot pub"></i> Published</span>
-  <span><i class="dot fail"></i> Failed</span>
-  {% if drafts_count %}<span class="meta" style="margin-left:auto;">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }} with no date —
-    <a href="/posts">schedule from Posts</a></span>{% endif %}
-</div>
+    <div class="cal-legend">
+      <span><i class="dot pub"></i> Published</span>
+      <span><i class="dot sched"></i> Queued</span>
+      <span><i class="dot open"></i> Open window</span>
+      {% if queue_count %}<span class="meta" style="margin-left:auto;">{{ queue_count }} in queue · drag to reschedule</span>
+      {% elif drafts_count %}<span class="meta" style="margin-left:auto;">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }} —
+        <a href="/posts">queue from Posts</a></span>{% endif %}
+    </div>
 
-<div class="cal-grid cal-head">
-  {% for d in dow %}<div class="cal-dow">{{ d }}</div>{% endfor %}
-</div>
-<div class="cal-grid">
-  {% for week in weeks %}
-    {% for day in week %}
-      {% if day == 0 %}
-        <div class="cal-cell out"></div>
-      {% else %}
-      <div class="cal-cell {{ 'today' if day == today }}">
-        <div class="cal-daynum">{{ day }}</div>
-        {% for e in events.get(day, []) %}
-          {% set cls = 'sched' if e.status in ('scheduled', 'publishing') else ('pub' if e.status == 'published' else ('fail' if e.status == 'failed' else 'draft')) %}
-          {% if e.post_id %}
-            <a class="cal-event {{ cls }}" href="/post/{{ e.post_id }}" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
-              <b>{{ e.time }}</b> {{ e.caption[:34] }}</a>
-          {% elif e.permalink %}
-            <a class="cal-event {{ cls }}" href="{{ e.permalink }}" target="_blank" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
-              <b>{{ e.time }}</b> {{ e.caption[:34] }}</a>
+    <div class="cal-grid cal-head">
+      {% for d in dow %}<div class="cal-dow">{{ d }}</div>{% endfor %}
+    </div>
+    <div class="cal-grid" id="cal-dnd">
+      {% for week in weeks %}
+        {% for day in week %}
+          {% if day == 0 %}
+            <div class="cal-cell out"></div>
           {% else %}
-            <span class="cal-event {{ cls }}" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
-              <b>{{ e.time }}</b> {{ e.caption[:34] }}</span>
+          <div class="cal-cell {{ 'today' if day == today }}">
+            <div class="cal-daynum">{{ day }}</div>
+            {% for e in events.get(day, []) %}
+              {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind in ('queued', 'breaking') else ('pub' if e.kind == 'published' else 'draft')) %}
+              {% if e.kind == 'open' %}
+                <div class="cal-event {{ cls }} empty cal-drop"
+                     data-window-key="{{ e.window_key }}"
+                     title="{{ e.time }} · open window — drop a queued post here">
+                  <b>{{ e.time }}</b> <em>open</em></div>
+              {% elif e.kind == 'queued' and e.post_id %}
+                <div class="cal-event {{ cls }} cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
+                     draggable="true"
+                     data-post-id="{{ e.post_id }}"
+                     data-window-key="{{ e.window_key }}"
+                     title="{{ e.time }} · queued{% if e.pinned %} (pinned){% endif %} · drag to another window · {{ e.caption }}">
+                  <a href="/post/{{ e.post_id }}" class="cal-event-link"
+                     onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
+                    <b>{{ e.time }}</b> ≈ {{ e.caption[:28] or '(post)' }}
+                  </a>
+                </div>
+              {% elif e.post_id %}
+                <a class="cal-event {{ cls }}" href="/post/{{ e.post_id }}"
+                   title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
+                  <b>{{ e.time }}</b> {{ e.caption[:28] or '(post)' }}</a>
+              {% elif e.permalink %}
+                <a class="cal-event {{ cls }}" href="{{ e.permalink }}" target="_blank"
+                   title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
+                  <b>{{ e.time }}</b> {{ e.caption[:28] }}</a>
+              {% else %}
+                <span class="cal-event {{ cls }}" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
+                  <b>{{ e.time }}</b> {{ e.caption[:28] }}</span>
+              {% endif %}
+            {% endfor %}
+          </div>
           {% endif %}
         {% endfor %}
+      {% endfor %}
+    </div>
+  </section>
+
+  <aside class="cal-queue">
+    <div class="card-title" style="margin-bottom: 8px;">Posting queue</div>
+    {% if scheduler %}
+    <div class="meta cal-queue-meta">
+      {% if scheduler.due_now %}<span class="badge">due now</span>{% endif %}
+      Next:
+      {% if scheduler.next_window_local %}
+        {{ scheduler.next_window_local.strftime("%a %-I:%M %p %Z") }}
+      {% else %}—{% endif %}
+      · {{ scheduler.queue_count }} queued
+    </div>
+    {% endif %}
+
+    {% if not linear %}
+      <div class="empty" style="min-height: 120px; margin-top: 12px;">
+        <span class="icon">⏱</span>
+        <strong>No upcoming windows</strong>
+        Add clips to the queue from a video’s Post step.
       </div>
-      {% endif %}
-    {% endfor %}
-  {% endfor %}
+    {% else %}
+    <ol class="queue-list" id="queue-dnd">
+      {% for e in linear %}
+      <li class="queue-item {{ e.kind }}{% if e.empty %} empty{% endif %}{% if e.pinned %} pinned{% endif %}
+          {% if e.kind in ('open', 'queued') %} cal-drop{% endif %}
+          {% if e.kind == 'queued' %} cal-drag{% endif %}"
+          {% if e.kind in ('open', 'queued') %}data-window-key="{{ e.window_key }}"{% endif %}
+          {% if e.kind == 'queued' and e.post_id %}draggable="true" data-post-id="{{ e.post_id }}"{% endif %}>
+        <div class="queue-when">
+          {% if e.kind == 'breaking' %}
+            <span class="badge hostile">breaking</span>
+            <span class="meta">ASAP</span>
+          {% else %}
+            <span class="queue-date">{{ e.date_label }}</span>
+            <span class="queue-time">{{ e.time }}</span>
+          {% endif %}
+        </div>
+        <div class="queue-body">
+          {% if e.empty %}
+            <div class="queue-open">Open window</div>
+            <div class="meta">Drop a queued post here to pin it.</div>
+          {% else %}
+            <a class="queue-caption" href="/post/{{ e.post_id }}">{{ e.caption[:110] or '(untitled)' }}</a>
+            <div class="meta">
+              {% if e.channel %}{{ e.channel }} · {% endif %}
+              {% if e.pinned %}pinned · {% elif e.kind == 'queued' %}projected · {% endif %}
+              {% if e.defer_count %}deferred {{ e.defer_count }}× · {% endif %}
+              {% if e.kind == 'queued' %}drag to move{% elif e.kind == 'breaking' %}publishes when spacing allows{% endif %}
+            </div>
+          {% endif %}
+        </div>
+        {% if e.post_id and not e.empty %}
+        <div class="queue-actions">
+          <a class="sm" href="/post/{{ e.post_id }}">Open</a>
+        </div>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+  </aside>
 </div>
+
+<script>
+(function () {
+  let dragPostId = null;
+  window._calDidDrag = false;
+
+  function pinToWindow(postId, windowKey) {
+    const body = new FormData();
+    body.append('window_key', windowKey);
+    body.append('next', location.pathname + location.search);
+    return fetch('/post/' + postId + '/pin-window', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json' },
+      body,
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      location.reload();
+    }).catch((e) => alert('Could not move post: ' + e.message));
+  }
+
+  document.addEventListener('dragstart', (ev) => {
+    const el = ev.target.closest('.cal-drag');
+    if (!el || !el.dataset.postId) return;
+    dragPostId = el.dataset.postId;
+    window._calDidDrag = false;
+    el.classList.add('dragging');
+    ev.dataTransfer.effectAllowed = 'move';
+    ev.dataTransfer.setData('text/plain', dragPostId);
+  });
+
+  document.addEventListener('dragend', (ev) => {
+    const el = ev.target.closest('.cal-drag');
+    if (el) el.classList.remove('dragging');
+    document.querySelectorAll('.cal-drop-over').forEach((n) => n.classList.remove('cal-drop-over'));
+    dragPostId = null;
+  });
+
+  document.addEventListener('dragover', (ev) => {
+    const drop = ev.target.closest('.cal-drop');
+    if (!drop || !dragPostId) return;
+    if (drop.dataset.postId && drop.dataset.postId === dragPostId) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'move';
+    drop.classList.add('cal-drop-over');
+  });
+
+  document.addEventListener('dragleave', (ev) => {
+    const drop = ev.target.closest('.cal-drop');
+    if (drop) drop.classList.remove('cal-drop-over');
+  });
+
+  document.addEventListener('drop', (ev) => {
+    const drop = ev.target.closest('.cal-drop');
+    if (!drop) return;
+    ev.preventDefault();
+    drop.classList.remove('cal-drop-over');
+    const postId = dragPostId || ev.dataTransfer.getData('text/plain');
+    const windowKey = drop.dataset.windowKey;
+    if (!postId || !windowKey) return;
+    if (drop.dataset.postId && drop.dataset.postId === postId) return;
+    window._calDidDrag = true;
+    pinToWindow(postId, windowKey);
+  });
+})();
+</script>
 {% endblock %}

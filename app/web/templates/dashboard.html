@@ -7,7 +7,7 @@
   </div>
   <div class="actions">
     <a class="btn approve"
-       href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for t in topic %}&topic={{ t }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+       href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
       ▶&nbsp; Triage mode</a>
   </div>
 </div>
@@ -106,17 +106,17 @@
       </div>
     </div>
     <div class="chip-row">
-      <span class="meta">Topics:</span>
-      {% for t in topics %}
-      <label class="chip {{ 'on' if t in topic }}">
-        <input type="checkbox" name="topic" value="{{ t }}" {{ "checked" if t in topic }}
-               onchange="this.parentElement.classList.toggle('on', this.checked); this.form.requestSubmit()"> {{ t }}
+      <span class="meta">Keywords:</span>
+      {% for k in keywords_options %}
+      <label class="chip {{ 'on' if k in keyword }}">
+        <input type="checkbox" name="keyword" value="{{ k }}" {{ "checked" if k in keyword }}
+               onchange="this.parentElement.classList.toggle('on', this.checked); this.form.requestSubmit()"> {{ k }}
       </label>
       {% endfor %}
     </div>
   </form>
   <script>
-    // Live filtering: selects/dates/topics submit on change (inline above);
+    // Live filtering: selects/dates/keywords submit on change (inline above);
     // the search box submits on a short debounce so typing isn't interrupted,
     // and focus + caret are restored after the reload.
     let searchTimer = null;
@@ -137,7 +137,7 @@
     })();
   </script>
   <div style="margin-top: 10px;">
-    <a class="meta" href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for t in topic %}&topic={{ t }}{% endfor %}&region={{ region }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ 0 if show_hidden else 1 }}">
+    <a class="meta" href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ 0 if show_hidden else 1 }}">
       {{ "Hide" if show_hidden else "Show" }} below-threshold matches (score &lt; {{ threshold }})</a>
   </div>
 </div>
@@ -156,7 +156,8 @@
       {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d %H:%M") }}{% endif %}
       {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
     <span class="vx">
-      {% if state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
+      {% if state.post_failed %}<span class="badge hostile">post failed — retry</span>
+      {% elif state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
       {% elif state.current == "trim" %}<span class="badge score-lo">ready to trim</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
@@ -176,7 +177,7 @@
             title="{{ c.visual_rationale or 'Visual appeal' }}">👁 {{ "%.2f"|format(c.visual_score) }}</span>
     {% endif %}
     {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
-    {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
+    {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
   </div>
 </div>
 {% endfor %}
@@ -235,7 +236,7 @@
             title="{{ c.visual_rationale or 'Visual appeal score' }}">👁 {{ "%.2f"|format(c.visual_score) }}</span>
     {% endif %}
     {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
-    {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
+    {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
     {% if c.status != "new" %}<span class="badge">{{ c.status }}</span>{% endif %}
   </div>
 </div>

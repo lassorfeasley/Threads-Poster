@@ -10,8 +10,8 @@ Usage:
   python run.py comments           # sync + classify comments on own posts
   python run.py digest             # print the analytics digest to stdout
   python run.py cleanup            # apply the retention setting (never automatic)
-  python run.py scheduler          # publish any scheduled posts that are due
-  python run.py scheduler --loop   # keep publishing scheduled posts as they come due
+  python run.py scheduler          # one adaptive-scheduler tick (windows + metrics)
+  python run.py scheduler --loop   # keep the adaptive scheduler running
   python run.py migrate-db         # copy local SQLite data into DATABASE_URL (Supabase)
 """
 from __future__ import annotations
@@ -126,25 +126,23 @@ def cmd_digest(_args) -> None:
 
 
 def cmd_scheduler(args) -> None:
-    """Publish due scheduled posts. Runs one pass, or loops when --loop is set.
+    """Run the adaptive window scheduler. One tick, or loop when --loop is set.
     The dashboard runs this automatically; use this for headless operation."""
     from app.db import init_db
-    from app.scheduler import run_due_posts
+    from app.scheduler import run_tick, start_scheduler_thread
 
     init_db()
     if not args.loop:
-        n = run_due_posts()
-        print(f"Published {n} due post(s)")
+        run_tick()
+        print("Scheduler tick complete")
         return
+    start_scheduler_thread(interval_seconds=args.interval)
     log.info("Scheduler loop started (every %ds). Ctrl-C to stop.", args.interval)
-    while True:
-        try:
-            n = run_due_posts()
-            if n:
-                log.info("Published %d due post(s)", n)
-        except Exception:
-            log.exception("Scheduler pass failed; will retry")
-        time.sleep(args.interval)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
 
 
 def cmd_migrate_db(_args) -> None:
@@ -196,8 +194,8 @@ def main() -> None:
                    help="scan this many days back instead of since-last-check (backfill)")
     p.set_defaults(func=cmd_monitor)
 
-    p = sub.add_parser("scheduler", help="publish due scheduled posts")
-    p.add_argument("--loop", action="store_true", help="keep running and publish posts as they come due")
+    p = sub.add_parser("scheduler", help="run the adaptive posting scheduler")
+    p.add_argument("--loop", action="store_true", help="keep running window checks + metrics polls")
     p.add_argument("--interval", type=int, default=60, help="seconds between checks in --loop mode")
     p.set_defaults(func=cmd_scheduler)
 

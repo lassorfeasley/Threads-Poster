@@ -64,6 +64,131 @@ def snapshot_metrics(session) -> int:
     return taken
 
 
+def poll_recent_metrics(session) -> int:
+    """Frequent insights pull for recently published posts (feeds hotness checks).
+
+    Independent of the long-term ``snapshot_interval_hours`` cadence: only posts
+    published within ``scheduler.metrics_poll_recency_hours`` are considered, and
+    each is re-snapshotted at most every ``scheduler.metrics_poll_interval_minutes``.
+    """
+    settings = load_settings()
+    interval = dt.timedelta(
+        minutes=settings.get("scheduler.metrics_poll_interval_minutes", 15)
+    )
+    recency = dt.timedelta(
+        hours=settings.get("scheduler.metrics_poll_recency_hours", 6)
+    )
+    now = utcnow()
+    cutoff = now - recency
+
+    posts = session.execute(
+        select(ThreadsPost).where(
+            ThreadsPost.status == "published",
+            ThreadsPost.published_at.is_not(None),
+            ThreadsPost.published_at >= cutoff,
+            ThreadsPost.threads_media_id != "",
+        ).order_by(ThreadsPost.published_at.desc())
+    ).scalars().all()
+
+    taken = 0
+    for post in posts:
+        last = session.execute(
+            select(func.max(MetricSnapshot.captured_at)).where(
+                MetricSnapshot.post_pk == post.id
+            )
+        ).scalar_one()
+        if last is not None:
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=dt.timezone.utc)
+            if now - last < interval:
+                continue
+        try:
+            data = fetch_insights(post.threads_media_id)
+        except Exception as exc:
+            log.warning("Recent metrics poll failed for post %s: %s", post.id, exc)
+            continue
+        if not data:
+            continue
+        session.add(
+            MetricSnapshot(
+                post_pk=post.id,
+                views=data.get("views"),
+                likes=data.get("likes"),
+                replies=data.get("replies"),
+                reposts=data.get("reposts"),
+                quotes=data.get("quotes"),
+                shares=data.get("shares"),
+            )
+        )
+        taken += 1
+    if taken:
+        session.flush()
+        log.info("Recent metric snapshots taken: %d", taken)
+    return taken
+
+
+def likes_delta_trailing(session, post: ThreadsPost, window_minutes: int) -> int | None:
+    """Likes gained by ``post`` over the trailing ``window_minutes``.
+
+    Diffs the latest MetricSnapshot against the newest snapshot at least
+    ``window_minutes`` old (or the oldest available if the post is younger).
+    Returns None when there aren't enough snapshots to compute a delta.
+    """
+    snaps = session.execute(
+        select(MetricSnapshot)
+        .where(MetricSnapshot.post_pk == post.id, MetricSnapshot.likes.is_not(None))
+        .order_by(MetricSnapshot.captured_at.desc())
+    ).scalars().all()
+    if len(snaps) < 2:
+        return None
+
+    latest = snaps[0]
+    latest_at = latest.captured_at
+    if latest_at.tzinfo is None:
+        latest_at = latest_at.replace(tzinfo=dt.timezone.utc)
+    cutoff = latest_at - dt.timedelta(minutes=window_minutes)
+
+    older = None
+    for snap in snaps[1:]:
+        at = snap.captured_at
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=dt.timezone.utc)
+        older = snap
+        if at <= cutoff:
+            break
+
+    if older is None or older.likes is None or latest.likes is None:
+        return None
+    return max(0, int(latest.likes) - int(older.likes))
+
+
+def is_last_post_hot(session) -> tuple[bool, int | None]:
+    """Whether the most recently published post is 'hot' per scheduler settings.
+
+    Returns ``(is_hot, likes_delta)``. When there is no published post or not
+    enough snapshot history, treats as not hot (``False, None``) so the queue
+    can proceed rather than stall forever on missing data.
+    """
+    settings = load_settings()
+    threshold = int(settings.get("scheduler.hot.threshold", 100))
+    window_minutes = int(settings.get("scheduler.hot.window_minutes", 60))
+    # metric is fixed to likes for v1; settings keep the knob for later.
+
+    post = session.execute(
+        select(ThreadsPost).where(
+            ThreadsPost.status == "published",
+            ThreadsPost.published_at.is_not(None),
+        ).order_by(ThreadsPost.published_at.desc()).limit(1)
+    ).scalar_one_or_none()
+    if post is None:
+        return False, None
+
+    delta = likes_delta_trailing(session, post, window_minutes)
+    if delta is None:
+        return False, None
+    return delta > threshold, delta
+
+
 def _latest_metrics(session, post: ThreadsPost) -> dict:
     snap = session.execute(
         select(MetricSnapshot)
@@ -113,7 +238,6 @@ def build_post_rows(session) -> list[dict]:
             "market": candidate.channel.market if candidate else None,
             "region": candidate.channel.region if candidate else None,
             "station": candidate.channel.call_sign if candidate else None,
-            "climate_topic": candidate.climate_topic if candidate else None,
             "matched_keywords": candidate.matched_keywords if candidate else None,
             "visual_traits": candidate.visual_traits if candidate else None,
             "visual_score": candidate.visual_score if candidate else None,
@@ -135,10 +259,10 @@ def build_post_rows(session) -> list[dict]:
 def slice_summaries(rows: list[dict]) -> dict:
     """Mean of each metric grouped by each attribute (simple correlational slices)."""
     attributes = [
-        "region", "climate_topic", "visual_traits", "caption_tone", "day_of_week",
+        "region", "matched_keywords", "visual_traits", "caption_tone", "day_of_week",
         "caption_has_question", "caption_has_cta",
     ]
-    multi_value = {"climate_topic", "visual_traits"}
+    multi_value = {"matched_keywords", "visual_traits"}
     summaries: dict = {}
     for attr in attributes:
         groups: dict = defaultdict(list)

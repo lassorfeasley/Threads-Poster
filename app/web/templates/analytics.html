@@ -118,14 +118,14 @@
   <summary><strong>All posts ({{ rows|length }})</strong></summary>
   <div class="table-wrap" style="margin-top: 10px;">
   <table>
-    <tr><th>Published</th><th>Caption</th><th>Topic</th><th>Region</th><th>Len (s)</th>
+    <tr><th>Published</th><th>Caption</th><th>Keywords</th><th>Region</th><th>Len (s)</th>
         <th>Tone</th><th>Q?</th><th>Views</th><th>Likes</th><th>Replies</th><th>Reposts</th>
         <th>Supportive</th><th>Hostile</th><th>Promo replies</th></tr>
     {% for r in rows %}
     <tr>
       <td class="meta" style="white-space: nowrap;">{{ r.published_at[:10] if r.published_at else "—" }} {{ r.day_of_week }} {{ r.hour_local }}h</td>
       <td>{% if r.permalink %}<a href="{{ r.permalink }}" target="_blank">{{ r.caption[:60] }}</a>{% else %}{{ r.caption[:60] }}{% endif %}</td>
-      <td>{{ r.climate_topic or "—" }}</td>
+      <td>{{ r.matched_keywords or "—" }}</td>
       <td>{{ r.region or "—" }}</td>
       <td>{{ r.clip_length_seconds or "—" }}</td>
       <td>{{ r.caption_tone or "—" }}</td>

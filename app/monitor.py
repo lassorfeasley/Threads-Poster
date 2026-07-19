@@ -125,7 +125,6 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
             )
             candidate.relevance_score = result["score"]
             candidate.relevance_rationale = result["rationale"]
-            candidate.climate_topic = ",".join(result["topics"])  # multi-topic CSV
         except Exception as exc:  # scoring failure shouldn't lose the candidate
             log.warning("LLM scoring failed for %s: %s", up.video_id, exc)
             candidate.relevance_rationale = f"(scoring failed: {exc})"

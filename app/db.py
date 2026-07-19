@@ -35,13 +35,15 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 def init_db() -> None:
     Base.metadata.create_all(engine)
     _ensure_new_columns()
+    _drop_removed_columns()
+    _migrate_scheduled_to_queued()
 
 
 def _ensure_new_columns() -> None:
     """Lightweight additive migration for columns added after first release."""
     from sqlalchemy import inspect, text
 
-    insp = inspect(engine)
+    bool_default = "FALSE" if not _is_sqlite else "0"
     tables = {
         "candidates": {
             "trim_segments": "TEXT DEFAULT ''",
@@ -54,6 +56,10 @@ def _ensure_new_columns() -> None:
         "threads_posts": {
             "source": "VARCHAR(20) DEFAULT 'app'",
             "scheduled_at": "TIMESTAMP WITH TIME ZONE",
+            "is_breaking": f"BOOLEAN DEFAULT {bool_default}",
+            "defer_count": "INTEGER DEFAULT 0",
+            "last_deferred_at": "TIMESTAMP WITH TIME ZONE",
+            "pinned_window_key": "VARCHAR(40) DEFAULT ''",
         },
         "channels": {
             "country": "VARCHAR(60) DEFAULT ''",
@@ -62,18 +68,56 @@ def _ensure_new_columns() -> None:
     }
     added: list[tuple[str, str]] = []
     with engine.begin() as conn:
+        insp = inspect(conn)
         for table, additions in tables.items():
             existing = {c["name"] for c in insp.get_columns(table)}
             for name, ddl in additions.items():
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
                     added.append((table, name))
+                    existing.add(name)
         # One-time backfill: the original seed is all US local stations, so tag
         # pre-existing rows as United States when the country column is new.
         if ("channels", "country") in added:
             conn.execute(text(
                 "UPDATE channels SET country='United States' WHERE country='' OR country IS NULL"
             ))
+
+
+def _migrate_scheduled_to_queued() -> None:
+    """One-time: move exact-time ``scheduled`` posts into the adaptive queue."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE threads_posts SET status='queued', scheduled_at=NULL "
+            "WHERE status='scheduled'"
+        ))
+
+
+def _drop_removed_columns() -> None:
+    """Drop columns retired after first release (best-effort, idempotent).
+
+    SQLite supports ``ALTER TABLE ... DROP COLUMN`` since 3.35 and Postgres
+    supports it natively; on older/unsupported engines the drop is skipped so a
+    stale column simply lingers unused rather than breaking startup.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    removed = {
+        "candidates": ["climate_topic"],
+    }
+    with engine.begin() as conn:
+        for table, columns in removed.items():
+            existing = {c["name"] for c in insp.get_columns(table)}
+            for name in columns:
+                if name not in existing:
+                    continue
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {name}"))
+                except Exception:  # unsupported engine/version: leave column in place
+                    pass
 
 
 @contextmanager

@@ -41,35 +41,47 @@
     {# ---- Caption ---- #}
     <div class="card tight">
       <div class="card-title">Caption</div>
-      {% if status in ("draft", "scheduled", "failed") %}
-        <textarea form="sched-form" name="caption" id="caption">{{ caption }}</textarea>
+      {% if status in ("draft", "queued", "failed") %}
+        <textarea form="queue-form" name="caption" id="caption">{{ caption }}</textarea>
         <div class="meta" style="margin-top: 6px;">Caption edits are saved when you
-          {{ "reschedule" if status == "scheduled" else "schedule" }} below.</div>
+          {{ "update the queue entry" if status == "queued" else "add it to the queue" }} below.</div>
       {% else %}
         <div style="white-space: pre-wrap;">{{ caption }}</div>
       {% endif %}
     </div>
 
-    {# ---- Timing / scheduling ---- #}
+    {# ---- Timing / queue ---- #}
     <div class="card tight" style="margin-top: 14px;">
-      <div class="card-title">Timing</div>
-      {% if status in ("draft", "scheduled", "failed") %}
+      <div class="card-title">Queue</div>
+      {% if status in ("draft", "queued", "failed") %}
         <div class="meta" style="margin-bottom: 8px;">
-          {% if status == "scheduled" and scheduled_at %}
-            Currently scheduled for {{ scheduled_at.strftime("%b %-d, %H:%M UTC") }}. Change it below.
-          {% elif status == "draft" %}This is a draft — pick a time to schedule it, or post now.
-          {% elif status == "failed" %}Publishing failed. Retry now or reschedule.{% endif %}
+          {% if status == "queued" %}
+            In the adaptive queue{% if is_breaking %} as <strong>breaking</strong>{% endif %}.
+            {% if defer_count %}Deferred {{ defer_count }}× so far
+              {% if last_deferred_at %}(last {{ last_deferred_at.astimezone().strftime("%b %-d %-I:%M %p") }}){% endif %}.
+            {% endif %}
+            Publishes at the next open window unless marked breaking.
+          {% elif status == "draft" %}This is a draft — add it to the queue, or post now.
+          {% elif status == "failed" %}Publishing failed. Retry now or re-queue.{% endif %}
         </div>
-        <form method="post" action="/post/{{ pid }}/schedule" id="sched-form" class="btn-group"
-              style="align-items: center; flex-wrap: wrap;" onsubmit="return validateSchedule()">
+        <form method="post" action="/post/{{ pid }}/queue" id="queue-form" class="btn-group"
+              style="align-items: center; flex-wrap: wrap;">
           <input type="hidden" name="next" value="/post/{{ pid }}">
-          <input type="datetime-local" name="scheduled_at" id="scheduled_at" value="{{ sched_local }}">
-          <button class="primary">{{ "Reschedule" if status == "scheduled" else "Schedule" }}</button>
+          <label class="inline-label" style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="is_breaking" value="1" {% if is_breaking %}checked{% endif %}>
+            Breaking (publish ASAP)
+          </label>
+          <button class="primary">{{ "Update queue" if status == "queued" else "Add to queue" }}</button>
         </form>
         <div class="btn-group" style="align-items: center; flex-wrap: wrap; margin-top: 10px;">
           <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
             <input type="hidden" name="next" value="/post/{{ pid }}">
             <button class="approve" onclick="return confirm('Publish to Threads now?')">Post now</button></form>
+          {% if status == "queued" %}
+          <form class="inline" method="post" action="/post/{{ pid }}/toggle-breaking">
+            <input type="hidden" name="next" value="/post/{{ pid }}">
+            <button class="sm">{{ "Clear breaking" if is_breaking else "Mark breaking" }}</button></form>
+          {% endif %}
           <form class="inline" method="post" action="/post/{{ pid }}/cancel">
             <input type="hidden" name="next" value="/posts">
             <button class="reject sm" onclick="return confirm('Delete this {{ status }} post?')">Delete</button></form>
@@ -77,7 +89,7 @@
       {% elif status == "published" %}
         <div class="meta">Published {{ published_at.strftime("%b %-d, %Y at %H:%M UTC") if published_at else "—" }}.</div>
       {% else %}
-        <div class="meta">Status: {{ status }}{% if scheduled_at %} · queued for {{ scheduled_at.strftime("%b %-d, %H:%M UTC") }}{% endif %}</div>
+        <div class="meta">Status: {{ status }}</div>
       {% endif %}
     </div>
 
@@ -155,26 +167,6 @@
     catch (e) { alert('Copy failed: ' + e); return; }
     btn.textContent = '✓ Copied';
     setTimeout(() => { btn.textContent = original; }, 1500);
-  }
-
-  (function () {
-    const el = document.getElementById('scheduled_at');
-    if (!el) return;
-    const pad = n => String(n).padStart(2, '0');
-    const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-      + `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    const now = new Date();
-    el.min = fmt(now);
-    if (!el.value) el.value = fmt(new Date(now.getTime() + 60 * 60 * 1000));
-  })();
-
-  function validateSchedule() {
-    const when = document.getElementById('scheduled_at');
-    const cap = document.getElementById('caption');
-    if (cap && !cap.value.trim()) { alert('Add a caption first.'); return false; }
-    if (!when.value) { alert('Pick a date and time.'); return false; }
-    if (new Date(when.value) <= new Date()) { alert('Pick a time in the future.'); return false; }
-    return true;
   }
 </script>
 {% endblock %}
