@@ -34,6 +34,28 @@
 </div>
 
 <div class="card tight">
+  <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form"
+        style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; width: 100%;"
+        onsubmit="return onUploadSubmit()">
+    <strong style="font-weight: 600;">Upload your own clip</strong>
+    <input type="file" name="file" id="upload-file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v,.mkv,.webm" required
+           style="max-width: 300px;">
+    <input type="text" name="title" placeholder="Title (optional)" style="width: 220px; padding: 5px 9px;">
+    <button class="primary" id="upload-btn">Upload &amp; transcribe</button>
+    <span class="meta">Runs through the same trim → caption → post workflow. Transcribed locally.</span>
+  </form>
+  <script>
+    function onUploadSubmit() {
+      const f = document.getElementById('upload-file');
+      if (!f.files.length) { alert('Choose a video file first.'); return false; }
+      const btn = document.getElementById('upload-btn');
+      btn.disabled = true; btn.textContent = 'Uploading…';
+      return true;
+    }
+  </script>
+</div>
+
+<div class="card tight">
   <form method="get" action="/" id="filter-form">
     <div class="form-row">
       <div class="field" style="flex: 2; min-width: 200px;">

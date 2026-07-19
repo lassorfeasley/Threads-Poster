@@ -35,8 +35,8 @@
         <div class="cal-daynum">{{ day }}</div>
         {% for e in events.get(day, []) %}
           {% set cls = 'sched' if e.status in ('scheduled', 'publishing') else ('pub' if e.status == 'published' else ('fail' if e.status == 'failed' else 'draft')) %}
-          {% if e.video_id %}
-            <a class="cal-event {{ cls }}" href="/video/{{ e.video_id }}?step=post" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
+          {% if e.post_id %}
+            <a class="cal-event {{ cls }}" href="/post/{{ e.post_id }}" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
               <b>{{ e.time }}</b> {{ e.caption[:34] }}</a>
           {% elif e.permalink %}
             <a class="cal-event {{ cls }}" href="{{ e.permalink }}" target="_blank" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">

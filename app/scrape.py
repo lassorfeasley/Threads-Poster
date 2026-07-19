@@ -69,6 +69,37 @@ def fetch_captions(video_id: str) -> list[dict] | None:
         return None
 
 
+_whisper_model = None
+
+
+def _get_whisper_model(settings):
+    """Lazily load the faster-whisper model (CPU, int8) once per process."""
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+
+        size = settings.get("upload.whisper_model", "base")
+        log.info("Loading faster-whisper model %r (first run downloads it)...", size)
+        _whisper_model = WhisperModel(size, device="cpu", compute_type="int8")
+    return _whisper_model
+
+
+def transcribe_local(media_path: str | Path, settings) -> list[dict] | None:
+    """Transcribe a local media file with faster-whisper (used for operator
+    uploads, which have no YouTube captions). Returns [{start, end, text}] or None."""
+    try:
+        model = _get_whisper_model(settings)
+        segments, _info = model.transcribe(str(media_path), vad_filter=True)
+        out = [
+            {"start": float(s.start), "end": float(s.end), "text": (s.text or "").strip()}
+            for s in segments
+        ]
+        return out or None
+    except Exception as exc:
+        log.warning("Local transcription failed for %s: %s", media_path, exc)
+        return None
+
+
 def _write_transcript(segments: list[dict], transcript_dir: Path, video_id: str) -> tuple[Path, str]:
     """Write timestamped JSON + a readable .txt. Returns (json_path, plain_text)."""
     json_path = transcript_dir / f"{video_id}.json"
@@ -138,14 +169,24 @@ def archive_candidate(session, candidate: Candidate, with_highlight: bool = True
 
     settings = load_settings()
     video_dir, transcript_dir = _paths_for(candidate, settings)
+    is_upload = (candidate.url or "").startswith("upload://")
 
     try:
-        # 1. Transcript from YouTube captions (no media download needed).
-        segments = fetch_captions(candidate.video_id)
-        method = "captions" if segments else ""
+        if is_upload:
+            # Operator-uploaded file: already on disk, nothing to download.
+            # Transcribe locally (no YouTube captions exist for it).
+            video_path = Path(candidate.local_video_path)
+            if not video_path.exists():
+                raise RuntimeError(f"Uploaded file missing: {video_path}")
+            segments = transcribe_local(video_path, settings)
+            method = "whisper" if segments else ""
+        else:
+            # 1. Transcript from YouTube captions (no media download needed).
+            segments = fetch_captions(candidate.video_id)
+            method = "captions" if segments else ""
+            # 2. Full segment download.
+            video_path = download_video(candidate, video_dir, settings)
 
-        # 2. Full segment download.
-        video_path = download_video(candidate, video_dir, settings)
         candidate.local_video_path = str(video_path)
 
         if segments:

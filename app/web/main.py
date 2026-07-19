@@ -13,7 +13,7 @@ import logging
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Query, Request
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -497,6 +497,77 @@ def _scrape_in_thread(candidate_id: int) -> None:
         log.exception("Background scrape failed for candidate %s", candidate_id)
     finally:
         session.close()
+
+
+_UPLOAD_EXTS = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
+
+
+def _get_or_create_upload_channel(session) -> Channel:
+    """A single synthetic channel that owns all operator-uploaded clips."""
+    ch = session.execute(
+        select(Channel).where(Channel.url == "upload://local")
+    ).scalar_one_or_none()
+    if ch is None:
+        ch = Channel(call_sign="Uploads", network="", market="My uploads",
+                     region="", country="", scope="local",
+                     url="upload://local", enabled=False)
+        session.add(ch)
+        session.flush()
+    return ch
+
+
+@app.post("/upload")
+async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
+    """Bring an operator's own video file into the same pipeline as discovered
+    clips: it lands pre-'downloaded', gets transcribed locally, then flows through
+    trim -> caption -> post like everything else."""
+    import uuid
+
+    from ..config import ROOT
+
+    filename = file.filename or "upload.mp4"
+    ext = Path(filename).suffix.lower()
+    if ext not in _UPLOAD_EXTS:
+        return _flash("/", f"Unsupported file type '{ext or '?'}'. "
+                           f"Use one of: {', '.join(_UPLOAD_EXTS)}")
+
+    video_id = "up" + uuid.uuid4().hex[:16]  # unique, fits String(20)
+    settings = load_settings()
+    upload_dir = ROOT / settings.get("storage.download_dir", "data/videos") / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    dest = upload_dir / f"{video_id}{ext}"
+
+    size = 0
+    try:
+        with open(dest, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                out.write(chunk)
+    finally:
+        await file.close()
+    if size == 0:
+        dest.unlink(missing_ok=True)
+        return _flash("/", "Upload was empty")
+
+    duration = clip_duration(dest)
+    with session_scope() as session:
+        ch = _get_or_create_upload_channel(session)
+        c = Candidate(
+            video_id=video_id,
+            channel_pk=ch.id,
+            title=(title.strip() or Path(filename).stem)[:300],
+            url=f"upload://{video_id}",
+            published_at=utcnow(),
+            duration_seconds=int(duration) if duration else None,
+            local_video_path=str(dest),
+            status=STATUS_APPROVED,
+            approved_at=utcnow(),
+        )
+        session.add(c)
+        session.flush()
+        cid = c.id
+    threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
+    return _flash(f"/video/{cid}", "Uploaded — transcribing now")
 
 
 @app.post("/video/{candidate_id}/approve")
@@ -1079,6 +1150,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
                 "sort": local,
                 "caption": (p.caption or "").strip(),
                 "status": p.status,
+                "post_id": p.id,
                 "video_id": p.candidate.id if p.candidate else None,
                 "permalink": p.permalink,
             })
