@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import selectinload
 
 from .. import spend, threads_api
 from ..analytics import generate_report, snapshot_metrics
@@ -31,7 +32,7 @@ from ..db import (
     sync_channels_from_config,
     sync_traits_from_config,
 )
-from ..engagement import PacingLimitError, post_approved_reply, sync_comments
+from ..engagement import PacingLimitError, post_approved_reply, redraft_comment, sync_comments
 from ..history import import_history
 from ..llm import suggest_post_caption
 from ..models import (
@@ -571,17 +572,23 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
 
 
 @app.post("/video/{candidate_id}/approve")
-def approve(candidate_id: int):
+def approve(request: Request, candidate_id: int):
     """The approve gate. This is the ONLY place a download is ever triggered."""
+    wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c is None:
-            return _flash("/", "Video not found")
+            return (JSONResponse({"error": "not found"}, status_code=404)
+                    if wants_json else _flash("/", "Video not found"))
         if c.status == STATUS_ARCHIVED:
-            return _flash(f"/video/{candidate_id}", "Already archived")
+            return (JSONResponse({"ok": True, "status": "archived"})
+                    if wants_json else _flash(f"/video/{candidate_id}", "Already archived"))
         c.status = STATUS_APPROVED
         c.approved_at = utcnow()
     threading.Thread(target=_scrape_in_thread, args=(candidate_id,), daemon=True).start()
+    # AJAX callers transition the page in place (no full reload); others redirect.
+    if wants_json:
+        return JSONResponse({"ok": True, "status": "approved"})
     return _flash(f"/video/{candidate_id}", "Approved — downloading and transcribing now")
 
 
@@ -904,18 +911,52 @@ def schedule_existing_post(post_id: int, scheduled_at: str = Form(...),
     return _flash(next, f"{verb} for {local.strftime('%b %-d, %-I:%M %p')}")
 
 
+def _publish_in_thread(post_id: int) -> None:
+    """Publish a post in the background. publish_post sets status to
+    published/failed (+ error) itself, so we just swallow the exception here."""
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return
+        try:
+            publish_post(session, p)
+        except Exception:
+            log.exception("Background publish failed for post %s", post_id)
+
+
 @app.post("/post/{post_id}/publish-now")
-def publish_scheduled_now(post_id: int, next: str = Form("/posts")):
-    """Publish a scheduled, draft, or previously failed post immediately."""
+def publish_scheduled_now(request: Request, post_id: int, next: str = Form("/posts")):
+    """Publish a scheduled, draft, or previously failed post immediately.
+
+    Publishing a video can take minutes (upload + Threads-side processing), so we
+    kick it off in the background and return right away. The post flips to a
+    'publishing' state that the UI can poll via /post/{id}/status."""
+    wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None or p.status not in ("scheduled", "failed", "draft"):
-            return _flash(next, "Nothing to publish")
-        try:
-            publish_post(session, p)
-            return _flash(next, f"Published: {p.permalink or p.threads_media_id}")
-        except Exception as exc:
-            return _flash(next, f"Publish failed: {exc}")
+            return (JSONResponse({"error": "Nothing to publish"}, status_code=409)
+                    if wants_json else _flash(next, "Nothing to publish"))
+        p.status = "publishing"
+        p.error = ""
+    threading.Thread(target=_publish_in_thread, args=(post_id,), daemon=True).start()
+    if wants_json:
+        return JSONResponse({"ok": True, "status": "publishing"})
+    return _flash(next, "Publishing now — video can take a minute to process.")
+
+
+@app.get("/post/{post_id}/status")
+def post_status(post_id: int):
+    """Lightweight status poll for a post that's publishing in the background."""
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({
+            "status": p.status,
+            "permalink": p.permalink or "",
+            "error": (p.error or "")[:300],
+        })
 
 
 _POST_METRICS = ("views", "likes", "replies", "reposts", "quotes", "shares")
@@ -1141,7 +1182,10 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
             select(func.count()).select_from(ThreadsPost).where(ThreadsPost.status == "draft")
         ).scalar_one()
         for p in rows:
-            when = p.scheduled_at if p.status in ("scheduled", "publishing") else p.published_at
+            # Published posts show at their publish time; everything else
+            # (scheduled, publishing, and FAILED) shows at its scheduled time so
+            # a failed post stays visible (in red) instead of vanishing.
+            when = p.published_at or p.scheduled_at
             if when is None:
                 continue
             local = when.astimezone()
@@ -1210,24 +1254,25 @@ def posts_page(request: Request, msg: str = ""):
 @app.get("/engagement", response_class=HTMLResponse)
 def engagement_page(request: Request, view: str = "queue", msg: str = ""):
     with session_scope() as session:
+        # Eager-load the related post in one round-trip. Without this, the template
+        # lazy-loads c.post per row (N+1), which is painfully slow against remote Postgres.
+        base = select(ThreadsComment).options(selectinload(ThreadsComment.post))
         if view == "filtered":
             comments = session.execute(
-                select(ThreadsComment).where(ThreadsComment.reply_status.in_(["filtered", "skipped"]))
+                base.where(ThreadsComment.reply_status.in_(["filtered", "skipped"]))
                 .order_by(ThreadsComment.created_at.desc()).limit(200)
             ).scalars().all()
         elif view == "posted":
             comments = session.execute(
-                select(ThreadsComment).where(ThreadsComment.reply_status == "posted")
+                base.where(ThreadsComment.reply_status == "posted")
                 .order_by(ThreadsComment.replied_at.desc()).limit(200)
             ).scalars().all()
         else:
             comments = session.execute(
-                select(ThreadsComment).where(
+                base.where(
                     ThreadsComment.reply_status == "pending", ThreadsComment.eligible_for_reply
                 ).order_by(ThreadsComment.created_at.desc()).limit(200)
             ).scalars().all()
-        for c in comments:
-            _ = c.post
     return templates.TemplateResponse(
         request, "engagement.html", {"comments": comments, "view": view, "msg": msg, "active": "engagement"}
     )
@@ -1244,30 +1289,56 @@ def engagement_sync():
 
 
 @app.post("/engagement/{comment_id}/post")
-def engagement_post(comment_id: int, reply_text: str = Form(...)):
+def engagement_post(request: Request, comment_id: int, reply_text: str = Form(...)):
+    wants_json = "application/json" in request.headers.get("accept", "")
     text = reply_text.strip()
     if not text:
-        return _flash("/engagement", "Reply text is empty")
+        return (JSONResponse({"error": "Reply text is empty"}, status_code=400)
+                if wants_json else _flash("/engagement", "Reply text is empty"))
     with session_scope() as session:
         comment = session.get(ThreadsComment, comment_id)
         if comment is None or not comment.eligible_for_reply or comment.reply_status != "pending":
-            return _flash("/engagement", "Comment is not eligible or already handled")
+            msg = "Comment is not eligible or already handled"
+            return (JSONResponse({"error": msg}, status_code=409)
+                    if wants_json else _flash("/engagement", msg))
         try:
             post_approved_reply(session, comment, text)
-            return _flash("/engagement", "Reply posted")
+            return (JSONResponse({"ok": True}) if wants_json
+                    else _flash("/engagement", "Reply posted"))
         except PacingLimitError as exc:
-            return _flash("/engagement", str(exc))
+            return (JSONResponse({"error": str(exc)}, status_code=429)
+                    if wants_json else _flash("/engagement", str(exc)))
         except Exception as exc:
-            return _flash("/engagement", f"Post failed: {exc}")
+            return (JSONResponse({"error": f"Post failed: {exc}"}, status_code=500)
+                    if wants_json else _flash("/engagement", f"Post failed: {exc}"))
+
+
+@app.post("/engagement/{comment_id}/redraft")
+def engagement_redraft(request: Request, comment_id: int):
+    """Regenerate a queued comment's draft reply with the latest reply guidance."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with session_scope() as session:
+        comment = session.get(ThreadsComment, comment_id)
+        if comment is None:
+            return (JSONResponse({"error": "Comment not found"}, status_code=404)
+                    if wants_json else _flash("/engagement", "Comment not found"))
+        try:
+            new_draft = redraft_comment(session, comment)
+            return (JSONResponse({"ok": True, "draft": new_draft or ""})
+                    if wants_json else _flash("/engagement", "Draft regenerated"))
+        except Exception as exc:
+            return (JSONResponse({"error": f"Redraft failed: {exc}"}, status_code=500)
+                    if wants_json else _flash("/engagement", f"Redraft failed: {exc}"))
 
 
 @app.post("/engagement/{comment_id}/skip")
-def engagement_skip(comment_id: int):
+def engagement_skip(request: Request, comment_id: int):
+    wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
         comment = session.get(ThreadsComment, comment_id)
         if comment:
             comment.reply_status = "skipped"
-    return _flash("/engagement", "Skipped")
+    return (JSONResponse({"ok": True}) if wants_json else _flash("/engagement", "Skipped"))
 
 
 # --- Analytics -----------------------------------------------------------------

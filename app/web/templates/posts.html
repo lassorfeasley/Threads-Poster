@@ -47,9 +47,10 @@
     </td>
     <td>
       <div class="btn-group" style="align-items:center; flex-wrap:wrap; gap:6px;">
-        <form class="inline" method="post" action="/post/{{ p.id }}/publish-now">
+        <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
+              data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
           <input type="hidden" name="next" value="/posts">
-          <button class="sm" onclick="return confirm('Publish to Threads now?')">Post now</button></form>
+          <button class="sm">Post now</button></form>
         <form class="inline" method="post" action="/post/{{ p.id }}/schedule" style="display:inline-flex; gap:6px; align-items:center;">
           <input type="hidden" name="next" value="/posts">
           <input type="datetime-local" class="sched-input" name="scheduled_at" required>
@@ -94,9 +95,10 @@
     <td><span class="badge">{{ p.status }}</span></td>
     <td style="white-space: nowrap;">
       {% if p.status == "scheduled" %}
-      <form class="inline" method="post" action="/post/{{ p.id }}/publish-now">
+      <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
+            data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
         <input type="hidden" name="next" value="/posts">
-        <button class="sm" onclick="return confirm('Publish now instead of waiting?')">Post now</button></form>
+        <button class="sm">Post now</button></form>
       <a class="sm" href="/post/{{ p.id }}/download-clip" download>⤓ Clip</a>
       <button type="button" class="sm" data-caption="{{ p.caption }}"
               onclick="copyPostCaption(this)">⧉ Caption</button>
@@ -149,6 +151,48 @@
 </div>
 {% endif %}
 <script>
+  function publishNow(ev) {
+    ev.preventDefault();
+    const form = ev.target;
+    const pid = form.dataset.pid;
+    if (!confirm('Publish to Threads now?')) return false;
+    const btn = form.querySelector('button');
+    btn.disabled = true; btn.textContent = 'Publishing…';
+    fetch(form.action, {
+      method: 'POST', headers: { 'Accept': 'application/json' },
+      body: new FormData(form),
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      pollPublish(pid, btn);
+    }).catch((e) => {
+      alert('Publish failed: ' + e.message);
+      btn.disabled = false; btn.textContent = 'Post now';
+    });
+    return false;
+  }
+
+  function pollPublish(pid, btn) {
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch('/post/' + pid + '/status');
+        const s = await r.json();
+        if (s.status === 'published') {
+          clearInterval(poll);
+          btn.textContent = '✓ Published';
+          const link = s.permalink
+            ? ' — <a href="' + s.permalink + '" target="_blank">open ↗</a>' : '';
+          btn.closest('td').innerHTML =
+            '<span class="badge supportive">published</span>' + link;
+        } else if (s.status === 'failed') {
+          clearInterval(poll);
+          alert('Publish failed: ' + (s.error || 'unknown error'));
+          btn.disabled = false; btn.textContent = 'Post now';
+        }
+      } catch (e) { /* keep polling */ }
+    }, 4000);
+  }
+
   async function copyPostCaption(btn) {
     const text = btn.dataset.caption || '';
     if (!text.trim()) { alert('No caption to copy.'); return; }

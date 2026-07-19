@@ -14,19 +14,17 @@
 
 <div class="card tight">
   {% if monitor_running %}
-    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+    <div class="bar">
       <span class="badge info"><span class="dot"></span> monitor running</span>
       <span class="meta">Scanning channels in the background — new candidates appear as they're found.</span>
-      <button class="ghost sm" onclick="location.reload()" style="margin-left: auto;">Refresh now</button>
+      <button class="ghost sm push" onclick="location.reload()">Refresh now</button>
     </div>
     <script>setTimeout(() => location.reload(), 10000);</script>
   {% else %}
-    <form class="inline" method="post" action="/monitor/run"
-          style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; width: 100%;">
+    <form class="bar" method="post" action="/monitor/run">
       <button class="primary">Run monitor now</button>
-      <label style="margin: 0; display: inline-flex; gap: 8px; align-items: center; font-weight: 500;">look back
-        <input type="number" name="lookback_days" min="1" max="30" placeholder="auto"
-               style="width: 74px; padding: 5px 9px;"> days</label>
+      <label class="inline-label">look back
+        <input type="number" name="lookback_days" min="1" max="30" placeholder="auto" class="input-xs"> days</label>
       <span class="meta">Leave blank to check only since the last run; set days (max 30) to backfill.</span>
     </form>
     {% if monitor_result %}<div class="meta" style="margin-top: 8px;">{{ monitor_result }}</div>{% endif %}
@@ -34,13 +32,11 @@
 </div>
 
 <div class="card tight">
-  <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form"
-        style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; width: 100%;"
+  <form class="bar" method="post" action="/upload" enctype="multipart/form-data" id="upload-form"
         onsubmit="return onUploadSubmit()">
-    <strong style="font-weight: 600;">Upload your own clip</strong>
-    <input type="file" name="file" id="upload-file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v,.mkv,.webm" required
-           style="max-width: 300px;">
-    <input type="text" name="title" placeholder="Title (optional)" style="width: 220px; padding: 5px 9px;">
+    <strong>Upload your own clip</strong>
+    <input type="file" name="file" id="upload-file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v,.mkv,.webm" required>
+    <input type="text" name="title" placeholder="Title (optional)" class="input-md">
     <button class="primary" id="upload-btn">Upload &amp; transcribe</button>
     <span class="meta">Runs through the same trim → caption → post workflow. Transcribed locally.</span>
   </form>
@@ -109,8 +105,8 @@
         {% if filtering %}<a class="btn ghost" href="/">Clear</a>{% endif %}
       </div>
     </div>
-    <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 12px;">
-      <span class="meta" style="margin-right: 4px;">Topics:</span>
+    <div class="chip-row">
+      <span class="meta">Topics:</span>
       {% for t in topics %}
       <label class="chip {{ 'on' if t in topic }}">
         <input type="checkbox" name="topic" value="{{ t }}" {{ "checked" if t in topic }}
@@ -159,7 +155,7 @@
     <span class="vmarket">{{ c.channel.call_sign }} · {{ c.channel.market }}
       {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d %H:%M") }}{% endif %}
       {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
-    <span class="vx" style="display: inline-flex; gap: 6px; align-items: center;">
+    <span class="vx">
       {% if state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
       {% elif state.current == "trim" %}<span class="badge score-lo">ready to trim</span>

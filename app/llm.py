@@ -137,7 +137,7 @@ def draft_reply(model: str, guidance: str, post_caption: str, comment_text: str,
     )
     user = json.dumps({"post_caption": post_caption[:800], "comment": comment_text[:1000], "username": username})
     data = _json_chat(model, system, user)
-    return str(data.get("reply", "")).strip()[:500]
+    return str(data.get("reply", "")).strip()[:700]
 
 
 def suggest_highlight(model: str, title: str, transcript_segments: list[dict]) -> dict:

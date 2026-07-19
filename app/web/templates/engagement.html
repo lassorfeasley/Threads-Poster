@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-head">
   <div class="titles">
-    <h1>Engagement</h1>
+    <h1>Replies</h1>
     <div class="sub">Comments on your own posts. Drafts are generated only for supportive comments and
       genuine questions — every reply requires your approval before it posts.</div>
   </div>
@@ -14,46 +14,330 @@
 </div>
 
 <div class="tabs">
-  <a class="tab {{ 'active' if view == 'queue' }}" href="/engagement?view=queue">Reply queue</a>
+  <a class="tab {{ 'active' if view == 'queue' }}" href="/engagement?view=queue">Reply queue{% if view == 'queue' and comments %} ({{ comments|length }}){% endif %}</a>
   <a class="tab {{ 'active' if view == 'posted' }}" href="/engagement?view=posted">Posted</a>
   <a class="tab {{ 'active' if view == 'filtered' }}" href="/engagement?view=filtered">Filtered &amp; skipped</a>
 </div>
 
-{% if not comments %}
-  <div class="empty"><span class="icon">✉</span><strong>Nothing in this view</strong>
-    Sync comments or check another tab.</div>
+{# ============================ QUEUE: one-at-a-time reviewer ============================ #}
+{% if view == "queue" %}
+  {% if not comments %}
+    <div class="empty"><span class="icon">✓</span><strong>You're all caught up</strong>
+      No replies waiting for approval. Hit “Sync comments now” to check for new ones.</div>
+  {% else %}
+    <div id="review-progress" class="review-progress">
+      <div class="review-count"><b id="q-pos">1</b> of <b>{{ comments|length }}</b> to review</div>
+      <div class="progress-track"><div id="q-fill" class="progress-fill"></div></div>
+      <div class="review-hint meta">⌘/Ctrl + Enter to approve &amp; post · edit the draft first if you like</div>
+    </div>
+
+    <div id="review-deck">
+      {% for c in comments %}
+      <div class="review-card card" id="comment-{{ c.id }}" data-cid="{{ c.id }}"
+           {% if not loop.first %}style="display: none;"{% endif %}>
+        <div class="meta">
+          on your post: “{{ c.post.caption[:90] }}”
+          {% if c.post.permalink %} · <a href="{{ c.post.permalink }}" target="_blank">open ↗</a>{% endif %}
+          · {{ c.commented_at.strftime("%b %-d %H:%M") if c.commented_at else "" }}
+        </div>
+
+        <div class="comment-bubble">
+          <div class="comment-author">@{{ c.username }}</div>
+          <div class="comment-text">{{ c.text }}</div>
+        </div>
+
+        <div class="badges" style="margin-top: 10px;">
+          <span class="badge {{ 'supportive' if c.classification in ['supportive', 'genuine_question'] else ('hostile' if c.classification in ['hostile_or_argumentative', 'bait_or_trolling', 'spam_or_bot'] else '') }}">{{ c.classification }}</span>
+          {% for f in c.risk_flags.split(",") if f %}<span class="badge score-lo">{{ f }}</span>{% endfor %}
+        </div>
+        {% if c.classification_rationale %}<div class="meta" style="margin-top: 6px;">{{ c.classification_rationale }}</div>{% endif %}
+
+        <hr class="div">
+        <form class="post-form" method="post" action="/engagement/{{ c.id }}/post"
+              data-cid="{{ c.id }}" onsubmit="return postReply(event)">
+          <label>Your reply — edit freely before posting</label>
+          <textarea name="reply_text" rows="5">{{ c.draft_reply }}</textarea>
+          <div class="btn-group" style="margin-top: 12px;">
+            <button class="approve" type="submit">Approve &amp; post →</button>
+            <button type="button" class="ghost sm" onclick="redraftReply(event)"
+                    data-cid="{{ c.id }}" title="Regenerate this draft with the current reply guidance">↻ Regenerate</button>
+            <button type="button" class="ghost sm" onclick="skipComment(event)"
+                    data-cid="{{ c.id }}">Skip →</button>
+          </div>
+        </form>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div id="review-done" class="empty" style="display: none;">
+      <span class="icon">✓</span><strong>All caught up</strong>
+      You've cleared the reply queue. Nice work.
+      <div style="margin-top: 12px;"><a class="badge" href="/engagement?view=posted">See posted replies →</a></div>
+    </div>
+
+    <div id="processing" class="processing" style="display: none;">
+      <div class="processing-head">Processing <span class="meta" id="proc-summary"></span></div>
+      <div id="processing-list"></div>
+    </div>
+  {% endif %}
+
+{# ============================ POSTED ============================ #}
+{% elif view == "posted" %}
+  {% if not comments %}
+    <div class="empty"><span class="icon">✉</span><strong>Nothing posted yet</strong>
+      Approved replies will show up here.</div>
+  {% endif %}
+  {% for c in comments %}
+  <div class="card">
+    <div class="meta">
+      on post: “{{ c.post.caption[:80] }}”
+      {% if c.post.permalink %} · <a href="{{ c.post.permalink }}" target="_blank">open ↗</a>{% endif %}
+      · {{ c.commented_at.strftime("%b %-d %H:%M") if c.commented_at else "" }}
+    </div>
+    <div style="margin: 10px 0; font-size: 14px;"><strong>@{{ c.username }}</strong> {{ c.text }}</div>
+    <div style="margin-top: 10px;" class="meta">Replied: “{{ c.reply_text_posted }}”</div>
+  </div>
+  {% endfor %}
+
+{# ============================ FILTERED / SKIPPED ============================ #}
+{% else %}
+  {% if not comments %}
+    <div class="empty"><span class="icon">✉</span><strong>Nothing here</strong>
+      Filtered and skipped comments will show up here.</div>
+  {% endif %}
+  {% for c in comments %}
+  <div class="card">
+    <div class="meta">
+      on post: “{{ c.post.caption[:80] }}”
+      {% if c.post.permalink %} · <a href="{{ c.post.permalink }}" target="_blank">open ↗</a>{% endif %}
+      · {{ c.commented_at.strftime("%b %-d %H:%M") if c.commented_at else "" }}
+    </div>
+    <div style="margin: 10px 0; font-size: 14px;"><strong>@{{ c.username }}</strong> {{ c.text }}</div>
+    <div class="badges">
+      <span class="badge">{{ c.reply_status }}</span>
+      <span class="badge {{ 'supportive' if c.classification in ['supportive', 'genuine_question'] else 'score-lo' }}">{{ c.classification }}</span>
+      {% for f in c.risk_flags.split(",") if f %}<span class="badge score-lo">{{ f }}</span>{% endfor %}
+    </div>
+  </div>
+  {% endfor %}
 {% endif %}
 
-{% for c in comments %}
-<div class="card">
-  <div class="meta">
-    on post: “{{ c.post.caption[:80] }}”
-    {% if c.post.permalink %} · <a href="{{ c.post.permalink }}" target="_blank">open ↗</a>{% endif %}
-    · {{ c.commented_at.strftime("%b %-d %H:%M") if c.commented_at else "" }}
-  </div>
-  <div style="margin: 10px 0; font-size: 14px;"><strong>@{{ c.username }}</strong> {{ c.text }}</div>
-  <div class="badges">
-    <span class="badge {{ 'supportive' if c.classification in ['supportive', 'genuine_question'] else ('hostile' if c.classification in ['hostile_or_argumentative', 'bait_or_trolling', 'spam_or_bot'] else '') }}">{{ c.classification }}</span>
-    {% for f in c.risk_flags.split(",") if f %}<span class="badge score-lo">{{ f }}</span>{% endfor %}
-  </div>
-  {% if c.classification_rationale %}<div class="meta" style="margin-top: 6px;">{{ c.classification_rationale }}</div>{% endif %}
+<style>
+  .review-progress { margin-bottom: 14px; }
+  .review-count { font-size: 13px; color: var(--muted); }
+  .review-count b { color: var(--text); }
+  .progress-track { height: 6px; border-radius: 4px; background: rgba(127,127,127,0.18);
+    overflow: hidden; margin: 8px 0 6px; }
+  .progress-fill { height: 100%; width: 0%; border-radius: 4px;
+    background: var(--accent, #22c55e); transition: width .25s ease; }
+  .review-hint { font-size: 12px; }
+  .review-card { max-width: 760px; }
+  .comment-bubble { margin-top: 10px; padding: 12px 14px; border-radius: 10px;
+    background: rgba(127,127,127,0.08); border: 1px solid rgba(127,127,127,0.15); }
+  .comment-author { font-weight: 650; font-size: 13px; margin-bottom: 4px; }
+  .comment-text { font-size: 15px; line-height: 1.45; }
+  .review-card textarea { width: 100%; font-size: 14px; line-height: 1.5; }
 
-  {% if view == "queue" %}
-    <hr class="div">
-    <form method="post" action="/engagement/{{ c.id }}/post"
-          onsubmit="return confirm('Post this reply?')">
-      <label>Draft reply — edit freely before posting</label>
-      <textarea name="reply_text">{{ c.draft_reply }}</textarea>
-      <div class="btn-group" style="margin-top: 10px;">
-        <button class="approve">Approve &amp; post</button>
-      </div>
-    </form>
-    <form class="inline" method="post" action="/engagement/{{ c.id }}/skip" style="margin-top: 8px;">
-      <button class="ghost sm">Skip this comment</button>
-    </form>
-  {% elif view == "posted" %}
-    <div style="margin-top: 10px;" class="meta">Replied: “{{ c.reply_text_posted }}”</div>
-  {% endif %}
-</div>
-{% endfor %}
+  .processing { margin-top: 22px; max-width: 760px; border-top: 1px solid rgba(127,127,127,0.15);
+    padding-top: 14px; }
+  .processing-head { font-size: 12px; font-weight: 650; text-transform: uppercase;
+    letter-spacing: 0.6px; color: var(--muted); margin-bottom: 10px; }
+  .processing-head .meta { text-transform: none; letter-spacing: 0; font-weight: 500; margin-left: 6px; }
+  .processing-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border-radius: 8px; background: rgba(127,127,127,0.06); margin-bottom: 6px; font-size: 13px; }
+  .proc-status { flex: 0 0 auto; font-size: 12px; font-weight: 650; padding: 2px 8px;
+    border-radius: 999px; white-space: nowrap; }
+  .proc-status.pending { color: var(--muted); background: rgba(127,127,127,0.16); }
+  .proc-status.ok { color: var(--accent); background: var(--accent-soft); }
+  .proc-status.err { color: #ef4444; background: rgba(239,68,68,0.12); }
+  .proc-author { flex: 0 0 auto; font-weight: 650; }
+  .proc-text { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proc-retry { flex: 0 0 auto; }
+</style>
+
+<script>
+  const REVIEW_TOTAL = {{ comments|length if view == "queue" else 0 }};
+
+  function currentCard() { return document.querySelector('#review-deck .review-card'); }
+
+  function focusCurrent() {
+    const card = currentCard();
+    if (!card) return;
+    card.style.display = '';
+    const ta = card.querySelector('textarea[name="reply_text"]');
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }
+
+  function refreshProgress() {
+    const remaining = document.querySelectorAll('#review-deck .review-card').length;
+    const done = REVIEW_TOTAL - remaining;
+    const pos = document.getElementById('q-pos');
+    if (pos) pos.textContent = remaining ? (done + 1) : REVIEW_TOTAL;
+    const fill = document.getElementById('q-fill');
+    if (fill) fill.style.width = (REVIEW_TOTAL ? (done / REVIEW_TOTAL * 100) : 100) + '%';
+    if (remaining === 0) {
+      const deck = document.getElementById('review-deck');
+      const prog = document.getElementById('review-progress');
+      const done_el = document.getElementById('review-done');
+      if (deck) deck.style.display = 'none';
+      if (prog) prog.style.display = 'none';
+      if (done_el) done_el.style.display = '';
+    }
+  }
+
+  function advance(cid) {
+    const card = document.getElementById('comment-' + cid);
+    const proceed = () => {
+      if (card) card.remove();
+      focusCurrent();
+      refreshProgress();
+    };
+    if (card) {
+      card.style.transition = 'opacity .2s ease';
+      card.style.opacity = '0';
+      setTimeout(proceed, 200);
+    } else {
+      proceed();
+    }
+  }
+
+  // --- Processing section: shows in-flight / completed posts so the reviewer
+  //     can keep moving while replies post to Threads in the background. ---
+  let procDone = 0, procFail = 0;
+
+  function updateProcSummary() {
+    const el = document.getElementById('proc-summary');
+    if (!el) return;
+    const bits = [];
+    if (procDone) bits.push(procDone + ' posted');
+    if (procFail) bits.push(procFail + ' failed');
+    el.textContent = bits.length ? '· ' + bits.join(' · ') : '';
+  }
+
+  function addProcessing(cid, author, text) {
+    const sec = document.getElementById('processing');
+    const list = document.getElementById('processing-list');
+    if (!sec || !list) return;
+    sec.style.display = '';
+    let row = document.getElementById('proc-' + cid);
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'processing-item';
+      row.id = 'proc-' + cid;
+      row.innerHTML =
+        '<span class="proc-status pending">Posting…</span>' +
+        '<span class="proc-author"></span>' +
+        '<span class="proc-text meta"></span>';
+      row.querySelector('.proc-author').textContent = author || '';
+      row.querySelector('.proc-text').textContent = (text || '').slice(0, 90);
+      list.prepend(row);
+    } else {
+      const st = row.querySelector('.proc-status');
+      st.className = 'proc-status pending'; st.textContent = 'Posting…';
+      const oldRetry = row.querySelector('.proc-retry');
+      if (oldRetry) oldRetry.remove();
+    }
+  }
+
+  function markProcessing(cid, state, errMsg, text) {
+    const row = document.getElementById('proc-' + cid);
+    if (!row) return;
+    const st = row.querySelector('.proc-status');
+    if (state === 'posted') {
+      st.className = 'proc-status ok'; st.textContent = 'Posted ✓';
+      procDone++;
+    } else {
+      st.className = 'proc-status err'; st.textContent = 'Failed';
+      procFail++;
+      if (errMsg) row.title = errMsg;
+      const retry = document.createElement('button');
+      retry.className = 'ghost sm proc-retry';
+      retry.textContent = '↻ Retry';
+      retry.onclick = () => { retry.remove(); sendPost(cid, text); };
+      row.appendChild(retry);
+    }
+    updateProcSummary();
+  }
+
+  function sendPost(cid, text) {
+    addProcessing(cid, document.querySelector('#proc-' + cid + ' .proc-author')?.textContent, text);
+    const fd = new FormData();
+    fd.append('reply_text', text);
+    fetch('/engagement/' + cid + '/post', {
+      method: 'POST', headers: { 'Accept': 'application/json' }, body: fd,
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      markProcessing(cid, 'posted');
+    }).catch((e) => markProcessing(cid, 'failed', e.message, text));
+  }
+
+  function postReply(ev) {
+    ev.preventDefault();
+    const form = ev.target;
+    const cid = form.dataset.cid;
+    const card = document.getElementById('comment-' + cid);
+    const text = (form.querySelector('textarea[name="reply_text"]') || {}).value || '';
+    const author = card ? (card.querySelector('.comment-author') || {}).textContent : '';
+    // Move it to Processing and jump to the next comment immediately.
+    addProcessing(cid, author, text);
+    advance(cid);
+    // Post to Threads in the background; the Processing row reflects the result.
+    const fd = new FormData();
+    fd.append('reply_text', text);
+    fetch(form.action, {
+      method: 'POST', headers: { 'Accept': 'application/json' }, body: fd,
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      markProcessing(cid, 'posted');
+    }).catch((e) => markProcessing(cid, 'failed', e.message, text));
+    return false;
+  }
+
+  async function redraftReply(ev) {
+    const btn = ev.currentTarget;
+    const cid = btn.dataset.cid;
+    const original = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Regenerating…';
+    try {
+      const r = await fetch('/engagement/' + cid + '/redraft',
+        { method: 'POST', headers: { 'Accept': 'application/json' } });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      const card = document.getElementById('comment-' + cid);
+      const ta = card ? card.querySelector('textarea[name="reply_text"]') : null;
+      if (ta) { ta.value = d.draft || ''; ta.focus(); }
+    } catch (e) {
+      alert('Redraft failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = original;
+    }
+  }
+
+  function skipComment(ev) {
+    const btn = ev.currentTarget;
+    const cid = btn.dataset.cid;
+    // Skip is local/cheap — advance immediately and fire in the background.
+    advance(cid);
+    fetch('/engagement/' + cid + '/skip', {
+      method: 'POST', headers: { 'Accept': 'application/json' },
+    }).catch((e) => console.error('skip ' + cid + ' failed:', e));
+  }
+
+  // Keyboard workflow: ⌘/Ctrl+Enter approves the current reply.
+  document.addEventListener('keydown', (e) => {
+    if (REVIEW_TOTAL === 0) return;
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      const card = currentCard();
+      if (!card) return;
+      e.preventDefault();
+      const form = card.querySelector('form.post-form');
+      if (form) form.requestSubmit();
+    }
+  });
+
+  // Focus the first draft on load so the operator can edit or approve immediately.
+  if (REVIEW_TOTAL > 0) { window.addEventListener('DOMContentLoaded', focusCurrent); }
+</script>
 {% endblock %}

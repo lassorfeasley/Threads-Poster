@@ -81,10 +81,10 @@
       <details style="margin: 8px 0;"><summary>Description</summary>
         <div class="meta">{{ c.description[:1500] }}</div></details>
     {% endif %}
-    <div class="btn-group" style="margin-top: 14px;">
+    <div class="btn-group" style="margin-top: 14px;" id="review-actions">
       {% if c.status in ("new", "rejected") %}
-        <form class="inline" method="post" action="/video/{{ c.id }}/approve">
-          <button class="approve">Approve — download &amp; transcribe →</button></form>
+        <form class="inline" method="post" action="/video/{{ c.id }}/approve" id="approve-form">
+          <button class="approve" type="submit">Approve — download &amp; transcribe →</button></form>
         {% if c.status == "new" %}
         <form class="inline" method="post" action="/video/{{ c.id }}/reject">
           <button class="reject">Reject</button></form>
@@ -94,6 +94,55 @@
           continue to <a href="/video/{{ c.id }}?step={{ state.current }}">{{ state.current }}</a></span>
       {% endif %}
     </div>
+    <div id="approve-progress" style="display: none; margin-top: 14px;">
+      <div class="badges" style="margin-bottom: 8px;">
+        <span class="badge info"><span class="dot"></span> downloading &amp; transcribing</span>
+      </div>
+      <div class="meta">Running in the background — you can leave this page. It advances to Trim
+        automatically when the clip is ready.</div>
+      <div class="meta" id="approve-dots" style="margin-top: 8px;">working…</div>
+    </div>
+    <script>
+      (function () {
+        const form = document.getElementById('approve-form');
+        if (!form) return;
+        form.addEventListener('submit', async (ev) => {
+          ev.preventDefault();
+          const btn = form.querySelector('button');
+          btn.disabled = true; btn.textContent = 'Approving…';
+          try {
+            const r = await fetch('/video/{{ c.id }}/approve',
+              { method: 'POST', headers: { 'Accept': 'application/json' } });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+            document.getElementById('review-actions').style.display = 'none';
+            document.getElementById('approve-progress').style.display = '';
+            let dots = 0;
+            const dotsEl = document.getElementById('approve-dots');
+            const poll = setInterval(async () => {
+              dots = (dots + 1) % 4;
+              dotsEl.textContent = 'working' + '.'.repeat(dots + 1);
+              try {
+                const sr = await fetch('/video/{{ c.id }}/status');
+                const s = await sr.json();
+                if (s.status === 'archived') {
+                  clearInterval(poll);
+                  window.location = '/video/{{ c.id }}?step=trim&msg=' +
+                    encodeURIComponent('Download complete — ready to trim');
+                } else if (s.status === 'failed') {
+                  clearInterval(poll);
+                  window.location = '/video/{{ c.id }}?step=scrape';
+                }
+              } catch (e) { /* keep polling */ }
+            }, 3000);
+          } catch (e) {
+            alert('Approve failed: ' + e);
+            btn.disabled = false;
+            btn.textContent = 'Approve — download & transcribe →';
+          }
+        });
+      })();
+    </script>
   </div>
 </div>
 {% endif %}

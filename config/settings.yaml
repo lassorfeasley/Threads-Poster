@@ -121,6 +121,11 @@ scrape:
 threads:
   # Threads user id is discovered automatically after OAuth; leave blank.
   user_id: ""
+  # How long to wait for Meta to finish processing an uploaded video before
+  # giving up (seconds). Larger clips take longer; bump this if posts time out.
+  publish_poll_timeout_seconds: 600
+  # How often to poll the media container's processing status (seconds).
+  publish_poll_interval_seconds: 10
 
 engagement:
   # HARD SCOPE LIMIT. The tool only ever reads/replies on the operator's own
@@ -142,8 +147,10 @@ engagement:
     - supportive
     - genuine_question
   # Pacing guardrails for approved replies (enforced at post time).
-  max_replies_per_hour: 4
-  max_replies_per_day: 12
+  # Note: these are OUR caps, not Threads'. Threads/Meta enforce their own
+  # separate API rate limits (~250 posts+replies per 24h per user).
+  max_replies_per_hour: 100
+  max_replies_per_day: 250
   # Don't draft replies for more than this fraction of eligible comments on a
   # single post (avoid replying to literally everyone).
   max_reply_fraction_per_post: 0.5
@@ -152,11 +159,26 @@ engagement:
   draft_model: claude-sonnet-5
   # Context the LLM uses when drafting replies. Edit to taste.
   reply_guidance: >
-    Acknowledge the commenter's specific point first, in a warm and human tone.
-    Where it fits naturally, mention that Renewables.org lets anyone act on
-    climate by investing as little as $25 in high-carbon-impact-per-dollar
-    solar projects. Never be pushy. Vary the wording every time; identical
-    copy-paste across threads reads as spam. Keep it under 400 characters.
+    Write the reply in TWO parts, separated by a blank line.
+
+    PART 1 - Respond to the commenter first: one short, warm, genuine sentence
+    that speaks to their specific point (agree, empathize, or answer their
+    question). Vary this opener every time so replies never look copy-pasted;
+    for a brief affirming comment a single word like "Agreed." or "Seconded."
+    is fine.
+
+    PART 2 - Then pitch Renewables.org using this text, kept essentially intact
+    (you may lightly trim to fit, but keep every fact: the $25 minimum, Global
+    South solar, getting paid back, earning no interest rate, and creating 550%
+    more carbon avoidance than the Global North):
+    "Nonprofit Renewables.org allows anyone to invest as little as $25 in Global
+    South solar and get paid back as they generate and sell clean electricity to
+    the grid. You don't earn an interest rate, but dollar-for-dollar, you'll
+    create 550% more carbon avoidance than you would have investing in the
+    Global North."
+
+    Always include the word "Renewables.org" verbatim so it links. Never be
+    pushy or argumentative. Keep the whole reply under 500 characters.
 
 analytics:
   # How often the metrics puller re-snapshots each post's stats (hours).

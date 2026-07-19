@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from .config import ROOT, env
+from .config import ROOT, env, load_settings
 
 log = logging.getLogger("threads")
 
@@ -142,19 +142,25 @@ def _api(method: str, path: str, **params) -> dict:
 # --- Publishing --------------------------------------------------------------
 
 def publish_video(video_url: str, caption: str, reply_to_id: str | None = None,
-                  poll_timeout_seconds: int = 300) -> dict:
+                  poll_timeout_seconds: int | None = None) -> dict:
     """Create a video media container from a public URL, wait for Meta to
     process it, then publish. Returns {media_id, permalink}."""
+    settings = load_settings()
+    if poll_timeout_seconds is None:
+        poll_timeout_seconds = settings.get("threads.publish_poll_timeout_seconds", 600)
+    interval = max(5, settings.get("threads.publish_poll_interval_seconds", 10))
+
     params = {"media_type": "VIDEO", "video_url": video_url, "text": caption}
     if reply_to_id:
         params["reply_to_id"] = reply_to_id
     container = _api("POST", "{user_id}/threads", **params)
     container_id = container["id"]
 
-    # Poll container status until FINISHED (Meta requires ~30s+ for video).
+    # Poll container status until FINISHED (Meta needs ~30s+ for video; larger
+    # clips can take a few minutes).
     deadline = time.time() + poll_timeout_seconds
     while time.time() < deadline:
-        time.sleep(15)
+        time.sleep(interval)
         status = _api("GET", container_id, fields="status,error_message")
         state = status.get("status")
         if state == "FINISHED":
@@ -162,7 +168,11 @@ def publish_video(video_url: str, caption: str, reply_to_id: str | None = None,
         if state == "ERROR":
             raise ThreadsError(f"Media container failed: {status.get('error_message')}")
     else:
-        raise ThreadsError("Timed out waiting for Threads to process the video")
+        raise ThreadsError(
+            f"Timed out waiting for Threads to process the video after "
+            f"{poll_timeout_seconds}s. Try posting again — larger clips can take "
+            f"longer; you can also raise threads.publish_poll_timeout_seconds."
+        )
 
     published = _api("POST", "{user_id}/threads_publish", creation_id=container_id)
     media_id = published["id"]

@@ -162,20 +162,29 @@ async function scoreVisuals() {
   }
 }
 
-async function act(action) {
-  if (busy || idx >= queue.length) return;
-  busy = true;
+// Tracks in-flight server writes per candidate so Undo can wait for the
+// original approve/reject to land before it POSTs the reset.
+const pending = new Map();
+
+function act(action) {
+  if (idx >= queue.length) return;
   const c = queue[idx];
-  try {
-    await fetch(`/video/${c.id}/${action}`, { method: 'POST' });
-    history.push({ id: c.id, action });
-    stats[STAT_KEY[action]]++;
-    idx++;
-    render();
-  } catch (e) {
-    alert(`${action} failed: ${e}`);
-  }
-  busy = false;
+  // Optimistic: advance the UI immediately and never block on the network.
+  history.push({ id: c.id, action });
+  stats[STAT_KEY[action]]++;
+  idx++;
+  render();
+  // Fire the server write in the background. The JSON Accept header is critical:
+  // without it the reject/approve routes 303-redirect to "/", and fetch would
+  // silently download the entire dashboard on every single action.
+  const p = fetch(`/video/${c.id}/${action}`, {
+    method: 'POST', headers: { 'Accept': 'application/json' },
+  }).then((r) => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+  }).catch((e) => {
+    console.error(`${action} ${c.id} failed:`, e);
+  }).finally(() => { pending.delete(c.id); });
+  pending.set(c.id, p);
 }
 
 function advance(kind) {
@@ -194,7 +203,11 @@ async function undo() {
   try {
     // Approve/reject changed server state; skip was local-only.
     if (last.action === 'approve' || last.action === 'reject') {
-      await fetch(`/video/${last.id}/reset`, { method: 'POST' });
+      // Make sure the optimistic write finished before we reset, so we don't
+      // race a late-arriving reject against the reset.
+      const p = pending.get(last.id);
+      if (p) { try { await p; } catch (e) { /* ignore */ } }
+      await fetch(`/video/${last.id}/reset`, { method: 'POST', headers: { 'Accept': 'application/json' } });
     }
     history.pop();
     stats[STAT_KEY[last.action]] = Math.max(0, stats[STAT_KEY[last.action]] - 1);

@@ -158,6 +158,29 @@ def sync_comments(session) -> dict:
     return {"new_comments": new_comments, "drafts": drafted}
 
 
+def redraft_comment(session, comment: ThreadsComment) -> str:
+    """Regenerate one comment's draft reply using the current reply guidance.
+    Lets the operator refresh existing queue drafts after editing the guidance."""
+    settings = load_settings()
+    draft_model = settings.get("engagement.draft_model", "claude-sonnet-5")
+    guidance = settings.get("engagement.reply_guidance", "")
+    recent = [
+        t for (t,) in session.execute(
+            select(ThreadsComment.reply_text_posted)
+            .where(ThreadsComment.reply_status == "posted")
+            .order_by(ThreadsComment.replied_at.desc())
+            .limit(8)
+        ).all()
+    ]
+    post = comment.post
+    comment.draft_reply = draft_reply(
+        draft_model, guidance, post.caption if post else "",
+        comment.text, comment.username, recent,
+    )
+    session.flush()
+    return comment.draft_reply
+
+
 def check_pacing(session) -> None:
     """Raise PacingLimitError if another reply would exceed hourly/daily caps."""
     settings = load_settings()
