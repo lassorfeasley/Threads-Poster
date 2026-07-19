@@ -11,5 +11,5 @@ youtube-transcript-api>=0.6.2
 anthropic>=0.30
 supabase>=2.5
 
-# Optional: only needed if DATABASE_URL points at Supabase/Postgres
-# psycopg2-binary>=2.9
+# Needed when DATABASE_URL points at Supabase/Postgres
+psycopg2-binary>=2.9

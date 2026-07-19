@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from .config import load_settings
 from .llm import write_digest
-from .models import Candidate, MetricSnapshot, ThreadsComment, ThreadsPost, utcnow
+from .models import Candidate, MetricSnapshot, ThreadsComment, ThreadsPost, TraitWeight, utcnow
 from .threads_api import fetch_insights
 
 log = logging.getLogger("analytics")
@@ -115,6 +115,8 @@ def build_post_rows(session) -> list[dict]:
             "station": candidate.channel.call_sign if candidate else None,
             "climate_topic": candidate.climate_topic if candidate else None,
             "matched_keywords": candidate.matched_keywords if candidate else None,
+            "visual_traits": candidate.visual_traits if candidate else None,
+            "visual_score": candidate.visual_score if candidate else None,
             "clip_length_seconds": post.clip_length_seconds,
             "caption_length": post.caption_length,
             "caption_has_question": post.caption_has_question,
@@ -133,9 +135,10 @@ def build_post_rows(session) -> list[dict]:
 def slice_summaries(rows: list[dict]) -> dict:
     """Mean of each metric grouped by each attribute (simple correlational slices)."""
     attributes = [
-        "region", "climate_topic", "caption_tone", "day_of_week",
+        "region", "climate_topic", "visual_traits", "caption_tone", "day_of_week",
         "caption_has_question", "caption_has_cta",
     ]
+    multi_value = {"climate_topic", "visual_traits"}
     summaries: dict = {}
     for attr in attributes:
         groups: dict = defaultdict(list)
@@ -143,8 +146,8 @@ def slice_summaries(rows: list[dict]) -> dict:
             key = row.get(attr)
             if key is None:
                 continue
-            if attr == "climate_topic":
-                # Multi-topic CSV: count the post in every topic it's tagged with.
+            if attr in multi_value:
+                # CSV of tags: count the post under every tag it carries.
                 for t in str(key).split(","):
                     if t.strip():
                         groups[t.strip()].append(row)
@@ -234,6 +237,51 @@ def summary_kpis(rows: list[dict]) -> dict:
     return kpi
 
 
+def learn_trait_weights(session, rows: list[dict] | None = None, metric: str = "views") -> list[dict]:
+    """Self-improvement loop: recompute how each visual trait's posts perform
+    vs. the overall average, and upsert TraitWeight rows. Ranking reads these to
+    drift toward footage traits that correlate with more of ``metric``.
+
+    Returns the per-trait summaries (also handy for the analytics UI). Purely
+    correlational; ``ranking`` gates influence on sample size.
+    """
+    if rows is None:
+        rows = build_post_rows(session)
+    with_metric = [r for r in rows if r.get(metric) is not None]
+    overall = _mean([r[metric] for r in with_metric])
+
+    groups: dict[str, list] = defaultdict(list)
+    for r in with_metric:
+        for t in str(r.get("visual_traits") or "").split(","):
+            t = t.strip()
+            if t:
+                groups[t].append(r[metric])
+
+    existing = {
+        w.trait: w for w in session.execute(
+            select(TraitWeight).where(TraitWeight.metric == metric)
+        ).scalars().all()
+    }
+    results = []
+    for trait, vals in groups.items():
+        avg = _mean(vals)
+        lift = ((avg - overall) / overall) if (overall and avg is not None) else None
+        row = existing.get(trait)
+        if row is None:
+            row = TraitWeight(trait=trait, metric=metric)
+            session.add(row)
+        row.n_posts = len(vals)
+        row.avg_metric = avg
+        row.overall_avg = overall
+        row.lift = lift
+        row.updated_at = utcnow()
+        results.append({"trait": trait, "n_posts": len(vals), "avg_metric": avg,
+                        "overall_avg": overall, "lift": lift, "metric": metric})
+    session.flush()
+    results.sort(key=lambda d: (d["lift"] if d["lift"] is not None else -99), reverse=True)
+    return results
+
+
 def generate_report(session) -> dict:
     """Full analytics payload: per-post rows, attribute slices, and LLM digest."""
     settings = load_settings()
@@ -241,10 +289,12 @@ def generate_report(session) -> dict:
     slices = slice_summaries(rows)
     timeseries = daily_timeseries(rows)
     summary = summary_kpis(rows)
+    trait_weights = learn_trait_weights(session, rows)
     payload = {
         "total_posts": len(rows),
         "posts": rows,
         "attribute_slices": slices,
+        "visual_trait_performance": trait_weights,
         "note": "All slice comparisons are correlational; small samples likely.",
     }
     digest = ""
@@ -259,4 +309,5 @@ def generate_report(session) -> dict:
             log.warning("Digest generation failed: %s", exc)
             digest = f"(digest generation failed: {exc})"
     return {"rows": rows, "slices": slices, "digest": digest,
-            "timeseries": timeseries, "summary": summary}
+            "timeseries": timeseries, "summary": summary,
+            "trait_weights": trait_weights}

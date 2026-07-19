@@ -7,11 +7,42 @@
   </div>
 </div>
 
+{% if countries or scope %}
+<div class="card tight">
+  <form method="get" action="/archive" id="archive-filter">
+    <div class="form-row">
+      <div class="field" style="min-width: 150px;">
+        <label>Country</label>
+        <select name="country" onchange="this.form.requestSubmit()">
+          <option value="">All countries</option>
+          {% for c in countries %}<option value="{{ c }}" {{ "selected" if c == country }}>{{ c }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field" style="min-width: 130px;">
+        <label>Scope</label>
+        <select name="scope" onchange="this.form.requestSubmit()">
+          <option value="">All scopes</option>
+          {% for s in scopes %}<option value="{{ s }}" {{ "selected" if s == scope }}>{{ s }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field btn-group">
+        {% if filtering %}<a class="btn ghost" href="/archive">Clear</a>{% endif %}
+      </div>
+    </div>
+  </form>
+</div>
+{% endif %}
+
 {% if not rows %}
   <div class="empty">
     <span class="icon">▤</span>
-    <strong>Nothing archived yet</strong>
-    Approve videos from the <a href="/">Dashboard</a> to download them.
+    {% if filtering %}
+      <strong>No archived videos match these filters</strong>
+      <a href="/archive">Clear filters</a> to see all archived videos.
+    {% else %}
+      <strong>Nothing archived yet</strong>
+      Approve videos from the <a href="/">Dashboard</a> to download them.
+    {% endif %}
   </div>
 {% endif %}
 

@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Traits ({{ (desirable|length) + (undesirable|length) }})</h1>
+    <div class="sub">The visual vocabulary the vision scorer looks for in each candidate's storyboard.
+      <strong>Desirable</strong> traits raise a clip's visual score; <strong>undesirable</strong> traits lower it.
+      Every scored candidate is tagged with whichever traits its footage shows. Changes apply on the next
+      scoring run (monitor pass or "Score visuals"). Counts below are from {{ scored_total }} scored candidate(s).</div>
+  </div>
+</div>
+
+<div class="card tight">
+  <form method="post" action="/traits/add" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+    <input type="text" name="name" required autocomplete="off"
+           placeholder="new trait, e.g. helicopter_rescue" style="max-width: 260px;">
+    <select name="kind">
+      <option value="desirable">desirable (score up)</option>
+      <option value="undesirable">undesirable (score down)</option>
+    </select>
+    <input type="text" name="description" autocomplete="off"
+           placeholder="optional hint for the model" style="flex: 1; min-width: 200px;">
+    <button class="primary">Add trait</button>
+  </form>
+</div>
+
+{% macro trait_card(t) %}
+<div class="card tight item" style="{{ 'opacity: 0.55;' if not t.enabled }}">
+  <div class="row center">
+    <div class="grow">
+      <div style="font-weight: 650;">{{ t.name }}
+        {% if not t.enabled %}<span class="badge">disabled</span>{% endif %}
+        {% if counts.get(t.name) %}<span class="badge info" title="candidates tagged">×{{ counts[t.name] }}</span>{% endif %}
+        {% set w = weights.get(t.name) %}
+        {% if w and w.n_posts >= trait_min_posts and w.lift is not none %}
+          <span class="badge {{ 'score-hi' if w.lift >= 0 else 'score-lo' }}"
+                title="Learned from {{ w.n_posts }} posts — nudges ranking">
+            {{ "%+.0f%%"|format(w.lift * 100) }} views</span>
+        {% elif w and w.n_posts %}
+          <span class="meta" title="Not enough posts yet to affect ranking">({{ w.n_posts }}/{{ trait_min_posts }} posts)</span>
+        {% endif %}
+      </div>
+      {% if t.description %}<div class="meta">{{ t.description }}</div>{% endif %}
+    </div>
+    <div class="btn-group">
+      <form class="inline" method="post" action="/traits/{{ t.id }}/toggle">
+        <button class="sm" title="{{ 'Disable' if t.enabled else 'Enable' }}">{{ "Disable" if t.enabled else "Enable" }}</button>
+      </form>
+      <form class="inline" method="post" action="/traits/{{ t.id }}/delete"
+            onsubmit="return confirm('Delete trait {{ t.name }}? Existing candidate tags are left as-is.')">
+        <button class="reject sm" title="Delete">✕</button>
+      </form>
+    </div>
+  </div>
+  <details style="margin-top: 8px;">
+    <summary class="meta">Edit</summary>
+    <form method="post" action="/traits/{{ t.id }}/update"
+          style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
+      <label class="meta">Kind
+        <select name="kind">
+          <option value="desirable" {{ "selected" if t.kind == "desirable" }}>desirable</option>
+          <option value="undesirable" {{ "selected" if t.kind == "undesirable" }}>undesirable</option>
+        </select>
+      </label>
+      <input type="text" name="description" value="{{ t.description }}" placeholder="description"
+             style="flex: 1; min-width: 220px;">
+      <button class="primary sm">Save</button>
+    </form>
+  </details>
+</div>
+{% endmacro %}
+
+<h2>Desirable <span class="meta">({{ desirable|length }}) — raise visual score</span></h2>
+{% if desirable %}
+  {% for t in desirable %}{{ trait_card(t) }}{% endfor %}
+{% else %}
+  <div class="meta" style="margin-bottom: 16px;">None yet — add one above.</div>
+{% endif %}
+
+<h2 style="margin-top: 22px;">Undesirable <span class="meta">({{ undesirable|length }}) — lower visual score</span></h2>
+{% if undesirable %}
+  {% for t in undesirable %}{{ trait_card(t) }}{% endfor %}
+{% else %}
+  <div class="meta">None yet — add one above (e.g. talking_head_or_anchor_at_desk).</div>
+{% endif %}
+
+<p class="meta" style="margin-top: 18px;">×N = candidates tagged with that trait so far. The <em>views</em> badge shows
+how posts with that trait have performed vs. your overall average once there are at least {{ trait_min_posts }} posts —
+that's the self-improving signal that nudges ranking. Seed lists live under <code>vision.*</code> in
+<code>config/settings.yaml</code>, but edits here take precedence.</p>
+{% endblock %}

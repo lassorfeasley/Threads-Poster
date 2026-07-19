@@ -12,18 +12,26 @@
     <div class="card-title">Add a channel</div>
     <form method="post" action="/channels/add" style="margin-top: 10px;">
       <div class="form-row" style="margin-bottom: 12px;">
-        <div class="field grow" style="min-width: 110px;"><label>Call sign</label>
-          <input type="text" name="call_sign" required placeholder="KXYZ"></div>
-        <div class="field grow" style="min-width: 90px;"><label>Network</label>
+        <div class="field grow" style="min-width: 100px;"><label>Call sign</label>
+          <input type="text" name="call_sign" required placeholder="KXYZ / BBC"></div>
+        <div class="field grow" style="min-width: 80px;"><label>Network</label>
           <input type="text" name="network" placeholder="ABC"></div>
-        <div class="field grow" style="min-width: 120px;"><label>Market</label>
+        <div class="field grow" style="min-width: 110px;"><label>Market</label>
           <input type="text" name="market" placeholder="Springfield"></div>
-        <div class="field grow" style="min-width: 100px;"><label>Region</label>
+        <div class="field grow" style="min-width: 90px;"><label>Region</label>
           <input type="text" name="region" placeholder="Midwest"></div>
       </div>
-      <div class="field">
-        <label>YouTube channel URL</label>
-        <input type="text" name="url" required placeholder="https://www.youtube.com/@example">
+      <div class="form-row" style="margin-bottom: 12px;">
+        <div class="field grow" style="min-width: 120px;"><label>Country</label>
+          <input type="text" name="country" placeholder="United States"></div>
+        <div class="field grow" style="min-width: 110px;"><label>Scope</label>
+          <select name="scope">
+            <option value="local">Local</option>
+            <option value="national">National</option>
+            <option value="international">International</option>
+          </select></div>
+        <div class="field grow" style="flex: 2; min-width: 180px;"><label>YouTube channel URL</label>
+          <input type="text" name="url" required placeholder="https://www.youtube.com/@example"></div>
       </div>
       <button class="primary">Add channel</button>
     </form>
@@ -35,27 +43,31 @@
     <div class="card-title">Bulk import (CSV)</div>
     <form method="post" action="/channels/import-csv" style="margin-top: 10px;">
       <div class="field">
-        <label>One channel per line: <code>call_sign, network, market, region, url</code></label>
+        <label>One per line: <code>call_sign, network, market, region, country, scope, url</code></label>
         <textarea name="csv_text" required rows="5" style="font-family: var(--mono); font-size: 12px;"
-placeholder="KXYZ, ABC, Springfield, Midwest, https://www.youtube.com/@kxyznews
-WABC, ABC, New York, Northeast, https://www.youtube.com/@abc7NY"></textarea>
+placeholder="KXYZ, ABC, Springfield, Midwest, United States, local, https://www.youtube.com/@kxyznews
+BBC News, BBC, , , United Kingdom, national, https://www.youtube.com/@BBCNews
+Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglish"></textarea>
       </div>
       <button class="primary">Import channels</button>
     </form>
-    <p class="hint">Only the call sign and URL are required; column order is flexible as long as the
-      URL is a youtube.com link. Duplicates are skipped automatically.</p>
+    <p class="hint">Only the call sign and URL are required; the YouTube URL is auto-detected so column
+      order is flexible. <code>scope</code> is one of local / national / international (defaults to local).
+      Duplicates are skipped automatically.</p>
   </div>
 </div>
 
 <div class="table-wrap">
 <table>
-  <tr><th>Call sign</th><th>Network</th><th>Market</th><th>Region</th><th>Status</th><th>Last checked</th><th></th></tr>
+  <tr><th>Call sign</th><th>Network</th><th>Market</th><th>Region</th><th>Country</th><th>Scope</th><th>Status</th><th>Last checked</th><th></th></tr>
   {% for ch in channels %}
   <tr style="{{ 'opacity:.45' if not ch.enabled }}">
     <td><a href="{{ ch.url }}" target="_blank">{{ ch.call_sign }}</a></td>
     <td>{{ ch.network }}</td>
     <td>{{ ch.market }}</td>
     <td>{{ ch.region }}</td>
+    <td>{{ ch.country or "—" }}</td>
+    <td>{% if ch.scope and ch.scope != "local" %}<span class="badge">{{ ch.scope }}</span>{% else %}{{ ch.scope or "local" }}{% endif %}</td>
     <td>
       {% if ch.last_error %}<span class="badge hostile" title="{{ ch.last_error }}">error</span>
       {% elif not ch.enabled %}<span class="badge">disabled</span>

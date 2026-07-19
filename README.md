@@ -73,6 +73,7 @@ Optional extras:
 python run.py dashboard        # web UI at http://127.0.0.1:8321
 python run.py monitor          # one discovery pass (or use the dashboard button)
 python run.py monitor --loop   # keep polling at the configured interval
+python run.py score-visuals    # backfill vision scores for unscored candidates
 python run.py comments         # pull + classify comments on your own posts
 python run.py metrics          # snapshot Threads metrics (time series)
 python run.py digest           # print the analytics digest
@@ -87,13 +88,21 @@ Typical always-on setup on a Mac mini / Pi: run `python run.py monitor --loop` a
 ## Workflow
 
 The dashboard (sidebar: Dashboard / Archive / Posts / Engagement / Analytics /
-Channels) guides each video through four breadcrumbed steps:
+Channels / Keywords / Traits) guides each video through four breadcrumbed steps:
 **Review → Scrape & Transcribe → Trim → Post.**
 
 1. **Monitor** polls each channel's uploads playlist via the YouTube Data API,
    keyword-filters title+description, LLM-scores each hit for genuine climate
    relevance (cuts "political climate" false positives), and stores candidates.
-   The Dashboard lists new matches plus anything mid-workflow.
+   Candidates that clear the relevance threshold are also **vision-scored**:
+   their YouTube storyboard stills (a metadata-only fetch — nothing downloaded)
+   go to a multimodal LLM that rates how engaging the footage looks (0–1) and
+   tags it with **desirable** traits that raise appeal (fire, flood, crowds,
+   action, rescue…) and **undesirable** traits that lower it (talking-head,
+   slideshow, charts…). The trait vocabulary is an editable database — see the
+   **Traits** page below. The Dashboard lists new matches plus anything
+   mid-workflow, ranked by a blend of relevance and visual appeal, with detected
+   traits shown as badges (undesirable ones flagged in red).
 2. **Review** (step 1): embedded player, matched keywords, score + rationale.
    Approve or Reject. Approve is the hard gate — nothing downloads before it.
 3. **Scrape & Transcribe** (step 2): on approval the tool fetches the transcript
@@ -117,8 +126,24 @@ Channels) guides each video through four breadcrumbed steps:
    edit and approve each one. Hourly/daily caps and a per-post reply-fraction cap
    are enforced in code. Filtered comments are visible in a low-priority view.
 7. **Analytics**: metric snapshots over time, per-post attribute tagging (topic,
-   region, clip length, caption traits, day/time), slice tables, and an LLM
-   digest with clearly-labeled correlational hypotheses and small-sample caveats.
+   region, clip length, caption traits, day/time, **footage traits**), slice
+   tables, and an LLM digest with clearly-labeled correlational hypotheses and
+   small-sample caveats. This is also the **self-improvement loop**: it measures
+   how each visual trait's posts perform vs. your overall average and stores
+   per-trait weights, which then nudge how future candidates are ranked — so the
+   tool drifts toward whatever footage actually earns views on *your* account.
+   Influence is capped and gated on a minimum sample size, so a few lucky posts
+   can't dominate (all correlational, never presented as proven cause).
+
+### Cost control
+
+Every Anthropic call's token usage is logged to `data/llm_spend.json` and
+estimated against `llm.pricing`. Vision scoring is gated three ways so spend
+stays bounded: it only runs on candidates above `vision.min_relevance`, it stops
+for the day once `llm.daily_budget_usd` (default $3) is reached, and it's capped
+at `vision.max_per_run` candidates per monitor pass. Today's spend and the
+budget are shown on the Analytics page and after each monitor run. Relevance
+scoring, caption/reply drafts, and the digest are cheap and always run.
 
 ## Config
 
@@ -129,10 +154,18 @@ Everything lives in `config/` — no code changes needed:
   automatically. You can also add/remove/disable channels on the dashboard's
   **Channels** page.
 - `config/keywords.yaml` — climate keyword list for the first-pass filter.
+- The **trait database** (desirable/undesirable visual traits) is seeded from
+  `vision.desirable_traits` / `vision.undesirable_traits` in `settings.yaml` on
+  first run, then managed on the dashboard's **Traits** page (add/edit/disable,
+  switch a trait's polarity, see how often each is detected and how its posts
+  perform). Page edits take precedence over the seed.
 - `config/settings.yaml` — poll interval, score threshold, storage paths,
   retention (defaults to keep-everything), politeness delays,
   engagement categories + reply-eligibility + pacing caps + reply guidance,
-  analytics cadence.
+  analytics cadence, **vision scoring** (`vision.*`: enable, model, traits,
+  per-run cap), **ranking** (`ranking.*`: relevance/visual blend weights and how
+  strongly learned trait weights nudge results), and the **LLM budget +
+  pricing** (`llm.daily_budget_usd`, `llm.pricing`).
 
 The `engagement.allow_other_users_posts` flag defaults to `false` and is
 **high-risk / not recommended**; this build intentionally contains no code path

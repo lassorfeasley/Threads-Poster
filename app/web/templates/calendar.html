@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Calendar</h1>
+    <div class="sub">Scheduled and published posts, shown in your local time.</div>
+  </div>
+</div>
+
+<div class="cal-toolbar">
+  <a class="btn" href="/calendar?year={{ prev_y }}&month={{ prev_m }}">← Prev</a>
+  <div class="cal-title">{{ month_name }} {{ year }}</div>
+  <a class="btn" href="/calendar?year={{ next_y }}&month={{ next_m }}">Next →</a>
+  <a class="btn" href="/calendar" style="margin-left: auto;">Today</a>
+</div>
+
+<div class="cal-legend">
+  <span><i class="dot sched"></i> Scheduled</span>
+  <span><i class="dot pub"></i> Published</span>
+  <span><i class="dot fail"></i> Failed</span>
+  {% if drafts_count %}<span class="meta" style="margin-left:auto;">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }} with no date —
+    <a href="/posts">schedule from Posts</a></span>{% endif %}
+</div>
+
+<div class="cal-grid cal-head">
+  {% for d in dow %}<div class="cal-dow">{{ d }}</div>{% endfor %}
+</div>
+<div class="cal-grid">
+  {% for week in weeks %}
+    {% for day in week %}
+      {% if day == 0 %}
+        <div class="cal-cell out"></div>
+      {% else %}
+      <div class="cal-cell {{ 'today' if day == today }}">
+        <div class="cal-daynum">{{ day }}</div>
+        {% for e in events.get(day, []) %}
+          {% set cls = 'sched' if e.status in ('scheduled', 'publishing') else ('pub' if e.status == 'published' else ('fail' if e.status == 'failed' else 'draft')) %}
+          {% if e.video_id %}
+            <a class="cal-event {{ cls }}" href="/video/{{ e.video_id }}?step=post" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
+              <b>{{ e.time }}</b> {{ e.caption[:34] }}</a>
+          {% elif e.permalink %}
+            <a class="cal-event {{ cls }}" href="{{ e.permalink }}" target="_blank" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
+              <b>{{ e.time }}</b> {{ e.caption[:34] }}</a>
+          {% else %}
+            <span class="cal-event {{ cls }}" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
+              <b>{{ e.time }}</b> {{ e.caption[:34] }}</span>
+          {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+</div>
+{% endblock %}

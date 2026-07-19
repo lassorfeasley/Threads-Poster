@@ -7,8 +7,10 @@
 # Fields:
 #   call_sign: station call sign(s)
 #   network:   network affiliation
-#   market:    Nielsen market name
+#   market:    Nielsen market name (leave blank for national/international)
 #   region:    coarse region tag used by analytics (editable)
+#   country:   country name for filtering (defaults to "United States")
+#   scope:     local | national | international (defaults to local)
 #   url:       YouTube channel URL (handle, /channel/, /c/, or /user/ form)
 #   channel_id: canonical UC... id. Leave blank; the app resolves and caches it.
 #   enabled:   set false to pause a channel without deleting it.
@@ -311,3 +313,27 @@ channels:
   - {call_sign: WMC, network: NBC, market: "Memphis", region: Southeast, url: "https://www.youtube.com/@ActionNews5"}
   - {call_sign: WREG, network: CBS, market: "Memphis", region: Southeast, url: "https://www.youtube.com/@Wreg3"}
   - {call_sign: WHBQ, network: FOX, market: "Memphis", region: Southeast, url: "https://www.youtube.com/@WHBQTVFOX13Memphis"}
+
+  # --- US national networks + weather + wire (scope: national) ---
+  - {call_sign: "ABC News", network: ABC, country: "United States", scope: national, url: "https://www.youtube.com/@ABCNews"}
+  - {call_sign: "CBS News", network: CBS, country: "United States", scope: national, url: "https://www.youtube.com/@CBSNews"}
+  - {call_sign: "NBC News", network: NBC, country: "United States", scope: national, url: "https://www.youtube.com/@NBCNews"}
+  - {call_sign: "CNN", network: CNN, country: "United States", scope: national, url: "https://www.youtube.com/@CNN"}
+  - {call_sign: "Fox News", network: FOX, country: "United States", scope: national, url: "https://www.youtube.com/@FoxNews"}
+  - {call_sign: "MSNBC", network: MSNBC, country: "United States", scope: national, url: "https://www.youtube.com/@msnbc"}
+  - {call_sign: "PBS NewsHour", network: PBS, country: "United States", scope: national, url: "https://www.youtube.com/@PBSNewsHour"}
+  - {call_sign: "The Weather Channel", network: Weather, country: "United States", scope: national, url: "https://www.youtube.com/@weatherchannel"}
+  - {call_sign: "AccuWeather", network: Weather, country: "United States", scope: national, url: "https://www.youtube.com/@accuweather"}
+  - {call_sign: "Associated Press", network: Wire, country: "United States", scope: national, url: "https://www.youtube.com/@AssociatedPress"}
+
+  # --- International (scope: international) ---
+  - {call_sign: "BBC News", network: BBC, country: "United Kingdom", scope: international, url: "https://www.youtube.com/@BBCNews"}
+  - {call_sign: "Sky News", network: Sky, country: "United Kingdom", scope: international, url: "https://www.youtube.com/@SkyNews"}
+  - {call_sign: "The Guardian", network: Guardian, country: "United Kingdom", scope: international, url: "https://www.youtube.com/@theguardian"}
+  - {call_sign: "Reuters", network: Wire, country: "United Kingdom", scope: international, url: "https://www.youtube.com/@Reuters"}
+  - {call_sign: "DW News", network: "Deutsche Welle", country: "Germany", scope: international, url: "https://www.youtube.com/@dwnews"}
+  - {call_sign: "France 24 English", network: "France 24", country: "France", scope: international, url: "https://www.youtube.com/@France24_en"}
+  - {call_sign: "Al Jazeera English", network: "Al Jazeera", country: "Qatar", scope: international, url: "https://www.youtube.com/@aljazeeraenglish"}
+  - {call_sign: "CNA", network: "Channel NewsAsia", country: "Singapore", scope: international, url: "https://www.youtube.com/@channelnewsasia"}
+  - {call_sign: "CBC News", network: CBC, country: "Canada", scope: international, url: "https://www.youtube.com/@CBCNews"}
+  - {call_sign: "ABC News Australia", network: "ABC Australia", country: "Australia", scope: international, url: "https://www.youtube.com/@abcnewsaustralia"}

@@ -5,6 +5,10 @@
     <h1>Analytics</h1>
     <div class="sub">Post performance pulled from Threads, smoothed with a rolling 7-day average,
       plus an LLM digest of what's working.</div>
+    <div class="meta" style="margin-top: 6px;">LLM spend today:
+      <strong>${{ "%.2f"|format(spend_today) }}</strong> of ${{ "%.2f"|format(spend_budget) }} budget
+      {%- if spend_recent %} · last 7 days: {% for d in spend_recent %}{{ "%.2f"|format(d.spend_usd) }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+    </div>
   </div>
   <div class="actions">
     <form class="inline" method="post" action="/analytics/snapshot">
@@ -57,13 +61,6 @@
     day's average. Grouped by the day each post was published.</div>
 </div>
 
-{# ---- Posting cadence ---- #}
-<div class="chart-card">
-  <div class="chart-head"><div class="card-title">Posting cadence</div></div>
-  <div class="chart-wrap"><canvas id="cadenceChart"></canvas></div>
-  <div class="meta" style="margin-top: 6px;">Posts published per day (bars) with a 7-day rolling average (line).</div>
-</div>
-
 {% if digest %}
 <h2>Digest</h2>
 <pre class="digest">{{ digest }}</pre>
@@ -89,6 +86,32 @@
   {% endif %}
 {% endfor %}
 </div>
+
+{# ---- Learned footage-trait weights (self-improving ranking) ---- #}
+<h2>Footage traits <span class="meta">(what the ranking is learning from views)</span></h2>
+<div class="meta" style="margin: -6px 0 12px;">Mean views of posts whose footage shows each trait, vs. the
+  overall average. Traits with at least {{ trait_min_posts }} posts (bold) actively nudge how new candidates are
+  ranked; the rest are shown for context only. Correlational — treat as a hint, not proof.</div>
+{% if trait_weights %}
+<div class="card">
+  <table style="margin-top: 4px;">
+    <tr><th>Trait</th><th>Posts</th><th>Avg views</th><th>Overall avg</th><th>Lift</th><th>Ranking effect</th></tr>
+    {% for w in trait_weights %}
+    <tr>
+      <td>{% if w.n_posts >= trait_min_posts %}<strong>{{ w.trait }}</strong>{% else %}{{ w.trait }}{% endif %}</td>
+      <td>{{ w.n_posts }}</td>
+      <td>{{ w.avg_metric if w.avg_metric is not none else "—" }}</td>
+      <td>{{ w.overall_avg if w.overall_avg is not none else "—" }}</td>
+      <td>{% if w.lift is not none %}{{ "%+.0f%%"|format(w.lift * 100) }}{% else %}—{% endif %}</td>
+      <td>{% if w.n_posts >= trait_min_posts %}<span class="badge {{ 'score-hi' if (w.lift or 0) >= 0 else 'score-lo' }}">active</span>{% else %}<span class="meta">needs {{ trait_min_posts - w.n_posts }} more</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% else %}
+<div class="meta" style="margin-bottom: 16px;">No vision-scored posts yet — trait weights appear once you've
+  published clips whose candidates were vision-scored.</div>
+{% endif %}
 
 {# ---- Per-post table (collapsed) ---- #}
 <details style="margin-top: 20px;">
@@ -174,27 +197,6 @@ if (window.Chart && TS.days && TS.days.length) {
     engChart.data.datasets[0].label = `7-day avg ${METRIC_LABELS[m].toLowerCase()} / post`;
     engChart.data.datasets[1].label = `Daily avg ${METRIC_LABELS[m].toLowerCase()} / post`;
     engChart.update();
-  });
-
-  // Posting cadence: bars (posts/day) + rolling line.
-  new Chart(document.getElementById('cadenceChart'), {
-    type: 'bar',
-    data: {
-      labels: TS.days,
-      datasets: [
-        { type: 'bar', label: 'Posts / day', data: TS.posts_per_day,
-          backgroundColor: cssVar('--accent-soft', 'rgba(62,207,142,0.2)'),
-          borderColor: accent, borderWidth: 1 },
-        { type: 'line', label: '7-day avg', data: TS.rolling_posts_7d,
-          borderColor: blue, borderWidth: 2.5, tension: 0.3, pointRadius: 0 },
-      ],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { labels: { color: text, usePointStyle: true } } },
-      scales: commonScales,
-    },
   });
 }
 </script>

@@ -32,6 +32,10 @@
       <div id="badges" class="badges" style="margin: 10px 0;"></div>
       <div class="meta" id="keywords"></div>
       <div class="meta" id="rationale" style="margin-top: 6px;"></div>
+      <div class="meta" id="visual-line" style="margin-top: 6px;"></div>
+      <div style="margin-top: 8px;">
+        <button class="btn ghost sm" id="score-visuals-btn" onclick="scoreVisuals()">👁 Score visuals</button>
+      </div>
 
       <div class="btn-group" style="margin-top: 24px;">
         <button class="approve lg" onclick="act('approve')">Approve&nbsp;<kbd>Z</kbd></button>
@@ -56,6 +60,7 @@
 
 <script>
 const queue = {{ queue | tojson }};
+const UNDESIRABLE = new Set({{ undesirable_traits | tojson }});
 let idx = 0;
 const stats = { approved: 0, rejected: 0, skipped: 0 };
 const history = [];  // stack of {id, action} for undo
@@ -99,13 +104,11 @@ function render() {
   document.getElementById('title').textContent = c.title;
   document.getElementById('sub').textContent =
     `${c.channel} · ${c.published}${c.duration ? ' · ' + c.duration : ''}`;
-  const badges = [];
-  if (c.score !== null) badges.push(`<span class="badge score-hi">score ${c.score.toFixed(2)}</span>`);
-  c.topics.forEach(t => badges.push(`<span class="badge">${t}</span>`));
-  document.getElementById('badges').innerHTML = badges.join(' ');
+  renderBadges(c);
   document.getElementById('keywords').innerHTML =
     c.keywords ? `Keywords: <span class="kw">${c.keywords}</span>` : '';
   document.getElementById('rationale').textContent = c.rationale || '';
+  renderVisual(c);
   document.getElementById('progress').textContent = `Reviewing ${idx + 1} of ${queue.length}`;
   setProgress(idx, queue.length);
   document.getElementById('counts').textContent =
@@ -113,6 +116,50 @@ function render() {
   updateUndoButtons();
   loadFilmstrip(c);
   prefetchNext();
+}
+
+function renderBadges(c) {
+  const badges = [];
+  if (c.score !== null && c.score !== undefined)
+    badges.push(`<span class="badge score-hi" title="Climate relevance">${c.score.toFixed(2)}</span>`);
+  if (c.visual_score !== null && c.visual_score !== undefined)
+    badges.push(`<span class="badge ${c.visual_score >= 0.5 ? 'score-hi' : 'score-lo'}" title="Visual appeal">👁 ${c.visual_score.toFixed(2)}</span>`);
+  (c.visual_traits || []).forEach(t => badges.push(`<span class="badge ${UNDESIRABLE.has(t) ? 'hostile' : 'info'}">${t}</span>`));
+  c.topics.forEach(t => badges.push(`<span class="badge">${t}</span>`));
+  document.getElementById('badges').innerHTML = badges.join(' ');
+}
+
+function renderVisual(c) {
+  const line = document.getElementById('visual-line');
+  const btn = document.getElementById('score-visuals-btn');
+  if (c.visual_score !== null && c.visual_score !== undefined) {
+    line.textContent = c.visual_rationale ? `Visuals: ${c.visual_rationale}` : '';
+    btn.textContent = '👁 Re-score visuals';
+  } else {
+    line.textContent = '';
+    btn.textContent = '👁 Score visuals';
+  }
+  btn.disabled = false;
+}
+
+async function scoreVisuals() {
+  if (idx >= queue.length) return;
+  const c = queue[idx];
+  const btn = document.getElementById('score-visuals-btn');
+  btn.disabled = true;
+  btn.textContent = 'Scoring…';
+  try {
+    const r = await fetch(`/video/${c.id}/score-visuals`, { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || 'Scoring failed'); btn.disabled = false; return; }
+    c.visual_score = data.visual_score;
+    c.visual_traits = data.traits || [];
+    c.visual_rationale = data.why || '';
+    if (queue[idx] && queue[idx].id === c.id) { renderBadges(c); renderVisual(c); }
+  } catch (e) {
+    alert('Scoring failed: ' + e);
+    btn.disabled = false;
+  }
 }
 
 async function act(action) {

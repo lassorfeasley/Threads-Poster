@@ -32,6 +32,9 @@ class Channel(Base):
     network: Mapped[str] = mapped_column(String(40), default="")
     market: Mapped[str] = mapped_column(String(80), default="")
     region: Mapped[str] = mapped_column(String(80), default="")
+    country: Mapped[str] = mapped_column(String(60), default="")
+    # local (single-market station) | national | international
+    scope: Mapped[str] = mapped_column(String(20), default="local")
     url: Mapped[str] = mapped_column(String(300))
     channel_id: Mapped[str | None] = mapped_column(String(40), unique=True, nullable=True)
     uploads_playlist_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
@@ -87,6 +90,13 @@ class Candidate(Base):
     suggested_highlight: Mapped[str] = mapped_column(Text, default="")  # e.g. "00:42-01:10: ..."
     draft_caption: Mapped[str] = mapped_column(Text, default="")
 
+    # Vision scoring: how engaging the FOOTAGE looks, judged from YouTube's
+    # storyboard stills (0-1) plus which popularity traits were detected.
+    visual_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    visual_traits: Mapped[str] = mapped_column(Text, default="")  # comma-separated
+    visual_rationale: Mapped[str] = mapped_column(Text, default="")
+    visual_scored_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # Trim step: operator-chosen segments (JSON [{start, end}, ...]) and the
     # exported supercut file produced from them.
     trim_segments: Mapped[str] = mapped_column(Text, default="")
@@ -108,9 +118,12 @@ class ThreadsPost(Base):
     caption: Mapped[str] = mapped_column(Text, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase Storage object key
     clip_local_path: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | published | failed
+    # draft | scheduled | publishing | published | failed
+    status: Mapped[str] = mapped_column(String(20), default="draft")
     source: Mapped[str] = mapped_column(String(20), default="app")  # app | threads (imported history)
     error: Mapped[str] = mapped_column(Text, default="")
+    # When set (and status == scheduled), the scheduler publishes at/after this time (UTC).
+    scheduled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Structured attributes for analytics slicing.
@@ -156,6 +169,45 @@ class ThreadsComment(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     post: Mapped[ThreadsPost] = relationship(back_populates="comments")
+
+
+class Trait(Base):
+    """The database of visual traits the vision scorer looks for. ``kind`` marks
+    whether a trait's presence should raise (desirable) or lower (undesirable)
+    a clip's visual appeal. Seeded from config, then editable on the Traits page.
+    """
+
+    __tablename__ = "traits"
+    __table_args__ = (UniqueConstraint("name", name="uq_trait_name"),)
+
+    KIND_DESIRABLE = "desirable"
+    KIND_UNDESIRABLE = "undesirable"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(60))
+    kind: Mapped[str] = mapped_column(String(20), default=KIND_DESIRABLE)
+    description: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TraitWeight(Base):
+    """Learned performance of a visual trait, derived from the operator's own
+    published posts. Recomputed from analytics; used to nudge candidate ranking
+    toward traits that correlate with more views. Correlational only."""
+
+    __tablename__ = "trait_weights"
+    __table_args__ = (UniqueConstraint("trait", "metric", name="uq_trait_metric"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trait: Mapped[str] = mapped_column(String(60))
+    metric: Mapped[str] = mapped_column(String(20), default="views")
+    n_posts: Mapped[int] = mapped_column(Integer, default=0)
+    avg_metric: Mapped[float | None] = mapped_column(Float, nullable=True)
+    overall_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Fractional lift vs. the overall average: (avg_metric - overall) / overall.
+    lift: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class MetricSnapshot(Base):

@@ -7,7 +7,7 @@
   </div>
   <div class="actions">
     <a class="btn approve"
-       href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for t in topic %}&topic={{ t }}{% endfor %}&region={{ region }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+       href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for t in topic %}&topic={{ t }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
       ▶&nbsp; Triage mode</a>
   </div>
 </div>
@@ -48,6 +48,20 @@
           {% for ch in filter_channels %}
           <option value="{{ ch.id }}" {{ "selected" if ch.id == channel_id }}>{{ ch.call_sign }} — {{ ch.market }}</option>
           {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="min-width: 130px;">
+        <label>Country</label>
+        <select name="country" onchange="this.form.requestSubmit()">
+          <option value="">All countries</option>
+          {% for c in countries %}<option value="{{ c }}" {{ "selected" if c == country }}>{{ c }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field" style="min-width: 120px;">
+        <label>Scope</label>
+        <select name="scope" onchange="this.form.requestSubmit()">
+          <option value="">All scopes</option>
+          {% for s in scopes %}<option value="{{ s }}" {{ "selected" if s == scope }}>{{ s }}</option>{% endfor %}
         </select>
       </div>
       <div class="field" style="min-width: 130px;">
@@ -113,33 +127,50 @@
 {% if in_progress %}
 <h2>In progress</h2>
 {% for c, state in in_progress %}
-<div class="card tight item">
-  <div class="row center">
-    <div class="grow">
-      <a class="item-title" href="/video/{{ c.id }}">{{ c.title }}</a>
-      <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}</div>
-    </div>
-    <div class="btn-group">
+<div class="vrow" tabindex="0" role="link"
+     onclick="location.href='/video/{{ c.id }}'"
+     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
+     {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
+  <div class="vtop">
+    <a class="item-title" href="/video/{{ c.id }}" onclick="event.stopPropagation()">{{ c.title }}</a>
+    <span class="vmarket">{{ c.channel.call_sign }} · {{ c.channel.market }}
+      {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d %H:%M") }}{% endif %}
+      {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
+    <span class="vx" style="display: inline-flex; gap: 6px; align-items: center;">
       {% if state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
       {% elif state.current == "trim" %}<span class="badge score-lo">ready to trim</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
-      <a class="btn sm" href="/video/{{ c.id }}">Continue →</a>
-    </div>
+      <a class="btn sm" href="/video/{{ c.id }}" onclick="event.stopPropagation()">Continue →</a>
+    </span>
+  </div>
+  <div class="filmstrip mini" data-cid="{{ c.id }}"></div>
+  <div class="vtags">
+    {% if c.relevance_score is not none %}
+      <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
+            title="Climate relevance">{{ "%.2f"|format(c.relevance_score) }}</span>
+    {% endif %}
+    {% if c.visual_score is not none %}
+      <span class="badge {{ 'score-hi' if c.visual_score >= 0.5 else 'score-lo' }}"
+            title="{{ c.visual_rationale or 'Visual appeal' }}">👁 {{ "%.2f"|format(c.visual_score) }}</span>
+    {% endif %}
+    {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
+    {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
   </div>
 </div>
 {% endfor %}
 {% endif %}
 
 <h2>{{ "Results" if filtering else "New matches" }}
-  ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})</h2>
+  ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})
+  <span class="meta" style="font-weight: 400;">· ranked by relevance + visual appeal</span></h2>
 {% if date_defaulted %}
   <div class="meta" style="margin: -6px 0 12px;">Showing today + yesterday by publish date.
     <a href="/?status=new{{ '&show_hidden=1' if show_hidden else '' }}">Show all dates</a></div>
 {% endif %}
 {% if total_matches > candidates|length %}
-  <div class="meta" style="margin: -6px 0 12px;">Showing the top {{ row_cap }} by score and recency.
-    Narrow with filters above to see the rest.</div>
+  <div class="meta" style="margin: -6px 0 12px;">Showing the top {{ row_cap }} by combined ranking
+    (relevance + visual appeal). Narrow with filters above to see the rest.</div>
 {% endif %}
 {% if not candidates %}
   <div class="empty">
@@ -155,31 +186,33 @@
 {% endif %}
 
 {% for c in candidates %}
-<div class="vrow">
-  <div class="vinfo">
-    <a class="item-title" href="/video/{{ c.id }}"
-       {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>{{ c.title }}</a>
-    <div class="meta vmeta">
-      {% if c.relevance_score is not none %}
-        <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}">
-          {{ "%.2f"|format(c.relevance_score) }}</span>
-      {% endif %}
-      {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
-      {% if c.status != "new" %}<span class="badge">{{ c.status }}</span>{% endif %}
-      <span>{{ c.channel.call_sign }} · {{ c.channel.market }} ·
-        {{ c.published_at.strftime("%b %-d %H:%M") if c.published_at else "?" }}
-        {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
-    </div>
-  </div>
-  <a class="filmstrip mini" data-cid="{{ c.id }}" href="/video/{{ c.id }}" title="Open video"></a>
-  <div class="btn-group vactions">
+<div class="vrow" tabindex="0" role="link"
+     onclick="location.href='/video/{{ c.id }}'"
+     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
+     {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
+  <div class="vtop">
+    <a class="item-title" href="/video/{{ c.id }}" onclick="event.stopPropagation()">{{ c.title }}</a>
+    <span class="vmarket">{{ c.channel.call_sign }} · {{ c.channel.market }} ·
+      {{ c.published_at.strftime("%b %-d %H:%M") if c.published_at else "?" }}
+      {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
     {% if c.status == "new" %}
-      <a class="btn primary sm" href="/video/{{ c.id }}">Review →</a>
-      <form class="inline" method="post" action="/video/{{ c.id }}/reject">
-        <button class="reject sm" title="Reject">✕</button></form>
-    {% else %}
-      <a class="btn sm" href="/video/{{ c.id }}">Open →</a>
+    <form class="inline vx" method="post" action="/video/{{ c.id }}/reject">
+      <button class="reject sm" title="Reject" onclick="event.stopPropagation()">✕</button></form>
     {% endif %}
+  </div>
+  <div class="filmstrip mini" data-cid="{{ c.id }}"></div>
+  <div class="vtags">
+    {% if c.relevance_score is not none %}
+      <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
+            title="Climate relevance score">{{ "%.2f"|format(c.relevance_score) }}</span>
+    {% endif %}
+    {% if c.visual_score is not none %}
+      <span class="badge {{ 'score-hi' if c.visual_score >= 0.5 else 'score-lo' }}"
+            title="{{ c.visual_rationale or 'Visual appeal score' }}">👁 {{ "%.2f"|format(c.visual_score) }}</span>
+    {% endif %}
+    {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
+    {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
+    {% if c.status != "new" %}<span class="badge">{{ c.status }}</span>{% endif %}
   </div>
 </div>
 {% endfor %}

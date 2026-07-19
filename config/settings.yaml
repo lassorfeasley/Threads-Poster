@@ -20,6 +20,80 @@ matching:
   # LLM model used for relevance scoring (Anthropic model ID).
   model: claude-haiku-4-5
 
+vision:
+  # Score each candidate's VISUALS (not just its title/transcript) for how
+  # engaging the footage looks, using YouTube's storyboard sprite sheets — a
+  # metadata-only fetch, nothing is downloaded. Cheap because the images are
+  # tiny scrub-preview stills. Feeds ranking alongside relevance.
+  enabled: true
+  # Multimodal Anthropic model. Haiku is cheap and plenty for coarse stills.
+  model: claude-haiku-4-5
+  # Score during the monitor pass (so the dashboard/triage can rank by it).
+  # Only candidates at/above min_relevance are scored, so vision tokens are
+  # never spent on clips you'd reject anyway.
+  score_at_monitor: true
+  min_relevance: 0.5
+  # Hard safety cap on how many candidates get vision-scored in one monitor
+  # pass, regardless of budget.
+  max_per_run: 40
+  # How many storyboard sprite sheets (each a contact-sheet of stills) to send
+  # per candidate. More = better coverage, slightly more cost.
+  max_sheets: 4
+  # Seed lists for the trait database (managed on the dashboard's Traits page —
+  # these only seed missing rows on first run, they never overwrite edits).
+  # DESIRABLE traits raise the visual score; UNDESIRABLE traits lower it. The
+  # model tags each candidate with whichever it detects, both kinds.
+  desirable_traits:
+    - action
+    - people_doing_things
+    - fire
+    - flood
+    - storm_damage
+    - destruction
+    - rescue_or_emergency_response
+    - crowd
+    - dramatic_weather
+    - aerial_or_sweeping_shot
+  undesirable_traits:
+    - talking_head_or_anchor_at_desk
+    - static_graphic_or_slideshow
+    - chart_or_data_screen
+    - text_heavy_lower_thirds
+    - press_conference_podium
+    - low_motion_studio_segment
+
+ranking:
+  # How candidates are ordered in the dashboard and triage queue. The blended
+  # score is relevance_weight*relevance + visual_weight*visual, then nudged by
+  # learned trait weights (below).
+  relevance_weight: 0.5
+  visual_weight: 0.5
+  # Self-improvement: traits are re-weighted from your own posts' performance.
+  # trait_influence caps how far a trait can move the score (0 = ignore the
+  # feedback loop entirely; 0.3 = a trait that doubles avg views multiplies the
+  # score by up to ~1.3). Only traits with at least trait_min_posts posts count,
+  # so small samples don't dominate.
+  trait_influence: 0.3
+  trait_min_posts: 8
+
+llm:
+  # Budget guardrail. Total Anthropic spend per day (UTC) is tracked in
+  # data/llm_spend.json; vision scoring stops for the day once this is hit
+  # (relevance scoring and the digest are cheap and always run).
+  daily_budget_usd: 3.0
+  # Approximate prices in USD per 1,000,000 tokens, used only to estimate spend
+  # for the budget guardrail. Update if Anthropic's pricing changes.
+  pricing:
+    claude-haiku-4-5:
+      input: 1.0
+      output: 5.0
+    claude-sonnet-5:
+      input: 3.0
+      output: 15.0
+    default:
+      input: 3.0
+      output: 15.0
+
 storage:
   # Local disk root for full downloaded segments, organized channel/date under it.
   download_dir: data/videos

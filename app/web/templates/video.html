@@ -45,15 +45,38 @@
       allow="encrypted-media; picture-in-picture" allowfullscreen></iframe>
   </div>
   <div class="grow stack-sm">
-    <div class="badges">
+    <div class="badges" id="badges">
       {% if c.relevance_score is not none %}
-        <span class="badge score-hi">score {{ "%.2f"|format(c.relevance_score) }}</span>
+        <span class="badge score-hi" title="Climate relevance">score {{ "%.2f"|format(c.relevance_score) }}</span>
       {% endif %}
+      {% if c.visual_score is not none %}
+        <span class="badge {{ 'score-hi' if c.visual_score >= 0.5 else 'score-lo' }}"
+              id="visual-badge" title="Visual appeal">👁 {{ "%.2f"|format(c.visual_score) }}</span>
+      {% endif %}
+      {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
       {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
       <span class="badge">{{ c.status }}</span>
     </div>
     <div class="meta">Keywords: <span class="kw">{{ c.matched_keywords }}</span></div>
     {% if c.relevance_rationale %}<div class="meta">{{ c.relevance_rationale }}</div>{% endif %}
+    <div class="meta" id="visual-line">{% if c.visual_rationale %}Visuals: {{ c.visual_rationale }}{% endif %}</div>
+    <div style="margin-top: 8px;">
+      <button type="button" class="btn ghost sm" id="score-visuals-btn" onclick="scoreVisuals()">
+        {{ "👁 Re-score visuals" if c.visual_score is not none else "👁 Score visuals" }}</button>
+    </div>
+    <script>
+      async function scoreVisuals() {
+        const btn = document.getElementById('score-visuals-btn');
+        btn.disabled = true; btn.textContent = 'Scoring…';
+        try {
+          const r = await fetch('/video/{{ c.id }}/score-visuals', { method: 'POST' });
+          const d = await r.json();
+          if (!r.ok) { alert(d.error || 'Scoring failed'); btn.disabled = false; return; }
+          document.getElementById('visual-line').textContent = d.why ? 'Visuals: ' + d.why : '';
+          window.location.reload();
+        } catch (e) { alert('Scoring failed: ' + e); btn.disabled = false; }
+      }
+    </script>
     {% if c.description %}
       <details style="margin: 8px 0;"><summary>Description</summary>
         <div class="meta">{{ c.description[:1500] }}</div></details>
@@ -147,14 +170,15 @@
 </div>
 
 <div class="btn-group" style="margin-top: 12px;">
-  <span class="badge info" id="cur-time" style="font-family: var(--mono); min-width: 64px; justify-content: center;">0:00.0</span>
+  <span class="badge info" id="cur-time" style="font-family: var(--mono); min-width: 64px; justify-content: center;">0.0s</span>
   <button type="button" class="sm" onclick="setStart()">⇤ Set start</button>
   <button type="button" class="sm" onclick="setEnd()">Set end ⇥</button>
   <span class="meta" id="pending-range">start: — · end: —</span>
   <button type="button" class="primary sm" onclick="addSegment()">＋ Add segment</button>
 </div>
-<div class="meta" style="margin-top: 6px;">Click or drag the waveform to scrub. Drag a red start/end line to
-  fine-tune it — dropping the start line plays from that moment. Green bands are segments already in the cut list.</div>
+<div class="meta" style="margin-top: 6px;">Click or drag the waveform to scrub. Drag a red pending line or a green segment
+  edge to fine-tune it — dropping a start edge plays from that moment. Click a green band to select it, then press
+  <kbd>Delete</kbd> to remove it. <kbd>⌘Z</kbd> / <kbd>Ctrl+Z</kbd> undoes the last edit.</div>
 {% if c.suggested_highlight %}
   <div class="meta" style="margin-top: 10px;">💡 Suggested highlight <span class="badge score-lo">draft</span>:
     {{ c.suggested_highlight }}</div>
@@ -183,8 +207,27 @@
 const player = document.getElementById('player');
 let pending = { start: null, end: null };
 let segments = {{ saved_segments | tojson }};
+let selectedSeg = null;         // index of the segment highlighted for deletion
 
-const fmt = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+// ---- Undo stack (Cmd/Ctrl+Z) ----
+// Each entry is a JSON snapshot of {segments, pending} taken *before* an edit.
+let undoStack = [];
+function pushUndo() {
+  undoStack.push(JSON.stringify({ segments, pending }));
+  if (undoStack.length > 100) undoStack.shift();
+}
+function undoEdit() {
+  const snap = undoStack.pop();
+  if (!snap) return;
+  const st = JSON.parse(snap);
+  segments = st.segments;
+  pending = st.pending;
+  if (selectedSeg !== null && selectedSeg >= segments.length) selectedSeg = null;
+  renderPending();
+  renderSegments();
+}
+
+const fmt = t => `${t.toFixed(1)}s`;
 player.addEventListener('timeupdate', () =>
   document.getElementById('cur-time').textContent = fmt(player.currentTime));
 
@@ -200,9 +243,9 @@ player.addEventListener('loadedmetadata', sizeTranscript);
 window.addEventListener('resize', sizeTranscript);
 sizeTranscript();
 
-function seek(t) { cancelPlayback(); player.currentTime = t; player.play(); }
-function setStart() { pending.start = player.currentTime; renderPending(); }
-function setEnd() { pending.end = player.currentTime; renderPending(); }
+function seek(t) { cancelPlayback(); activeStop = null; player.currentTime = t; player.play(); }
+function setStart() { pushUndo(); pending.start = player.currentTime; renderPending(); }
+function setEnd() { pushUndo(); pending.end = player.currentTime; renderPending(); }
 function renderPending() {
   document.getElementById('pending-range').textContent =
     `start: ${pending.start === null ? '—' : fmt(pending.start)} · end: ${pending.end === null ? '—' : fmt(pending.end)}`;
@@ -211,21 +254,35 @@ function renderPending() {
 function addSegment() {
   if (pending.start === null || pending.end === null) { alert('Set both start and end first.'); return; }
   if (pending.end - pending.start < 0.5) { alert('Segment must be at least 0.5s.'); return; }
+  pushUndo();
   segments.push({ start: +pending.start.toFixed(2), end: +pending.end.toFixed(2) });
   pending = { start: null, end: null };
   renderPending(); renderSegments();
 }
-function removeSegment(i) { segments.splice(i, 1); renderSegments(); }
+function removeSegment(i) {
+  pushUndo();
+  segments.splice(i, 1);
+  if (selectedSeg === i) selectedSeg = null;
+  else if (selectedSeg !== null && selectedSeg > i) selectedSeg--;
+  renderSegments();
+}
 function moveSegment(i, d) {
   const j = i + d;
   if (j < 0 || j >= segments.length) return;
+  pushUndo();
   [segments[i], segments[j]] = [segments[j], segments[i]];
+  if (selectedSeg === i) selectedSeg = j;
+  else if (selectedSeg === j) selectedSeg = i;
   renderSegments();
 }
 // ---- Segment playback (single preview + full supercut preview) ----
 // playback = { segs: [{start,end},...], idx } while sequentially playing only
 // the selected ranges; null when the player is free/scrubbing.
 let playback = null;
+// When set, free playback (not the supercut preview) hard-stops at this time —
+// used so playing a segment from its mini halts right on the end line, letting
+// you judge whether the out-transition is too abrupt.
+let activeStop = null;
 
 function setPreviewBtn(active) {
   const btn = document.getElementById('preview-all-btn');
@@ -234,6 +291,7 @@ function setPreviewBtn(active) {
 function playSegments(segs) {
   segs = segs.filter(s => s.end > s.start);
   if (!segs.length) return;
+  activeStop = null;
   playback = { segs, idx: 0 };
   setPreviewBtn(true);
   player.currentTime = segs[0].start;
@@ -260,6 +318,16 @@ player.addEventListener('timeupdate', () => {
   }
 });
 
+// Free-play hard stop at a segment's end line (set from the per-segment minis).
+player.addEventListener('timeupdate', () => {
+  if (playback || activeStop === null) return;
+  if (player.currentTime >= activeStop - 0.02) {
+    player.pause();
+    player.currentTime = activeStop;
+    activeStop = null;
+  }
+});
+
 // ---- Waveform editor ----
 const wave = document.getElementById('wave');
 const wctx = wave.getContext('2d');
@@ -273,6 +341,7 @@ async function loadWave() {
     document.getElementById('wave-hint').style.display = 'none';
     sizeWave();
     drawWave();
+    redrawAllSegWaves(true);   // now that peaks exist, fill the per-segment minis
   } catch (e) {
     document.getElementById('wave-hint').textContent = 'waveform unavailable';
   }
@@ -283,7 +352,7 @@ function sizeWave() {
   wave.width = wave.clientWidth * dpr;
   wave.height = wave.clientHeight * dpr;
 }
-window.addEventListener('resize', () => { sizeWave(); drawWave(); });
+window.addEventListener('resize', () => { sizeWave(); drawWave(); redrawAllSegWaves(true); });
 
 const duration = () => (wf && wf.duration) || player.duration || 1;
 const xOf = t => (t / duration()) * wave.width;
@@ -296,9 +365,18 @@ function drawWave() {
   const gridColor = css.getPropertyValue('--wave-grid').trim() || 'rgba(126,140,154,0.25)';
   wctx.clearRect(0, 0, W, H);
 
-  // Cut-list segments: green translucent bands behind the bars.
-  wctx.fillStyle = 'rgba(62,207,142,0.18)';
-  for (const s of segments) wctx.fillRect(xOf(s.start), 0, xOf(s.end) - xOf(s.start), H);
+  // Cut-list segments: green translucent bands behind the bars. The selected
+  // one is brighter with an outline to signal it's the delete target.
+  segments.forEach((s, i) => {
+    const x0 = xOf(s.start), x1 = xOf(s.end);
+    wctx.fillStyle = i === selectedSeg ? 'rgba(62,207,142,0.32)' : 'rgba(62,207,142,0.18)';
+    wctx.fillRect(x0, 0, x1 - x0, H);
+    if (i === selectedSeg) {
+      wctx.strokeStyle = 'rgba(62,207,142,0.95)';
+      wctx.lineWidth = 2;
+      wctx.strokeRect(x0 + 1, 1, (x1 - x0) - 2, H - 2);
+    }
+  });
 
   // Pending range shading.
   if (pending.start !== null && pending.end !== null && pending.end > pending.start) {
@@ -321,7 +399,14 @@ function drawWave() {
   wctx.font = `${10 * (window.devicePixelRatio || 1)}px sans-serif`;
   for (let t = 30; t < duration(); t += 30) {
     wctx.fillRect(xOf(t), 0, 1, H);
-    wctx.fillText(`${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`, xOf(t) + 3, H - 4);
+    wctx.fillText(`${t}s`, xOf(t) + 3, H - 4);
+  }
+
+  // Green edge handles for every segment (draggable to adjust start/end).
+  wctx.fillStyle = 'rgba(40,150,100,0.95)';
+  for (const s of segments) {
+    wctx.fillRect(xOf(s.start) - 1, 0, 2, H);
+    wctx.fillRect(xOf(s.end) - 1, 0, 2, H);
   }
 
   // Red marker lines for pending start / end.
@@ -336,12 +421,18 @@ function drawWave() {
   wctx.fillRect(xOf(player.currentTime) - 1, 0, 2, H);
 }
 
-// Smooth playhead while playing.
-(function tick() { drawWave(); requestAnimationFrame(tick); })();
+// Smooth playhead while playing (main wave + any per-segment minis).
+(function tick() {
+  drawWave();
+  if (!player.paused) redrawAllSegWaves(false);  // animate mini playheads only while playing
+  requestAnimationFrame(tick);
+})();
 
-// Pointer interaction: grab a red marker line to drag it, otherwise scrub.
-let dragging = null;  // 'start' | 'end' | 'scrub' | null
-const GRAB_PX = 8;    // css-pixel grab radius around a marker line
+// Pointer interaction: grab a pending red line or a green segment edge to drag
+// it; click a green band to select it; otherwise scrub.
+// dragging = null | {kind:'scrub'} | {kind:'pending',edge} | {kind:'seg',index,edge}
+let dragging = null;
+const GRAB_PX = 8;    // css-pixel grab radius around a marker/edge line
 
 function timeAt(e) {
   const rect = wave.getBoundingClientRect();
@@ -349,51 +440,124 @@ function timeAt(e) {
   return frac * duration();
 }
 
-function markerAt(e) {
+// Nearest draggable handle (pending marker or segment edge) within GRAB_PX.
+function handleAt(e) {
   const rect = wave.getBoundingClientRect();
   const x = e.clientX - rect.left;
+  const px = t => (t / duration()) * rect.width;
   let best = null, bestDist = GRAB_PX + 1;
-  for (const key of ['start', 'end']) {
-    if (pending[key] === null) continue;
-    const dist = Math.abs(x - (pending[key] / duration()) * rect.width);
-    if (dist <= GRAB_PX && dist < bestDist) { best = key; bestDist = dist; }
+  for (const edge of ['start', 'end']) {
+    if (pending[edge] === null) continue;
+    const d = Math.abs(x - px(pending[edge]));
+    if (d <= GRAB_PX && d < bestDist) { best = { kind: 'pending', edge }; bestDist = d; }
   }
+  segments.forEach((s, index) => {
+    for (const edge of ['start', 'end']) {
+      const d = Math.abs(x - px(s[edge]));
+      if (d <= GRAB_PX && d < bestDist) { best = { kind: 'seg', index, edge }; bestDist = d; }
+    }
+  });
   return best;
+}
+
+function segAtTime(t) {
+  for (let i = 0; i < segments.length; i++)
+    if (t >= segments[i].start && t <= segments[i].end) return i;
+  return -1;
+}
+
+// Move one edge of a segment, keeping start < end with a 0.1s floor.
+function setSegEdge(i, edge, t) {
+  const s = segments[i];
+  t = Math.max(0, Math.min(t, duration()));
+  if (edge === 'start') s.start = +Math.min(t, s.end - 0.1).toFixed(2);
+  else s.end = +Math.max(t, s.start + 0.1).toFixed(2);
+  syncSegInputs(i);
+  updateTotal();
+  drawSegWave(i);
+}
+
+// Update just one segment row's number inputs during a drag (no full re-render,
+// so we don't thrash the DOM every frame).
+function syncSegInputs(i) {
+  const a = document.getElementById(`seg-start-${i}`);
+  const b = document.getElementById(`seg-end-${i}`);
+  const len = document.getElementById(`seg-len-${i}`);
+  if (a) a.value = segments[i].start.toFixed(1);
+  if (b) b.value = segments[i].end.toFixed(1);
+  if (len) len.textContent = `(${(segments[i].end - segments[i].start).toFixed(1)}s)`;
 }
 
 wave.addEventListener('pointerdown', e => {
   cancelPlayback();
-  dragging = markerAt(e) || 'scrub';
+  activeStop = null;   // interacting with the main wave cancels a mini's stop line
   try { wave.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
-  if (dragging === 'scrub') player.currentTime = timeAt(e);
-  else { pending[dragging] = timeAt(e); renderPending(); }
+  const h = handleAt(e);
+  const t = timeAt(e);
+  if (h) {
+    pushUndo();
+    dragging = h;
+    if (h.kind === 'pending') { pending[h.edge] = t; renderPending(); }
+    else { selectedSeg = h.index; setSegEdge(h.index, h.edge, t); }
+  } else {
+    // Bare click: select the band under the cursor (if any) and scrub there.
+    const i = segAtTime(t);
+    selectedSeg = i >= 0 ? i : null;
+    dragging = { kind: 'scrub' };
+    player.currentTime = t;
+    renderSegments();
+  }
 });
 wave.addEventListener('pointermove', e => {
   if (!dragging) {
-    wave.style.cursor = markerAt(e) ? 'ew-resize' : 'crosshair';
+    const h = handleAt(e);
+    wave.style.cursor = h ? 'ew-resize' : (segAtTime(timeAt(e)) >= 0 ? 'pointer' : 'crosshair');
     return;
   }
-  if (dragging === 'scrub') player.currentTime = timeAt(e);
-  else { pending[dragging] = timeAt(e); renderPending(); }
+  const t = timeAt(e);
+  if (dragging.kind === 'scrub') player.currentTime = t;
+  else if (dragging.kind === 'pending') { pending[dragging.edge] = t; renderPending(); }
+  else setSegEdge(dragging.index, dragging.edge, t);
 });
 wave.addEventListener('pointerup', () => {
-  // Dropping the start marker plays from there so you can verify the in-point.
-  if (dragging === 'start' && pending.start !== null) {
-    player.currentTime = pending.start;
-    player.play();
+  if (dragging) {
+    // Dropping a start edge plays from there so you can verify the in-point.
+    if (dragging.kind === 'pending' && dragging.edge === 'start' && pending.start !== null) {
+      player.currentTime = pending.start; player.play();
+    } else if (dragging.kind === 'seg') {
+      if (dragging.edge === 'start') { player.currentTime = segments[dragging.index].start; player.play(); }
+      renderSegments();  // normalize order-independent state + keep selection
+    }
   }
   dragging = null;
 });
 
-// Space toggles play/pause anywhere on the trim screen (except while typing
-// in a field), so scrubbing + marker work never needs a trip to the player.
 document.addEventListener('keydown', e => {
-  if (e.code !== 'Space') return;
   const el = document.activeElement;
-  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
-             || el.isContentEditable)) return;
-  e.preventDefault();
-  if (player.paused) player.play(); else player.pause();
+  const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+                        || el.tagName === 'SELECT' || el.isContentEditable);
+
+  // Undo (leave native undo alone while editing a field).
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    if (typing) return;
+    e.preventDefault();
+    undoEdit();
+    return;
+  }
+  // Delete the selected segment.
+  if ((e.key === 'Delete' || e.key === 'Backspace') && !typing) {
+    if (selectedSeg !== null && selectedSeg < segments.length) {
+      e.preventDefault();
+      removeSegment(selectedSeg);
+    }
+    return;
+  }
+  // Space toggles play/pause (except while typing in a field).
+  if (e.code === 'Space') {
+    if (typing) return;
+    e.preventDefault();
+    if (player.paused) player.play(); else player.pause();
+  }
 });
 
 loadWave();
@@ -402,13 +566,18 @@ function renderSegments() {
   box.innerHTML = segments.length ? '' : '<div class="meta">No segments yet — set start/end and add one.</div>';
   segments.forEach((s, i) => {
     const div = document.createElement('div');
-    div.className = 'seg-row';
-    div.innerHTML = `<strong>#${i + 1}</strong>
-      <input type="number" class="seg-num" step="0.1" min="0" value="${s.start.toFixed(1)}"
+    div.className = 'seg-row' + (i === selectedSeg ? ' selected' : '');
+    div.onclick = ev => {
+      if (ev.target.closest('button') || ev.target.closest('input') || ev.target.closest('canvas')) return;
+      selectedSeg = i; renderSegments();
+    };
+    div.innerHTML = `<div class="seg-main">
+      <strong>#${i + 1}</strong>
+      <input type="number" id="seg-start-${i}" class="seg-num" step="0.1" min="0" value="${s.start.toFixed(1)}"
              title="Start (seconds) — changing it plays from there"
              onchange="updateSegment(${i}, 'start', this.value)">
       <span class="meta">→</span>
-      <input type="number" class="seg-num" step="0.1" min="0" value="${s.end.toFixed(1)}"
+      <input type="number" id="seg-end-${i}" class="seg-num" step="0.1" min="0" value="${s.end.toFixed(1)}"
              title="End (seconds)" onchange="updateSegment(${i}, 'end', this.value)">
       <span class="meta">s</span>
       <span class="meta" id="seg-len-${i}">(${(s.end - s.start).toFixed(1)}s)</span>
@@ -416,11 +585,149 @@ function renderSegments() {
       <button type="button" title="Preview" onclick="previewSegment(${i})">▶</button>
       <button type="button" title="Move up" onclick="moveSegment(${i},-1)">↑</button>
       <button type="button" title="Move down" onclick="moveSegment(${i},1)">↓</button>
-      <button type="button" class="reject" title="Remove" onclick="removeSegment(${i})">✕</button>`;
+      <button type="button" class="reject" title="Remove (or select + Delete)" onclick="removeSegment(${i})">✕</button>
+      </div>
+      <canvas class="seg-wave" id="seg-wave-${i}" title="Drag the green edges to fine-trim. Click to play from there up to the end line (it stops so you can check the transition). The dim sides are lead-in / lead-out room."></canvas>`;
     box.appendChild(div);
+    initSegWave(i, div.querySelector(`#seg-wave-${i}`));
   });
   updateTotal();
   drawWave();
+}
+
+// ---- Per-segment mini waveform (zoomed to one segment, drag edges to trim) ----
+// The window shows the segment plus a little context padding so you can nudge an
+// edge slightly outward as well as inward.
+function segWindow(i) {
+  const s = segments[i];
+  const len = s.end - s.start;
+  const pad = Math.min(Math.max(len * 0.25, 2), 10);
+  // Not clamped to [0, duration]: we always show pad on both sides so there's
+  // visible lead-in / lead-out room, even for clips at the very start or end.
+  return { a: s.start - pad, b: s.end + pad };
+}
+
+function sizeSegWave(i) {
+  const canvas = document.getElementById(`seg-wave-${i}`);
+  if (!canvas || !canvas.clientWidth) return;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+}
+
+function drawSegWave(i) {
+  const canvas = document.getElementById(`seg-wave-${i}`);
+  if (!canvas || !segments[i] || !canvas.width) return;
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height, mid = H / 2;
+  const css = getComputedStyle(document.documentElement);
+  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(126,140,154,0.55)';
+  ctx.clearRect(0, 0, W, H);
+
+  const s = segments[i], win = segWindow(i), span = (win.b - win.a) || 1;
+  const xOfT = t => ((t - win.a) / span) * W;
+
+  // Dim the context (outside-segment) area; tint the segment region green.
+  ctx.fillStyle = 'rgba(62,207,142,0.16)';
+  ctx.fillRect(xOfT(s.start), 0, xOfT(s.end) - xOfT(s.start), H);
+
+  // Stretch the low-res peaks across the window so it looks continuous.
+  if (wf && wf.peaks && wf.peaks.length) {
+    const n = wf.peaks.length, total = duration(), step = 2 * dpr;
+    for (let x = 0; x < W; x += step) {
+      const t = win.a + (x / W) * span;
+      if (t < 0 || t > total) continue;   // leave blank space beyond the media
+      const k = Math.min(n - 1, Math.max(0, Math.floor((t / total) * n)));
+      const inSeg = t >= s.start && t <= s.end;
+      const h = Math.max(1, wf.peaks[k] * (H * 0.8));
+      ctx.fillStyle = inSeg ? 'rgba(62,207,142,0.9)' : barColor;
+      ctx.fillRect(x, mid - h / 2, Math.max(1, step * 0.7), h);
+    }
+  } else {
+    ctx.fillStyle = barColor;
+    ctx.fillRect(0, mid - 1, W, 2);
+  }
+
+  // Green draggable edge handles.
+  ctx.fillStyle = 'rgba(40,150,100,0.95)';
+  ctx.fillRect(xOfT(s.start) - 1, 0, 2, H);
+  ctx.fillRect(xOfT(s.end) - 1, 0, 2, H);
+
+  // Playhead, when inside this window.
+  const pt = player.currentTime;
+  if (pt >= win.a && pt <= win.b) {
+    ctx.fillStyle = '#5aa9f0';
+    ctx.fillRect(xOfT(pt) - 1, 0, 2, H);
+  }
+}
+
+function initSegWave(i, canvas) {
+  if (!canvas) return;
+  const GRAB = 9;
+  const winX = clientX => {
+    const r = canvas.getBoundingClientRect();
+    const win = segWindow(i), span = (win.b - win.a) || 1;
+    const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    return { t: win.a + frac * span, r, win, span };
+  };
+  const edgeAt = clientX => {
+    const { r, win, span } = winX(clientX);
+    const x = clientX - r.left;
+    const px = t => ((t - win.a) / span) * r.width;
+    let best = null, bd = GRAB + 1;
+    for (const e of ['start', 'end']) {
+      const d = Math.abs(x - px(segments[i][e]));
+      if (d <= GRAB && d < bd) { best = e; bd = d; }
+    }
+    return best;
+  };
+  let drag = null;
+  canvas.addEventListener('pointerdown', ev => {
+    cancelPlayback();
+    try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic */ }
+    if (selectedSeg !== i) { selectedSeg = i; highlightSelectedRow(); }
+    const edge = edgeAt(ev.clientX);
+    const { t } = winX(ev.clientX);
+    if (edge) { pushUndo(); drag = edge; setSegEdge(i, edge, t); drawSegWave(i); }
+    else {
+      // Play from the clicked point up to the end line, then stop, so you can
+      // hear the lead-in and check the out-transition. Clicking past the end
+      // just seeks there.
+      drag = 'scrub';
+      player.currentTime = Math.max(0, t);
+      if (t < segments[i].end - 0.02) { activeStop = segments[i].end; player.play(); }
+      else activeStop = null;
+    }
+  });
+  canvas.addEventListener('pointermove', ev => {
+    if (!drag) { canvas.style.cursor = edgeAt(ev.clientX) ? 'ew-resize' : 'pointer'; return; }
+    const { t } = winX(ev.clientX);
+    if (drag === 'scrub') player.currentTime = Math.max(0, t);
+    else { setSegEdge(i, drag, t); drawSegWave(i); }
+  });
+  canvas.addEventListener('pointerup', () => {
+    // Dropping the start edge plays the whole segment and stops on the end line.
+    if (drag === 'start') {
+      player.currentTime = segments[i].start;
+      activeStop = segments[i].end;
+      player.play();
+    }
+    if (drag && drag !== 'scrub') renderSegments();
+    drag = null;
+  });
+  sizeSegWave(i);
+  drawSegWave(i);
+}
+
+function redrawAllSegWaves(resize) {
+  segments.forEach((_, i) => { if (resize) sizeSegWave(i); drawSegWave(i); });
+}
+
+// Toggle the .selected class without a full rebuild (used mid-interaction).
+function highlightSelectedRow() {
+  document.querySelectorAll('#segments .seg-row').forEach((el, idx) =>
+    el.classList.toggle('selected', idx === selectedSeg));
 }
 
 // Fine-tune a segment boundary from its number input (0.1s steps). Updates the
@@ -430,11 +737,13 @@ function updateSegment(i, key, val) {
   let v = parseFloat(val);
   if (isNaN(v)) return;
   v = Math.max(0, Math.min(v, duration()));
+  pushUndo();
   segments[i][key] = +v.toFixed(1);
   const lenEl = document.getElementById(`seg-len-${i}`);
   if (lenEl) lenEl.textContent = `(${(segments[i].end - segments[i].start).toFixed(1)}s)`;
   updateTotal();
   drawWave();
+  drawSegWave(i);
   if (key === 'start') { cancelPlayback(); player.currentTime = v; player.play(); }
 }
 
@@ -462,7 +771,13 @@ renderSegments();
 <div class="row">
   <div style="width: 420px; max-width: 100%;">
     <video src="/media/clip/{{ c.id }}" controls preload="metadata"></video>
-    <div class="meta" style="margin-top: 8px;">Your exported clip. Re-trim any time to replace it.</div>
+    <div class="btn-group" style="margin-top: 8px; flex-wrap: wrap;">
+      <a class="sm" href="/video/{{ c.id }}/download-clip" download>⤓ Download clip</a>
+      <button type="button" class="sm" id="copy-caption-btn"
+              data-caption="{{ c.draft_caption }}" onclick="copyCaption()">⧉ Copy caption</button>
+    </div>
+    <div class="meta" style="margin-top: 8px;">Your exported clip. Download it and copy the
+      caption to post manually elsewhere, or publish to Threads below. Re-trim any time to replace it.</div>
   </div>
   <div class="grow">
     {% if not threads_ok %}
@@ -477,15 +792,29 @@ renderSegments();
         </form>
       </div>
     {% else %}
-      <form method="post" action="/video/{{ c.id }}/post"
-            onsubmit="return confirm('Post this clip to Threads now?')">
+      <form method="post" action="/video/{{ c.id }}/post" id="post-form">
         <label>Caption
           <span class="badge score-lo" style="margin-left: 6px;">AI suggestion is a draft — edit freely</span></label>
         <textarea name="caption" id="caption" required>{{ c.draft_caption }}</textarea>
-        <div class="btn-group" style="margin-top: 12px;">
+        <div class="btn-group" style="margin-top: 12px; flex-wrap: wrap;">
           <button type="button" class="primary" id="suggest-btn" onclick="suggestCaption()">
             {{ "Regenerate" if c.draft_caption else "Suggest" }} caption</button>
-          <button class="approve">Confirm &amp; post to Threads</button>
+          <button class="approve" onclick="return confirm('Post this clip to Threads now?')">
+            Confirm &amp; post now</button>
+          <button class="sm" formaction="/video/{{ c.id }}/save-draft" formnovalidate
+                  onclick="return validateDraft()">💾 Save as draft</button>
+        </div>
+        <div class="meta" style="margin-top: 6px;">Three ways to finish: post now, save a draft to
+          publish/schedule later, or schedule it below.</div>
+
+        <div class="card tight" style="margin-top: 14px;">
+          <div class="card-title">Or schedule for later</div>
+          <div class="btn-group" style="align-items: center; flex-wrap: wrap;">
+            <input type="datetime-local" name="scheduled_at" id="scheduled_at">
+            <button class="sm" formaction="/video/{{ c.id }}/schedule" formnovalidate
+                    onclick="return validateSchedule()">⏱ Schedule post</button>
+            <span class="meta">Publishes automatically at the time you pick (your local time).</span>
+          </div>
         </div>
       </form>
       <script>
@@ -500,6 +829,30 @@ renderSegments();
           } catch (e) { alert('Suggestion failed: ' + e); }
           btn.disabled = false; btn.textContent = 'Regenerate caption';
         }
+        // Default the picker to one hour out and prevent past times.
+        (function () {
+          const el = document.getElementById('scheduled_at');
+          if (!el) return;
+          const pad = n => String(n).padStart(2, '0');
+          const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+            + `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+          const now = new Date();
+          el.min = fmt(now);
+          el.value = fmt(new Date(now.getTime() + 60 * 60 * 1000));
+        })();
+        function validateSchedule() {
+          const cap = document.getElementById('caption');
+          const when = document.getElementById('scheduled_at');
+          if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
+          if (!when.value) { alert('Pick a date and time.'); return false; }
+          if (new Date(when.value) <= new Date()) { alert('Pick a time in the future.'); return false; }
+          return confirm('Schedule this clip to post at ' + new Date(when.value).toLocaleString() + '?');
+        }
+        function validateDraft() {
+          const cap = document.getElementById('caption');
+          if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
+          return true;
+        }
       </script>
     {% endif %}
 
@@ -509,10 +862,28 @@ renderSegments();
       <table>
         {% for p in posts %}
         <tr>
-          <td class="meta">{{ p.published_at.strftime("%b %-d %H:%M") if p.published_at else "—" }}</td>
+          <td class="meta" style="white-space: nowrap;">
+            {% if p.status in ("scheduled", "publishing") and p.scheduled_at %}
+              ⏱ {{ p.scheduled_at.strftime("%b %-d %H:%M UTC") }}
+            {% elif p.status == "draft" %}💾 draft
+            {% else %}{{ p.published_at.strftime("%b %-d %H:%M") if p.published_at else "—" }}{% endif %}
+          </td>
           <td>{{ p.caption[:70] }}</td>
-          <td><span class="badge {{ 'supportive' if p.status == 'published' else 'hostile' }}">{{ p.status }}</span></td>
-          <td>{% if p.permalink %}<a href="{{ p.permalink }}" target="_blank">open ↗</a>{% endif %}</td>
+          <td><span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else '') }}">{{ p.status }}</span></td>
+          <td>
+            {% if p.permalink %}<a href="{{ p.permalink }}" target="_blank">open ↗</a>{% endif %}
+            {% if p.status in ("scheduled", "draft") %}
+              <form class="inline" method="post" action="/post/{{ p.id }}/publish-now">
+                <input type="hidden" name="next" value="/video/{{ c.id }}?step=post">
+                <button class="sm" onclick="return confirm('Publish to Threads now?')">Post now</button></form>
+              {% if p.status == "draft" %}
+              <a class="badge" href="/posts" title="Schedule this draft from the Posts page">Schedule ↗</a>
+              {% endif %}
+              <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
+                <input type="hidden" name="next" value="/video/{{ c.id }}?step=post">
+                <button class="reject sm" onclick="return confirm('Remove this {{ p.status }} post?')">Delete</button></form>
+            {% endif %}
+          </td>
         </tr>
         {% endfor %}
       </table>
@@ -520,6 +891,23 @@ renderSegments();
     {% endif %}
   </div>
 </div>
+<script>
+  async function copyCaption() {
+    const btn = document.getElementById('copy-caption-btn');
+    const box = document.getElementById('caption');
+    const text = (box ? box.value : btn.dataset.caption) || '';
+    if (!text.trim()) { alert('No caption to copy yet.'); return; }
+    const original = btn.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      if (box) { box.focus(); box.select(); document.execCommand('copy'); }
+      else { alert('Copy failed: ' + e); return; }
+    }
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  }
+</script>
 {% endif %}
 {% endif %}
 {% endblock %}
