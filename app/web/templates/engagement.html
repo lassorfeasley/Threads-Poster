@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Engagement</h1>
+    <div class="sub">Comments on your own posts. Drafts are generated only for supportive comments and
+      genuine questions — every reply requires your approval before it posts.</div>
+  </div>
+  <div class="actions">
+    <form class="inline" method="post" action="/engagement/sync">
+      <button class="primary">Sync comments now</button>
+    </form>
+  </div>
+</div>
+
+<div class="tabs">
+  <a class="tab {{ 'active' if view == 'queue' }}" href="/engagement?view=queue">Reply queue</a>
+  <a class="tab {{ 'active' if view == 'posted' }}" href="/engagement?view=posted">Posted</a>
+  <a class="tab {{ 'active' if view == 'filtered' }}" href="/engagement?view=filtered">Filtered &amp; skipped</a>
+</div>
+
+{% if not comments %}
+  <div class="empty"><span class="icon">✉</span><strong>Nothing in this view</strong>
+    Sync comments or check another tab.</div>
+{% endif %}
+
+{% for c in comments %}
+<div class="card">
+  <div class="meta">
+    on post: “{{ c.post.caption[:80] }}”
+    {% if c.post.permalink %} · <a href="{{ c.post.permalink }}" target="_blank">open ↗</a>{% endif %}
+    · {{ c.commented_at.strftime("%b %-d %H:%M") if c.commented_at else "" }}
+  </div>
+  <div style="margin: 10px 0; font-size: 14px;"><strong>@{{ c.username }}</strong> {{ c.text }}</div>
+  <div class="badges">
+    <span class="badge {{ 'supportive' if c.classification in ['supportive', 'genuine_question'] else ('hostile' if c.classification in ['hostile_or_argumentative', 'bait_or_trolling', 'spam_or_bot'] else '') }}">{{ c.classification }}</span>
+    {% for f in c.risk_flags.split(",") if f %}<span class="badge score-lo">{{ f }}</span>{% endfor %}
+  </div>
+  {% if c.classification_rationale %}<div class="meta" style="margin-top: 6px;">{{ c.classification_rationale }}</div>{% endif %}
+
+  {% if view == "queue" %}
+    <hr class="div">
+    <form method="post" action="/engagement/{{ c.id }}/post"
+          onsubmit="return confirm('Post this reply?')">
+      <label>Draft reply — edit freely before posting</label>
+      <textarea name="reply_text">{{ c.draft_reply }}</textarea>
+      <div class="btn-group" style="margin-top: 10px;">
+        <button class="approve">Approve &amp; post</button>
+      </div>
+    </form>
+    <form class="inline" method="post" action="/engagement/{{ c.id }}/skip" style="margin-top: 8px;">
+      <button class="ghost sm">Skip this comment</button>
+    </form>
+  {% elif view == "posted" %}
+    <div style="margin-top: 10px;" class="meta">Replied: “{{ c.reply_text_posted }}”</div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

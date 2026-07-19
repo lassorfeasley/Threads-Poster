@@ -1,0 +1,95 @@
+# Main application settings. Everything here is operator-editable.
+
+monitor:
+  # How often the scheduler polls channels, in minutes (default: every 4 hours,
+  # i.e. a few times daily).
+  poll_interval_minutes: 240
+  # Default monitor window by publish date: number of calendar days to scan,
+  # counting today (2 = today + yesterday). Also the dashboard's default date
+  # filter. Override a single run with the "look back" box on the dashboard.
+  default_lookback_days: 2
+  # Max uploads fetched per channel per poll (safety cap; local news volume is low).
+  max_results_per_channel: 25
+  # Skip portrait/vertical videos (YouTube Shorts) — they don't fit the clip workflow.
+  exclude_portrait: true
+
+matching:
+  # LLM relevance score is 0.0-1.0. Candidates below this are hidden by default
+  # in the review dashboard (still stored, still viewable with "show hidden").
+  score_threshold: 0.5
+  # LLM model used for relevance scoring (Anthropic model ID).
+  model: claude-haiku-4-5
+
+storage:
+  # Local disk root for full downloaded segments, organized channel/date under it.
+  download_dir: data/videos
+  # Where transcripts are written (also stored in the DB).
+  transcript_dir: data/transcripts
+  # Retention for full segments: "keep" (default, never delete) or an integer
+  # number of days after which the CLEANUP COMMAND (never automatic) may prune.
+  retention: keep
+  # Optional redundancy: also copy full segments to a PRIVATE Supabase bucket.
+  # Off by default by design (keep raw segments local).
+  backup_full_segments_to_cloud: false
+  # Supabase Storage bucket for trimmed clips (public URL needed by Threads).
+  trimmed_clip_bucket: trimmed-clips
+  # Seconds a signed clip URL stays valid; must outlive Meta's fetch+processing
+  # window. 1 hour is comfortable.
+  signed_url_ttl_seconds: 3600
+
+scrape:
+  # Politeness delays between any two yt-dlp operations (seconds, randomized range).
+  delay_min_seconds: 8
+  delay_max_seconds: 25
+  # yt-dlp format selection for the full segment.
+  ytdlp_format: "bv*[height<=1080]+ba/b[height<=1080]"
+
+threads:
+  # Threads user id is discovered automatically after OAuth; leave blank.
+  user_id: ""
+
+engagement:
+  # HARD SCOPE LIMIT. The tool only ever reads/replies on the operator's own
+  # posts. This flag exists but is HIGH-RISK and should stay false: enabling it
+  # is documented as against the design intent and platform-risk posture.
+  allow_other_users_posts: false
+  # Comment classification categories (LLM must pick exactly one).
+  categories:
+    - supportive
+    - genuine_question
+    - neutral
+    - hostile_or_argumentative
+    - bait_or_trolling
+    - spam_or_bot
+    - off_topic
+  # Only these categories become reply candidates. Everything else is logged
+  # but never gets a drafted promo reply.
+  reply_eligible_categories:
+    - supportive
+    - genuine_question
+  # Pacing guardrails for approved replies (enforced at post time).
+  max_replies_per_hour: 4
+  max_replies_per_day: 12
+  # Don't draft replies for more than this fraction of eligible comments on a
+  # single post (avoid replying to literally everyone).
+  max_reply_fraction_per_post: 0.5
+  # LLM models (Anthropic model IDs).
+  classify_model: claude-haiku-4-5
+  draft_model: claude-sonnet-5
+  # Context the LLM uses when drafting replies. Edit to taste.
+  reply_guidance: >
+    Acknowledge the commenter's specific point first, in a warm and human tone.
+    Where it fits naturally, mention that Renewables.org lets anyone act on
+    climate by investing as little as $25 in high-carbon-impact-per-dollar
+    solar projects. Never be pushy. Vary the wording every time; identical
+    copy-paste across threads reads as spam. Keep it under 400 characters.
+
+analytics:
+  # How often the metrics puller re-snapshots each post's stats (hours).
+  snapshot_interval_hours: 12
+  # Stop re-pulling metrics for posts older than this many days.
+  max_post_age_days: 60
+  # Model used for the written digest (Anthropic model ID).
+  digest_model: claude-sonnet-5
+  # Minimum posts before the digest is allowed to claim any pattern.
+  min_sample_size: 8

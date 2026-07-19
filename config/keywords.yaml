@@ -1,0 +1,25 @@
+# Climate keyword list used for the first-pass filter on video title + description.
+# Matching is case-insensitive, whole-word/phrase. Edit freely (or via the
+# dashboard's Keywords page); no code changes needed.
+#
+# Every keyword hit is then scored by the LLM for genuine climate relevance,
+# which is what filters out "political climate" / "business climate" style
+# false positives. So err on the side of inclusive keywords here.
+
+keywords:
+- algae bloom
+- carbon pollution
+- climate change
+- coral bleaching
+- fossil fuel
+- glacier
+- global warming
+- greenhouse gas
+- oil spill
+- record breaking heat
+- record temperatures
+- reservoir levels
+- sea level
+- severe weather record
+- solar panels
+- solar power

@@ -1,0 +1,264 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Triage</h1>
+    <div class="sub"><span id="progress"></span></div>
+    <div class="progressbar" id="progbar" style="display: none;"><i></i></div>
+  </div>
+  <div class="actions"><a class="btn ghost" href="/">← Back to dashboard</a></div>
+</div>
+
+<div id="done" class="empty" style="display: none; padding: 56px 20px;">
+  <span class="icon">🎉</span>
+  <strong style="font-size: 16px;">Queue clear</strong>
+  <div class="meta" style="margin-top: 6px;">
+    <span id="done-stats"></span><br><br>
+    <button class="btn" id="undo-btn-done" onclick="undo()">↩ Undo last</button>
+    <a class="btn primary" href="/">Back to dashboard</a>
+  </div>
+</div>
+
+<div id="triage" style="display: none;">
+  <div class="row">
+    <div style="flex: 1.6; min-width: 480px;">
+      <iframe class="yt" id="player" src="" allow="autoplay; encrypted-media; picture-in-picture"
+              allowfullscreen></iframe>
+      <div class="meta" style="margin-top: 8px;">Plays with sound. If your browser blocks autoplay, click the video to start.</div>
+    </div>
+    <div class="grow" style="min-width: 300px;">
+      <div id="title" style="font-weight: 650; font-size: 16px; line-height: 1.4;"></div>
+      <div class="meta" id="sub" style="margin: 8px 0;"></div>
+      <div id="badges" class="badges" style="margin: 10px 0;"></div>
+      <div class="meta" id="keywords"></div>
+      <div class="meta" id="rationale" style="margin-top: 6px;"></div>
+
+      <div class="btn-group" style="margin-top: 24px;">
+        <button class="approve lg" onclick="act('approve')">Approve&nbsp;<kbd>Z</kbd></button>
+        <button class="reject lg" onclick="act('reject')">Reject&nbsp;<kbd>X</kbd></button>
+        <button class="lg" onclick="advance('skipped')">Skip&nbsp;<kbd>S</kbd></button>
+        <button class="lg" id="undo-btn" onclick="undo()" disabled>Undo&nbsp;<kbd>U</kbd></button>
+      </div>
+      <div class="meta" style="margin-top: 16px;">
+        <kbd>Z</kbd> approve &amp; next · <kbd>X</kbd> reject &amp; next · <kbd>S</kbd> skip ·
+        <kbd>U</kbd> undo last — approving starts the download + transcript in the background.
+      </div>
+      <div class="meta" style="margin-top: 8px;" id="counts"></div>
+    </div>
+  </div>
+
+  <div id="filmstrip-wrap" style="margin-top: 20px; display: none;">
+    <div class="meta" style="margin-bottom: 8px;">Storyboard — stills across the clip (click one to preview on YouTube)</div>
+    <div id="filmstrip" class="story-grid"></div>
+  </div>
+  <div id="filmstrip-loading" class="meta" style="margin-top: 20px; display: none;">loading storyboard…</div>
+</div>
+
+<script>
+const queue = {{ queue | tojson }};
+let idx = 0;
+const stats = { approved: 0, rejected: 0, skipped: 0 };
+const history = [];  // stack of {id, action} for undo
+let busy = false;
+
+const STAT_KEY = { approve: 'approved', reject: 'rejected', skipped: 'skipped' };
+
+function updateUndoButtons() {
+  const has = history.length > 0;
+  const b = document.getElementById('undo-btn');
+  if (b) b.disabled = !has;
+  const bd = document.getElementById('undo-btn-done');
+  if (bd) bd.style.display = has ? '' : 'none';
+}
+
+function setProgress(done, total) {
+  const bar = document.getElementById('progbar');
+  if (!total) { bar.style.display = 'none'; return; }
+  bar.style.display = 'block';
+  bar.querySelector('i').style.width = Math.round((done / total) * 100) + '%';
+}
+
+function render() {
+  const doneEl = document.getElementById('done');
+  const triEl = document.getElementById('triage');
+  if (idx >= queue.length) {
+    triEl.style.display = 'none';
+    doneEl.style.display = 'block';
+    document.getElementById('done-stats').textContent =
+      `${stats.approved} approved · ${stats.rejected} rejected · ${stats.skipped} skipped`;
+    document.getElementById('progress').textContent = 'All done';
+    setProgress(queue.length, queue.length);
+    updateUndoButtons();
+    return;
+  }
+  const c = queue[idx];
+  triEl.style.display = 'block';
+  doneEl.style.display = 'none';
+  document.getElementById('player').src =
+    `https://www.youtube-nocookie.com/embed/${c.video_id}?autoplay=1&mute=0`;
+  document.getElementById('title').textContent = c.title;
+  document.getElementById('sub').textContent =
+    `${c.channel} · ${c.published}${c.duration ? ' · ' + c.duration : ''}`;
+  const badges = [];
+  if (c.score !== null) badges.push(`<span class="badge score-hi">score ${c.score.toFixed(2)}</span>`);
+  c.topics.forEach(t => badges.push(`<span class="badge">${t}</span>`));
+  document.getElementById('badges').innerHTML = badges.join(' ');
+  document.getElementById('keywords').innerHTML =
+    c.keywords ? `Keywords: <span class="kw">${c.keywords}</span>` : '';
+  document.getElementById('rationale').textContent = c.rationale || '';
+  document.getElementById('progress').textContent = `Reviewing ${idx + 1} of ${queue.length}`;
+  setProgress(idx, queue.length);
+  document.getElementById('counts').textContent =
+    `${stats.approved} approved · ${stats.rejected} rejected · ${stats.skipped} skipped`;
+  updateUndoButtons();
+  loadFilmstrip(c);
+  prefetchNext();
+}
+
+async function act(action) {
+  if (busy || idx >= queue.length) return;
+  busy = true;
+  const c = queue[idx];
+  try {
+    await fetch(`/video/${c.id}/${action}`, { method: 'POST' });
+    history.push({ id: c.id, action });
+    stats[STAT_KEY[action]]++;
+    idx++;
+    render();
+  } catch (e) {
+    alert(`${action} failed: ${e}`);
+  }
+  busy = false;
+}
+
+function advance(kind) {
+  if (idx >= queue.length) return;
+  const c = queue[idx];
+  history.push({ id: c.id, action: kind });
+  stats[kind]++;
+  idx++;
+  render();
+}
+
+async function undo() {
+  if (busy || !history.length) return;
+  busy = true;
+  const last = history[history.length - 1];
+  try {
+    // Approve/reject changed server state; skip was local-only.
+    if (last.action === 'approve' || last.action === 'reject') {
+      await fetch(`/video/${last.id}/reset`, { method: 'POST' });
+    }
+    history.pop();
+    stats[STAT_KEY[last.action]] = Math.max(0, stats[STAT_KEY[last.action]] - 1);
+    idx = Math.max(0, idx - 1);
+    render();
+  } catch (e) {
+    alert('Undo failed: ' + e);
+  }
+  busy = false;
+}
+
+// ---- Filmstrip (YouTube storyboard sprites, ~10s sampling) ----
+let stripToken = 0;
+
+async function loadFilmstrip(c) {
+  const token = ++stripToken;
+  const wrap = document.getElementById('filmstrip-wrap');
+  const strip = document.getElementById('filmstrip');
+  const loading = document.getElementById('filmstrip-loading');
+  wrap.style.display = 'none';
+  strip.innerHTML = '';
+  loading.style.display = 'block';
+  try {
+    const r = await fetch(`/video/${c.id}/storyboard`);
+    const sb = await r.json();
+    if (token !== stripToken) return;  // user already advanced
+    loading.style.display = 'none';
+    if (!sb.available || !sb.fragments || !sb.fragments.length) return;
+
+    const cols = sb.columns, rows = sb.rows;
+    const tw = sb.tile_width, th = sb.tile_height;
+    const perSheet = cols * rows;
+    // Build a flat timeline of tiles across all sprite sheets.
+    const tiles = [];
+    let t = 0;
+    for (const frag of sb.fragments) {
+      const tileDur = (frag.duration || 0) / perSheet;
+      for (let i = 0; i < perSheet; i++) {
+        tiles.push({ url: frag.url, index: i, time: t });
+        t += tileDur;
+      }
+    }
+    if (!tiles.length) return;
+
+    // Dense sample: aim for one still every ~5s, capped so long clips don't explode.
+    const tileDur = tiles.length > 1 ? tiles[1].time - tiles[0].time : 5;
+    const step = Math.max(1, Math.round(5 / Math.max(tileDur, 0.1)));
+    let picks = [];
+    for (let i = 0; i < tiles.length; i += step) picks.push(tiles[i]);
+    const MAX_TILES = 96;
+    if (picks.length > MAX_TILES) {
+      const resampled = [];
+      for (let k = 0; k < MAX_TILES; k++)
+        resampled.push(picks[Math.round(k * (picks.length - 1) / (MAX_TILES - 1))]);
+      picks = resampled;
+    }
+
+    const TW = 132, scale = TW / tw, TH = Math.round(th * scale);
+    for (const tile of picks) {
+      const col = tile.index % cols, row = Math.floor(tile.index / cols);
+      const m = Math.floor(tile.time / 60), s = Math.floor(tile.time % 60);
+      const cell = document.createElement('a');
+      cell.href = `https://www.youtube-nocookie.com/embed/${c.video_id}?start=${Math.floor(tile.time)}&autoplay=1&mute=0`;
+      cell.className = 'story-tile';
+      cell.onclick = (ev) => {
+        ev.preventDefault();
+        document.getElementById('player').src = cell.getAttribute('href');
+      };
+      cell.innerHTML = `
+        <div style="width:${TW}px;height:${TH}px;border-radius:6px;
+                    background-image:url('${tile.url.replace(/'/g, "%27")}');
+                    background-position:-${Math.round(col * tw * scale)}px -${Math.round(row * th * scale)}px;
+                    background-size:${Math.round(cols * tw * scale)}px ${Math.round(rows * th * scale)}px;"></div>
+        <div class="meta" style="text-align:center;font-size:11px;">${m}:${String(s).padStart(2, '0')}</div>`;
+      strip.appendChild(cell);
+    }
+    wrap.style.display = 'block';
+  } catch (e) {
+    if (token === stripToken) loading.style.display = 'none';
+  }
+}
+
+function prefetchNext() {
+  if (idx + 1 < queue.length) fetch(`/video/${queue[idx + 1].id}/storyboard`).catch(() => {});
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  const k = e.key.toLowerCase();
+  if (k === 'z') { e.preventDefault(); act('approve'); }
+  else if (k === 'x') { e.preventDefault(); act('reject'); }
+  else if (k === 's') { e.preventDefault(); advance('skipped'); }
+  else if (k === 'u') { e.preventDefault(); undo(); }
+});
+
+// Clicking the embedded player moves keyboard focus into its cross-origin
+// YouTube iframe, which then swallows our A/R/S shortcuts. Detect that (the
+// window loses focus while the iframe becomes the active element) and hand
+// keyboard control straight back to the page so the shortcuts always work.
+function reclaimFocus() {
+  const el = document.activeElement;
+  if (el && el.tagName === 'IFRAME') {
+    el.blur();
+    window.focus();
+  }
+}
+window.addEventListener('blur', () => setTimeout(reclaimFocus, 0));
+// Belt-and-suspenders: also poll, since some browsers don't fire a reliable
+// blur when focus crosses into a same-tab iframe.
+setInterval(reclaimFocus, 400);
+
+render();
+</script>
+{% endblock %}

@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Channels ({{ channels|length }})</h1>
+    <div class="sub">Local TV news YouTube channels scanned by the monitor.</div>
+  </div>
+</div>
+
+<div class="row" style="align-items: stretch;">
+  <div class="card grow" style="margin-bottom: 14px;">
+    <div class="card-title">Add a channel</div>
+    <form method="post" action="/channels/add" style="margin-top: 10px;">
+      <div class="form-row" style="margin-bottom: 12px;">
+        <div class="field grow" style="min-width: 110px;"><label>Call sign</label>
+          <input type="text" name="call_sign" required placeholder="KXYZ"></div>
+        <div class="field grow" style="min-width: 90px;"><label>Network</label>
+          <input type="text" name="network" placeholder="ABC"></div>
+        <div class="field grow" style="min-width: 120px;"><label>Market</label>
+          <input type="text" name="market" placeholder="Springfield"></div>
+        <div class="field grow" style="min-width: 100px;"><label>Region</label>
+          <input type="text" name="region" placeholder="Midwest"></div>
+      </div>
+      <div class="field">
+        <label>YouTube channel URL</label>
+        <input type="text" name="url" required placeholder="https://www.youtube.com/@example">
+      </div>
+      <button class="primary">Add channel</button>
+    </form>
+    <p class="hint">Handle, /channel/, /c/ or /user/ URLs all work — the channel ID is resolved
+      automatically on the next monitor run.</p>
+  </div>
+
+  <div class="card grow" style="margin-bottom: 14px;">
+    <div class="card-title">Bulk import (CSV)</div>
+    <form method="post" action="/channels/import-csv" style="margin-top: 10px;">
+      <div class="field">
+        <label>One channel per line: <code>call_sign, network, market, region, url</code></label>
+        <textarea name="csv_text" required rows="5" style="font-family: var(--mono); font-size: 12px;"
+placeholder="KXYZ, ABC, Springfield, Midwest, https://www.youtube.com/@kxyznews
+WABC, ABC, New York, Northeast, https://www.youtube.com/@abc7NY"></textarea>
+      </div>
+      <button class="primary">Import channels</button>
+    </form>
+    <p class="hint">Only the call sign and URL are required; column order is flexible as long as the
+      URL is a youtube.com link. Duplicates are skipped automatically.</p>
+  </div>
+</div>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Call sign</th><th>Network</th><th>Market</th><th>Region</th><th>Status</th><th>Last checked</th><th></th></tr>
+  {% for ch in channels %}
+  <tr style="{{ 'opacity:.45' if not ch.enabled }}">
+    <td><a href="{{ ch.url }}" target="_blank">{{ ch.call_sign }}</a></td>
+    <td>{{ ch.network }}</td>
+    <td>{{ ch.market }}</td>
+    <td>{{ ch.region }}</td>
+    <td>
+      {% if ch.last_error %}<span class="badge hostile" title="{{ ch.last_error }}">error</span>
+      {% elif not ch.enabled %}<span class="badge">disabled</span>
+      {% elif ch.channel_id %}<span class="badge supportive">ok</span>
+      {% else %}<span class="badge score-lo">pending resolve</span>{% endif %}
+    </td>
+    <td class="meta" style="white-space: nowrap;">{{ ch.last_checked_at.strftime("%b %-d %H:%M") if ch.last_checked_at else "never" }}</td>
+    <td style="white-space: nowrap;">
+      <form class="inline" method="post" action="/channels/{{ ch.id }}/toggle">
+        <button class="sm">{{ "Disable" if ch.enabled else "Enable" }}</button></form>
+      <form class="inline" method="post" action="/channels/{{ ch.id }}/delete"
+            onsubmit="return confirm('Delete {{ ch.call_sign }}?')">
+        <button class="reject sm">Delete</button></form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+
+<p class="meta" style="margin-top: 12px;">Channels from <code>config/channels.yaml</code> are synced in
+on startup; removing one here only disables it if it has stored candidates.</p>
+{% endblock %}

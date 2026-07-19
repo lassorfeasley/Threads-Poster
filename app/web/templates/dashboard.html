@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Dashboard</h1>
+    <div class="sub">New climate segments from your monitored channels. Review a match to start the clip workflow.</div>
+  </div>
+  <div class="actions">
+    <a class="btn approve"
+       href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for t in topic %}&topic={{ t }}{% endfor %}&region={{ region }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+      ▶&nbsp; Triage mode</a>
+  </div>
+</div>
+
+<div class="card tight">
+  {% if monitor_running %}
+    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+      <span class="badge info"><span class="dot"></span> monitor running</span>
+      <span class="meta">Scanning channels in the background — new candidates appear as they're found.</span>
+      <button class="ghost sm" onclick="location.reload()" style="margin-left: auto;">Refresh now</button>
+    </div>
+    <script>setTimeout(() => location.reload(), 10000);</script>
+  {% else %}
+    <form class="inline" method="post" action="/monitor/run"
+          style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; width: 100%;">
+      <button class="primary">Run monitor now</button>
+      <label style="margin: 0; display: inline-flex; gap: 8px; align-items: center; font-weight: 500;">look back
+        <input type="number" name="lookback_days" min="1" max="30" placeholder="auto"
+               style="width: 74px; padding: 5px 9px;"> days</label>
+      <span class="meta">Leave blank to check only since the last run; set days (max 30) to backfill.</span>
+    </form>
+    {% if monitor_result %}<div class="meta" style="margin-top: 8px;">{{ monitor_result }}</div>{% endif %}
+  {% endif %}
+</div>
+
+<div class="card tight">
+  <form method="get" action="/" id="filter-form">
+    <div class="form-row">
+      <div class="field" style="flex: 2; min-width: 200px;">
+        <label>Search</label>
+        <input type="text" name="q" id="q-input" value="{{ q }}" autocomplete="off"
+               placeholder="title, description, keywords…" oninput="onSearchInput()">
+      </div>
+      <div class="field" style="min-width: 150px;">
+        <label>Channel</label>
+        <select name="channel_id" onchange="this.form.requestSubmit()">
+          <option value="0">All channels</option>
+          {% for ch in filter_channels %}
+          <option value="{{ ch.id }}" {{ "selected" if ch.id == channel_id }}>{{ ch.call_sign }} — {{ ch.market }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="min-width: 130px;">
+        <label>Region</label>
+        <select name="region" onchange="this.form.requestSubmit()">
+          <option value="">All regions</option>
+          {% for r in regions %}<option value="{{ r }}" {{ "selected" if r == region }}>{{ r }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field" style="min-width: 120px;">
+        <label>Status</label>
+        <select name="status" onchange="this.form.requestSubmit()">
+          {% for s in ["new", "approved", "archived", "rejected", "failed", "all"] %}
+          <option value="{{ s }}" {{ "selected" if s == status }}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field"><label>From</label>
+        <input type="date" name="date_from" value="{{ date_from }}" onchange="this.form.requestSubmit()"></div>
+      <div class="field"><label>To</label>
+        <input type="date" name="date_to" value="{{ date_to }}" onchange="this.form.requestSubmit()"></div>
+      <div class="field btn-group">
+        {% if filtering %}<a class="btn ghost" href="/">Clear</a>{% endif %}
+      </div>
+    </div>
+    <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 12px;">
+      <span class="meta" style="margin-right: 4px;">Topics:</span>
+      {% for t in topics %}
+      <label class="chip {{ 'on' if t in topic }}">
+        <input type="checkbox" name="topic" value="{{ t }}" {{ "checked" if t in topic }}
+               onchange="this.parentElement.classList.toggle('on', this.checked); this.form.requestSubmit()"> {{ t }}
+      </label>
+      {% endfor %}
+    </div>
+  </form>
+  <script>
+    // Live filtering: selects/dates/topics submit on change (inline above);
+    // the search box submits on a short debounce so typing isn't interrupted,
+    // and focus + caret are restored after the reload.
+    let searchTimer = null;
+    function onSearchInput() {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        try { sessionStorage.setItem('focusSearch', '1'); } catch (e) {}
+        document.getElementById('filter-form').requestSubmit();
+      }, 400);
+    }
+    (function restoreSearchFocus() {
+      let flag = null;
+      try { flag = sessionStorage.getItem('focusSearch'); sessionStorage.removeItem('focusSearch'); } catch (e) {}
+      if (flag) {
+        const el = document.getElementById('q-input');
+        if (el) { el.focus(); const v = el.value; el.value = ''; el.value = v; }
+      }
+    })();
+  </script>
+  <div style="margin-top: 10px;">
+    <a class="meta" href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for t in topic %}&topic={{ t }}{% endfor %}&region={{ region }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ 0 if show_hidden else 1 }}">
+      {{ "Hide" if show_hidden else "Show" }} below-threshold matches (score &lt; {{ threshold }})</a>
+  </div>
+</div>
+
+{% if in_progress %}
+<h2>In progress</h2>
+{% for c, state in in_progress %}
+<div class="card tight item">
+  <div class="row center">
+    <div class="grow">
+      <a class="item-title" href="/video/{{ c.id }}">{{ c.title }}</a>
+      <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}</div>
+    </div>
+    <div class="btn-group">
+      {% if state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
+      {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
+      {% elif state.current == "trim" %}<span class="badge score-lo">ready to trim</span>
+      {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
+      <a class="btn sm" href="/video/{{ c.id }}">Continue →</a>
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+
+<h2>{{ "Results" if filtering else "New matches" }}
+  ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})</h2>
+{% if date_defaulted %}
+  <div class="meta" style="margin: -6px 0 12px;">Showing today + yesterday by publish date.
+    <a href="/?status=new{{ '&show_hidden=1' if show_hidden else '' }}">Show all dates</a></div>
+{% endif %}
+{% if total_matches > candidates|length %}
+  <div class="meta" style="margin: -6px 0 12px;">Showing the top {{ row_cap }} by score and recency.
+    Narrow with filters above to see the rest.</div>
+{% endif %}
+{% if not candidates %}
+  <div class="empty">
+    <span class="icon">◎</span>
+    {% if filtering %}
+      <strong>No videos match these filters</strong>
+      Try broadening the search or <a href="/">clearing filters</a>.
+    {% else %}
+      <strong>No new matches</strong>
+      Run the monitor above, or check back later.
+    {% endif %}
+  </div>
+{% endif %}
+
+{% for c in candidates %}
+<div class="vrow">
+  <div class="vinfo">
+    <a class="item-title" href="/video/{{ c.id }}"
+       {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>{{ c.title }}</a>
+    <div class="meta vmeta">
+      {% if c.relevance_score is not none %}
+        <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}">
+          {{ "%.2f"|format(c.relevance_score) }}</span>
+      {% endif %}
+      {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
+      {% if c.status != "new" %}<span class="badge">{{ c.status }}</span>{% endif %}
+      <span>{{ c.channel.call_sign }} · {{ c.channel.market }} ·
+        {{ c.published_at.strftime("%b %-d %H:%M") if c.published_at else "?" }}
+        {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
+    </div>
+  </div>
+  <a class="filmstrip mini" data-cid="{{ c.id }}" href="/video/{{ c.id }}" title="Open video"></a>
+  <div class="btn-group vactions">
+    {% if c.status == "new" %}
+      <a class="btn primary sm" href="/video/{{ c.id }}">Review →</a>
+      <form class="inline" method="post" action="/video/{{ c.id }}/reject">
+        <button class="reject sm" title="Reject">✕</button></form>
+    {% else %}
+      <a class="btn sm" href="/video/{{ c.id }}">Open →</a>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+
+<script>
+// Lazy-load mini filmstrips as rows scroll into view, max 2 fetches at a
+// time (uncached storyboards trigger a yt-dlp metadata extraction).
+const TILE_W = 64, TILE_GAP = 3;
+const stripQueue = [];
+let stripActive = 0;
+
+function pumpStrips() {
+  while (stripActive < 2 && stripQueue.length) {
+    stripActive++;
+    loadStrip(stripQueue.shift()).finally(() => { stripActive--; pumpStrips(); });
+  }
+}
+
+async function loadStrip(strip) {
+  try {
+    const r = await fetch(`/video/${strip.dataset.cid}/storyboard`);
+    const sb = await r.json();
+    if (!sb.available || !sb.fragments || !sb.fragments.length) return;
+
+    const cols = sb.columns, rows = sb.rows;
+    const tw = sb.tile_width, th = sb.tile_height;
+    const perSheet = cols * rows;
+    const tiles = [];
+    let t = 0;
+    for (const frag of sb.fragments) {
+      const dur = (frag.duration || 0) / perSheet;
+      for (let i = 0; i < perSheet; i++) {
+        tiles.push({ url: frag.url, index: i, time: t });
+        t += dur;
+      }
+    }
+    if (!tiles.length) return;
+
+    // Representative sample: as many evenly-spaced frames as fit the strip.
+    const count = Math.max(3, Math.floor((strip.clientWidth + TILE_GAP) / (TILE_W + TILE_GAP)));
+    const seen = new Set();
+    const picks = [];
+    for (let k = 0; k < count; k++) {
+      const i = Math.round(k * (tiles.length - 1) / Math.max(count - 1, 1));
+      if (!seen.has(i)) { seen.add(i); picks.push(tiles[i]); }
+    }
+
+    const scale = TILE_W / tw;
+    const h = Math.round(th * scale);
+    for (const tile of picks) {
+      const col = tile.index % cols, row = Math.floor(tile.index / cols);
+      const m = Math.floor(tile.time / 60), s = Math.floor(tile.time % 60);
+      const cell = document.createElement('div');
+      cell.title = `${m}:${String(s).padStart(2, '0')}`;
+      cell.style.cssText = `flex:0 0 auto;width:${TILE_W}px;height:${h}px;border-radius:4px;
+        background-image:url('${tile.url.replace(/'/g, "%27")}');
+        background-position:-${Math.round(col * tw * scale)}px -${Math.round(row * th * scale)}px;
+        background-size:${Math.round(cols * tw * scale)}px ${Math.round(rows * th * scale)}px;`;
+      strip.appendChild(cell);
+    }
+    strip.classList.add('loaded');
+  } catch (e) { /* storyboard unavailable — placeholder stays */ }
+}
+
+const stripObserver = new IntersectionObserver((entries) => {
+  for (const en of entries) {
+    if (en.isIntersecting) {
+      stripObserver.unobserve(en.target);
+      stripQueue.push(en.target);
+      pumpStrips();
+    }
+  }
+}, { rootMargin: '300px' });
+document.querySelectorAll('.filmstrip.mini').forEach(el => stripObserver.observe(el));
+</script>
+{% endblock %}

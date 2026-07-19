@@ -1,0 +1,525 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="meta" style="margin-bottom: 10px;"><a href="/">← Dashboard</a></div>
+<div style="display: flex; gap: 16px; align-items: flex-start;">
+  <h1 style="margin-bottom: 4px; flex: 1;">{{ c.title }}</h1>
+  {% if c.status != "rejected" %}
+    <form method="post" action="/video/{{ c.id }}/reject"
+          onsubmit="return confirm({{ 'Reject this clip? It was already downloaded — the file stays on disk but the clip leaves your workflow. You can find it later with the Rejected status filter.' | tojson if state.scraped else 'Reject this clip?' | tojson }});">
+      <button class="reject sm" title="Reject this clip and remove it from the workflow">✕ Reject clip</button>
+    </form>
+  {% else %}
+    <form method="post" action="/video/{{ c.id }}/unreject">
+      <button class="sm" title="Restore this rejected clip to the workflow">↩ Un-reject</button>
+    </form>
+  {% endif %}
+</div>
+<div class="meta" style="margin-bottom: 18px;">
+  {{ c.channel.call_sign }} · {{ c.channel.market }} ·
+  {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
+  {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
+  · <a href="{{ c.url }}" target="_blank">YouTube ↗</a>
+  {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>{% endif %}
+</div>
+
+{# ---- Workflow stepper ---- #}
+<div class="steps">
+  <a class="step {{ 'done' if state.reviewed }} {{ 'current' if step == 'review' }}"
+     href="/video/{{ c.id }}?step=review"><span class="n">{{ "✓" if state.reviewed else "1" }}</span> Review</a>
+  <span class="sep">›</span>
+  <a class="step {{ 'done' if state.scraped }} {{ 'current' if step == 'scrape' }} {{ 'locked' if not state.reviewed }}"
+     href="/video/{{ c.id }}?step=scrape"><span class="n">{{ "✓" if state.scraped else "2" }}</span> Scrape &amp; Transcribe</a>
+  <span class="sep">›</span>
+  <a class="step {{ 'done' if state.trimmed }} {{ 'current' if step == 'trim' }} {{ 'locked' if not state.scraped }}"
+     href="/video/{{ c.id }}?step=trim"><span class="n">{{ "✓" if state.trimmed else "3" }}</span> Trim</a>
+  <span class="sep">›</span>
+  <a class="step {{ 'done' if state.posted }} {{ 'current' if step == 'post' }} {{ 'locked' if not state.scraped }}"
+     href="/video/{{ c.id }}?step=post"><span class="n">{{ "✓" if state.posted else "4" }}</span> Post</a>
+</div>
+
+{# ============ STEP 1: REVIEW ============ #}
+{% if step == "review" %}
+<div class="row">
+  <div style="width: 560px; max-width: 100%;">
+    <iframe class="yt" src="https://www.youtube-nocookie.com/embed/{{ c.video_id }}"
+      allow="encrypted-media; picture-in-picture" allowfullscreen></iframe>
+  </div>
+  <div class="grow stack-sm">
+    <div class="badges">
+      {% if c.relevance_score is not none %}
+        <span class="badge score-hi">score {{ "%.2f"|format(c.relevance_score) }}</span>
+      {% endif %}
+      {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
+      <span class="badge">{{ c.status }}</span>
+    </div>
+    <div class="meta">Keywords: <span class="kw">{{ c.matched_keywords }}</span></div>
+    {% if c.relevance_rationale %}<div class="meta">{{ c.relevance_rationale }}</div>{% endif %}
+    {% if c.description %}
+      <details style="margin: 8px 0;"><summary>Description</summary>
+        <div class="meta">{{ c.description[:1500] }}</div></details>
+    {% endif %}
+    <div class="btn-group" style="margin-top: 14px;">
+      {% if c.status in ("new", "rejected") %}
+        <form class="inline" method="post" action="/video/{{ c.id }}/approve">
+          <button class="approve">Approve — download &amp; transcribe →</button></form>
+        {% if c.status == "new" %}
+        <form class="inline" method="post" action="/video/{{ c.id }}/reject">
+          <button class="reject">Reject</button></form>
+        {% endif %}
+      {% else %}
+        <span class="meta">Approved {{ c.approved_at.strftime("%b %-d %H:%M") if c.approved_at else "" }} —
+          continue to <a href="/video/{{ c.id }}?step={{ state.current }}">{{ state.current }}</a></span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ============ STEP 2: SCRAPE & TRANSCRIBE ============ #}
+{% if step == "scrape" %}
+<div class="card">
+  {% if c.status == "approved" %}
+    <div id="scrape-wait">
+      <div class="badges" style="margin-bottom: 8px;">
+        <span class="badge info"><span class="dot"></span> downloading &amp; transcribing</span>
+      </div>
+      <div class="meta">Fetching captions, then downloading the full segment with
+        polite randomized delays. This page advances automatically when it's done.</div>
+      <div style="margin-top: 12px;" class="meta" id="scrape-dots">working…</div>
+    </div>
+    <script>
+      let dots = 0;
+      setInterval(async () => {
+        dots = (dots + 1) % 4;
+        document.getElementById('scrape-dots').textContent = 'working' + '.'.repeat(dots + 1);
+        const r = await fetch('/video/{{ c.id }}/status');
+        const s = await r.json();
+        if (s.status === 'archived') window.location = '/video/{{ c.id }}?step=trim&msg=Download complete — ready to trim';
+        if (s.status === 'failed') window.location = '/video/{{ c.id }}?step=scrape';
+      }, 3000);
+    </script>
+  {% elif c.status == "failed" %}
+    <div class="badges" style="margin-bottom: 8px;"><span class="badge hostile">scrape failed</span></div>
+    <div class="meta" style="margin-bottom: 12px;">{{ c.scrape_error }}</div>
+    <form class="inline" method="post" action="/video/{{ c.id }}/retry"><button class="primary">Retry download</button></form>
+  {% elif c.status == "archived" %}
+    <div class="badges" style="margin-bottom: 10px;"><span class="badge supportive">download complete</span></div>
+    <table>
+      <tr><th style="width: 150px;">Video file</th><td><code>{{ c.local_video_path }}</code></td></tr>
+      <tr><th>Transcript</th><td><code>{{ c.transcript_path }}</code> ({{ c.transcription_method }})</td></tr>
+      {% if c.suggested_highlight %}
+      <tr><th>Suggested highlight <span class="badge score-lo">draft</span></th><td>{{ c.suggested_highlight }}</td></tr>
+      {% endif %}
+    </table>
+    <div style="margin-top: 16px;"><a class="btn approve" href="/video/{{ c.id }}?step=trim">Continue to Trim →</a></div>
+  {% else %}
+    <span class="meta">Not approved yet — go back to <a href="/video/{{ c.id }}?step=review">Review</a>.</span>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ============ STEP 3: TRIM ============ #}
+{% if step == "trim" %}
+{% if not state.scraped %}
+  <div class="empty"><strong>Nothing to trim yet</strong>The video hasn't been downloaded.</div>
+{% else %}
+<div class="row">
+  <div style="flex: 1.4; min-width: 420px;">
+    <video id="player" src="/media/source/{{ c.id }}" controls preload="metadata"></video>
+  </div>
+  <div style="flex: 1; min-width: 320px;">
+    <div class="transcript-box" id="transcript-box" title="Click a line to jump">
+      {% for s in transcript_segments %}
+        <div class="tline" onclick="seek({{ s.start }})">
+          <span class="ts">{{ "%d:%02d"|format(s.start // 60, s.start % 60) }}</span>{{ s.text }}</div>
+      {% else %}
+        <div class="meta">No transcript segments found.</div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{# Waveform scrubber spans the full width of player + transcript. #}
+<div style="margin-top: 14px; position: relative;">
+  <canvas id="wave"></canvas>
+  <div class="meta" id="wave-hint" style="position: absolute; inset: 0; display: flex;
+       align-items: center; justify-content: center; pointer-events: none;">loading waveform…</div>
+</div>
+
+<div class="btn-group" style="margin-top: 12px;">
+  <span class="badge info" id="cur-time" style="font-family: var(--mono); min-width: 64px; justify-content: center;">0:00.0</span>
+  <button type="button" class="sm" onclick="setStart()">⇤ Set start</button>
+  <button type="button" class="sm" onclick="setEnd()">Set end ⇥</button>
+  <span class="meta" id="pending-range">start: — · end: —</span>
+  <button type="button" class="primary sm" onclick="addSegment()">＋ Add segment</button>
+</div>
+<div class="meta" style="margin-top: 6px;">Click or drag the waveform to scrub. Drag a red start/end line to
+  fine-tune it — dropping the start line plays from that moment. Green bands are segments already in the cut list.</div>
+{% if c.suggested_highlight %}
+  <div class="meta" style="margin-top: 10px;">💡 Suggested highlight <span class="badge score-lo">draft</span>:
+    {{ c.suggested_highlight }}</div>
+{% endif %}
+
+<h2>Cut list</h2>
+<div id="segments"></div>
+<div class="meta" id="total-len" style="margin: 6px 0;"></div>
+<div class="btn-group" style="margin-top: 8px;">
+  <button type="button" class="sm" id="preview-all-btn" onclick="togglePreviewAll()">▶ Preview supercut</button>
+  <span class="meta">Plays only your selected segments, back to back, exactly as they'll be joined — no export.</span>
+</div>
+<form method="post" action="/video/{{ c.id }}/export" onsubmit="return prepExport(this)">
+  <input type="hidden" name="segments_json" value="">
+  <div class="btn-group" style="margin-top: 8px;">
+    <button class="approve">Export {{ "new " if state.trimmed }}clip →</button>
+    <span class="meta">Segments are joined in order into one video.</span>
+  </div>
+</form>
+{% if state.trimmed %}
+  <div class="meta" style="margin-top: 10px;">A clip was already exported —
+    <a href="/video/{{ c.id }}?step=post">continue to Post</a> or export again to replace it.</div>
+{% endif %}
+
+<script>
+const player = document.getElementById('player');
+let pending = { start: null, end: null };
+let segments = {{ saved_segments | tojson }};
+
+const fmt = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+player.addEventListener('timeupdate', () =>
+  document.getElementById('cur-time').textContent = fmt(player.currentTime));
+
+// Keep the transcript exactly as tall as the video player (no dead space).
+function sizeTranscript() {
+  const box = document.getElementById('transcript-box');
+  if (box && player.clientHeight > 100) {
+    box.style.height = player.clientHeight + 'px';
+    box.style.maxHeight = 'none';
+  }
+}
+player.addEventListener('loadedmetadata', sizeTranscript);
+window.addEventListener('resize', sizeTranscript);
+sizeTranscript();
+
+function seek(t) { cancelPlayback(); player.currentTime = t; player.play(); }
+function setStart() { pending.start = player.currentTime; renderPending(); }
+function setEnd() { pending.end = player.currentTime; renderPending(); }
+function renderPending() {
+  document.getElementById('pending-range').textContent =
+    `start: ${pending.start === null ? '—' : fmt(pending.start)} · end: ${pending.end === null ? '—' : fmt(pending.end)}`;
+  drawWave();
+}
+function addSegment() {
+  if (pending.start === null || pending.end === null) { alert('Set both start and end first.'); return; }
+  if (pending.end - pending.start < 0.5) { alert('Segment must be at least 0.5s.'); return; }
+  segments.push({ start: +pending.start.toFixed(2), end: +pending.end.toFixed(2) });
+  pending = { start: null, end: null };
+  renderPending(); renderSegments();
+}
+function removeSegment(i) { segments.splice(i, 1); renderSegments(); }
+function moveSegment(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= segments.length) return;
+  [segments[i], segments[j]] = [segments[j], segments[i]];
+  renderSegments();
+}
+// ---- Segment playback (single preview + full supercut preview) ----
+// playback = { segs: [{start,end},...], idx } while sequentially playing only
+// the selected ranges; null when the player is free/scrubbing.
+let playback = null;
+
+function setPreviewBtn(active) {
+  const btn = document.getElementById('preview-all-btn');
+  if (btn) btn.textContent = active ? '■ Stop preview' : '▶ Preview supercut';
+}
+function playSegments(segs) {
+  segs = segs.filter(s => s.end > s.start);
+  if (!segs.length) return;
+  playback = { segs, idx: 0 };
+  setPreviewBtn(true);
+  player.currentTime = segs[0].start;
+  player.play();
+}
+function stopPlayback() { if (playback) { playback = null; setPreviewBtn(false); player.pause(); } }
+function cancelPlayback() { if (playback) { playback = null; setPreviewBtn(false); } }
+
+function previewSegment(i) { playSegments([{ ...segments[i] }]); }
+function togglePreviewAll() {
+  if (playback) { stopPlayback(); return; }
+  if (!segments.length) { alert('Add at least one segment first.'); return; }
+  playSegments(segments.map(s => ({ ...s })));
+}
+
+// Advance through the segment list, jumping to each next in-point at its end.
+player.addEventListener('timeupdate', () => {
+  if (!playback) return;
+  const seg = playback.segs[playback.idx];
+  if (player.currentTime >= seg.end - 0.02) {
+    playback.idx++;
+    if (playback.idx >= playback.segs.length) stopPlayback();
+    else player.currentTime = playback.segs[playback.idx].start;
+  }
+});
+
+// ---- Waveform editor ----
+const wave = document.getElementById('wave');
+const wctx = wave.getContext('2d');
+let wf = null;   // {peaks: [...], duration}
+
+async function loadWave() {
+  try {
+    const r = await fetch('/video/{{ c.id }}/waveform');
+    if (!r.ok) throw new Error('waveform unavailable');
+    wf = await r.json();
+    document.getElementById('wave-hint').style.display = 'none';
+    sizeWave();
+    drawWave();
+  } catch (e) {
+    document.getElementById('wave-hint').textContent = 'waveform unavailable';
+  }
+}
+
+function sizeWave() {
+  const dpr = window.devicePixelRatio || 1;
+  wave.width = wave.clientWidth * dpr;
+  wave.height = wave.clientHeight * dpr;
+}
+window.addEventListener('resize', () => { sizeWave(); drawWave(); });
+
+const duration = () => (wf && wf.duration) || player.duration || 1;
+const xOf = t => (t / duration()) * wave.width;
+
+function drawWave() {
+  if (!wf) return;
+  const W = wave.width, H = wave.height, mid = H / 2;
+  const css = getComputedStyle(document.documentElement);
+  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(126,140,154,0.55)';
+  const gridColor = css.getPropertyValue('--wave-grid').trim() || 'rgba(126,140,154,0.25)';
+  wctx.clearRect(0, 0, W, H);
+
+  // Cut-list segments: green translucent bands behind the bars.
+  wctx.fillStyle = 'rgba(62,207,142,0.18)';
+  for (const s of segments) wctx.fillRect(xOf(s.start), 0, xOf(s.end) - xOf(s.start), H);
+
+  // Pending range shading.
+  if (pending.start !== null && pending.end !== null && pending.end > pending.start) {
+    wctx.fillStyle = 'rgba(239,112,112,0.15)';
+    wctx.fillRect(xOf(pending.start), 0, xOf(pending.end) - xOf(pending.start), H);
+  }
+
+  // Peak bars, colored green inside cut-list segments.
+  const n = wf.peaks.length, barW = W / n;
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * duration();
+    const inSeg = segments.some(s => t >= s.start && t <= s.end);
+    wctx.fillStyle = inSeg ? 'rgba(62,207,142,0.85)' : barColor;
+    const h = Math.max(1, wf.peaks[i] * (H * 0.86));
+    wctx.fillRect(i * barW, mid - h / 2, Math.max(1, barW * 0.7), h);
+  }
+
+  // Time gridlines every 30s.
+  wctx.fillStyle = gridColor;
+  wctx.font = `${10 * (window.devicePixelRatio || 1)}px sans-serif`;
+  for (let t = 30; t < duration(); t += 30) {
+    wctx.fillRect(xOf(t), 0, 1, H);
+    wctx.fillText(`${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`, xOf(t) + 3, H - 4);
+  }
+
+  // Red marker lines for pending start / end.
+  wctx.fillStyle = '#ef7070';
+  for (const t of [pending.start, pending.end]) {
+    if (t === null) continue;
+    wctx.fillRect(xOf(t) - 1, 0, 3, H);
+  }
+
+  // Playhead.
+  wctx.fillStyle = '#5aa9f0';
+  wctx.fillRect(xOf(player.currentTime) - 1, 0, 2, H);
+}
+
+// Smooth playhead while playing.
+(function tick() { drawWave(); requestAnimationFrame(tick); })();
+
+// Pointer interaction: grab a red marker line to drag it, otherwise scrub.
+let dragging = null;  // 'start' | 'end' | 'scrub' | null
+const GRAB_PX = 8;    // css-pixel grab radius around a marker line
+
+function timeAt(e) {
+  const rect = wave.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  return frac * duration();
+}
+
+function markerAt(e) {
+  const rect = wave.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  let best = null, bestDist = GRAB_PX + 1;
+  for (const key of ['start', 'end']) {
+    if (pending[key] === null) continue;
+    const dist = Math.abs(x - (pending[key] / duration()) * rect.width);
+    if (dist <= GRAB_PX && dist < bestDist) { best = key; bestDist = dist; }
+  }
+  return best;
+}
+
+wave.addEventListener('pointerdown', e => {
+  cancelPlayback();
+  dragging = markerAt(e) || 'scrub';
+  try { wave.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
+  if (dragging === 'scrub') player.currentTime = timeAt(e);
+  else { pending[dragging] = timeAt(e); renderPending(); }
+});
+wave.addEventListener('pointermove', e => {
+  if (!dragging) {
+    wave.style.cursor = markerAt(e) ? 'ew-resize' : 'crosshair';
+    return;
+  }
+  if (dragging === 'scrub') player.currentTime = timeAt(e);
+  else { pending[dragging] = timeAt(e); renderPending(); }
+});
+wave.addEventListener('pointerup', () => {
+  // Dropping the start marker plays from there so you can verify the in-point.
+  if (dragging === 'start' && pending.start !== null) {
+    player.currentTime = pending.start;
+    player.play();
+  }
+  dragging = null;
+});
+
+// Space toggles play/pause anywhere on the trim screen (except while typing
+// in a field), so scrubbing + marker work never needs a trip to the player.
+document.addEventListener('keydown', e => {
+  if (e.code !== 'Space') return;
+  const el = document.activeElement;
+  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
+             || el.isContentEditable)) return;
+  e.preventDefault();
+  if (player.paused) player.play(); else player.pause();
+});
+
+loadWave();
+function renderSegments() {
+  const box = document.getElementById('segments');
+  box.innerHTML = segments.length ? '' : '<div class="meta">No segments yet — set start/end and add one.</div>';
+  segments.forEach((s, i) => {
+    const div = document.createElement('div');
+    div.className = 'seg-row';
+    div.innerHTML = `<strong>#${i + 1}</strong>
+      <input type="number" class="seg-num" step="0.1" min="0" value="${s.start.toFixed(1)}"
+             title="Start (seconds) — changing it plays from there"
+             onchange="updateSegment(${i}, 'start', this.value)">
+      <span class="meta">→</span>
+      <input type="number" class="seg-num" step="0.1" min="0" value="${s.end.toFixed(1)}"
+             title="End (seconds)" onchange="updateSegment(${i}, 'end', this.value)">
+      <span class="meta">s</span>
+      <span class="meta" id="seg-len-${i}">(${(s.end - s.start).toFixed(1)}s)</span>
+      <span style="margin-left:auto"></span>
+      <button type="button" title="Preview" onclick="previewSegment(${i})">▶</button>
+      <button type="button" title="Move up" onclick="moveSegment(${i},-1)">↑</button>
+      <button type="button" title="Move down" onclick="moveSegment(${i},1)">↓</button>
+      <button type="button" class="reject" title="Remove" onclick="removeSegment(${i})">✕</button>`;
+    box.appendChild(div);
+  });
+  updateTotal();
+  drawWave();
+}
+
+// Fine-tune a segment boundary from its number input (0.1s steps). Updates the
+// model in place (no re-render, so the input keeps focus for repeated ticks);
+// a changed start plays from that moment for verification, like marker drops.
+function updateSegment(i, key, val) {
+  let v = parseFloat(val);
+  if (isNaN(v)) return;
+  v = Math.max(0, Math.min(v, duration()));
+  segments[i][key] = +v.toFixed(1);
+  const lenEl = document.getElementById(`seg-len-${i}`);
+  if (lenEl) lenEl.textContent = `(${(segments[i].end - segments[i].start).toFixed(1)}s)`;
+  updateTotal();
+  drawWave();
+  if (key === 'start') { cancelPlayback(); player.currentTime = v; player.play(); }
+}
+
+function updateTotal() {
+  const total = segments.reduce((a, s) => a + (s.end - s.start), 0);
+  document.getElementById('total-len').textContent =
+    segments.length ? `Total clip length: ${total.toFixed(1)}s${total > 300 ? ' — Threads max is 300s' : ''}` : '';
+}
+function prepExport(form) {
+  if (!segments.length) { alert('Add at least one segment.'); return false; }
+  form.segments_json.value = JSON.stringify(segments);
+  return true;
+}
+renderSegments();
+</script>
+{% endif %}
+{% endif %}
+
+{# ============ STEP 4: POST ============ #}
+{% if step == "post" %}
+{% if not state.trimmed %}
+  <div class="empty"><strong>No exported clip yet</strong>
+    Do the <a href="/video/{{ c.id }}?step=trim">Trim</a> step first.</div>
+{% else %}
+<div class="row">
+  <div style="width: 420px; max-width: 100%;">
+    <video src="/media/clip/{{ c.id }}" controls preload="metadata"></video>
+    <div class="meta" style="margin-top: 8px;">Your exported clip. Re-trim any time to replace it.</div>
+  </div>
+  <div class="grow">
+    {% if not threads_ok %}
+      <div class="card">
+        <div class="card-title">Connect Threads first</div>
+        <p class="meta">1. <a href="{{ auth_url }}" target="_blank">Authorize with Threads ↗</a><br>
+           2. Copy the <code>code=</code> value from the redirect URL and paste it here.</p>
+        <form method="post" action="/threads/connect">
+          <input type="hidden" name="next" value="/video/{{ c.id }}?step=post">
+          <input type="text" name="code" placeholder="AQB..." required>
+          <div style="margin-top: 10px;"><button class="primary">Connect</button></div>
+        </form>
+      </div>
+    {% else %}
+      <form method="post" action="/video/{{ c.id }}/post"
+            onsubmit="return confirm('Post this clip to Threads now?')">
+        <label>Caption
+          <span class="badge score-lo" style="margin-left: 6px;">AI suggestion is a draft — edit freely</span></label>
+        <textarea name="caption" id="caption" required>{{ c.draft_caption }}</textarea>
+        <div class="btn-group" style="margin-top: 12px;">
+          <button type="button" class="primary" id="suggest-btn" onclick="suggestCaption()">
+            {{ "Regenerate" if c.draft_caption else "Suggest" }} caption</button>
+          <button class="approve">Confirm &amp; post to Threads</button>
+        </div>
+      </form>
+      <script>
+        async function suggestCaption() {
+          const btn = document.getElementById('suggest-btn');
+          btn.disabled = true; btn.textContent = 'Thinking…';
+          try {
+            const r = await fetch('/video/{{ c.id }}/suggest-caption', { method: 'POST' });
+            const d = await r.json();
+            if (d.caption) document.getElementById('caption').value = d.caption;
+            else alert(d.error || 'No caption returned');
+          } catch (e) { alert('Suggestion failed: ' + e); }
+          btn.disabled = false; btn.textContent = 'Regenerate caption';
+        }
+      </script>
+    {% endif %}
+
+    {% if posts %}
+      <h2>Posts from this video</h2>
+      <div class="table-wrap">
+      <table>
+        {% for p in posts %}
+        <tr>
+          <td class="meta">{{ p.published_at.strftime("%b %-d %H:%M") if p.published_at else "—" }}</td>
+          <td>{{ p.caption[:70] }}</td>
+          <td><span class="badge {{ 'supportive' if p.status == 'published' else 'hostile' }}">{{ p.status }}</span></td>
+          <td>{% if p.permalink %}<a href="{{ p.permalink }}" target="_blank">open ↗</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

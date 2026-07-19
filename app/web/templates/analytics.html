@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Analytics</h1>
+    <div class="sub">Post performance pulled from Threads, smoothed with a rolling 7-day average,
+      plus an LLM digest of what's working.</div>
+  </div>
+  <div class="actions">
+    <form class="inline" method="post" action="/analytics/snapshot">
+      <button class="primary">Pull latest metrics</button>
+    </form>
+  </div>
+</div>
+
+{% if not rows %}
+  <div class="empty"><span class="icon">▁▃▅</span><strong>No published posts yet</strong>
+    Metrics appear once you've posted clips or imported your Threads history.</div>
+{% else %}
+
+{# ---- KPI cards ---- #}
+<div class="kpi-grid">
+  <div class="kpi"><div class="kpi-label">Posts</div>
+    <div class="kpi-value">{{ summary.total_posts }}</div>
+    <div class="kpi-sub">{{ summary.posts_with_metrics }} with metrics</div></div>
+  <div class="kpi"><div class="kpi-label">Total views</div>
+    <div class="kpi-value">{{ "{:,}".format(summary.total_views) }}</div>
+    <div class="kpi-sub">{{ summary.avg_views if summary.avg_views is not none else "—" }} avg / post</div></div>
+  <div class="kpi"><div class="kpi-label">Total likes</div>
+    <div class="kpi-value">{{ "{:,}".format(summary.total_likes) }}</div>
+    <div class="kpi-sub">{{ summary.avg_likes if summary.avg_likes is not none else "—" }} avg / post</div></div>
+  <div class="kpi"><div class="kpi-label">Total replies</div>
+    <div class="kpi-value">{{ "{:,}".format(summary.total_replies) }}</div>
+    <div class="kpi-sub">{{ summary.avg_replies if summary.avg_replies is not none else "—" }} avg / post</div></div>
+  <div class="kpi"><div class="kpi-label">Reposts + quotes</div>
+    <div class="kpi-value">{{ "{:,}".format(summary.total_reposts + summary.total_quotes) }}</div>
+    <div class="kpi-sub">amplification</div></div>
+</div>
+
+{# ---- Engagement over time ---- #}
+<div class="chart-card">
+  <div class="chart-head">
+    <div class="card-title">Engagement over time</div>
+    <label class="meta">Metric
+      <select id="metric-select">
+        <option value="views">Views</option>
+        <option value="likes">Likes</option>
+        <option value="replies">Replies</option>
+        <option value="reposts">Reposts</option>
+        <option value="quotes">Quotes</option>
+        <option value="shares">Shares</option>
+      </select>
+    </label>
+  </div>
+  <div class="chart-wrap"><canvas id="engagementChart"></canvas></div>
+  <div class="meta" style="margin-top: 6px;">Bold line is the trailing 7-day average per post; faint points are each
+    day's average. Grouped by the day each post was published.</div>
+</div>
+
+{# ---- Posting cadence ---- #}
+<div class="chart-card">
+  <div class="chart-head"><div class="card-title">Posting cadence</div></div>
+  <div class="chart-wrap"><canvas id="cadenceChart"></canvas></div>
+  <div class="meta" style="margin-top: 6px;">Posts published per day (bars) with a 7-day rolling average (line).</div>
+</div>
+
+{% if digest %}
+<h2>Digest</h2>
+<pre class="digest">{{ digest }}</pre>
+{% endif %}
+
+{# ---- Attribute slices ---- #}
+<h2>Attribute slices <span class="meta">(correlational — small samples, read with care)</span></h2>
+<div class="slice-grid">
+{% for attr, groups in slices.items() %}
+  {% if groups %}
+  <div class="card">
+    <div class="card-title">{{ attr }}</div>
+    <table style="margin-top: 8px;">
+      <tr><th>value</th><th>posts</th><th>views</th><th>likes</th><th>replies</th></tr>
+      {% for key, s in groups.items() %}
+      <tr><td>{{ key }}</td><td>{{ s.n_posts }}</td>
+          <td>{{ s.views if s.views is not none else "—" }}</td>
+          <td>{{ s.likes if s.likes is not none else "—" }}</td>
+          <td>{{ s.replies if s.replies is not none else "—" }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+{% endfor %}
+</div>
+
+{# ---- Per-post table (collapsed) ---- #}
+<details style="margin-top: 20px;">
+  <summary><strong>All posts ({{ rows|length }})</strong></summary>
+  <div class="table-wrap" style="margin-top: 10px;">
+  <table>
+    <tr><th>Published</th><th>Caption</th><th>Topic</th><th>Region</th><th>Len (s)</th>
+        <th>Tone</th><th>Q?</th><th>Views</th><th>Likes</th><th>Replies</th><th>Reposts</th>
+        <th>Supportive</th><th>Hostile</th><th>Promo replies</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td class="meta" style="white-space: nowrap;">{{ r.published_at[:10] if r.published_at else "—" }} {{ r.day_of_week }} {{ r.hour_local }}h</td>
+      <td>{% if r.permalink %}<a href="{{ r.permalink }}" target="_blank">{{ r.caption[:60] }}</a>{% else %}{{ r.caption[:60] }}{% endif %}</td>
+      <td>{{ r.climate_topic or "—" }}</td>
+      <td>{{ r.region or "—" }}</td>
+      <td>{{ r.clip_length_seconds or "—" }}</td>
+      <td>{{ r.caption_tone or "—" }}</td>
+      <td>{{ "✓" if r.caption_has_question }}</td>
+      <td>{{ r.views if r.views is not none else "—" }}</td>
+      <td>{{ r.likes if r.likes is not none else "—" }}</td>
+      <td>{{ r.replies if r.replies is not none else "—" }}</td>
+      <td>{{ r.reposts if r.reposts is not none else "—" }}</td>
+      <td>{{ r.supportive_comments }}</td>
+      <td>{{ r.hostile_comments }}</td>
+      <td>{{ r.renewables_replies_posted }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+</details>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script>
+const TS = {{ timeseries | tojson }};
+const METRIC_LABELS = { views: 'Views', likes: 'Likes', replies: 'Replies',
+                        reposts: 'Reposts', quotes: 'Quotes', shares: 'Shares' };
+
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+if (window.Chart && TS.days && TS.days.length) {
+  const text = cssVar('--text-dim', '#b7c2cd');
+  const grid = cssVar('--border', '#27313d');
+  const accent = cssVar('--accent', '#3ecf8e');
+  const blue = '#5aa9f0';
+  Chart.defaults.color = text;
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+
+  const commonScales = {
+    x: { grid: { color: grid }, ticks: { color: text, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+    y: { grid: { color: grid }, ticks: { color: text }, beginAtZero: true },
+  };
+
+  // Engagement chart (metric-switchable).
+  const engCtx = document.getElementById('engagementChart');
+  const engChart = new Chart(engCtx, {
+    type: 'line',
+    data: {
+      labels: TS.days,
+      datasets: [
+        { label: '7-day avg / post', data: TS.metrics.views.rolling_7d,
+          borderColor: accent, backgroundColor: accent, borderWidth: 2.5,
+          tension: 0.3, pointRadius: 0, spanGaps: true },
+        { label: 'Daily avg / post', data: TS.metrics.views.daily_avg,
+          borderColor: blue, backgroundColor: blue, borderWidth: 0,
+          pointRadius: 3, pointHoverRadius: 5, showLine: false, spanGaps: false },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: text, usePointStyle: true } } },
+      scales: commonScales,
+    },
+  });
+
+  document.getElementById('metric-select').addEventListener('change', (e) => {
+    const m = e.target.value;
+    engChart.data.datasets[0].data = TS.metrics[m].rolling_7d;
+    engChart.data.datasets[1].data = TS.metrics[m].daily_avg;
+    engChart.data.datasets[0].label = `7-day avg ${METRIC_LABELS[m].toLowerCase()} / post`;
+    engChart.data.datasets[1].label = `Daily avg ${METRIC_LABELS[m].toLowerCase()} / post`;
+    engChart.update();
+  });
+
+  // Posting cadence: bars (posts/day) + rolling line.
+  new Chart(document.getElementById('cadenceChart'), {
+    type: 'bar',
+    data: {
+      labels: TS.days,
+      datasets: [
+        { type: 'bar', label: 'Posts / day', data: TS.posts_per_day,
+          backgroundColor: cssVar('--accent-soft', 'rgba(62,207,142,0.2)'),
+          borderColor: accent, borderWidth: 1 },
+        { type: 'line', label: '7-day avg', data: TS.rolling_posts_7d,
+          borderColor: blue, borderWidth: 2.5, tension: 0.3, pointRadius: 0 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: text, usePointStyle: true } } },
+      scales: commonScales,
+    },
+  });
+}
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,313 @@
+# Channel seed list: top-50 US market local TV news YouTube channels.
+# One entry per YouTube channel. Shared newsrooms that post to a single channel
+# (First Coast News, Action News Jax, KCAL/KCBS, Arizona's Family) appear once,
+# which is what deduplicates them. KDNL (St. Louis ABC) is omitted: no local
+# newscast / no channel.
+#
+# Fields:
+#   call_sign: station call sign(s)
+#   network:   network affiliation
+#   market:    Nielsen market name
+#   region:    coarse region tag used by analytics (editable)
+#   url:       YouTube channel URL (handle, /channel/, /c/, or /user/ form)
+#   channel_id: canonical UC... id. Leave blank; the app resolves and caches it.
+#   enabled:   set false to pause a channel without deleting it.
+#
+# You can edit this file by hand or use the Channels page in the dashboard.
+
+channels:
+  # 1. New York
+  - {call_sign: WABC, network: ABC, market: "New York", region: Northeast, url: "https://www.youtube.com/@abc7NY"}
+  - {call_sign: WNBC, network: NBC, market: "New York", region: Northeast, url: "https://www.youtube.com/@NBCNewYork"}
+  - {call_sign: WCBS, network: CBS, market: "New York", region: Northeast, url: "https://www.youtube.com/@CBSNewYork"}
+  - {call_sign: WNYW, network: FOX, market: "New York", region: Northeast, url: "https://www.youtube.com/@fox5ny"}
+
+  # 2. Los Angeles
+  - {call_sign: KABC, network: ABC, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@ABC7"}
+  - {call_sign: KNBC, network: NBC, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@nbcla"}
+  - {call_sign: KCAL/KCBS, network: CBS, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@KCALnews"}
+  - {call_sign: KTLA, network: IND/CW, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@KTLA"}
+
+  # 3. Chicago
+  - {call_sign: WLS, network: ABC, market: "Chicago", region: Midwest, url: "https://www.youtube.com/@abc7chicago"}
+  - {call_sign: WMAQ, network: NBC, market: "Chicago", region: Midwest, url: "https://www.youtube.com/@NBCChicago"}
+  - {call_sign: WBBM, network: CBS, market: "Chicago", region: Midwest, url: "https://www.youtube.com/@CBSChicago"}
+  - {call_sign: WFLD, network: FOX, market: "Chicago", region: Midwest, url: "https://www.youtube.com/@fox32chicago"}
+  - {call_sign: WGN, network: IND/CW, market: "Chicago", region: Midwest, url: "https://www.youtube.com/@wgntv"}
+
+  # 4. Philadelphia
+  - {call_sign: WPVI, network: ABC, market: "Philadelphia", region: Northeast, url: "https://www.youtube.com/@6abcActionNews"}
+  - {call_sign: WCAU, network: NBC, market: "Philadelphia", region: Northeast, url: "https://www.youtube.com/@NBC10Philadelphia"}
+  - {call_sign: KYW, network: CBS, market: "Philadelphia", region: Northeast, url: "https://www.youtube.com/@CBSPhiladelphia"}
+  - {call_sign: WTXF, network: FOX, market: "Philadelphia", region: Northeast, url: "https://www.youtube.com/@Fox29Philly"}
+
+  # 5. Dallas-Fort Worth
+  - {call_sign: WFAA, network: ABC, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@wfaa"}
+  - {call_sign: KXAS, network: NBC, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@nbcdfw"}
+  - {call_sign: KTVT, network: CBS, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@CBSTexas"}
+  - {call_sign: KDFW, network: FOX, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@fox4news"}
+
+  # 6. San Francisco-Oakland-San Jose
+  - {call_sign: KGO, network: ABC, market: "San Francisco", region: West Coast, url: "https://www.youtube.com/@abc7news"}
+  - {call_sign: KNTV, network: NBC, market: "San Francisco", region: West Coast, url: "https://www.youtube.com/@nbcbayarea"}
+  - {call_sign: KPIX, network: CBS, market: "San Francisco", region: West Coast, url: "https://www.youtube.com/@cbssf"}
+  - {call_sign: KTVU, network: FOX, market: "San Francisco", region: West Coast, url: "https://www.youtube.com/@KTVUFox2"}
+
+  # 7. Atlanta
+  - {call_sign: WSB, network: ABC, market: "Atlanta", region: Southeast, url: "https://www.youtube.com/@wsbtv"}
+  - {call_sign: WXIA, network: NBC, market: "Atlanta", region: Southeast, url: "https://www.youtube.com/@11Alive"}
+  - {call_sign: WAGA, network: FOX, market: "Atlanta", region: Southeast, url: "https://www.youtube.com/@fox5atlanta"}
+  - {call_sign: WANF, network: IND, market: "Atlanta", region: Southeast, url: "https://www.youtube.com/@AtlantaNewsFirst"}
+
+  # 8. Houston
+  - {call_sign: KTRK, network: ABC, market: "Houston", region: Gulf Coast, url: "https://www.youtube.com/@abc13houston"}
+  - {call_sign: KPRC, network: NBC, market: "Houston", region: Gulf Coast, url: "https://www.youtube.com/@KPRC2Click2Houston"}
+  - {call_sign: KHOU, network: CBS, market: "Houston", region: Gulf Coast, url: "https://www.youtube.com/@KHOU"}
+  - {call_sign: KRIV, network: FOX, market: "Houston", region: Gulf Coast, url: "https://www.youtube.com/@fox26houston"}
+
+  # 9. Washington, DC
+  - {call_sign: WJLA, network: ABC, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@7NewsDC"}
+  - {call_sign: WRC, network: NBC, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@nbcwashington"}
+  - {call_sign: WUSA, network: CBS, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@wusa9"}
+  - {call_sign: WTTG, network: FOX, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@fox5dc"}
+
+  # 10. Boston
+  - {call_sign: WCVB, network: ABC, market: "Boston", region: Northeast, url: "https://www.youtube.com/@WCVB"}
+  - {call_sign: WBTS, network: NBC, market: "Boston", region: Northeast, url: "https://www.youtube.com/@NBC10Boston"}
+  - {call_sign: WBZ, network: CBS, market: "Boston", region: Northeast, url: "https://www.youtube.com/@wbztv"}
+  - {call_sign: WFXT, network: FOX, market: "Boston", region: Northeast, url: "https://www.youtube.com/@Boston25News"}
+
+  # 11. Phoenix
+  - {call_sign: KNXV, network: ABC, market: "Phoenix", region: Southwest, url: "https://www.youtube.com/@abc15"}
+  - {call_sign: KPNX, network: NBC, market: "Phoenix", region: Southwest, url: "https://www.youtube.com/@12NewsAZ"}
+  - {call_sign: KPHO/KTVK, network: CBS/IND, market: "Phoenix", region: Southwest, url: "https://www.youtube.com/@azfamily"}
+  - {call_sign: KSAZ, network: FOX, market: "Phoenix", region: Southwest, url: "https://www.youtube.com/@Fox10Phoenix"}
+
+  # 12. Seattle-Tacoma
+  - {call_sign: KOMO, network: ABC, market: "Seattle", region: Pacific Northwest, url: "https://www.youtube.com/@komonews"}
+  - {call_sign: KING, network: NBC, market: "Seattle", region: Pacific Northwest, url: "https://www.youtube.com/@KING5Seattle"}
+  - {call_sign: KIRO, network: CBS, market: "Seattle", region: Pacific Northwest, url: "https://www.youtube.com/@kiro7"}
+  - {call_sign: KCPQ, network: FOX, market: "Seattle", region: Pacific Northwest, url: "https://www.youtube.com/@fox13seattle"}
+
+  # 13. Tampa-St. Petersburg
+  - {call_sign: WFLA, network: NBC, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@WFLANewsChannel8"}
+  - {call_sign: WFTS, network: ABC, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@abcactionnews"}
+  - {call_sign: WTSP, network: CBS, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@10TampaBay"}
+  - {call_sign: WTVT, network: FOX, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@FOX13TampaBay"}
+
+  # 14. Minneapolis-St. Paul
+  - {call_sign: KSTP, network: ABC, market: "Minneapolis", region: Midwest, url: "https://www.youtube.com/@KSTPTV"}
+  - {call_sign: KARE, network: NBC, market: "Minneapolis", region: Midwest, url: "https://www.youtube.com/@kare11"}
+  - {call_sign: WCCO, network: CBS, market: "Minneapolis", region: Midwest, url: "https://www.youtube.com/@wcco"}
+  - {call_sign: KMSP, network: FOX, market: "Minneapolis", region: Midwest, url: "https://www.youtube.com/@fox9"}
+
+  # 15. Detroit
+  - {call_sign: WXYZ, network: ABC, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@wxyztvdetroit"}
+  - {call_sign: WDIV, network: NBC, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@ClickOnDetroit"}
+  - {call_sign: WWJ, network: CBS, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@CBSDetroitWWJTV"}
+  - {call_sign: WJBK, network: FOX, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@FOX2Detroit"}
+
+  # 16. Denver
+  - {call_sign: KMGH, network: ABC, market: "Denver", region: Mountain West, url: "https://www.youtube.com/@Denver7"}
+  - {call_sign: KUSA, network: NBC, market: "Denver", region: Mountain West, url: "https://www.youtube.com/@9news"}
+  - {call_sign: KCNC, network: CBS, market: "Denver", region: Mountain West, url: "https://www.youtube.com/@cbscolorado"}
+  - {call_sign: KDVR, network: FOX, market: "Denver", region: Mountain West, url: "https://www.youtube.com/@fox31"}
+
+  # 17. Orlando-Daytona Beach
+  - {call_sign: WFTV, network: ABC, market: "Orlando", region: Southeast, url: "https://www.youtube.com/@wftv"}
+  - {call_sign: WESH, network: NBC, market: "Orlando", region: Southeast, url: "https://www.youtube.com/@WESH"}
+  - {call_sign: WKMG, network: CBS, market: "Orlando", region: Southeast, url: "https://www.youtube.com/@News6WKMG"}
+  - {call_sign: WOFL, network: FOX, market: "Orlando", region: Southeast, url: "https://www.youtube.com/@fox35"}
+
+  # 18. Miami-Fort Lauderdale
+  - {call_sign: WPLG, network: ABC, market: "Miami", region: Southeast, url: "https://www.youtube.com/@WPLGLocal10"}
+  - {call_sign: WTVJ, network: NBC, market: "Miami", region: Southeast, url: "https://www.youtube.com/@nbc6southflorida"}
+  - {call_sign: WFOR, network: CBS, market: "Miami", region: Southeast, url: "https://www.youtube.com/@CBSMiami"}
+  - {call_sign: WSVN, network: FOX, market: "Miami", region: Southeast, url: "https://www.youtube.com/@Wsvn7NewsMiami"}
+
+  # 19. Cleveland-Akron
+  - {call_sign: WEWS, network: ABC, market: "Cleveland", region: Midwest, url: "https://www.youtube.com/@news5cleveland"}
+  - {call_sign: WKYC, network: NBC, market: "Cleveland", region: Midwest, url: "https://www.youtube.com/@WKYCChannel3"}
+  - {call_sign: WOIO, network: CBS, market: "Cleveland", region: Midwest, url: "https://www.youtube.com/@Cleveland19News"}
+  - {call_sign: WJW, network: FOX, market: "Cleveland", region: Midwest, url: "https://www.youtube.com/@Fox8WJW"}
+
+  # 20. Sacramento-Stockton-Modesto
+  - {call_sign: KXTV, network: ABC, market: "Sacramento", region: West Coast, url: "https://www.youtube.com/@ABC10"}
+  - {call_sign: KCRA, network: NBC, market: "Sacramento", region: West Coast, url: "https://www.youtube.com/@KCRA"}
+  - {call_sign: KOVR, network: CBS, market: "Sacramento", region: West Coast, url: "https://www.youtube.com/@cbssacramento"}
+  - {call_sign: KTXL, network: FOX, market: "Sacramento", region: West Coast, url: "https://www.youtube.com/@fox40"}
+
+  # 21. Charlotte
+  - {call_sign: WSOC, network: ABC, market: "Charlotte", region: Southeast, url: "https://www.youtube.com/@WSOC"}
+  - {call_sign: WCNC, network: NBC, market: "Charlotte", region: Southeast, url: "https://www.youtube.com/@WCNC"}
+  - {call_sign: WBTV, network: CBS, market: "Charlotte", region: Southeast, url: "https://www.youtube.com/@WBTVNews"}
+  - {call_sign: WJZY, network: FOX, market: "Charlotte", region: Southeast, url: "https://www.youtube.com/@QueenCityNews"}
+
+  # 22. Portland, OR
+  - {call_sign: KATU, network: ABC, market: "Portland OR", region: Pacific Northwest, url: "https://www.youtube.com/@KATUNews"}
+  - {call_sign: KGW, network: NBC, market: "Portland OR", region: Pacific Northwest, url: "https://www.youtube.com/@KGWNews8"}
+  - {call_sign: KOIN, network: CBS, market: "Portland OR", region: Pacific Northwest, url: "https://www.youtube.com/@KOINLOCAL6"}
+  - {call_sign: KPTV, network: FOX, market: "Portland OR", region: Pacific Northwest, url: "https://www.youtube.com/@Fox12oregon"}
+
+  # 23. Raleigh-Durham
+  - {call_sign: WTVD, network: ABC, market: "Raleigh-Durham", region: Southeast, url: "https://www.youtube.com/@ABC11WTVD"}
+  - {call_sign: WRAL, network: NBC, market: "Raleigh-Durham", region: Southeast, url: "https://www.youtube.com/@WRAL5"}
+  - {call_sign: WNCN, network: CBS, market: "Raleigh-Durham", region: Southeast, url: "https://www.youtube.com/@CBS17"}
+  - {call_sign: WRAZ, network: FOX, market: "Raleigh-Durham", region: Southeast, url: "https://www.youtube.com/@FOX50WRAZ"}
+
+  # 24. St. Louis (KDNL/ABC omitted: no local newscast)
+  - {call_sign: KSDK, network: NBC, market: "St. Louis", region: Midwest, url: "https://www.youtube.com/@KSDK"}
+  - {call_sign: KMOV, network: CBS, market: "St. Louis", region: Midwest, url: "https://www.youtube.com/@KMOVStLouis"}
+  - {call_sign: KTVI, network: FOX, market: "St. Louis", region: Midwest, url: "https://www.youtube.com/@fox2stlouis"}
+
+  # 25. Indianapolis
+  - {call_sign: WTHR, network: NBC, market: "Indianapolis", region: Midwest, url: "https://www.youtube.com/@WTHR13News"}
+  - {call_sign: WTTV, network: CBS, market: "Indianapolis", region: Midwest, url: "https://www.youtube.com/@CBS4IndyWTTV"}
+  - {call_sign: WXIN, network: FOX, market: "Indianapolis", region: Midwest, url: "https://www.youtube.com/@wxintv"}
+  - {call_sign: WRTV, network: ABC, market: "Indianapolis", region: Midwest, url: "https://www.youtube.com/channel/UCfLYcp8eh4VAC8_BBRsHhFg"}
+  - {call_sign: WISH, network: CW, market: "Indianapolis", region: Midwest, url: "https://www.youtube.com/channel/UCKe4Fry0MyvT_SRrmn0_MiQ"}
+
+  # 26. Pittsburgh
+  - {call_sign: WTAE, network: ABC, market: "Pittsburgh", region: Mid-Atlantic, url: "https://www.youtube.com/@WTAE"}
+  - {call_sign: WPXI, network: NBC, market: "Pittsburgh", region: Mid-Atlantic, url: "https://www.youtube.com/@WPXI11News"}
+  - {call_sign: KDKA, network: CBS, market: "Pittsburgh", region: Mid-Atlantic, url: "https://www.youtube.com/@CBSPittsburgh"}
+
+  # 27. Nashville
+  - {call_sign: WKRN, network: ABC, market: "Nashville", region: Southeast, url: "https://www.youtube.com/c/WKRNTV"}
+  - {call_sign: WSMV, network: NBC, market: "Nashville", region: Southeast, url: "https://www.youtube.com/@WSMV4"}
+  - {call_sign: WTVF, network: CBS, market: "Nashville", region: Southeast, url: "https://www.youtube.com/@newschannel5"}
+  - {call_sign: WZTV, network: FOX, market: "Nashville", region: Southeast, url: "https://www.youtube.com/@fox17nashville-wztv54"}
+
+  # 28. Baltimore
+  - {call_sign: WMAR, network: ABC, market: "Baltimore", region: Mid-Atlantic, url: "https://www.youtube.com/@WMAR2news"}
+  - {call_sign: WBAL, network: NBC, market: "Baltimore", region: Mid-Atlantic, url: "https://www.youtube.com/@WBALTV11"}
+  - {call_sign: WJZ, network: CBS, market: "Baltimore", region: Mid-Atlantic, url: "https://www.youtube.com/@WJZ13TV"}
+  - {call_sign: WBFF, network: FOX, market: "Baltimore", region: Mid-Atlantic, url: "https://www.youtube.com/@FOXBaltimore"}
+
+  # 29. San Diego
+  - {call_sign: KGTV, network: ABC, market: "San Diego", region: West Coast, url: "https://www.youtube.com/@abc10news"}
+  - {call_sign: KNSD, network: NBC, market: "San Diego", region: West Coast, url: "https://www.youtube.com/@nbcsandiego"}
+  - {call_sign: KFMB, network: CBS, market: "San Diego", region: West Coast, url: "https://www.youtube.com/@cbs8sandiego"}
+  - {call_sign: KSWB, network: FOX, market: "San Diego", region: West Coast, url: "https://www.youtube.com/fox5sd"}
+
+  # 30. Salt Lake City
+  - {call_sign: KTVX, network: ABC, market: "Salt Lake City", region: Mountain West, url: "https://www.youtube.com/user/abc4utah"}
+  - {call_sign: KSL, network: NBC, market: "Salt Lake City", region: Mountain West, url: "https://www.youtube.com/@KSLNews"}
+  - {call_sign: KUTV, network: CBS, market: "Salt Lake City", region: Mountain West, url: "https://www.youtube.com/@KUTV2News"}
+  - {call_sign: KSTU, network: FOX, market: "Salt Lake City", region: Mountain West, url: "https://www.youtube.com/user/fox13newsutah"}
+
+  # 31. San Antonio
+  - {call_sign: KSAT, network: ABC, market: "San Antonio", region: Texas, url: "https://www.youtube.com/@KSATnews"}
+  - {call_sign: WOAI, network: NBC, market: "San Antonio", region: Texas, url: "https://www.youtube.com/channel/UCpsuSNiFkl4T4owtIb8QqWQ"}
+  - {call_sign: KENS, network: CBS, market: "San Antonio", region: Texas, url: "https://www.youtube.com/@kens5"}
+  - {call_sign: KABB, network: FOX, market: "San Antonio", region: Texas, url: "https://www.youtube.com/c/KABBFOXSanAntonio"}
+
+  # 32. Columbus, OH
+  - {call_sign: WSYX, network: ABC, market: "Columbus OH", region: Midwest, url: "https://www.youtube.com/@WSYXABC6"}
+  - {call_sign: WCMH, network: NBC, market: "Columbus OH", region: Midwest, url: "https://www.youtube.com/@wcmhnbc4columbus"}
+  - {call_sign: WBNS, network: CBS, market: "Columbus OH", region: Midwest, url: "https://www.youtube.com/@WBNS"}
+  - {call_sign: WTTE, network: FOX, market: "Columbus OH", region: Midwest, url: "https://www.youtube.com/@fox28columbus"}
+
+  # 33. Kansas City
+  - {call_sign: KMBC, network: ABC, market: "Kansas City", region: Plains, url: "https://www.youtube.com/@KMBC"}
+  - {call_sign: KSHB, network: NBC, market: "Kansas City", region: Plains, url: "https://www.youtube.com/@KSHB41"}
+  - {call_sign: KCTV, network: CBS, market: "Kansas City", region: Plains, url: "https://www.youtube.com/@kctv5"}
+  - {call_sign: WDAF, network: FOX, market: "Kansas City", region: Plains, url: "https://www.youtube.com/@fox4kc"}
+
+  # 34. Hartford-New Haven
+  - {call_sign: WTNH, network: ABC, market: "Hartford-New Haven", region: Northeast, url: "https://www.youtube.com/@WtnhNews8"}
+  - {call_sign: WVIT, network: NBC, market: "Hartford-New Haven", region: Northeast, url: "https://www.youtube.com/@nbcconnecticut"}
+  - {call_sign: WFSB, network: CBS, market: "Hartford-New Haven", region: Northeast, url: "https://www.youtube.com/@WFSB"}
+  - {call_sign: WTIC, network: FOX, market: "Hartford-New Haven", region: Northeast, url: "https://www.youtube.com/@FOX61News"}
+
+  # 35. Milwaukee
+  - {call_sign: WISN, network: ABC, market: "Milwaukee", region: Midwest, url: "https://www.youtube.com/@WISN"}
+  - {call_sign: WTMJ, network: NBC, market: "Milwaukee", region: Midwest, url: "https://www.youtube.com/@tmj4"}
+  - {call_sign: WDJT, network: CBS, market: "Milwaukee", region: Midwest, url: "https://www.youtube.com/@CBS58TV"}
+  - {call_sign: WITI, network: FOX, market: "Milwaukee", region: Midwest, url: "https://www.youtube.com/@fox6milwaukee"}
+
+  # 36. Cincinnati
+  - {call_sign: WCPO, network: ABC, market: "Cincinnati", region: Midwest, url: "https://www.youtube.com/@Wcpo9"}
+  - {call_sign: WLWT, network: NBC, market: "Cincinnati", region: Midwest, url: "https://www.youtube.com/@WLWT"}
+  - {call_sign: WKRC, network: CBS, market: "Cincinnati", region: Midwest, url: "https://www.youtube.com/@local12WKRC"}
+  - {call_sign: WXIX, network: FOX, market: "Cincinnati", region: Midwest, url: "https://www.youtube.com/@fox19now"}
+
+  # 37. Greenville-Spartanburg-Asheville
+  - {call_sign: WLOS, network: ABC, market: "Greenville-Spartanburg-Asheville", region: Southeast, url: "https://www.youtube.com/@ABC13Channel"}
+  - {call_sign: WYFF, network: NBC, market: "Greenville-Spartanburg-Asheville", region: Southeast, url: "https://www.youtube.com/@WYFFNews4"}
+  - {call_sign: WSPA, network: CBS, market: "Greenville-Spartanburg-Asheville", region: Southeast, url: "https://www.youtube.com/@WSPA_7NEWS"}
+  - {call_sign: WHNS, network: FOX, market: "Greenville-Spartanburg-Asheville", region: Southeast, url: "https://www.youtube.com/@FOXCarolinaNewsTV"}
+
+  # 38. Austin
+  - {call_sign: KVUE, network: ABC, market: "Austin", region: Texas, url: "https://www.youtube.com/@KVUETV"}
+  - {call_sign: KXAN, network: NBC, market: "Austin", region: Texas, url: "https://www.youtube.com/@kxan_news"}
+  - {call_sign: KEYE, network: CBS, market: "Austin", region: Texas, url: "https://www.youtube.com/@CBSAustin"}
+  - {call_sign: KTBC, network: FOX, market: "Austin", region: Texas, url: "https://www.youtube.com/@FOX7Austin"}
+
+  # 39. Las Vegas
+  - {call_sign: KTNV, network: ABC, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@KTNV"}
+  - {call_sign: KSNV, network: NBC, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@News3LasVegas"}
+  - {call_sign: KLAS, network: CBS, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@8NewsNOW"}
+  - {call_sign: KVVU, network: FOX, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@kvvutv"}
+
+  # 40. West Palm Beach-Fort Pierce
+  - {call_sign: WPBF, network: ABC, market: "West Palm Beach", region: Southeast, url: "https://www.youtube.com/@WPBF"}
+  - {call_sign: WPTV, network: NBC, market: "West Palm Beach", region: Southeast, url: "https://www.youtube.com/@wptv5"}
+  - {call_sign: WPEC, network: CBS, market: "West Palm Beach", region: Southeast, url: "https://www.youtube.com/@CBS12NewsWPEC"}
+
+  # 41. Grand Rapids-Kalamazoo
+  - {call_sign: WZZM, network: ABC, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@13onyourside"}
+  - {call_sign: WOOD, network: NBC, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@woodtv8"}
+  - {call_sign: WWMT, network: CBS, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@wwmtnews"}
+  - {call_sign: WXMI, network: FOX, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@Fox17onlineWXMI"}
+
+  # 42. Oklahoma City
+  - {call_sign: KOCO, network: ABC, market: "Oklahoma City", region: Plains, url: "https://www.youtube.com/@KOCO"}
+  - {call_sign: KFOR, network: NBC, market: "Oklahoma City", region: Plains, url: "https://www.youtube.com/@kfor4news"}
+  - {call_sign: KWTV, network: CBS, market: "Oklahoma City", region: Plains, url: "https://www.youtube.com/@OklahomasOwn"}
+  - {call_sign: KOKH, network: FOX, market: "Oklahoma City", region: Plains, url: "https://www.youtube.com/@foxokc"}
+
+  # 43. Harrisburg-Lancaster-York
+  - {call_sign: WHTM, network: ABC, market: "Harrisburg", region: Mid-Atlantic, url: "https://www.youtube.com/@WHTMabc27News"}
+  - {call_sign: WGAL, network: NBC, market: "Harrisburg", region: Mid-Atlantic, url: "https://www.youtube.com/@WGAL"}
+  - {call_sign: WHP, network: CBS, market: "Harrisburg", region: Mid-Atlantic, url: "https://www.youtube.com/@CBS21News"}
+  - {call_sign: WPMT, network: FOX, market: "Harrisburg", region: Mid-Atlantic, url: "https://www.youtube.com/@fox43"}
+
+  # 44. Birmingham
+  - {call_sign: WBMA, network: ABC, market: "Birmingham", region: Southeast, url: "https://www.youtube.com/c/abc3340"}
+  - {call_sign: WVTM, network: NBC, market: "Birmingham", region: Southeast, url: "https://www.youtube.com/c/WVTM13News"}
+  - {call_sign: WIAT, network: CBS, market: "Birmingham", region: Southeast, url: "https://www.youtube.com/@CBS42"}
+  - {call_sign: WBRC, network: FOX, market: "Birmingham", region: Southeast, url: "https://www.youtube.com/@WBRC6NewsOnYourSide"}
+
+  # 45. Norfolk-Portsmouth-Newport News
+  - {call_sign: WVEC, network: ABC, market: "Norfolk", region: Mid-Atlantic, url: "https://www.youtube.com/@WVECTelevisionInc"}
+  - {call_sign: WAVY, network: NBC, market: "Norfolk", region: Mid-Atlantic, url: "https://www.youtube.com/@wavy"}
+  - {call_sign: WTKR, network: CBS, market: "Norfolk", region: Mid-Atlantic, url: "https://www.youtube.com/@WTKR3"}
+  - {call_sign: WVBT, network: FOX, market: "Norfolk", region: Mid-Atlantic, url: "https://www.youtube.com/@myfoxhamptonroads"}
+
+  # 46. Greensboro-High Point-Winston Salem
+  - {call_sign: WXLV, network: ABC, market: "Greensboro", region: Southeast, url: "https://www.youtube.com/@WXLV-TV"}
+  - {call_sign: WXII, network: NBC, market: "Greensboro", region: Southeast, url: "https://www.youtube.com/user/WXIItv"}
+  - {call_sign: WFMY, network: CBS, market: "Greensboro", region: Southeast, url: "https://www.youtube.com/@wfmynews2910"}
+  - {call_sign: WGHP, network: FOX, market: "Greensboro", region: Southeast, url: "https://www.youtube.com/@myfox8"}
+
+  # 47. Albuquerque-Santa Fe
+  - {call_sign: KOAT, network: ABC, market: "Albuquerque", region: Southwest, url: "https://www.youtube.com/@KOAT"}
+  - {call_sign: KOB, network: NBC, market: "Albuquerque", region: Southwest, url: "https://www.youtube.com/@KOB4"}
+  - {call_sign: KRQE, network: CBS, market: "Albuquerque", region: Southwest, url: "https://www.youtube.com/@KRQE"}
+
+  # 48. Louisville
+  - {call_sign: WHAS, network: ABC, market: "Louisville", region: Southeast, url: "https://www.youtube.com/@WHAS11News"}
+  - {call_sign: WAVE, network: NBC, market: "Louisville", region: Southeast, url: "https://www.youtube.com/@wave3newstv"}
+  - {call_sign: WLKY, network: CBS, market: "Louisville", region: Southeast, url: "https://www.youtube.com/@WLKY"}
+  - {call_sign: WDRB, network: FOX, market: "Louisville", region: Southeast, url: "https://www.youtube.com/@WDRBNewsOfficial"}
+
+  # 49. Jacksonville (shared newsrooms: one channel covers two stations each)
+  - {call_sign: WTLV/WJXX, network: NBC/ABC, market: "Jacksonville", region: Southeast, url: "https://www.youtube.com/@FirstCoastNews"}
+  - {call_sign: WJAX/WFOX, network: CBS/FOX, market: "Jacksonville", region: Southeast, url: "https://www.youtube.com/@ActionNewsJax"}
+
+  # 50. Memphis
+  - {call_sign: WATN, network: ABC, market: "Memphis", region: Southeast, url: "https://www.youtube.com/@ABC24Memphis"}
+  - {call_sign: WMC, network: NBC, market: "Memphis", region: Southeast, url: "https://www.youtube.com/@ActionNews5"}
+  - {call_sign: WREG, network: CBS, market: "Memphis", region: Southeast, url: "https://www.youtube.com/@Wreg3"}
+  - {call_sign: WHBQ, network: FOX, market: "Memphis", region: Southeast, url: "https://www.youtube.com/@WHBQTVFOX13Memphis"}

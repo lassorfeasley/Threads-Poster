@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Keywords ({{ keywords|length }})</h1>
+    <div class="sub">Case-insensitive whole-word/phrase filter on every new upload's title and description.
+      Hits are then LLM-scored for genuine climate relevance, so it's fine to keep this list inclusive.
+      Changes apply on the next monitor run.</div>
+  </div>
+</div>
+
+<div class="card tight">
+  <form method="post" action="/keywords/add" id="add-form" style="display: flex; gap: 10px; align-items: center;">
+    <input type="text" name="keyword" id="kw-input" required autocomplete="off"
+           placeholder="Type to search or add… (e.g. microgrid)" style="max-width: 320px;"
+           oninput="filterKeywords()">
+    <button class="primary" id="add-btn">Add keyword</button>
+    <span class="meta" id="kw-status"></span>
+  </form>
+</div>
+
+<div class="card" style="display: flex; flex-wrap: wrap; gap: 8px;" id="kw-list">
+  {% for kw in keywords %}
+  <span class="kw-pill" data-term="{{ kw|lower }}">
+    <span class="term">{{ kw }}</span>
+    {% if hits.get(kw) %}<span class="hits" title="candidates matched">×{{ hits[kw] }}</span>{% endif %}
+    <form class="inline" method="post" action="/keywords/delete"
+          onsubmit="return confirm('Remove keyword: {{ kw }}?')">
+      <input type="hidden" name="keyword" value="{{ kw }}">
+      <button type="submit" title="Remove">✕</button>
+    </form>
+  </span>
+  {% endfor %}
+  <span class="meta" id="kw-empty" style="display: none;">No existing keyword matches — this will be added as new.</span>
+</div>
+
+<script>
+  const kwInput = document.getElementById('kw-input');
+  const pills = Array.from(document.querySelectorAll('#kw-list .kw-pill'));
+  function filterKeywords() {
+    const q = kwInput.value.trim().toLowerCase();
+    let visible = 0, exact = false;
+    for (const p of pills) {
+      const term = p.dataset.term;
+      const match = !q || term.includes(q);
+      p.style.display = match ? '' : 'none';
+      if (match) visible++;
+      if (term === q) exact = true;
+    }
+    document.getElementById('kw-empty').style.display = (q && visible === 0) ? 'inline' : 'none';
+    const btn = document.getElementById('add-btn');
+    const status = document.getElementById('kw-status');
+    if (exact) {
+      btn.disabled = true; btn.textContent = 'Already in list';
+      status.textContent = '“' + q + '” is already a keyword.';
+    } else {
+      btn.disabled = false; btn.textContent = 'Add keyword';
+      status.textContent = (q && visible) ? (visible + ' existing match' + (visible === 1 ? '' : 'es')) : '';
+    }
+  }
+</script>
+<p class="meta">×N = how many stored candidates matched that term so far — a quick read on which
+terms are pulling weight and which never fire. The list lives in <code>config/keywords.yaml</code>
+if you'd rather edit it by hand.</p>
+{% endblock %}

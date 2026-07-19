@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>Archive</h1>
+    <div class="sub">Downloaded videos with transcripts — pick up any of them where you left off.</div>
+  </div>
+</div>
+
+{% if not rows %}
+  <div class="empty">
+    <span class="icon">▤</span>
+    <strong>Nothing archived yet</strong>
+    Approve videos from the <a href="/">Dashboard</a> to download them.
+  </div>
+{% endif %}
+
+{% for c, state in rows %}
+<div class="card item">
+  <div class="row center">
+    <div class="grow stack-sm">
+      <a class="item-title" href="/video/{{ c.id }}">{{ c.title }}</a>
+      <div class="meta">
+        {{ c.channel.call_sign }} · {{ c.channel.market }} ·
+        archived {{ c.archived_at.strftime("%b %-d, %Y") if c.archived_at else "?" }} ·
+        transcript via {{ c.transcription_method or "?" }}
+      </div>
+      <div class="badges">
+        {% if state.posted %}<span class="badge supportive">posted</span>
+        {% elif state.trimmed %}<span class="badge info">clip exported — not posted</span>
+        {% else %}<span class="badge score-lo">not trimmed yet</span>{% endif %}
+        {% for t in c.climate_topic.split(",") if t %}<span class="badge">{{ t }}</span>{% endfor %}
+      </div>
+    </div>
+    <div>
+      <a class="btn {{ '' if state.posted else 'primary' }}" href="/video/{{ c.id }}?step={{ state.current }}">
+        {{ "Open" if state.posted else "Continue → " + state.current }}</a>
+    </div>
+  </div>
+  <details style="margin-top: 10px;"><summary>Files &amp; transcript</summary>
+    <table style="margin-top: 4px;">
+      <tr><th style="width: 140px;">Video file</th><td><code>{{ c.local_video_path }}</code></td></tr>
+      <tr><th>Transcript</th><td><code>{{ c.transcript_path }}</code></td></tr>
+      {% if c.trimmed_clip_path %}<tr><th>Exported clip</th><td><code>{{ c.trimmed_clip_path }}</code></td></tr>{% endif %}
+      <tr><th>Source</th><td><a href="{{ c.url }}" target="_blank">{{ c.url }}</a></td></tr>
+    </table>
+    {% if c.transcript_text %}
+      <pre class="digest" style="max-height: 280px; overflow-y: auto; margin-top: 10px;">{{ c.transcript_text }}</pre>
+    {% endif %}
+  </details>
+</div>
+{% endfor %}
+{% endblock %}
