@@ -1,0 +1,42 @@
+name: Threads scheduler
+
+# Runs one adaptive-scheduler tick (windows + breaking + metrics) so queued
+# posts publish even when the operator's machine is off. The tick is
+# idempotent: SchedulerState in Postgres tracks processed windows, and the
+# publish claim is atomic, so overlapping with a locally running dashboard
+# scheduler is safe.
+#
+# Schedule notes:
+# - GitHub cron is UTC only; posting windows are ET (10:00 / 14:30 / 19:00).
+#   The hour range below covers active hours (08:00-22:00 ET) in both EDT
+#   (UTC-4) and EST (UTC-5). Off-hours ticks exit in seconds.
+# - GitHub may delay scheduled runs by 5-15 minutes; the window logic
+#   catches up on the next tick, so drift only shifts a post slightly.
+on:
+  schedule:
+    - cron: "*/30 12-23,0-3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: threads-scheduler
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-scheduler.txt
+      - run: pip install -r requirements-scheduler.txt
+      - name: Run one scheduler tick
+        run: python run.py scheduler
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

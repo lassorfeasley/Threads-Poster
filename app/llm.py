@@ -231,6 +231,33 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     return str(data.get("caption", "")).strip()[:500]
 
 
+def suggest_title(model: str, source_title: str, transcript_excerpt: str,
+                  caption: str | None = None) -> str:
+    """Generate a concise, human-readable title for a trimmed climate news clip.
+
+    Draws on the clip's own transcript excerpt (the trimmed windows) plus the
+    original source title/description and, optionally, the draft caption. Returns
+    a single punchy plain-text title (no surrounding quotes), roughly <= 70 chars.
+    """
+    system = (
+        "You write a short, punchy title for a local-TV climate news clip that has "
+        "been trimmed to its strongest moment. Base it on what the clip actually "
+        "says (the transcript excerpt), using the source title only for context. "
+        "Rules: one line, plain text, no surrounding quotes, no emojis, no hashtags, "
+        "at most ~70 characters, concrete and faithful to the clip — do not invent "
+        "facts. Prefer the place and the striking detail over vague phrasing. "
+        "JSON shape: {\"title\": \"...\"}"
+    )
+    user = json.dumps({
+        "source_title": source_title,
+        "transcript_excerpt_of_clip": transcript_excerpt[:3000],
+        "draft_caption": (caption or "")[:800],
+    })
+    data = _json_chat(model, system, user)
+    title = str(data.get("title", "")).strip().strip('"').strip("'").strip()
+    return title[:120]
+
+
 def caption_attributes(model: str, caption: str) -> dict:
     """Tag a published caption's attributes for analytics. Returns
     {tone, has_question, has_cta, hashtag_count}."""

@@ -1,5 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
+{% macro ev_card(e, label) %}
+  <span class="cal-ev-thumb"{% if e.thumbnail %} style="background-image:url('{{ e.thumbnail }}')"{% endif %}>
+    {% if not e.thumbnail %}<span class="cal-ev-ph">▶</span>{% endif %}
+  </span>
+  <span class="cal-ev-body">
+    <span class="cal-ev-title">{{ (label or '(post)')[:64] }}</span>
+    <span class="cal-ev-sub"><span class="cal-ev-dot"></span>{{ e.time }}{% if e.pinned %} · pinned{% endif %}</span>
+  </span>
+{% endmacro %}
 <div class="page-head">
   <div class="titles">
     <h1>Calendar</h1>
@@ -7,10 +16,17 @@
       {% if windows_et %}({{ windows_et|join(' · ') }} ET){% endif %}
       — drag a queued post onto an open window to pin it there.</div>
   </div>
+  <div class="actions">
+    <div class="segmented cal-viewtoggle" role="tablist" aria-label="Switch calendar view">
+      <button type="button" class="seg-btn is-active" data-view="calendar" role="tab" aria-selected="true">Calendar</button>
+      <button type="button" class="seg-btn" data-view="queue" role="tab" aria-selected="false">Queue
+        {% if queue_count %}<span class="seg-count">{{ queue_count }}</span>{% endif %}</button>
+    </div>
+  </div>
 </div>
 
-<div class="cal-layout">
-  <section class="cal-month">
+<div class="cal-layout" id="cal-layout">
+  <section class="cal-month" id="view-calendar">
     <div class="cal-toolbar">
       <a class="btn" href="/calendar?year={{ prev_y }}&month={{ prev_m }}">← Prev</a>
       <div class="cal-title">{{ month_name }} {{ year }}</div>
@@ -40,33 +56,34 @@
             <div class="cal-daynum">{{ day }}</div>
             {% for e in events.get(day, []) %}
               {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind in ('queued', 'breaking') else ('pub' if e.kind == 'published' else 'draft')) %}
+              {% set label = e.title or e.caption %}
               {% if e.kind == 'open' %}
                 <div class="cal-event {{ cls }} empty cal-drop"
                      data-window-key="{{ e.window_key }}"
                      title="{{ e.time }} · open window — drop a queued post here">
                   <b>{{ e.time }}</b> <em>open</em></div>
               {% elif e.kind == 'queued' and e.post_id %}
-                <div class="cal-event {{ cls }} cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
+                <div class="cal-event {{ cls }} card cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
                      draggable="true"
                      data-post-id="{{ e.post_id }}"
                      data-window-key="{{ e.window_key }}"
-                     title="{{ e.time }} · queued{% if e.pinned %} (pinned){% endif %} · drag to another window · {{ e.caption }}">
-                  <a href="/post/{{ e.post_id }}" class="cal-event-link"
+                     title="{{ e.time }} · queued{% if e.pinned %} (pinned){% endif %} · drag to another window · {{ label }}">
+                  <a href="/post/{{ e.post_id }}" class="cal-ev"
                      onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
-                    <b>{{ e.time }}</b> ≈ {{ e.caption[:28] or '(post)' }}
+                    {{ ev_card(e, label) }}
                   </a>
                 </div>
               {% elif e.post_id %}
-                <a class="cal-event {{ cls }}" href="/post/{{ e.post_id }}"
-                   title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
-                  <b>{{ e.time }}</b> {{ e.caption[:28] or '(post)' }}</a>
+                <a class="cal-event {{ cls }} card" href="/post/{{ e.post_id }}"
+                   title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                  <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
               {% elif e.permalink %}
-                <a class="cal-event {{ cls }}" href="{{ e.permalink }}" target="_blank"
-                   title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
-                  <b>{{ e.time }}</b> {{ e.caption[:28] }}</a>
+                <a class="cal-event {{ cls }} card" href="{{ e.permalink }}" target="_blank"
+                   title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                  <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
               {% else %}
-                <span class="cal-event {{ cls }}" title="{{ e.time }} · {{ e.status }} · {{ e.caption }}">
-                  <b>{{ e.time }}</b> {{ e.caption[:28] }}</span>
+                <span class="cal-event {{ cls }} card" title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                  <span class="cal-ev">{{ ev_card(e, label) }}</span></span>
               {% endif %}
             {% endfor %}
           </div>
@@ -76,7 +93,7 @@
     </div>
   </section>
 
-  <aside class="cal-queue">
+  <aside class="cal-queue" id="view-queue" hidden>
     <div class="card-title" style="margin-bottom: 8px;">Posting queue</div>
     {% if scheduler %}
     <div class="meta cal-queue-meta">
@@ -140,65 +157,163 @@
 
 <script>
 (function () {
+  // ---------- View toggle: Calendar <-> Queue (one at a time) ----------
+  const layout = document.getElementById('cal-layout');
+  const viewCal = document.getElementById('view-calendar');
+  const viewQueue = document.getElementById('view-queue');
+  const toggleBtns = Array.from(document.querySelectorAll('.cal-viewtoggle .seg-btn'));
+
+  function setView(view) {
+    const isQueue = view === 'queue';
+    viewCal.hidden = isQueue;
+    viewQueue.hidden = !isQueue;
+    layout.classList.toggle('view-queue', isQueue);
+    layout.classList.toggle('view-calendar', !isQueue);
+    toggleBtns.forEach((b) => {
+      const on = b.dataset.view === view;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    try { localStorage.setItem('calView', view); } catch (e) {}
+  }
+  toggleBtns.forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
+  (function restoreView() {
+    let v = 'calendar';
+    try { v = localStorage.getItem('calView') || 'calendar'; } catch (e) {}
+    setView(v);
+  })();
+
+  // ---------- Drag & drop with FLIP rearrange animation ----------
+  let dragEl = null;        // element currently being dragged
   let dragPostId = null;
+  let lastOverKey = null;   // avoid redundant live reflows
   window._calDidDrag = false;
+
+  // FLIP: record sibling positions, run `mutate`, then slide each moved
+  // sibling from its old box to the new one. The dragged element is skipped
+  // so only the *other* cards animate into place.
+  function flip(container, mutate, skip) {
+    if (!container) { mutate(); return; }
+    const items = Array.from(container.querySelectorAll('.cal-event, .queue-item'));
+    const first = new Map();
+    items.forEach((el) => first.set(el, el.getBoundingClientRect()));
+    mutate();
+    container.querySelectorAll('.cal-event, .queue-item').forEach((el) => {
+      if (el === skip) return;
+      const prev = first.get(el);
+      if (!prev) return;
+      const now = el.getBoundingClientRect();
+      const dx = prev.left - now.left, dy = prev.top - now.top;
+      if (!dx && !dy) return;
+      el.style.transition = 'none';
+      el.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+      requestAnimationFrame(() => {
+        el.style.transition = '';
+        el.classList.add('cal-flip');
+        el.style.transform = '';
+        el.addEventListener('transitionend', () => {
+          el.classList.remove('cal-flip');
+        }, { once: true });
+      });
+    });
+  }
+
+  function nextWindowKey(el) {
+    for (let n = el.nextElementSibling; n; n = n.nextElementSibling)
+      if (n.dataset && n.dataset.windowKey) return n.dataset.windowKey;
+    for (let p = el.previousElementSibling; p; p = p.previousElementSibling)
+      if (p.dataset && p.dataset.windowKey) return p.dataset.windowKey;
+    return null;
+  }
+
+  function clearDropOver() {
+    document.querySelectorAll('.cal-drop-over').forEach((n) => n.classList.remove('cal-drop-over'));
+  }
 
   function pinToWindow(postId, windowKey) {
     const body = new FormData();
     body.append('window_key', windowKey);
     body.append('next', location.pathname + location.search);
     return fetch('/post/' + postId + '/pin-window', {
-      method: 'POST',
-      headers: { 'Accept': 'application/json' },
-      body,
+      method: 'POST', headers: { 'Accept': 'application/json' }, body,
     }).then(async (r) => {
       const d = await r.json().catch(() => ({}));
       if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      // Let the rearrange animation settle, fade, then reload for authoritative
+      // (re-projected) times.
+      document.body.classList.add('cal-committing');
+      setTimeout(() => location.reload(), 260);
+    }).catch((e) => {
+      document.body.classList.remove('cal-committing');
+      alert('Could not move post: ' + e.message);
       location.reload();
-    }).catch((e) => alert('Could not move post: ' + e.message));
+    });
   }
 
   document.addEventListener('dragstart', (ev) => {
     const el = ev.target.closest('.cal-drag');
     if (!el || !el.dataset.postId) return;
+    dragEl = el;
     dragPostId = el.dataset.postId;
     window._calDidDrag = false;
-    el.classList.add('dragging');
+    lastOverKey = null;
     ev.dataTransfer.effectAllowed = 'move';
     ev.dataTransfer.setData('text/plain', dragPostId);
+    // Add the lifted look after the browser snapshots the drag image.
+    requestAnimationFrame(() => el.classList.add('dragging'));
   });
 
-  document.addEventListener('dragend', (ev) => {
-    const el = ev.target.closest('.cal-drag');
-    if (el) el.classList.remove('dragging');
-    document.querySelectorAll('.cal-drop-over').forEach((n) => n.classList.remove('cal-drop-over'));
-    dragPostId = null;
+  document.addEventListener('dragend', () => {
+    if (dragEl) dragEl.classList.remove('dragging');
+    clearDropOver();
+    dragEl = null; dragPostId = null; lastOverKey = null;
   });
 
   document.addEventListener('dragover', (ev) => {
+    if (!dragPostId) return;
     const drop = ev.target.closest('.cal-drop');
-    if (!drop || !dragPostId) return;
+    if (!drop || drop === dragEl) return;
     if (drop.dataset.postId && drop.dataset.postId === dragPostId) return;
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'move';
+    clearDropOver();
     drop.classList.add('cal-drop-over');
+
+    // Live reflow inside the queue list so the other cards slide as you move.
+    const list = dragEl && dragEl.closest('#queue-dnd');
+    if (list && drop.closest('#queue-dnd')) {
+      const rect = drop.getBoundingClientRect();
+      const after = ev.clientY > rect.top + rect.height / 2;
+      const key = (after ? 'a:' : 'b:') + (drop.dataset.windowKey || drop.dataset.postId || '');
+      if (key !== lastOverKey) {
+        lastOverKey = key;
+        flip(list, () => { after ? drop.after(dragEl) : drop.before(dragEl); }, dragEl);
+      }
+    }
   });
 
   document.addEventListener('dragleave', (ev) => {
     const drop = ev.target.closest('.cal-drop');
-    if (drop) drop.classList.remove('cal-drop-over');
+    if (drop && !drop.contains(ev.relatedTarget)) drop.classList.remove('cal-drop-over');
   });
 
   document.addEventListener('drop', (ev) => {
     const drop = ev.target.closest('.cal-drop');
-    if (!drop) return;
+    if (!drop || !dragPostId) return;
     ev.preventDefault();
-    drop.classList.remove('cal-drop-over');
+    clearDropOver();
     const postId = dragPostId || ev.dataTransfer.getData('text/plain');
-    const windowKey = drop.dataset.windowKey;
+    const windowKey = drop.dataset.windowKey || (dragEl ? nextWindowKey(dragEl) : null);
     if (!postId || !windowKey) return;
     if (drop.dataset.postId && drop.dataset.postId === postId) return;
     window._calDidDrag = true;
+
+    // Animate the moved event into the dropped calendar cell (the queue list
+    // already reflowed live during dragover).
+    const grid = document.getElementById('cal-dnd');
+    if (grid && drop.closest('#cal-dnd') && dragEl && drop !== dragEl) {
+      flip(grid, () => { drop.before(dragEl); }, dragEl);
+    }
     pinToWindow(postId, windowKey);
   });
 })();

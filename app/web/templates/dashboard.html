@@ -6,39 +6,76 @@
     <div class="sub">New climate segments from your monitored channels. Review a match to start the clip workflow.</div>
   </div>
   <div class="actions">
-    <a class="btn approve"
-       href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
-      ▶&nbsp; Triage mode</a>
+    <div class="monitor-status">
+      {% if monitor_running %}
+        <span class="badge info"><span class="dot"></span> monitor running</span>
+        <script>setTimeout(() => location.reload(), 10000);</script>
+      {% else %}
+        <span class="meta" title="{{ monitor_result }}">Monitor {{ 'never run' if monitor_last_refreshed == 'never' else 'last refreshed ' + monitor_last_refreshed }}</span>
+        <form method="post" action="/monitor/run">
+          <button type="submit" class="btn ghost icon-btn" title="Refresh monitor"
+                  aria-label="Refresh monitor">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 4v6h-6"/>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+          </button>
+        </form>
+      {% endif %}
+    </div>
+    <button type="button" class="btn ghost icon-btn" title="Upload your own clip"
+            aria-label="Upload your own clip" onclick="document.getElementById('upload-dialog').showModal()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 15V4M8 8l4-4 4 4"/>
+        <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
+      </svg>
+    </button>
+    <div class="view-toggle" role="group" aria-label="Switch view">
+      <a class="view-seg is-active" aria-current="page" title="Table view" aria-label="Table view"
+         href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="1.5"/>
+          <path d="M3 9h18M3 14h18M9 9v11"/>
+        </svg>
+      </a>
+      <a class="view-seg" title="Triage view" aria-label="Triage view"
+         href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 4v16M9 5.5v13a1 1 0 0 0 1.5.86l9-6.5a1 1 0 0 0 0-1.72l-9-6.5A1 1 0 0 0 9 5.5z"/>
+        </svg>
+      </a>
+    </div>
   </div>
 </div>
 
-<div class="card tight">
-  {% if monitor_running %}
-    <div class="bar">
-      <span class="badge info"><span class="dot"></span> monitor running</span>
-      <span class="meta">Scanning channels in the background — new candidates appear as they're found.</span>
-      <button class="ghost sm push" onclick="location.reload()">Refresh now</button>
-    </div>
-    <script>setTimeout(() => location.reload(), 10000);</script>
-  {% else %}
-    <form class="bar" method="post" action="/monitor/run">
-      <button class="primary">Run monitor now</button>
-      <label class="inline-label">look back
-        <input type="number" name="lookback_days" min="1" max="30" placeholder="auto" class="input-xs"> days</label>
-      <span class="meta">Leave blank to check only since the last run; set days (max 30) to backfill.</span>
-    </form>
-    {% if monitor_result %}<div class="meta" style="margin-top: 8px;">{{ monitor_result }}</div>{% endif %}
-  {% endif %}
-</div>
-
-<div class="card tight">
-  <form class="bar" method="post" action="/upload" enctype="multipart/form-data" id="upload-form"
+<dialog id="upload-dialog" class="modal">
+  <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form"
         onsubmit="return onUploadSubmit()">
-    <strong>Upload your own clip</strong>
-    <input type="file" name="file" id="upload-file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v,.mkv,.webm" required>
-    <input type="text" name="title" placeholder="Title (optional)" class="input-md">
-    <button class="primary" id="upload-btn">Upload &amp; transcribe</button>
-    <span class="meta">Runs through the same trim → caption → post workflow. Transcribed locally.</span>
+    <div class="modal-head">
+      <strong>Upload your own clip</strong>
+      <button type="button" class="btn ghost sm" aria-label="Close"
+              onclick="document.getElementById('upload-dialog').close()">✕</button>
+    </div>
+    <p class="meta" style="margin: 0 0 16px;">Runs through the same trim → caption → post
+      workflow. Transcribed locally.</p>
+    <div class="field">
+      <label>Video file</label>
+      <input type="file" name="file" id="upload-file"
+             accept="video/mp4,video/quicktime,.mp4,.mov,.m4v,.mkv,.webm" required>
+    </div>
+    <div class="field" style="margin-top: 12px;">
+      <label>Title (optional)</label>
+      <input type="text" name="title" placeholder="Title (optional)">
+    </div>
+    <div class="btn-group" style="margin-top: 18px; justify-content: flex-end;">
+      <button type="button" class="btn ghost"
+              onclick="document.getElementById('upload-dialog').close()">Cancel</button>
+      <button class="primary" id="upload-btn">Upload &amp; transcribe</button>
+    </div>
   </form>
   <script>
     function onUploadSubmit() {
@@ -49,47 +86,34 @@
       return true;
     }
   </script>
-</div>
+</dialog>
 
-<div class="card tight">
+<div class="card tight" id="filter-card">
   <form method="get" action="/" id="filter-form">
-    <div class="form-row">
-      <div class="field" style="flex: 2; min-width: 200px;">
+    <div class="form-row single-row">
+      <div class="field search">
         <label>Search</label>
         <input type="text" name="q" id="q-input" value="{{ q }}" autocomplete="off"
                placeholder="title, description, keywords…" oninput="onSearchInput()">
       </div>
-      <div class="field" style="min-width: 150px;">
-        <label>Channel</label>
-        <select name="channel_id" onchange="this.form.requestSubmit()">
-          <option value="0">All channels</option>
-          {% for ch in filter_channels %}
-          <option value="{{ ch.id }}" {{ "selected" if ch.id == channel_id }}>{{ ch.call_sign }} — {{ ch.market }}</option>
-          {% endfor %}
-        </select>
+      <div class="field">
+        <label>Keywords</label>
+        <details class="combo" id="keyword-combo">
+          <summary class="combo-summary">
+            <span id="keyword-summary">{{ (keyword|length ~ " selected") if keyword else "All keywords" }}</span>
+            <svg class="combo-caret" width="10" height="6" viewBox="0 0 10 6" fill="none"
+                 stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 1l4 4 4-4"/></svg>
+          </summary>
+          <div class="combo-panel">
+            {% for k in keywords_options %}
+            <label class="combo-opt">
+              <input type="checkbox" name="keyword" value="{{ k }}" {{ "checked" if k in keyword }}> {{ k }}
+            </label>
+            {% endfor %}
+          </div>
+        </details>
       </div>
-      <div class="field" style="min-width: 130px;">
-        <label>Country</label>
-        <select name="country" onchange="this.form.requestSubmit()">
-          <option value="">All countries</option>
-          {% for c in countries %}<option value="{{ c }}" {{ "selected" if c == country }}>{{ c }}</option>{% endfor %}
-        </select>
-      </div>
-      <div class="field" style="min-width: 120px;">
-        <label>Scope</label>
-        <select name="scope" onchange="this.form.requestSubmit()">
-          <option value="">All scopes</option>
-          {% for s in scopes %}<option value="{{ s }}" {{ "selected" if s == scope }}>{{ s }}</option>{% endfor %}
-        </select>
-      </div>
-      <div class="field" style="min-width: 130px;">
-        <label>Region</label>
-        <select name="region" onchange="this.form.requestSubmit()">
-          <option value="">All regions</option>
-          {% for r in regions %}<option value="{{ r }}" {{ "selected" if r == region }}>{{ r }}</option>{% endfor %}
-        </select>
-      </div>
-      <div class="field" style="min-width: 120px;">
+      <div class="field">
         <label>Status</label>
         <select name="status" onchange="this.form.requestSubmit()">
           {% for s in ["new", "approved", "archived", "rejected", "failed", "all"] %}
@@ -97,22 +121,13 @@
           {% endfor %}
         </select>
       </div>
-      <div class="field"><label>From</label>
+      <div class="field date"><label>From</label>
         <input type="date" name="date_from" value="{{ date_from }}" onchange="this.form.requestSubmit()"></div>
-      <div class="field"><label>To</label>
+      <div class="field date"><label>To</label>
         <input type="date" name="date_to" value="{{ date_to }}" onchange="this.form.requestSubmit()"></div>
       <div class="field btn-group">
         {% if filtering %}<a class="btn ghost" href="/">Clear</a>{% endif %}
       </div>
-    </div>
-    <div class="chip-row">
-      <span class="meta">Keywords:</span>
-      {% for k in keywords_options %}
-      <label class="chip {{ 'on' if k in keyword }}">
-        <input type="checkbox" name="keyword" value="{{ k }}" {{ "checked" if k in keyword }}
-               onchange="this.parentElement.classList.toggle('on', this.checked); this.form.requestSubmit()"> {{ k }}
-      </label>
-      {% endfor %}
     </div>
   </form>
   <script>
@@ -135,16 +150,45 @@
         if (el) { el.focus(); const v = el.value; el.value = ''; el.value = v; }
       }
     })();
+    // Keyword combo: apply the filter once when the dropdown closes (so several
+    // keywords can be toggled in one go), and close it when clicking outside.
+    (function () {
+      const combo = document.getElementById('keyword-combo');
+      if (!combo) return;
+      let dirty = false;
+      combo.querySelectorAll('input[type="checkbox"]').forEach(cb =>
+        cb.addEventListener('change', () => { dirty = true; }));
+      combo.addEventListener('toggle', () => {
+        if (!combo.open && dirty) {
+          dirty = false;
+          document.getElementById('filter-form').requestSubmit();
+        }
+      });
+      document.addEventListener('click', (e) => {
+        if (combo.open && !combo.contains(e.target)) combo.open = false;
+      });
+    })();
   </script>
   <div style="margin-top: 10px;">
-    <a class="meta" href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ 0 if show_hidden else 1 }}">
+    <a class="meta" href="/?status={{ status }}&q={{ q }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ 0 if show_hidden else 1 }}">
       {{ "Hide" if show_hidden else "Show" }} below-threshold matches (score &lt; {{ threshold }})</a>
   </div>
 </div>
 
+<div class="segmented" role="tablist" aria-label="Switch list view">
+  <button type="button" class="seg-btn is-active" role="tab" aria-selected="true"
+          data-tab="candidates" onclick="setDashTab('candidates')">
+    Candidates <span class="seg-count">{{ total_matches }}</span>
+  </button>
+  <button type="button" class="seg-btn" role="tab" aria-selected="false"
+          data-tab="inprogress" onclick="setDashTab('inprogress')">
+    Selected clips to trim <span class="seg-count">{{ in_progress|length }}</span>
+  </button>
+</div>
+
+<div id="inprogress-panel" class="list-panel" hidden>
 {% if in_progress %}
 <div id="in-progress-section">
-<h2>In progress</h2>
 {% for c, state in in_progress %}
 <div class="vrow" tabindex="0" role="link"
      onclick="location.href='/video/{{ c.id }}'"
@@ -152,6 +196,7 @@
      {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
   <div class="vtop">
     <a class="item-title" href="/video/{{ c.id }}" onclick="event.stopPropagation()">{{ c.title }}</a>
+    {% if c.clip_title %}<span class="vmarket" title="Generated clip title">🎬 {{ c.clip_title }}</span>{% endif %}
     <span class="vmarket">{{ c.channel.call_sign }} · {{ c.channel.market }}
       {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d %H:%M") }}{% endif %}
       {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
@@ -182,8 +227,16 @@
 </div>
 {% endfor %}
 </div>
+{% else %}
+<div class="empty">
+  <span class="icon">◎</span>
+  <strong>No clips in progress</strong>
+  Select a candidate to start the trim → caption → post workflow.
+</div>
 {% endif %}
+</div>
 
+<div id="candidates-panel" class="list-panel">
 <h2>{{ "Results" if filtering else "New matches" }}
   ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})
   <span class="meta" style="font-weight: 400;">· ranked by relevance + visual appeal</span></h2>
@@ -241,8 +294,31 @@
   </div>
 </div>
 {% endfor %}
+</div>
 
 <script>
+// Segmented toggle: switch between the Candidates list and the in-progress
+// ("Selected clips to trim") list. The chosen tab is persisted in localStorage
+// so it survives the periodic 10s auto-reload while the monitor is running.
+function setDashTab(tab) {
+  const isCandidates = tab !== 'inprogress';
+  const candPanel = document.getElementById('candidates-panel');
+  const progPanel = document.getElementById('inprogress-panel');
+  if (candPanel) candPanel.hidden = !isCandidates;
+  if (progPanel) progPanel.hidden = isCandidates;
+  document.querySelectorAll('.segmented .seg-btn').forEach(btn => {
+    const active = btn.dataset.tab === (isCandidates ? 'candidates' : 'inprogress');
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  try { localStorage.setItem('dashTab', isCandidates ? 'candidates' : 'inprogress'); } catch (e) {}
+}
+(function restoreDashTab() {
+  let tab = 'candidates';
+  try { tab = localStorage.getItem('dashTab') || 'candidates'; } catch (e) {}
+  setDashTab(tab);
+})();
+
 // Remove a clip in place (no full-page reload, so we don't re-fetch every
 // row's filmstrip). Rejected clips can be restored from Archive.
 async function deleteRow(cid, btn, confirmMsg) {

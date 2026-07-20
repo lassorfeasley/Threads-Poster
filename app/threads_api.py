@@ -1,8 +1,10 @@
 """Official Threads API (Meta) client: OAuth, publishing, replies, insights.
 
-Token is stored locally in data/threads_token.json (gitignored). Long-lived
-tokens last ~60 days and are refreshed automatically when older than 24h and
-nearing expiry.
+The token lives in the shared database (``app_tokens`` table) so headless
+runners (GitHub Actions / cron) can publish without this machine. A local copy
+in data/threads_token.json (gitignored) is kept as a backup and migrated into
+the DB automatically. Long-lived tokens last ~60 days and are refreshed when
+older than 7 days.
 """
 from __future__ import annotations
 
@@ -25,8 +27,55 @@ TOKEN_FILE = ROOT / "data" / "threads_token.json"
 SCOPES = "threads_basic,threads_content_publish,threads_manage_replies,threads_read_replies,threads_manage_insights"
 
 
+TOKEN_NAME = "threads"
+
+
 class ThreadsError(RuntimeError):
     pass
+
+
+# --- Token storage (DB-first, file fallback) ---------------------------------
+
+def _save_token(token: dict) -> None:
+    """Persist the token to the DB (canonical) and the local file (backup)."""
+    payload = json.dumps(token, indent=1)
+    try:
+        from .db import session_scope
+        from .models import AppToken, utcnow
+
+        with session_scope() as session:
+            row = session.get(AppToken, TOKEN_NAME)
+            if row is None:
+                row = AppToken(name=TOKEN_NAME)
+                session.add(row)
+            row.value = payload
+            row.updated_at = utcnow()
+    except Exception as exc:
+        log.warning("Could not save Threads token to DB (file copy still written): %s", exc)
+    try:
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TOKEN_FILE.write_text(payload)
+    except Exception as exc:
+        log.warning("Could not write local token file: %s", exc)
+
+
+def _peek_token() -> dict | None:
+    """Return the stored token or None. Migrates the legacy file into the DB."""
+    try:
+        from .db import session_scope
+        from .models import AppToken
+
+        with session_scope() as session:
+            row = session.get(AppToken, TOKEN_NAME)
+            if row is not None and row.value:
+                return json.loads(row.value)
+    except Exception as exc:
+        log.warning("Could not read Threads token from DB (trying local file): %s", exc)
+    if TOKEN_FILE.exists():
+        token = json.loads(TOKEN_FILE.read_text())
+        _save_token(token)  # one-time migration into the DB
+        return token
+    return None
 
 
 # --- OAuth -------------------------------------------------------------------
@@ -76,15 +125,15 @@ def exchange_code(code: str) -> dict:
         "obtained_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "expires_in": data.get("expires_in", 5183944),
     }
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(json.dumps(token, indent=1))
+    _save_token(token)
     return token
 
 
 def _load_token() -> dict:
-    if not TOKEN_FILE.exists():
+    token = _peek_token()
+    if token is None:
         raise ThreadsError("Not authenticated with Threads. Use the Publish page to connect.")
-    return json.loads(TOKEN_FILE.read_text())
+    return token
 
 
 def _maybe_refresh(token: dict) -> dict:
@@ -103,7 +152,7 @@ def _maybe_refresh(token: dict) -> dict:
         token["access_token"] = data["access_token"]
         token["expires_in"] = data.get("expires_in", token.get("expires_in"))
         token["obtained_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
-        TOKEN_FILE.write_text(json.dumps(token, indent=1))
+        _save_token(token)
         log.info("Refreshed Threads token")
     else:
         log.warning("Token refresh failed (will keep current token): %s", resp.text[:200])
@@ -111,7 +160,10 @@ def _maybe_refresh(token: dict) -> dict:
 
 
 def is_authenticated() -> bool:
-    return TOKEN_FILE.exists()
+    try:
+        return _peek_token() is not None
+    except Exception:
+        return False
 
 
 def _auth() -> tuple[str, str]:
@@ -181,7 +233,7 @@ def publish_video(video_url: str, caption: str, reply_to_id: str | None = None,
 
 
 def publish_text_reply(text: str, reply_to_id: str) -> dict:
-    """Publish a text reply to a comment on the operator's own post."""
+    """Publish a text reply to a post or comment (``reply_to_id`` is either)."""
     container = _api("POST", "{user_id}/threads", media_type="TEXT", text=text, reply_to_id=reply_to_id)
     published = _api("POST", "{user_id}/threads_publish", creation_id=container["id"])
     return {"media_id": published["id"]}

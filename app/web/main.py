@@ -23,7 +23,7 @@ from sqlalchemy.orm import selectinload
 from .. import spend, threads_api
 from ..analytics import generate_report, snapshot_metrics
 from ..clipper import ClipExportError, clip_duration, export_supercut, get_waveform
-from ..config import load_keywords, load_settings, save_keywords
+from ..config import load_first_reply, load_keywords, load_settings, save_first_reply, save_keywords
 from ..db import (
     SessionLocal,
     active_traits,
@@ -34,7 +34,7 @@ from ..db import (
 )
 from ..engagement import PacingLimitError, post_approved_reply, redraft_comment, sync_comments
 from ..history import import_history
-from ..llm import suggest_post_caption
+from ..llm import suggest_post_caption, suggest_title
 from ..models import (
     STATUS_APPROVED,
     STATUS_ARCHIVED,
@@ -51,7 +51,7 @@ from ..models import (
     utcnow,
 )
 from ..monitor import run_monitor_once
-from ..publishing import publish_clip, publish_post, queue_clip, record_post
+from ..publishing import maybe_post_first_reply, publish_clip, publish_post, queue_clip, record_post
 from ..ranking import load_trait_weights, order_expr, sort_candidates, trait_guidance_text
 from ..scheduler import (
     build_window_plan,
@@ -167,6 +167,33 @@ def _parse_date(value: str) -> dt.datetime | None:
         return dt.datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
     except (ValueError, TypeError):
         return None
+
+
+def _relative_time_ago(when: dt.datetime | None) -> str:
+    """Human-friendly relative string, e.g. "5 minutes ago" / "just now" / "never"."""
+    if when is None:
+        return "never"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    secs = (dt.datetime.now(dt.timezone.utc) - when).total_seconds()
+    if secs < 45:
+        return "just now"
+    minutes = secs / 60
+    if minutes < 45:
+        n = max(1, round(minutes))
+        return f"{n} minute{'s' if n != 1 else ''} ago"
+    hours = secs / 3600
+    if hours < 24:
+        n = round(hours)
+        return f"{n} hour{'s' if n != 1 else ''} ago"
+    days = secs / 86400
+    if days < 7:
+        n = max(1, round(days))
+        return f"{n} day{'s' if n != 1 else ''} ago"
+    weeks = round(days / 7)
+    if weeks < 5:
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    return when.strftime("%b %-d")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -303,7 +330,7 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
                 in_progress_rows.append((c, state))
                 _ = c.channel
 
-        monitor_running, monitor_result = _monitor_view_state(session)
+        monitor_running, monitor_result, monitor_last_refreshed = _monitor_view_state(session)
 
     return templates.TemplateResponse(
         request, "dashboard.html",
@@ -320,6 +347,7 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
          "countries": countries, "scopes": ["local", "national", "international"],
          "monitor_running": monitor_running,
          "monitor_result": monitor_result,
+         "monitor_last_refreshed": monitor_last_refreshed,
          "msg": msg, "active": "dashboard"},
     )
 
@@ -367,29 +395,31 @@ def _latest_monitor_run(session) -> MonitorRun | None:
     ).scalar_one_or_none()
 
 
-def _monitor_view_state(session) -> tuple[bool, str]:
-    """(running, message) for the dashboard, derived from durable run state.
+def _monitor_view_state(session) -> tuple[bool, str, str]:
+    """(running, message, last_refreshed) for the dashboard, from durable run state.
 
     ``running`` is true only when a pass is genuinely in flight in THIS process,
-    so a restart can never leave a spinner stuck on.
+    so a restart can never leave a spinner stuck on. ``last_refreshed`` is a
+    human-friendly relative string ("5 minutes ago" / "just now" / "never").
     """
     run = _latest_monitor_run(session)
     running = _monitor_running.is_set() and run is not None and run.status == MonitorRun.STATUS_RUNNING
     if run is None:
-        return running, ""
+        return running, "", "never"
     when = run.finished_at or run.started_at
+    last_refreshed = _relative_time_ago(when)
     stamp = when.strftime("%b %-d %H:%M") if when else ""
     scope = run.scope or "since last check"
     if run.status == MonitorRun.STATUS_DONE:
-        return running, f"Last pass ({scope}, {stamp}): {run.result}"
+        return running, f"Last pass ({scope}, {stamp}): {run.result}", last_refreshed
     if run.status == MonitorRun.STATUS_FAILED:
-        return running, run.result or "Last pass failed."
+        return running, run.result or "Last pass failed.", last_refreshed
     if run.status == MonitorRun.STATUS_INTERRUPTED:
         return running, (
             f"Last pass ({scope}, started {stamp}) was interrupted by a server "
             "restart. Run the monitor again to finish checking."
-        )
-    return running, ""  # currently running: badge is shown instead
+        ), last_refreshed
+    return running, "", last_refreshed  # currently running: badge is shown instead
 
 
 @app.post("/monitor/run")
@@ -827,6 +857,21 @@ def export_clip(candidate_id: int, segments_json: str = Form(...)):
             out = export_supercut(c.local_video_path, segments, f"{c.video_id}_cut")
             c.trim_segments = json.dumps(segments)
             c.trimmed_clip_path = str(out)
+            # Auto-title the fresh clip from its own transcript, but only when the
+            # operator hasn't already set one (regeneration stays available in the
+            # Post step). A titling failure must never block the export.
+            if not (c.clip_title or "").strip():
+                try:
+                    settings = load_settings()
+                    excerpt = _transcript_excerpt(c, segments)
+                    title = suggest_title(
+                        settings.get("engagement.draft_model", "claude-sonnet-5"),
+                        c.title, excerpt, c.draft_caption or None,
+                    )
+                    if title:
+                        c.clip_title = title
+                except Exception:
+                    pass
             n = len(segments)
             return _flash(f"/video/{candidate_id}?step=post",
                           f"Exported {n} segment{'s' if n > 1 else ''} — ready to post")
@@ -897,8 +942,30 @@ def suggest_caption(candidate_id: int):
             return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.post("/video/{candidate_id}/suggest-title")
+def suggest_clip_title(candidate_id: int):
+    settings = load_settings()
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        segments = json.loads(c.trim_segments) if c.trim_segments else []
+        excerpt = _transcript_excerpt(c, segments)
+        try:
+            title = suggest_title(
+                settings.get("engagement.draft_model", "claude-sonnet-5"),
+                c.title, excerpt, c.draft_caption or None,
+            )
+            if title:
+                c.clip_title = title
+            return {"title": title or c.clip_title}
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.post("/video/{candidate_id}/post")
-def post_to_threads(candidate_id: int, caption: str = Form(...)):
+def post_to_threads(candidate_id: int, caption: str = Form(...),
+                    clip_title: str = Form("")):
     """Operator-confirmed publish of the exported clip."""
     caption = caption.strip()
     if not caption:
@@ -914,6 +981,7 @@ def post_to_threads(candidate_id: int, caption: str = Form(...)):
         c = session.get(Candidate, candidate_id)
         if c is None or not c.trimmed_clip_path:
             return _flash(f"/video/{candidate_id}", "Export a clip first")
+        c.clip_title = clip_title.strip()
         try:
             post = publish_clip(session, c, c.trimmed_clip_path, caption)
             state = session.get(SchedulerState, 1)
@@ -923,15 +991,19 @@ def post_to_threads(candidate_id: int, caption: str = Form(...)):
             state.last_publish_at = utcnow()
             state.last_action = f"manual_publish:post={post.id}"
             state.updated_at = utcnow()
-            return _flash(f"/video/{candidate_id}?step=post",
-                          f"Published: {post.permalink or post.threads_media_id}")
+            msg = f"Published: {post.permalink or post.threads_media_id}"
+            if post.first_reply_id:
+                msg += " · first reply posted"
+            elif post.first_reply_error:
+                msg += f" · first reply failed: {post.first_reply_error[:120]}"
+            return _flash(f"/video/{candidate_id}?step=post", msg)
         except Exception as exc:
             return _flash(f"/video/{candidate_id}?step=post", f"Publish failed: {exc}")
 
 
 @app.post("/video/{candidate_id}/queue")
 def queue_to_threads(candidate_id: int, caption: str = Form(...),
-                     is_breaking: str = Form("")):
+                     is_breaking: str = Form(""), clip_title: str = Form("")):
     """Add the exported clip to the adaptive FIFO queue (no immediate post)."""
     caption = caption.strip()
     if not caption:
@@ -941,6 +1013,7 @@ def queue_to_threads(candidate_id: int, caption: str = Form(...),
         c = session.get(Candidate, candidate_id)
         if c is None or not c.trimmed_clip_path:
             return _flash(f"/video/{candidate_id}", "Export a clip first")
+        c.clip_title = clip_title.strip()
         try:
             # Reuse an existing not-yet-published post for this clip rather than
             # creating a duplicate queue entry.
@@ -972,7 +1045,8 @@ def queue_to_threads(candidate_id: int, caption: str = Form(...),
 
 
 @app.post("/video/{candidate_id}/save-draft")
-def save_draft(candidate_id: int, caption: str = Form(...)):
+def save_draft(candidate_id: int, caption: str = Form(...),
+               clip_title: str = Form("")):
     """Save the exported clip + caption as a draft to publish or queue later."""
     caption = caption.strip()
     if not caption:
@@ -981,6 +1055,7 @@ def save_draft(candidate_id: int, caption: str = Form(...)):
         c = session.get(Candidate, candidate_id)
         if c is None or not c.trimmed_clip_path:
             return _flash(f"/video/{candidate_id}", "Export a clip first")
+        c.clip_title = clip_title.strip()
         try:
             record_post(session, c, c.trimmed_clip_path, caption, status="draft")
         except Exception as exc:
@@ -1174,12 +1249,17 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "candidate_id": cand.id if cand else None,
             "channel_sign": cand.channel.call_sign if (cand and cand.channel) else "",
             "video_title": cand.title if cand else "",
+            "clip_title": cand.clip_title if cand else "",
             "has_clip": has_clip,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
             "is_breaking": bool(p.is_breaking),
             "defer_count": int(p.defer_count or 0),
             "last_deferred_at": p.last_deferred_at,
+            "first_reply_id": p.first_reply_id or "",
+            "first_reply_text": p.first_reply_text or "",
+            "first_reply_error": p.first_reply_error or "",
+            "first_reply_at": p.first_reply_at,
             "metrics": metrics, "metrics_captured": snap.captured_at if snap else None,
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
@@ -1535,6 +1615,23 @@ def analytics_snapshot():
             return _flash("/analytics", f"Snapshot failed: {exc}")
 
 
+@app.post("/post/{post_id}/first-reply")
+def retry_first_reply(post_id: int, next: str = Form("")):
+    """Post the configured first reply under a published post (manual / retry)."""
+    dest = next or f"/post/{post_id}"
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None or p.status != "published" or not p.threads_media_id:
+            return _flash(dest, "No published post to reply under")
+        if p.first_reply_id:
+            return _flash(dest, "First reply already posted")
+        # Manual action: use current configured text even if auto-post is disabled.
+        if maybe_post_first_reply(session, p, force=True):
+            return _flash(dest, "First reply posted")
+        err = p.first_reply_error or "First reply not posted — set text under Replies settings"
+        return _flash(dest, err)
+
+
 # --- Keywords ----------------------------------------------------------------
 
 @app.get("/keywords", response_class=HTMLResponse)
@@ -1573,6 +1670,35 @@ def keyword_delete(keyword: str = Form(...)):
     keywords = [k for k in load_keywords() if k.lower() != kw]
     save_keywords(keywords)
     return _flash("/keywords", f"Removed '{kw}'")
+
+
+# --- First reply (under Replies) ---------------------------------------------
+
+@app.get("/engagement/first-reply", response_class=HTMLResponse)
+def first_reply_page(request: Request, msg: str = ""):
+    cfg = load_first_reply()
+    return templates.TemplateResponse(
+        request, "first_reply.html",
+        {"enabled": cfg["enabled"], "text": cfg["text"], "msg": msg, "active": "engagement"},
+    )
+
+
+@app.post("/engagement/first-reply")
+def first_reply_save(enabled: str = Form(""), text: str = Form("")):
+    text = (text or "").strip()
+    on = str(enabled).lower() in ("1", "true", "on", "yes")
+    if on and not text:
+        return _flash("/engagement/first-reply", "Add reply text before enabling")
+    if len(text) > 500:
+        return _flash("/engagement/first-reply", f"Reply is {len(text)} characters — Threads limit is 500")
+    save_first_reply(enabled=on, text=text)
+    state = "enabled" if on else "disabled"
+    return _flash("/engagement/first-reply", f"Saved — auto first reply is {state}")
+
+
+@app.get("/first-reply")
+def first_reply_redirect():
+    return RedirectResponse("/engagement/first-reply", status_code=303)
 
 
 # --- Traits (visual desirable/undesirable trait database) -----------------------

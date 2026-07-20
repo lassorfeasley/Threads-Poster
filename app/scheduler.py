@@ -17,7 +17,7 @@ import threading
 import time
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from . import threads_api
 from .analytics import is_last_post_hot, poll_recent_metrics
@@ -246,12 +246,15 @@ def pin_post_to_window(session, post_id: int, window_key: str) -> str:
 def _claim_and_publish(post_id: int, state_action: str) -> bool:
     """Flip post to publishing, publish it, update SchedulerState.last_publish_at."""
     with session_scope() as session:
-        post = session.get(ThreadsPost, post_id)
-        if post is None or post.status != STATUS_QUEUED:
+        # Atomic claim: only one scheduler (local dashboard vs headless runner)
+        # can win when both tick at the same time.
+        claimed = session.execute(
+            update(ThreadsPost)
+            .where(ThreadsPost.id == post_id, ThreadsPost.status == STATUS_QUEUED)
+            .values(status=STATUS_PUBLISHING, error="", pinned_window_key="")
+        ).rowcount
+        if claimed != 1:
             return False
-        post.status = STATUS_PUBLISHING
-        post.error = ""
-        post.pinned_window_key = ""
 
     ok = False
     with session_scope() as session:
@@ -607,6 +610,8 @@ def build_window_plan(
             "video_id": p.candidate.id if p.candidate else None,
             "channel": (p.candidate.channel.call_sign
                         if p.candidate and p.candidate.channel else ""),
+            "thumbnail": (p.candidate.thumbnail_url if p.candidate else ""),
+            "title": ((p.candidate.clip_title or p.candidate.title) if p.candidate else ""),
             "permalink": p.permalink,
             "projected": True,
             "is_breaking": True,
@@ -648,6 +653,8 @@ def build_window_plan(
                 "post_id": None,
                 "video_id": None,
                 "channel": "",
+                "thumbnail": "",
+                "title": "",
                 "permalink": "",
                 "projected": True,
                 "is_breaking": False,
@@ -670,6 +677,8 @@ def build_window_plan(
                 "video_id": post.candidate.id if post.candidate else None,
                 "channel": (post.candidate.channel.call_sign
                             if post.candidate and post.candidate.channel else ""),
+                "thumbnail": (post.candidate.thumbnail_url if post.candidate else ""),
+                "title": ((post.candidate.clip_title or post.candidate.title) if post.candidate else ""),
                 "permalink": post.permalink,
                 "projected": True,
                 "is_breaking": False,
@@ -710,6 +719,8 @@ def build_window_plan(
             "video_id": p.candidate.id if p.candidate else None,
             "channel": (p.candidate.channel.call_sign
                         if p.candidate and p.candidate.channel else ""),
+            "thumbnail": (p.candidate.thumbnail_url if p.candidate else ""),
+            "title": ((p.candidate.clip_title or p.candidate.title) if p.candidate else ""),
             "permalink": p.permalink,
             "projected": False,
             "is_breaking": False,

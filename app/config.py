@@ -1,4 +1,4 @@
-"""Config loading: .env secrets + YAML settings/keywords/channels."""
+"""Config loading: .env secrets + YAML settings/keywords/channels/first-reply."""
 from __future__ import annotations
 
 import os
@@ -60,6 +60,34 @@ def save_keywords(keywords: list[str]) -> None:
     cleaned = sorted({k.strip().lower() for k in keywords if k.strip()})
     body = yaml.safe_dump({"keywords": cleaned}, default_flow_style=False, allow_unicode=True)
     (CONFIG_DIR / "keywords.yaml").write_text(KEYWORDS_HEADER + body)
+
+
+FIRST_REPLY_HEADER = """\
+# Auto first-reply posted under every Threads post this app publishes.
+# Editable via the cog on the Replies page; no code changes needed.
+#
+# When enabled is true and text is non-empty, the reply is published
+# immediately after the main post succeeds. A reply failure never rolls
+# back the post — check the post page and retry there if needed.
+
+"""
+
+
+def load_first_reply() -> dict[str, Any]:
+    """Return ``{enabled: bool, text: str}`` for the auto first-reply."""
+    data = _load_yaml(CONFIG_DIR / "first_reply.yaml")
+    text = data.get("text") or ""
+    if isinstance(text, str):
+        text = text.strip()
+    else:
+        text = str(text).strip()
+    return {"enabled": bool(data.get("enabled", False)), "text": text}
+
+
+def save_first_reply(*, enabled: bool, text: str) -> None:
+    payload = {"enabled": bool(enabled), "text": (text or "").strip()}
+    body = yaml.safe_dump(payload, default_flow_style=False, allow_unicode=True, width=88)
+    (CONFIG_DIR / "first_reply.yaml").write_text(FIRST_REPLY_HEADER + body)
 
 
 def load_channel_seed() -> list[dict[str, Any]]:

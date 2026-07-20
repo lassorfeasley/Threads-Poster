@@ -46,6 +46,7 @@ def _ensure_new_columns() -> None:
     bool_default = "FALSE" if not _is_sqlite else "0"
     tables = {
         "candidates": {
+            "clip_title": "TEXT DEFAULT ''",
             "trim_segments": "TEXT DEFAULT ''",
             "trimmed_clip_path": "TEXT DEFAULT ''",
             "visual_score": "FLOAT",
@@ -60,6 +61,10 @@ def _ensure_new_columns() -> None:
             "defer_count": "INTEGER DEFAULT 0",
             "last_deferred_at": "TIMESTAMP WITH TIME ZONE",
             "pinned_window_key": "VARCHAR(40) DEFAULT ''",
+            "first_reply_id": "VARCHAR(60) DEFAULT ''",
+            "first_reply_text": "TEXT DEFAULT ''",
+            "first_reply_error": "TEXT DEFAULT ''",
+            "first_reply_at": "TIMESTAMP WITH TIME ZONE",
         },
         "channels": {
             "country": "VARCHAR(60) DEFAULT ''",

@@ -10,7 +10,7 @@
       <a href="/posts">← Back to Posts</a>
       {% if channel_sign %} · from
         <a href="/video/{{ candidate_id }}">{{ channel_sign }}</a>{% endif %}
-      {% if video_title %} · {{ video_title[:80] }}{% endif %}
+      {% if clip_title %} · 🎬 {{ clip_title[:80] }}{% elif video_title %} · {{ video_title[:80] }}{% endif %}
       {% if source == "threads" %} · <span class="badge">Threads history</span>{% endif %}
     </div>
   </div>
@@ -92,6 +92,34 @@
         <div class="meta">Status: {{ status }}</div>
       {% endif %}
     </div>
+
+    {# ---- First reply ---- #}
+    {% if status == "published" %}
+    <div class="card tight" style="margin-top: 14px;">
+      <div class="card-title" style="display:flex; align-items:center; gap:10px;">
+        First reply
+        {% if not first_reply_id %}
+        <form class="inline" method="post" action="/post/{{ pid }}/first-reply" style="margin-left:auto;">
+          <input type="hidden" name="next" value="/post/{{ pid }}">
+          <button class="sm">{{ "Retry" if first_reply_error else "Post now" }}</button>
+        </form>
+        {% endif %}
+      </div>
+      {% if first_reply_id %}
+        <div class="meta" style="margin-bottom: 6px;">
+          <span class="badge supportive">posted</span>
+          {% if first_reply_at %} {{ first_reply_at.strftime("%b %-d, %H:%M UTC") }}{% endif %}
+        </div>
+        <div style="white-space: pre-wrap;">{{ first_reply_text }}</div>
+      {% elif first_reply_error %}
+        <div class="meta" style="color: var(--danger); margin-bottom: 6px;">{{ first_reply_error }}</div>
+        <div class="meta">Edit the text under <a href="/engagement/first-reply">Replies settings</a>, then retry.</div>
+      {% else %}
+        <div class="meta">No first reply yet. Enable auto-post under
+          <a href="/engagement/first-reply">Replies settings</a>, or post one now.</div>
+      {% endif %}
+    </div>
+    {% endif %}
 
     {# ---- Stats ---- #}
     {% if status == "published" %}

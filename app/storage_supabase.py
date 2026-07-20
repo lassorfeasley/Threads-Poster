@@ -65,3 +65,19 @@ def upload_trimmed_clip(local_path: str | Path, object_key: str) -> str:
         raise RuntimeError(f"Could not create signed URL for {object_key}: {signed}")
     log.info("Uploaded clip %s (signed URL valid %ss)", object_key, ttl)
     return url
+
+
+def signed_clip_url(object_key: str) -> str:
+    """Fresh signed URL for a clip already uploaded to storage.
+
+    Lets a headless runner publish a queued post without the operator's disk —
+    the clip was uploaded at queue time."""
+    settings = load_settings()
+    bucket = settings.get("storage.trimmed_clip_bucket", "trimmed-clips")
+    ttl = settings.get("storage.signed_url_ttl_seconds", 3600)
+    storage = _client().storage.from_(bucket)
+    signed = storage.create_signed_url(object_key, ttl)
+    url = signed.get("signedURL") or signed.get("signedUrl") or ""
+    if not url:
+        raise RuntimeError(f"Could not create signed URL for {object_key}: {signed}")
+    return url

@@ -833,6 +833,9 @@ renderSegments();
 {% else %}
 <div class="row">
   <div style="width: 420px; max-width: 100%;">
+    {% if c.clip_title %}
+      <div class="card-title" style="margin-bottom: 8px;" title="Generated clip title">🎬 {{ c.clip_title }}</div>
+    {% endif %}
     <video id="clip-player" src="/media/clip/{{ c.id }}" controls preload="metadata"></video>
     <div class="btn-group" style="margin-top: 8px; flex-wrap: wrap;">
       <a class="sm" href="/video/{{ c.id }}/download-clip" download>⤓ Download clip</a>
@@ -881,6 +884,15 @@ renderSegments();
       </div>
     {% else %}
       <form method="post" action="/video/{{ c.id }}/post" id="post-form">
+        <label>Clip title
+          <span class="badge score-lo" style="margin-left: 6px;">AI-generated — edit freely</span></label>
+        <input type="text" name="clip_title" id="clip_title" maxlength="120"
+               placeholder="{{ c.title }}" value="{{ c.clip_title }}">
+        <div class="btn-group" style="margin: 8px 0 14px; flex-wrap: wrap;">
+          <button type="button" class="sm" id="suggest-title-btn" onclick="suggestTitle()">
+            {{ "Regenerate" if c.clip_title else "Suggest" }} title</button>
+          <span class="meta">A concise title generated from this clip's transcript. Saved with the post.</span>
+        </div>
         <label>Caption
           <span class="badge score-lo" style="margin-left: 6px;">AI suggestion is a draft — edit freely</span></label>
         <textarea name="caption" id="caption" required>{{ c.draft_caption }}</textarea>
@@ -920,6 +932,17 @@ renderSegments();
             else alert(d.error || 'No caption returned');
           } catch (e) { alert('Suggestion failed: ' + e); }
           btn.disabled = false; btn.textContent = 'Regenerate caption';
+        }
+        async function suggestTitle() {
+          const btn = document.getElementById('suggest-title-btn');
+          btn.disabled = true; btn.textContent = 'Thinking…';
+          try {
+            const r = await fetch('/video/{{ c.id }}/suggest-title', { method: 'POST' });
+            const d = await r.json();
+            if (d.title) document.getElementById('clip_title').value = d.title;
+            else alert(d.error || 'No title returned');
+          } catch (e) { alert('Suggestion failed: ' + e); }
+          btn.disabled = false; btn.textContent = 'Regenerate title';
         }
         function validateQueue() {
           const cap = document.getElementById('caption');

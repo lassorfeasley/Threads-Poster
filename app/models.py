@@ -88,6 +88,8 @@ class Candidate(Base):
     # Optional LLM assists (clearly drafts).
     suggested_highlight: Mapped[str] = mapped_column(Text, default="")  # e.g. "00:42-01:10: ..."
     draft_caption: Mapped[str] = mapped_column(Text, default="")
+    # LLM-generated, human-readable title for the exported clip (editable).
+    clip_title: Mapped[str] = mapped_column(Text, default="")
 
     # Vision scoring: how engaging the FOOTAGE looks, judged from YouTube's
     # storyboard stills (0-1) plus which popularity traits were detected.
@@ -145,6 +147,13 @@ class ThreadsPost(Base):
     clip_length_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     post_day_of_week: Mapped[str] = mapped_column(String(10), default="")
     post_hour_local: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Auto first-reply (text reply under the published post). Set after publish
+    # when config/first_reply.yaml is enabled; failure does not fail the post.
+    first_reply_id: Mapped[str] = mapped_column(String(60), default="")
+    first_reply_text: Mapped[str] = mapped_column(Text, default="")
+    first_reply_error: Mapped[str] = mapped_column(Text, default="")
+    first_reply_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -238,6 +247,18 @@ class TraitWeight(Base):
     overall_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Fractional lift vs. the overall average: (avg_metric - overall) / overall.
     lift: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AppToken(Base):
+    """Service credentials (e.g. the Threads OAuth token) stored in the shared
+    DB so a headless runner (GitHub Actions / cron) can publish without the
+    operator's laptop. ``value`` is the token payload as JSON text."""
+
+    __tablename__ = "app_tokens"
+
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

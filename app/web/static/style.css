@@ -267,6 +267,9 @@ main {
 .page-head h1 { margin: 0; }
 .page-head .sub { color: var(--muted); font-size: 13.5px; margin-top: 5px; max-width: 68ch; }
 .page-head .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.page-head .monitor-status { display: inline-flex; align-items: center; gap: 8px; margin-right: 4px; }
+.page-head .monitor-status .meta { white-space: nowrap; }
+.page-head .monitor-status form { display: inline-flex; margin: 0; }
 
 h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.4px; margin: 0 0 16px; }
 h2 {
@@ -592,6 +595,31 @@ button.ghost:hover, .btn.ghost:hover {
 button.sm, .btn.sm { padding: 4px 10px; font-size: 12px; border-radius: 7px; }
 button.lg, .btn.lg { padding: 11px 22px; font-size: 14.5px; border-radius: 10px; }
 
+/* Square icon-only button (e.g. header upload trigger). */
+.icon-btn { padding: 7px 9px; gap: 0; }
+.icon-btn svg { display: block; }
+
+/* Modal dialog (native <dialog>). */
+dialog.modal {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  color: var(--text);
+  padding: 20px 22px;
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  box-shadow: 0 24px 64px -18px rgba(0, 0, 0, 0.6);
+}
+dialog.modal::backdrop { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(2px); }
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.modal-head strong { font-size: 15px; font-weight: 650; }
+
 .btn-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 form.inline { display: inline-flex; }
@@ -661,6 +689,67 @@ label {
 .field { margin-bottom: 14px; }
 .form-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
 .form-row .field { margin-bottom: 0; }
+
+/* Single-row filter bar: a compact set of controls on one line, centered. */
+.form-row.single-row { flex-wrap: nowrap; gap: 12px; justify-content: center; }
+.form-row.single-row .field { flex: 0 1 auto; min-width: 0; }
+.form-row.single-row .field.search { flex: 0 1 300px; }
+.form-row.single-row .field.date { flex: 0 0 auto; }
+.form-row.single-row .field.btn-group { flex: 0 0 auto; }
+.form-row.single-row .field > input,
+.form-row.single-row .field > select { min-width: 0; }
+
+/* Keyword multi-select combo box (native <details> dropdown). */
+.combo { position: relative; }
+.combo > summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 140px;
+  font-size: 13.5px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 7px 11px;
+}
+.combo > summary::-webkit-details-marker { display: none; }
+.combo[open] > summary { border-color: var(--muted); }
+.combo-caret { color: var(--muted); flex: 0 0 auto; transition: transform 0.15s ease; }
+.combo[open] .combo-caret { transform: rotate(180deg); }
+.combo-panel {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.6);
+}
+.combo-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.combo-opt:hover { background: var(--panel2); }
+.combo-opt input { width: auto; margin: 0; }
 
 /* Topic chips (checkbox pills) */
 .chip {
@@ -1209,7 +1298,7 @@ kbd {
   font-weight: 650; text-transform: uppercase; letter-spacing: 0.6px;
 }
 .cal-cell {
-  min-height: 112px;
+  min-height: 138px;
   background: var(--panel2);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1348,3 +1437,210 @@ a.cal-event:hover { background: var(--panel3); }
   .queue-item { grid-template-columns: 64px minmax(0, 1fr); }
   .queue-actions { display: none; }
 }
+
+/* ------------------------------------------------------------
+   Dashboard header view toggle (icon-only segmented control):
+   Table view (dashboard list) <-> Triage view.
+   ------------------------------------------------------------ */
+.view-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 2px;
+  gap: 2px;
+  background: var(--panel3);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.view-toggle .view-seg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.view-toggle .view-seg svg { display: block; }
+.view-toggle .view-seg:hover {
+  color: var(--text);
+  background: var(--panel2);
+  text-decoration: none;
+}
+.view-toggle .view-seg.is-active {
+  color: var(--blue);
+  background: var(--panel2);
+  border-color: var(--blue-border);
+}
+.view-toggle .view-seg:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+/* =========================================================================
+   Dashboard list-view segmented control (Candidates / Selected clips to trim)
+   Rounded pill container with two buttons; the active one is highlighted.
+   ========================================================================= */
+.segmented {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin: 4px 0 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.segmented .seg-btn {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 7px 16px;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.segmented .seg-btn:hover {
+  background: var(--panel2);
+  color: var(--text);
+  border-color: transparent;
+}
+.segmented .seg-btn.is-active {
+  background: var(--blue-soft);
+  border-color: var(--blue-border);
+  color: var(--blue);
+}
+.segmented .seg-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: var(--panel3);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.segmented .seg-btn.is-active .seg-count {
+  background: var(--blue-border);
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------
+   Calendar: single-view toggle + animated drag & drop
+   ------------------------------------------------------------ */
+/* With the Calendar/Queue toggle, only one panel shows at a time, full width. */
+.cal-layout.view-calendar,
+.cal-layout.view-queue { display: block; }
+.cal-layout.view-queue .cal-queue {
+  position: static;
+  max-height: none;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+/* Smooth, GPU-friendly transitions for the cards that reflow around a drag. */
+.cal-event,
+.queue-item { will-change: transform; }
+.cal-flip { transition: transform 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) !important; }
+
+.cal-event.cal-drag,
+.queue-item.cal-drag {
+  transition: box-shadow 0.18s ease, background 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+}
+
+/* The card being dragged lifts off the surface (only the others reflow). */
+.cal-event.cal-drag.dragging,
+.queue-item.cal-drag.dragging {
+  opacity: 0.6;
+  box-shadow: 0 14px 30px -12px rgba(0, 0, 0, 0.65);
+  transform: scale(1.015) rotate(-0.6deg);
+  z-index: 6;
+}
+
+/* Animated drop target (adds a gentle pulse to the existing highlight). */
+.cal-event.cal-drop-over,
+.queue-item.cal-drop-over {
+  animation: cal-pulse 1.1s ease-in-out infinite;
+}
+.queue-item.cal-drop-over {
+  box-shadow: inset 0 0 0 9999px color-mix(in srgb, var(--blue) 8%, transparent);
+}
+@keyframes cal-pulse {
+  0%, 100% { outline-color: var(--blue); }
+  50% { outline-color: color-mix(in srgb, var(--blue) 35%, transparent); }
+}
+
+/* Soft fade while the move is persisted, just before the reload. */
+body.cal-committing #cal-layout {
+  opacity: 0.5;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cal-flip,
+  .cal-event.cal-drag.dragging,
+  .queue-item.cal-drop-over { animation: none !important; transition: none !important; }
+}
+
+/* Thumbnail event cards in the month grid (windows make the exact time
+   secondary, so lead with the clip thumbnail + title). */
+.cal-event.card {
+  white-space: normal;
+  padding: 4px;
+  overflow: hidden;
+}
+.cal-ev {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  text-decoration: none;
+  color: inherit;
+}
+.cal-ev-thumb {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 30px;
+  border-radius: 4px;
+  background: #000 center / cover no-repeat;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.cal-ev-ph { color: var(--muted); font-size: 10px; opacity: 0.8; }
+.cal-ev-body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cal-ev-title {
+  font-size: 11px;
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.cal-ev-sub {
+  font-size: 10px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.cal-ev-dot {
+  width: 6px; height: 6px; border-radius: 2px; flex: 0 0 auto;
+  background: currentColor;
+}
+.cal-event.card.sched .cal-ev-dot { background: var(--blue); }
+.cal-event.card.pub .cal-ev-dot { background: var(--accent); }
+.cal-event.card.pub .cal-ev-title { color: var(--text-dim); }
+/* Keep the lifted drag state readable on the taller cards. */
+.cal-event.card.cal-drag { cursor: grab; }

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>First reply</h1>
+    <div class="sub">
+      <a href="/engagement">← Back to Replies</a>
+      · Text automatically posted under every post this app publishes.
+      Failures never undo the main post — retry from the post page.
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <form method="post" action="/engagement/first-reply">
+    <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 14px;">
+      <input type="checkbox" name="enabled" value="1" {% if enabled %}checked{% endif %}>
+      Automatically post this reply after each publish
+    </label>
+
+    <label for="reply-text" class="card-title" style="display:block; margin-bottom: 8px;">Reply text</label>
+    <textarea name="text" id="reply-text" maxlength="500" rows="8"
+              placeholder="e.g. pitch Renewables.org under every clip…">{{ text }}</textarea>
+    <div class="meta" style="margin-top: 6px; display:flex; justify-content:space-between; gap:12px;">
+      <span>Threads limit is 500 characters. URLs in the text get a link preview.</span>
+      <span id="char-count">{{ text|length }} / 500</span>
+    </div>
+
+    <div class="btn-group" style="margin-top: 16px;">
+      <button class="primary" type="submit">Save</button>
+    </div>
+  </form>
+</div>
+
+<p class="meta" style="margin-top: 12px;">Stored in <code>config/first_reply.yaml</code> if you'd rather edit it by hand.</p>
+
+<script>
+  const ta = document.getElementById('reply-text');
+  const count = document.getElementById('char-count');
+  function refresh() {
+    const n = (ta.value || '').length;
+    count.textContent = n + ' / 500';
+    count.style.color = n > 500 ? 'var(--danger)' : '';
+  }
+  ta.addEventListener('input', refresh);
+  refresh();
+</script>
+{% endblock %}

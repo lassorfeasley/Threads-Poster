@@ -1,0 +1,10 @@
+# Minimal deps for a headless scheduler tick (GitHub Actions / cron).
+# Excludes the dashboard + scrape/transcribe stack (fastapi, yt-dlp,
+# faster-whisper, ...) which only runs on the operator's machine.
+sqlalchemy>=2.0
+pyyaml>=6.0
+python-dotenv>=1.0
+requests>=2.32
+anthropic>=0.30
+supabase>=2.5
+psycopg2-binary>=2.9
