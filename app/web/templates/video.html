@@ -836,7 +836,18 @@ renderSegments();
     {% if c.clip_title %}
       <div class="card-title" style="margin-bottom: 8px;" title="Generated clip title">🎬 {{ c.clip_title }}</div>
     {% endif %}
-    <video id="clip-player" src="/media/clip/{{ c.id }}" controls preload="metadata"></video>
+    <video id="clip-player"
+           src="{{ '/media/subtitled/' ~ c.id if c.subtitled_clip_path else '/media/clip/' ~ c.id }}"
+           controls preload="metadata"></video>
+    {% if c.subtitled_clip_path %}
+      <div class="btn-group" style="margin-top: 8px;">
+        <button type="button" class="sm" id="preview-subs-btn" disabled
+                onclick="swapPreview(true)">Captioned</button>
+        <button type="button" class="sm" id="preview-orig-btn"
+                onclick="swapPreview(false)">Original</button>
+        <span class="meta">preview</span>
+      </div>
+    {% endif %}
     <div class="btn-group" style="margin-top: 8px; flex-wrap: wrap;">
       <a class="sm" href="/video/{{ c.id }}/download-clip" download>⤓ Download clip</a>
       <button type="button" class="sm" id="copy-caption-btn"
@@ -844,6 +855,43 @@ renderSegments();
     </div>
     <div class="meta" style="margin-top: 8px;">Your exported clip. Download it and copy the
       caption to post manually elsewhere, or publish to Threads below. Re-trim any time to replace it.</div>
+
+    <div class="card tight" style="margin-top: 14px;">
+      <div class="card-title">Stylized captions</div>
+      <div class="meta" style="margin-bottom: 8px;">Burns word-by-word captions into the clip
+        (Funnel font, current word highlighted). Optional — you choose which version to post.</div>
+      <div class="btn-group" style="align-items: center; flex-wrap: wrap;">
+        <button type="button" class="sm" id="gen-subs-btn" onclick="generateSubtitles()">
+          {{ "↻ Regenerate captions" if c.subtitled_clip_path else "✦ Generate captions" }}</button>
+        <span class="meta" id="subs-status">
+          {% if c.subtitled_clip_path %}Captioned version ready.{% endif %}</span>
+      </div>
+    </div>
+    <script>
+      function swapPreview(subs) {
+        const p = document.getElementById('clip-player');
+        const t = p.currentTime;
+        p.src = subs ? '/media/subtitled/{{ c.id }}' : '/media/clip/{{ c.id }}';
+        p.currentTime = t;
+        const sb = document.getElementById('preview-subs-btn');
+        const ob = document.getElementById('preview-orig-btn');
+        if (sb) sb.disabled = subs;
+        if (ob) ob.disabled = !subs;
+      }
+      async function generateSubtitles() {
+        const btn = document.getElementById('gen-subs-btn');
+        const status = document.getElementById('subs-status');
+        btn.disabled = true;
+        status.textContent = 'Transcribing + rendering… this can take a minute.';
+        try {
+          const r = await fetch('/video/{{ c.id }}/subtitles', { method: 'POST' });
+          const d = await r.json();
+          if (d.url) { location.reload(); return; }
+          status.textContent = d.error || 'Caption generation failed';
+        } catch (e) { status.textContent = 'Caption generation failed: ' + e; }
+        btn.disabled = false;
+      }
+    </script>
 
     <div style="margin-top: 14px;">
       <div class="card-title" style="margin-bottom: 4px;">Clip transcript</div>
@@ -896,6 +944,13 @@ renderSegments();
         <label>Caption
           <span class="badge score-lo" style="margin-left: 6px;">AI suggestion is a draft — edit freely</span></label>
         <textarea name="caption" id="caption" required>{{ c.draft_caption }}</textarea>
+        {% if c.subtitled_clip_path %}
+          <label class="inline-label" style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+            <input type="checkbox" name="use_subtitles" value="1"
+                   {{ "checked" if c.use_subtitles }}>
+            Post the captioned version (burned-in word-by-word subtitles)
+          </label>
+        {% endif %}
         <div class="btn-group" style="margin-top: 12px; flex-wrap: wrap;">
           <button type="button" class="primary" id="suggest-btn" onclick="suggestCaption()">
             {{ "Regenerate" if c.draft_caption else "Suggest" }} caption</button>

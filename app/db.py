@@ -49,6 +49,8 @@ def _ensure_new_columns() -> None:
             "clip_title": "TEXT DEFAULT ''",
             "trim_segments": "TEXT DEFAULT ''",
             "trimmed_clip_path": "TEXT DEFAULT ''",
+            "subtitled_clip_path": "TEXT DEFAULT ''",
+            "use_subtitles": f"BOOLEAN DEFAULT {bool_default}",
             "visual_score": "FLOAT",
             "visual_traits": "TEXT DEFAULT ''",
             "visual_rationale": "TEXT DEFAULT ''",

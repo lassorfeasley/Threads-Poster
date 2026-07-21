@@ -812,6 +812,15 @@ def media_clip(candidate_id: int):
         return FileResponse(c.trimmed_clip_path, media_type="video/mp4")
 
 
+@app.get("/media/subtitled/{candidate_id}")
+def media_subtitled(candidate_id: int):
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None or not c.subtitled_clip_path or not Path(c.subtitled_clip_path).exists():
+            return JSONResponse({"error": "no subtitled clip"}, status_code=404)
+        return FileResponse(c.subtitled_clip_path, media_type="video/mp4")
+
+
 @app.get("/video/{candidate_id}/download-clip")
 def download_clip(candidate_id: int):
     """Serve the exported clip as a file attachment so the operator can save it
@@ -857,6 +866,9 @@ def export_clip(candidate_id: int, segments_json: str = Form(...)):
             out = export_supercut(c.local_video_path, segments, f"{c.video_id}_cut")
             c.trim_segments = json.dumps(segments)
             c.trimmed_clip_path = str(out)
+            # Any previously generated captions no longer match the new cut.
+            c.subtitled_clip_path = ""
+            c.use_subtitles = False
             # Auto-title the fresh clip from its own transcript, but only when the
             # operator hasn't already set one (regeneration stays available in the
             # Post step). A titling failure must never block the export.
@@ -877,6 +889,46 @@ def export_clip(candidate_id: int, segments_json: str = Form(...)):
                           f"Exported {n} segment{'s' if n > 1 else ''} — ready to post")
         except ClipExportError as exc:
             return _flash(f"/video/{candidate_id}?step=trim", f"Export failed: {exc}")
+
+
+@app.post("/video/{candidate_id}/subtitles")
+def generate_subtitles(candidate_id: int):
+    """Generate the stylized-caption variant of the exported clip (AJAX).
+
+    Runs whisper word timestamps + the Pillow/ffmpeg burn; takes roughly
+    10-60s for a typical clip, longer on the first run while the whisper
+    model downloads.
+    """
+    from ..subtitles import SubtitleError, create_subtitled_clip
+
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None or not c.trimmed_clip_path or not Path(c.trimmed_clip_path).exists():
+            return JSONResponse({"error": "Export a clip first"}, status_code=404)
+        clip_path = c.trimmed_clip_path
+    try:
+        out = create_subtitled_clip(clip_path)
+    except SubtitleError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    except Exception as exc:
+        log.exception("Caption generation failed for candidate %s", candidate_id)
+        return JSONResponse({"error": f"Caption generation failed: {exc}"}, status_code=500)
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is not None:
+            c.subtitled_clip_path = str(out)
+            c.use_subtitles = True
+    return {"url": f"/media/subtitled/{candidate_id}"}
+
+
+def _chosen_clip_path(c: Candidate, use_subtitles_form: str) -> str:
+    """The file the operator wants to post: captioned variant when the box is
+    ticked and the file exists, otherwise the plain export. Persists the choice."""
+    want = str(use_subtitles_form).lower() in ("1", "true", "on", "yes")
+    c.use_subtitles = want and bool(c.subtitled_clip_path)
+    if c.use_subtitles and Path(c.subtitled_clip_path).exists():
+        return c.subtitled_clip_path
+    return c.trimmed_clip_path
 
 
 # --- Caption suggestion + posting -------------------------------------------------
@@ -965,7 +1017,7 @@ def suggest_clip_title(candidate_id: int):
 
 @app.post("/video/{candidate_id}/post")
 def post_to_threads(candidate_id: int, caption: str = Form(...),
-                    clip_title: str = Form("")):
+                    clip_title: str = Form(""), use_subtitles: str = Form("")):
     """Operator-confirmed publish of the exported clip."""
     caption = caption.strip()
     if not caption:
@@ -983,7 +1035,7 @@ def post_to_threads(candidate_id: int, caption: str = Form(...),
             return _flash(f"/video/{candidate_id}", "Export a clip first")
         c.clip_title = clip_title.strip()
         try:
-            post = publish_clip(session, c, c.trimmed_clip_path, caption)
+            post = publish_clip(session, c, _chosen_clip_path(c, use_subtitles), caption)
             state = session.get(SchedulerState, 1)
             if state is None:
                 state = SchedulerState(id=1)
@@ -1003,7 +1055,8 @@ def post_to_threads(candidate_id: int, caption: str = Form(...),
 
 @app.post("/video/{candidate_id}/queue")
 def queue_to_threads(candidate_id: int, caption: str = Form(...),
-                     is_breaking: str = Form(""), clip_title: str = Form("")):
+                     is_breaking: str = Form(""), clip_title: str = Form(""),
+                     use_subtitles: str = Form("")):
     """Add the exported clip to the adaptive FIFO queue (no immediate post)."""
     caption = caption.strip()
     if not caption:
@@ -1014,6 +1067,7 @@ def queue_to_threads(candidate_id: int, caption: str = Form(...),
         if c is None or not c.trimmed_clip_path:
             return _flash(f"/video/{candidate_id}", "Export a clip first")
         c.clip_title = clip_title.strip()
+        clip_path = _chosen_clip_path(c, use_subtitles)
         try:
             # Reuse an existing not-yet-published post for this clip rather than
             # creating a duplicate queue entry.
@@ -1026,6 +1080,17 @@ def queue_to_threads(candidate_id: int, caption: str = Form(...),
             if existing:
                 keep = existing[0]
                 keep.caption = caption
+                if keep.clip_local_path != clip_path:
+                    # Captions were toggled since this post was created — point
+                    # at the chosen file and refresh the cloud copy.
+                    from ..publishing import _object_key
+                    from ..storage_supabase import upload_trimmed_clip
+                    keep.clip_local_path = clip_path
+                    keep.clip_object_path = _object_key(Path(clip_path))
+                    try:
+                        upload_trimmed_clip(Path(clip_path), keep.clip_object_path)
+                    except Exception as exc:
+                        log.warning("Clip re-upload failed (will retry at publish): %s", exc)
                 keep.status = "queued"
                 keep.scheduled_at = None
                 keep.is_breaking = breaking
@@ -1036,7 +1101,7 @@ def queue_to_threads(candidate_id: int, caption: str = Form(...),
                 for extra in existing[1:]:
                     session.delete(extra)
             else:
-                queue_clip(session, c, c.trimmed_clip_path, caption, is_breaking=breaking)
+                queue_clip(session, c, clip_path, caption, is_breaking=breaking)
         except Exception as exc:
             return _flash(f"/video/{candidate_id}?step=post", f"Queue failed: {exc}")
     note = " (breaking — publishes ASAP)" if breaking else ""
@@ -1046,7 +1111,7 @@ def queue_to_threads(candidate_id: int, caption: str = Form(...),
 
 @app.post("/video/{candidate_id}/save-draft")
 def save_draft(candidate_id: int, caption: str = Form(...),
-               clip_title: str = Form("")):
+               clip_title: str = Form(""), use_subtitles: str = Form("")):
     """Save the exported clip + caption as a draft to publish or queue later."""
     caption = caption.strip()
     if not caption:
@@ -1057,7 +1122,7 @@ def save_draft(candidate_id: int, caption: str = Form(...),
             return _flash(f"/video/{candidate_id}", "Export a clip first")
         c.clip_title = clip_title.strip()
         try:
-            record_post(session, c, c.trimmed_clip_path, caption, status="draft")
+            record_post(session, c, _chosen_clip_path(c, use_subtitles), caption, status="draft")
         except Exception as exc:
             return _flash(f"/video/{candidate_id}?step=post", f"Save failed: {exc}")
     return _flash(f"/video/{candidate_id}?step=post",

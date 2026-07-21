@@ -102,6 +102,11 @@ class Candidate(Base):
     # exported supercut file produced from them.
     trim_segments: Mapped[str] = mapped_column(Text, default="")
     trimmed_clip_path: Mapped[str] = mapped_column(Text, default="")
+    # Optional stylized-caption variant of the exported clip (Funnel font,
+    # word-by-word highlight). Cleared on re-export; posting uses it only when
+    # ``use_subtitles`` is on.
+    subtitled_clip_path: Mapped[str] = mapped_column(Text, default="")
+    use_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

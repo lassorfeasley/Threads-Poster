@@ -34,20 +34,58 @@ def cmd_dashboard(args) -> None:
                 log_level="info", reload=args.reload)
 
 
+def _monitor_pass_with_record(lookback: int | None) -> None:
+    """One monitor pass, recorded in the MonitorRun table so the dashboard's
+    "last refreshed" state also reflects headless (cron / GitHub Actions) runs."""
+    from app.db import session_scope
+    from app.models import MonitorRun, utcnow
+    from app.monitor import run_monitor_once
+
+    scope = f"last {lookback} days" if lookback else "since last check"
+    with session_scope() as session:
+        run = MonitorRun(status=MonitorRun.STATUS_RUNNING, scope=scope, lookback_days=lookback)
+        session.add(run)
+        session.flush()
+        run_id = run.id
+    try:
+        result = run_monitor_once(lookback)
+    except Exception as exc:
+        with session_scope() as session:
+            run = session.get(MonitorRun, run_id)
+            if run is not None:
+                run.status = MonitorRun.STATUS_FAILED
+                run.error = str(exc)
+                run.result = f"Monitor pass failed: {exc}"
+                run.finished_at = utcnow()
+        raise
+    with session_scope() as session:
+        run = session.get(MonitorRun, run_id)
+        if run is not None:
+            run.status = MonitorRun.STATUS_DONE
+            run.channels_checked = result["channels_checked"]
+            run.candidates_stored = result["candidates_stored"]
+            run.vision_scored = result.get("vision_scored", 0)
+            run.result = (
+                f"{result['channels_checked']} channels checked, "
+                f"{result['candidates_stored']} new candidates, "
+                f"{result.get('vision_scored', 0)} vision-scored"
+            )
+            run.finished_at = utcnow()
+
+
 def cmd_monitor(args) -> None:
     from app.config import load_settings
     from app.db import init_db
-    from app.monitor import run_monitor_once
 
     init_db()
     if not args.loop:
-        run_monitor_once(args.lookback)
+        _monitor_pass_with_record(args.lookback)
         return
-    interval_min = load_settings().get("monitor.poll_interval_minutes", 240)
+    interval_min = load_settings().get("monitor.poll_interval_minutes", 360)
     log.info("Monitoring every %d minutes. Ctrl-C to stop.", interval_min)
     while True:
         try:
-            run_monitor_once()
+            _monitor_pass_with_record(None)
         except Exception:
             log.exception("Monitor pass failed; will retry next interval")
         time.sleep(interval_min * 60)

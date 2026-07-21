@@ -1,9 +1,10 @@
 # Main application settings. Everything here is operator-editable.
 
 monitor:
-  # How often the scheduler polls channels, in minutes (default: every 4 hours,
-  # i.e. a few times daily).
-  poll_interval_minutes: 240
+  # How often `run.py monitor --loop` polls channels, in minutes. The GitHub
+  # Actions monitor workflow has its own 6-hour cron (see
+  # .github/workflows/monitor.yml); this value only drives local loop mode.
+  poll_interval_minutes: 360
   # Default monitor window by publish date: number of calendar days to scan,
   # counting today (2 = today + yesterday). Also the dashboard's default date
   # filter. Override a single run with the "look back" box on the dashboard.
@@ -209,6 +210,25 @@ scheduler:
   metrics_poll_interval_minutes: 15
   # Only poll posts published within this many hours for the hotness signal.
   metrics_poll_recency_hours: 6
+
+subtitles:
+  # Stylized burned-in captions for exported clips (optional, per clip from the
+  # Post step). The "talks Renewables.org" look: big lowercase Funnel words, a
+  # few at a time, with the word being spoken set on a solid rounded box in
+  # inverted colors.
+  # Words shown on screen at once (fewer = bigger, more kinetic).
+  max_words_per_group: 3
+  # Bundled Funnel weights: FunnelDisplay-SemiBold.ttf / -Bold.ttf / -ExtraBold.ttf
+  font_file: FunnelDisplay-SemiBold.ttf
+  # Render captions in ALL CAPS (the reference series uses lowercase).
+  uppercase: false
+  # Base word color, the highlight box fill, and the word color inside the box
+  # (defaults sampled from the talks Renewables.org series: navy #1A4A7D).
+  text_color: "#FFFFFF"
+  highlight_box_color: "#FFFFFF"
+  highlight_text_color: "#1A4A7D"
+  # Caption size as a fraction of video height (0.11 ≈ 120px at 1080p).
+  font_size_frac: 0.11
 
 analytics:
   # How often the metrics puller re-snapshots each post's stats (hours).
