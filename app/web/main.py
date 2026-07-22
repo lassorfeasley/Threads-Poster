@@ -28,6 +28,7 @@ from ..db import (
     SessionLocal,
     active_traits,
     init_db,
+    invalidate_traits_cache,
     session_scope,
     sync_channels_from_config,
     sync_traits_from_config,
@@ -62,9 +63,10 @@ from ..scheduler import (
     spacing_allows_publish,
     start_scheduler_thread,
 )
-from ..scrape import archive_candidate
+from ..scrape import archive_candidate, fetch_video_metadata
 from ..vision import annotate_post_footage, tag_candidate_storyboard
 from ..voice import voice_context
+from ..youtube import YouTubeAPIError, parse_video_url
 
 log = logging.getLogger("web")
 
@@ -299,24 +301,9 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
         trait_weights = load_trait_weights(session)
         candidates = sort_candidates(candidates, trait_weights, settings)
 
-        # Filter dropdown options: only channels that actually have candidates.
-        filter_channels = session.execute(
-            select(Channel).join(Candidate, Candidate.channel_pk == Channel.id)
-            .distinct().order_by(Channel.call_sign)
-        ).scalars().all()
         # Keyword filter chips come from the active keyword list (what we monitor
         # for), so removed/legacy terms never show up as filters.
         keywords_options = sorted(load_keywords())
-        regions = [
-            r for (r,) in session.execute(
-                select(Channel.region).distinct().order_by(Channel.region)
-            ).all() if r
-        ]
-        countries = [
-            c for (c,) in session.execute(
-                select(Channel.country).distinct().order_by(Channel.country)
-            ).all() if c
-        ]
 
         # Items mid-workflow (shown on the default view only).
         in_progress_rows = []
@@ -358,9 +345,7 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
          "q": q, "channel_id": channel_id, "keyword": keyword, "region": region,
          "country": country, "scope": scope, "status": status,
          "date_from": date_from, "date_to": date_to,
-         "filter_channels": filter_channels, "keywords_options": keywords_options,
-         "regions": regions,
-         "countries": countries, "scopes": ["local", "national", "international"],
+         "keywords_options": keywords_options,
          "monitor_running": monitor_running,
          "monitor_result": monitor_result,
          "monitor_last_refreshed": monitor_last_refreshed,
@@ -730,6 +715,105 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
         cid = c.id
     threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
     return _flash(f"/video/{cid}", "Uploaded — transcribing now")
+
+
+def _get_or_create_pasted_channel(session) -> Channel:
+    """A single synthetic channel that owns all pasted-URL YouTube clips."""
+    ch = session.execute(
+        select(Channel).where(Channel.url == "youtube://pasted")
+    ).scalar_one_or_none()
+    if ch is None:
+        ch = Channel(call_sign="Pasted URLs", network="", market="Pasted YouTube URLs",
+                     region="", country="", scope="local",
+                     url="youtube://pasted", enabled=False)
+        session.add(ch)
+        session.flush()
+    return ch
+
+
+@app.post("/upload-url")
+def upload_url(urls: str = Form(...)):
+    """Queue one or more pasted YouTube URLs for download.
+
+    Reuses the approve/scrape pipeline: each URL becomes an 'approved' Candidate
+    with a real YouTube url, then a background thread downloads it via yt-dlp and
+    pulls captions — exactly like an approved discovered clip.
+    """
+    import re
+
+    parts = [p.strip() for p in re.split(r"[\s,]+", urls or "") if p.strip()]
+    if not parts:
+        return _flash("/", "Paste at least one YouTube URL")
+
+    queued: list[int] = []
+    duplicates = 0
+    invalid: list[str] = []
+
+    for raw in parts:
+        try:
+            video_id = parse_video_url(raw)
+        except YouTubeAPIError:
+            invalid.append(raw)
+            continue
+
+        canonical = f"https://www.youtube.com/watch?v={video_id}"
+        title = ""
+        duration = None
+        published_at = utcnow()
+        # Best-effort metadata; if it fails we still queue the download.
+        try:
+            meta = fetch_video_metadata(canonical)
+            title = meta.get("title") or ""
+            duration = meta.get("duration_seconds")
+            upload_date = meta.get("upload_date")
+            if upload_date:
+                try:
+                    published_at = dt.datetime.strptime(upload_date, "%Y%m%d").replace(
+                        tzinfo=dt.timezone.utc
+                    )
+                except ValueError:
+                    pass
+        except Exception as exc:
+            log.info("Metadata fetch failed for %s: %s", canonical, exc)
+
+        with session_scope() as session:
+            existing = session.execute(
+                select(Candidate.id).where(Candidate.video_id == video_id)
+            ).scalar_one_or_none()
+            if existing is not None:
+                duplicates += 1
+                continue
+            ch = _get_or_create_pasted_channel(session)
+            c = Candidate(
+                video_id=video_id,
+                channel_pk=ch.id,
+                title=(title.strip() or canonical)[:300],
+                url=canonical,
+                published_at=published_at,
+                duration_seconds=duration,
+                status=STATUS_APPROVED,
+                approved_at=utcnow(),
+            )
+            session.add(c)
+            session.flush()
+            queued.append(c.id)
+
+    for cid in queued:
+        threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
+
+    bits = []
+    if queued:
+        bits.append(f"{len(queued)} queued — downloading now")
+    if duplicates:
+        bits.append(f"{duplicates} already in library")
+    if invalid:
+        bits.append(f"{len(invalid)} not recognized")
+    msg = "; ".join(bits) or "Nothing to do"
+
+    # Single new video: jump straight to its workflow screen, like /upload.
+    if len(queued) == 1 and not duplicates and not invalid:
+        return _flash(f"/video/{queued[0]}", "Queued — downloading and transcribing now")
+    return _flash("/", msg)
 
 
 def _log_triage_decision(session, c: Candidate, action: str) -> None:
@@ -2032,6 +2116,7 @@ def trait_add(name: str = Form(...)):
         if exists:
             return _flash("/traits", f"'{name}' already exists")
         session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, enabled=True))
+    invalidate_traits_cache()
     return _flash("/traits", f"Added '{name}'")
 
 
@@ -2041,6 +2126,7 @@ def trait_toggle(trait_id: int):
         t = session.get(Trait, trait_id)
         if t:
             t.enabled = not t.enabled
+    invalidate_traits_cache()
     return _flash("/traits", "Updated")
 
 
@@ -2050,6 +2136,7 @@ def trait_delete(trait_id: int):
         t = session.get(Trait, trait_id)
         if t:
             session.delete(t)
+    invalidate_traits_cache()
     return _flash("/traits", "Deleted")
 
 

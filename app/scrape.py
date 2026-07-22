@@ -110,6 +110,30 @@ def _write_transcript(segments: list[dict], transcript_dir: Path, video_id: str)
     return json_path, plain
 
 
+# --- Metadata ----------------------------------------------------------------
+
+def fetch_video_metadata(url: str) -> dict:
+    """Fetch title/duration/uploader for a YouTube URL without downloading.
+
+    Uses yt-dlp's metadata extraction (no API key required). Returns a dict with
+    video_id, title, duration_seconds, uploader, upload_date (YYYYMMDD or None),
+    and webpage_url. Raises whatever yt-dlp raises on a bad/unavailable URL.
+    """
+    import yt_dlp
+
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return {
+        "video_id": info.get("id"),
+        "title": info.get("title") or "",
+        "duration_seconds": int(info["duration"]) if info.get("duration") else None,
+        "uploader": info.get("uploader") or info.get("channel") or "",
+        "upload_date": info.get("upload_date"),
+        "webpage_url": info.get("webpage_url") or url,
+    }
+
+
 # --- Download ----------------------------------------------------------------
 
 def download_video(candidate: Candidate, video_dir: Path, settings) -> Path:

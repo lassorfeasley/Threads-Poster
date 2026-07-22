@@ -74,6 +74,29 @@ def parse_channel_url(url: str) -> tuple[str, str]:
     raise YouTubeAPIError(f"Unrecognized channel URL: {url}")
 
 
+def parse_video_url(url: str) -> str:
+    """Extract the 11-char video id from any YouTube video URL form.
+
+    Handles watch?v=, youtu.be/, /shorts/, /embed/, /live/, and a bare id.
+    Raises YouTubeAPIError if nothing looks like a video id.
+    """
+    url = url.strip()
+    patterns = (
+        r"[?&]v=([\w-]{11})",
+        r"youtu\.be/([\w-]{11})",
+        r"youtube\.com/shorts/([\w-]{11})",
+        r"youtube\.com/embed/([\w-]{11})",
+        r"youtube\.com/live/([\w-]{11})",
+    )
+    for pat in patterns:
+        m = re.search(pat, url)
+        if m:
+            return m.group(1)
+    if re.fullmatch(r"[\w-]{11}", url):
+        return url
+    raise YouTubeAPIError(f"Unrecognized YouTube video URL: {url}")
+
+
 def resolve_channel(url: str) -> dict:
     """Resolve any channel URL form to canonical info.
 

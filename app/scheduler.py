@@ -17,7 +17,7 @@ import threading
 import time
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from . import threads_api
@@ -476,9 +476,9 @@ def scheduler_status(session) -> dict:
                 next_window_local = tw[0].astimezone(tz)
                 next_window_key = _window_key(tomorrow, 0)
 
-    queue_rows = session.execute(
-        select(ThreadsPost).where(ThreadsPost.status == STATUS_QUEUED)
-    ).scalars().all()
+    queue_count = session.execute(
+        select(func.count(ThreadsPost.id)).where(ThreadsPost.status == STATUS_QUEUED)
+    ).scalar_one()
     hot, delta = is_last_post_hot(session)
 
     return {
@@ -500,7 +500,7 @@ def scheduler_status(session) -> dict:
         "hot_window_minutes": int(settings.get("scheduler.hot.window_minutes", 60)),
         "spacing_floor_minutes": int(settings.get("scheduler.spacing_floor_minutes", 90)),
         "max_deferrals": int(settings.get("scheduler.max_deferrals", 2)),
-        "queue_count": len(queue_rows),
+        "queue_count": queue_count,
         "within_active_hours": _within_active_hours(now_local),
     }
 

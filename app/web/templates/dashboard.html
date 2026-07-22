@@ -24,6 +24,14 @@
         </form>
       {% endif %}
     </div>
+    <button type="button" class="btn ghost icon-btn" title="Paste a YouTube URL"
+            aria-label="Paste a YouTube URL" onclick="document.getElementById('url-dialog').showModal()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+        <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+      </svg>
+    </button>
     <button type="button" class="btn ghost icon-btn" title="Upload your own clip"
             aria-label="Upload your own clip" onclick="document.getElementById('upload-dialog').showModal()">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -51,6 +59,37 @@
     </div>
   </div>
 </div>
+
+<dialog id="url-dialog" class="modal">
+  <form method="post" action="/upload-url" id="url-form" onsubmit="return onUrlSubmit()">
+    <div class="modal-head">
+      <strong>Paste YouTube URL(s)</strong>
+      <button type="button" class="btn ghost sm" aria-label="Close"
+              onclick="document.getElementById('url-dialog').close()">✕</button>
+    </div>
+    <p class="meta" style="margin: 0 0 16px;">Downloads with yt-dlp and runs through the same
+      trim → caption → post workflow. Paste one URL per line to queue several at once.</p>
+    <div class="field">
+      <label>YouTube URL(s)</label>
+      <textarea name="urls" id="url-input" rows="4"
+                placeholder="https://www.youtube.com/watch?v=…&#10;https://youtu.be/…" required></textarea>
+    </div>
+    <div class="btn-group" style="margin-top: 18px; justify-content: flex-end;">
+      <button type="button" class="btn ghost"
+              onclick="document.getElementById('url-dialog').close()">Cancel</button>
+      <button class="primary" id="url-btn">Download &amp; transcribe</button>
+    </div>
+  </form>
+  <script>
+    function onUrlSubmit() {
+      const t = document.getElementById('url-input');
+      if (!t.value.trim()) { alert('Paste at least one YouTube URL.'); return false; }
+      const btn = document.getElementById('url-btn');
+      btn.disabled = true; btn.textContent = 'Queuing…';
+      return true;
+    }
+  </script>
+</dialog>
 
 <dialog id="upload-dialog" class="modal">
   <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form"

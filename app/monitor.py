@@ -11,7 +11,7 @@ import logging
 from sqlalchemy import select
 
 from . import youtube
-from .config import load_keywords, load_settings
+from .config import env, load_keywords, load_settings
 from .db import active_traits, session_scope, sync_channels_from_config, sync_traits_from_config
 from .llm import score_relevance
 from .matching import find_keyword_matches
@@ -146,6 +146,17 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
 def run_monitor_once(lookback_days: int | None = None) -> dict:
     """One full pass over all enabled channels. `lookback_days` scans that far
     back regardless of last-seen state (backfill). Returns summary counts."""
+    # Fail the whole pass fast if the API key is absent, instead of stamping the
+    # same "key not set" error onto every channel (which, against the shared
+    # Supabase DB, turns the entire Channels page red — e.g. a scheduled runner
+    # missing the YOUTUBE_API_KEY secret). Callers record this to MonitorRun.
+    if not env("YOUTUBE_API_KEY"):
+        raise youtube.YouTubeAPIError(
+            "YOUTUBE_API_KEY is not set — aborting the monitor pass before "
+            "polling any channels. Set it in .env locally, or as the "
+            "YOUTUBE_API_KEY GitHub Actions secret for the scheduled workflow."
+        )
+
     settings = load_settings()
     keywords = load_keywords()
     total_stored = 0

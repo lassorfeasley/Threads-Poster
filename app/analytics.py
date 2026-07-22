@@ -6,6 +6,7 @@ import logging
 from collections import defaultdict
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from .config import load_settings
 from .llm import write_digest
@@ -15,6 +16,18 @@ from .threads_api import fetch_insights
 log = logging.getLogger("analytics")
 
 METRICS = ["views", "likes", "replies", "reposts", "quotes", "shares"]
+
+
+def _last_snapshot_times(session, post_ids: list[int]) -> dict[int, dt.datetime]:
+    """post_pk -> newest snapshot capture time, in one grouped query."""
+    if not post_ids:
+        return {}
+    rows = session.execute(
+        select(MetricSnapshot.post_pk, func.max(MetricSnapshot.captured_at))
+        .where(MetricSnapshot.post_pk.in_(post_ids))
+        .group_by(MetricSnapshot.post_pk)
+    ).all()
+    return {pk: last for pk, last in rows if last is not None}
 
 
 def snapshot_metrics(session) -> int:
@@ -27,6 +40,7 @@ def snapshot_metrics(session) -> int:
     posts = session.execute(
         select(ThreadsPost).where(ThreadsPost.status == "published")
     ).scalars().all()
+    last_by_post = _last_snapshot_times(session, [p.id for p in posts])
 
     taken = 0
     for post in posts:
@@ -35,9 +49,7 @@ def snapshot_metrics(session) -> int:
             published = published.replace(tzinfo=dt.timezone.utc)
         if published and now - published > max_age:
             continue
-        last = session.execute(
-            select(func.max(MetricSnapshot.captured_at)).where(MetricSnapshot.post_pk == post.id)
-        ).scalar_one()
+        last = last_by_post.get(post.id)
         if last is not None:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=dt.timezone.utc)
@@ -89,14 +101,11 @@ def poll_recent_metrics(session) -> int:
             ThreadsPost.threads_media_id != "",
         ).order_by(ThreadsPost.published_at.desc())
     ).scalars().all()
+    last_by_post = _last_snapshot_times(session, [p.id for p in posts])
 
     taken = 0
     for post in posts:
-        last = session.execute(
-            select(func.max(MetricSnapshot.captured_at)).where(
-                MetricSnapshot.post_pk == post.id
-            )
-        ).scalar_one()
+        last = last_by_post.get(post.id)
         if last is not None:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=dt.timezone.utc)
@@ -189,42 +198,79 @@ def is_last_post_hot(session) -> tuple[bool, int | None]:
     return delta > threshold, delta
 
 
-def _latest_metrics(session, post: ThreadsPost) -> dict:
-    snap = session.execute(
-        select(MetricSnapshot)
-        .where(MetricSnapshot.post_pk == post.id)
-        .order_by(MetricSnapshot.captured_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if snap is None:
-        return {m: None for m in METRICS}
-    return {m: getattr(snap, m) for m in METRICS}
+def _latest_metrics_bulk(session, post_ids: list[int]) -> dict[int, dict]:
+    """post_pk -> {metric: value} from each post's newest snapshot.
+
+    One window-function query instead of one query per post — essential against
+    a remote DB, where per-post lookups cost a network round trip each.
+    """
+    if not post_ids:
+        return {}
+    rn = (
+        func.row_number()
+        .over(partition_by=MetricSnapshot.post_pk,
+              order_by=MetricSnapshot.captured_at.desc())
+        .label("rn")
+    )
+    sub = (
+        select(MetricSnapshot.post_pk,
+               *[getattr(MetricSnapshot, m) for m in METRICS], rn)
+        .where(MetricSnapshot.post_pk.in_(post_ids))
+        .subquery()
+    )
+    rows = session.execute(select(sub).where(sub.c.rn == 1)).all()
+    return {row.post_pk: {m: getattr(row, m) for m in METRICS} for row in rows}
 
 
-def _comment_outcomes(session, post: ThreadsPost) -> dict:
-    rows = session.execute(
-        select(ThreadsComment.classification, func.count(ThreadsComment.id))
-        .where(ThreadsComment.post_pk == post.id)
-        .group_by(ThreadsComment.classification)
+def _comment_outcomes_bulk(session, post_ids: list[int]) -> dict[int, dict]:
+    """post_pk -> comment-outcome counts, from two grouped queries total."""
+    if not post_ids:
+        return {}
+    class_rows = session.execute(
+        select(ThreadsComment.post_pk, ThreadsComment.classification,
+               func.count(ThreadsComment.id))
+        .where(ThreadsComment.post_pk.in_(post_ids))
+        .group_by(ThreadsComment.post_pk, ThreadsComment.classification)
     ).all()
-    by_class = {c: n for c, n in rows}
-    replies_posted = session.execute(
-        select(func.count(ThreadsComment.id)).where(
-            ThreadsComment.post_pk == post.id, ThreadsComment.reply_status == "posted"
-        )
-    ).scalar_one()
-    return {
-        "supportive_comments": by_class.get("supportive", 0) + by_class.get("genuine_question", 0),
-        "hostile_comments": by_class.get("hostile_or_argumentative", 0) + by_class.get("bait_or_trolling", 0),
-        "renewables_replies_posted": replies_posted,
-    }
+    posted_rows = session.execute(
+        select(ThreadsComment.post_pk, func.count(ThreadsComment.id))
+        .where(ThreadsComment.post_pk.in_(post_ids),
+               ThreadsComment.reply_status == "posted")
+        .group_by(ThreadsComment.post_pk)
+    ).all()
+    posted = {pk: n for pk, n in posted_rows}
+
+    by_post: dict[int, dict[str, int]] = defaultdict(dict)
+    for pk, classification, n in class_rows:
+        by_post[pk][classification] = n
+    out: dict[int, dict] = {}
+    for pk in post_ids:
+        by_class = by_post.get(pk, {})
+        out[pk] = {
+            "supportive_comments": by_class.get("supportive", 0) + by_class.get("genuine_question", 0),
+            "hostile_comments": by_class.get("hostile_or_argumentative", 0) + by_class.get("bait_or_trolling", 0),
+            "renewables_replies_posted": posted.get(pk, 0),
+        }
+    return out
+
+
+_EMPTY_METRICS = {m: None for m in METRICS}
+_EMPTY_OUTCOMES = {"supportive_comments": 0, "hostile_comments": 0,
+                   "renewables_replies_posted": 0}
 
 
 def build_post_rows(session) -> list[dict]:
     """One flat row per published post: attributes + latest metrics + comment outcomes."""
     posts = session.execute(
-        select(ThreadsPost).where(ThreadsPost.status == "published").order_by(ThreadsPost.published_at.desc())
+        select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
+        .where(ThreadsPost.status == "published")
+        .order_by(ThreadsPost.published_at.desc())
     ).scalars().all()
+
+    post_ids = [p.id for p in posts]
+    metrics_by_post = _latest_metrics_bulk(session, post_ids)
+    outcomes_by_post = _comment_outcomes_bulk(session, post_ids)
 
     rows = []
     for post in posts:
@@ -251,8 +297,8 @@ def build_post_rows(session) -> list[dict]:
             "day_of_week": post.post_day_of_week,
             "hour_local": post.post_hour_local,
         }
-        row.update(_latest_metrics(session, post))
-        row.update(_comment_outcomes(session, post))
+        row.update(metrics_by_post.get(post.id, _EMPTY_METRICS))
+        row.update(outcomes_by_post.get(post.id, _EMPTY_OUTCOMES))
         rows.append(row)
     return rows
 
@@ -363,42 +409,67 @@ def summary_kpis(rows: list[dict]) -> dict:
     return kpi
 
 
-def metric_at_age(session, post: ThreadsPost, metric: str, age_hours: int) -> int | None:
-    """``metric`` value when the post was ``age_hours`` old, from its snapshot
-    time series. Comparing every post at the same age keeps old posts (with
-    months of accumulated views) from always beating young ones.
+def _metric_at_age_from_series(
+    series: list[tuple[dt.datetime, int]],
+    published: dt.datetime | None,
+    age_hours: int,
+) -> int | None:
+    """Value when the post was ``age_hours`` old, from its (captured_at, value)
+    series in ascending capture order. Comparing every post at the same age
+    keeps old posts (with months of accumulated views) from always beating
+    young ones.
 
     Uses the newest snapshot captured at or before the target age; when
     snapshots only start later (or the post is still younger than the target),
     falls back to the closest one available.
     """
-    published = post.published_at
-    if published is None:
+    if not series or published is None:
         return None
     if published.tzinfo is None:
         published = published.replace(tzinfo=dt.timezone.utc)
     target = published + dt.timedelta(hours=age_hours)
 
-    snaps = session.execute(
-        select(MetricSnapshot)
-        .where(MetricSnapshot.post_pk == post.id,
-               getattr(MetricSnapshot, metric).is_not(None))
-        .order_by(MetricSnapshot.captured_at.asc())
-    ).scalars().all()
-    if not snaps:
-        return None
-
     best = None
-    for snap in snaps:
-        at = snap.captured_at
+    for at, value in series:
         if at.tzinfo is None:
             at = at.replace(tzinfo=dt.timezone.utc)
         if at <= target:
-            best = snap
+            best = value
         else:
             break
-    chosen = best if best is not None else snaps[0]
-    return getattr(chosen, metric)
+    return best if best is not None else series[0][1]
+
+
+def metrics_at_age_bulk(session, posts: list[ThreadsPost], metric: str,
+                        age_hours: int) -> dict[int, int]:
+    """post.id -> ``metric`` value at fixed age, for all posts in ONE query
+    (instead of one snapshot-series query per post)."""
+    ids = [p.id for p in posts]
+    if not ids:
+        return {}
+    col = getattr(MetricSnapshot, metric)
+    rows = session.execute(
+        select(MetricSnapshot.post_pk, MetricSnapshot.captured_at, col)
+        .where(MetricSnapshot.post_pk.in_(ids), col.is_not(None))
+        .order_by(MetricSnapshot.post_pk, MetricSnapshot.captured_at.asc())
+    ).all()
+    series: dict[int, list[tuple[dt.datetime, int]]] = defaultdict(list)
+    for pk, at, value in rows:
+        series[pk].append((at, value))
+
+    out: dict[int, int] = {}
+    for post in posts:
+        value = _metric_at_age_from_series(
+            series.get(post.id, []), post.published_at, age_hours
+        )
+        if value is not None:
+            out[post.id] = value
+    return out
+
+
+def metric_at_age(session, post: ThreadsPost, metric: str, age_hours: int) -> int | None:
+    """Single-post convenience wrapper around the bulk fixed-age lookup."""
+    return metrics_at_age_bulk(session, [post], metric, age_hours).get(post.id)
 
 
 def _weighted_median(pairs: list[tuple[float, float]]) -> float | None:
@@ -451,9 +522,10 @@ def learn_trait_weights(session, rows: list[dict] | None = None, metric: str = "
     ).scalars().all()
 
     now = utcnow()
+    values_by_post = metrics_at_age_bulk(session, posts, metric, age_hours)
     observations: list[dict] = []  # one per post with a usable metric value
     for post in posts:
-        value = metric_at_age(session, post, metric, age_hours)
+        value = values_by_post.get(post.id)
         if value is None:
             continue
         published = post.published_at

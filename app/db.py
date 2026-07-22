@@ -1,6 +1,7 @@
 """Database engine/session setup and channel-seed sync."""
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event, select
@@ -13,23 +14,25 @@ _url = database_url()
 _is_sqlite = _url.startswith("sqlite")
 
 # Bump when additive migrations in ``_ensure_new_columns`` /
-# ``_drop_removed_columns`` / ``_migrate_scheduled_to_queued`` change.
+# ``_drop_removed_columns`` / ``_migrate_scheduled_to_queued`` /
+# ``_ensure_indexes`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "5"
+SCHEMA_VERSION = "6"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
 if _is_sqlite:
     _engine_kwargs["connect_args"] = {"timeout": 30}
 else:
-    # Supabase/Postgres: avoid 1–2s reconnects mid-session and drop stale
-    # pooled connections after idle (Supabase closes them ~30 min).
+    # Supabase/Postgres. No pool_pre_ping: it costs a network round trip on
+    # every connection checkout (i.e. every request). Instead, recycle
+    # connections well before Supabase's ~30-minute idle close so we never
+    # hand out a stale one.
     _engine_kwargs.update(
-        pool_pre_ping=True,
         pool_size=10,
         max_overflow=20,
-        pool_recycle=1800,
+        pool_recycle=900,
     )
 
 engine = create_engine(_url, **_engine_kwargs)
@@ -57,6 +60,7 @@ def init_db() -> None:
     _ensure_new_columns()
     _drop_removed_columns()
     _migrate_scheduled_to_queued()
+    _ensure_indexes()
     _set_schema_version()
 
 
@@ -177,6 +181,29 @@ def _ensure_new_columns() -> None:
             conn.execute(text(
                 "UPDATE channels SET country='United States' WHERE country='' OR country IS NULL"
             ))
+
+
+def _ensure_indexes() -> None:
+    """Indexes for the hot query filters. Without them a remote Postgres scans
+    whole tables for every dashboard/analytics filter. ``IF NOT EXISTS`` works
+    on both SQLite and Postgres, so this is idempotent."""
+    from sqlalchemy import text
+
+    statements = (
+        "CREATE INDEX IF NOT EXISTS ix_threads_posts_status ON threads_posts (status)",
+        "CREATE INDEX IF NOT EXISTS ix_threads_posts_candidate_pk ON threads_posts (candidate_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_threads_posts_published_at ON threads_posts (published_at)",
+        "CREATE INDEX IF NOT EXISTS ix_metric_snapshots_post_captured "
+        "ON metric_snapshots (post_pk, captured_at)",
+        "CREATE INDEX IF NOT EXISTS ix_candidates_status ON candidates (status)",
+        "CREATE INDEX IF NOT EXISTS ix_candidates_channel_pk ON candidates (channel_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_candidates_published_at ON candidates (published_at)",
+        "CREATE INDEX IF NOT EXISTS ix_threads_comments_post_pk ON threads_comments (post_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_threads_comments_reply_status ON threads_comments (reply_status)",
+    )
+    with engine.begin() as conn:
+        for stmt in statements:
+            conn.execute(text(stmt))
 
 
 def _migrate_scheduled_to_queued() -> None:
@@ -308,7 +335,25 @@ def sync_traits_from_config(session: Session) -> int:
     return added
 
 
+# Traits change only via the Traits page, but nearly every page reads them.
+# A short in-process cache saves a remote round trip per request; trait
+# mutations call invalidate_traits_cache() so edits still apply immediately.
+_TRAITS_CACHE_TTL_SECONDS = 60.0
+_traits_cache: tuple[float, list[str]] | None = None
+
+
+def invalidate_traits_cache() -> None:
+    global _traits_cache
+    _traits_cache = None
+
+
 def active_traits(session: Session) -> list[str]:
     """Enabled trait names (flat vocabulary)."""
+    global _traits_cache
+    now = time.monotonic()
+    if _traits_cache is not None and now - _traits_cache[0] < _TRAITS_CACHE_TTL_SECONDS:
+        return list(_traits_cache[1])
     rows = session.execute(select(Trait).where(Trait.enabled)).scalars().all()
-    return [t.name for t in rows]
+    names = [t.name for t in rows]
+    _traits_cache = (now, names)
+    return list(names)
