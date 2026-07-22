@@ -48,6 +48,9 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
     post = ThreadsPost(
         candidate_pk=candidate.id if candidate else None,
         caption=caption,
+        # Freeze the LLM draft as it stood, so the diff against the operator's
+        # final caption survives as a voice signal (see app/voice.py).
+        suggested_caption=(candidate.draft_caption if candidate else "") or "",
         clip_local_path=str(clip),
         clip_object_path=_object_key(clip),
         status=status,
@@ -119,10 +122,24 @@ def publish_post(session, post: ThreadsPost) -> ThreadsPost:
         raise
 
     _apply_post_attributes(post)
+    _annotate_footage(session, post)
     session.flush()
     log.info("Published Threads post %s (%s)", post.threads_media_id, post.permalink)
     maybe_post_first_reply(session, post)
     return post
+
+
+def _annotate_footage(session, post: ThreadsPost) -> None:
+    """Ground-truth footage trait tagging from the posted clip. Best-effort —
+    a tagging hiccup must never undo a successful publish (the backfill
+    command / dashboard button can retry later)."""
+    try:
+        from .db import active_traits
+        from .vision import annotate_post_footage
+
+        annotate_post_footage(post, load_settings(), active_traits(session))
+    except Exception as exc:
+        log.warning("Footage annotation failed for post %s: %s", post.id, exc)
 
 
 def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:

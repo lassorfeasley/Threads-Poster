@@ -68,7 +68,7 @@
           <div class="btn-group" style="margin-top: 12px;">
             <button class="approve" type="submit">Approve &amp; post →</button>
             <button type="button" class="ghost sm" onclick="redraftReply(event)"
-                    data-cid="{{ c.id }}" title="Regenerate this draft with the current reply guidance">↻ Regenerate</button>
+                    data-cid="{{ c.id }}" title="Regenerate this draft with the current reply guidance">Regenerate</button>
             <button type="button" class="ghost sm" onclick="skipComment(event)"
                     data-cid="{{ c.id }}">Skip →</button>
           </div>
@@ -260,7 +260,7 @@
       if (errMsg) row.title = errMsg;
       const retry = document.createElement('button');
       retry.className = 'ghost sm proc-retry';
-      retry.textContent = '↻ Retry';
+      retry.textContent = 'Retry';
       retry.onclick = () => { retry.remove(); sendPost(cid, text); };
       row.appendChild(retry);
     }

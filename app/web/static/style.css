@@ -33,17 +33,40 @@
   --warn-border: rgba(230, 180, 92, 0.45);
 
   --sidebar-w: 232px;
-  --radius: 10px;
-  --radius-lg: 14px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
-  --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.3), 0 14px 34px -14px rgba(0, 0, 0, 0.55);
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 18px -10px rgba(0, 0, 0, 0.45);
+  --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.28), 0 12px 28px -12px rgba(0, 0, 0, 0.5);
+
+  /* Spacing scale — use these instead of ad-hoc pixel values. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+
+  /* Content widths */
+  --canvas-w: 1080px;   /* focused compose/manage surfaces */
+  --canvas-wide: 1220px; /* list/table surfaces */
+  --stage-w: 660px;      /* media stage max width */
+
+  /* Focus ring */
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 
   /* Ambient page glows (top corners of the canvas). */
   --glow-a: rgba(62, 207, 142, 0.07);
   --glow-b: rgba(90, 169, 240, 0.055);
-  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --font: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo,
+    Consolas, monospace;
+
+  /* Primary action (solid) — the ONE loud button per page. */
+  --primary-bg: linear-gradient(180deg, #43d492 0%, #2fbd80 100%);
+  --primary-bg-hover: linear-gradient(180deg, #52db9d 0%, #3bcd8d 100%);
+  --primary-ink: #06281c;
 
   /* Canvas colors read by the waveform editor (theme-aware). */
   --wave-bar: rgba(126, 140, 154, 0.55);
@@ -88,6 +111,10 @@ html[data-theme="light"] {
   --glow-a: rgba(18, 138, 83, 0.055);
   --glow-b: rgba(32, 115, 201, 0.05);
 
+  --primary-bg: linear-gradient(180deg, #17a763 0%, #128a53 100%);
+  --primary-bg-hover: linear-gradient(180deg, #19b56c 0%, #15995c 100%);
+  --primary-ink: #ffffff;
+
   --wave-bar: rgba(88, 102, 116, 0.5);
   --wave-grid: rgba(88, 102, 116, 0.28);
   --row-stripe: rgba(16, 24, 40, 0.025);
@@ -109,6 +136,7 @@ body {
   color: var(--text);
   font-size: 14px;
   line-height: 1.55;
+  font-optical-sizing: auto;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
@@ -190,8 +218,8 @@ a.nav svg { width: 17px; height: 17px; flex: none; opacity: 0.75; }
 a.nav:hover { color: var(--text); background: var(--panel2); }
 a.nav:hover svg { opacity: 1; }
 a.nav.active {
-  color: var(--accent);
-  background: var(--accent-soft);
+  color: var(--text);
+  background: var(--panel2);
   font-weight: 600;
 }
 a.nav.active::before {
@@ -204,7 +232,7 @@ a.nav.active::before {
   border-radius: 0 3px 3px 0;
   background: var(--accent);
 }
-a.nav.active svg { opacity: 1; }
+a.nav.active svg { opacity: 1; color: var(--accent); }
 a.nav .count {
   margin-left: auto;
   font-size: 11px;
@@ -214,7 +242,7 @@ a.nav .count {
   border-radius: 999px;
   padding: 1px 8px;
 }
-a.nav.active .count { color: var(--accent); background: rgba(62, 207, 142, 0.16); }
+a.nav.active .count { color: var(--text-dim); background: var(--panel3); }
 
 .theme-toggle {
   margin-top: auto;
@@ -253,7 +281,7 @@ a.nav.active .count { color: var(--accent); background: rgba(62, 207, 142, 0.16)
 main {
   margin-left: var(--sidebar-w);
   padding: 30px 34px 110px;
-  max-width: 1220px;
+  max-width: var(--canvas-wide);
 }
 
 .page-head {
@@ -271,7 +299,7 @@ main {
 .page-head .monitor-status .meta { white-space: nowrap; }
 .page-head .monitor-status form { display: inline-flex; margin: 0; }
 
-h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.4px; margin: 0 0 16px; }
+h1 { font-size: 23px; font-weight: 750; letter-spacing: -0.45px; margin: 0 0 16px; }
 h2 {
   display: flex;
   align-items: center;
@@ -498,6 +526,22 @@ code {
   background: var(--blue-soft);
 }
 
+/* Inline busy state: spinner + accent text (e.g. caption generation). */
+.meta.busy { color: var(--accent); }
+.meta.busy::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  border: 2px solid var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* Pulse dot for running states */
 .badge .dot {
   width: 7px;
@@ -541,52 +585,73 @@ button:hover, .btn:hover {
 }
 button:active, .btn:active { transform: translateY(1px); }
 button:disabled { opacity: 0.55; cursor: default; transform: none; }
-button:focus-visible, .btn:focus-visible, a:focus-visible {
-  outline: 2px solid var(--blue);
+button:focus-visible, .btn:focus-visible, a:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-button.approve, .btn.approve {
-  background: linear-gradient(180deg, #46d795 0%, #2fbd80 100%);
-  border-color: rgba(6, 40, 28, 0.35);
-  color: #06281c;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 6px 16px -8px rgba(62, 207, 142, 0.7);
+/* Tier 1 — THE primary action. One per page state, always solid green. */
+button.approve, .btn.approve,
+button.btn-primary, .btn-primary {
+  background: var(--primary-bg);
+  border-color: transparent;
+  color: var(--primary-ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22), 0 6px 14px -8px rgba(62, 207, 142, 0.55);
 }
-button.approve:hover, .btn.approve:hover {
-  background: linear-gradient(180deg, #55dda0 0%, #3bcd8d 100%);
-  border-color: rgba(6, 40, 28, 0.35);
-  color: #06281c;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 20px -8px rgba(62, 207, 142, 0.85);
+button.approve:hover, .btn.approve:hover,
+button.btn-primary:hover, .btn-primary:hover {
+  background: var(--primary-bg-hover);
+  border-color: transparent;
+  color: var(--primary-ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22), 0 8px 18px -8px rgba(62, 207, 142, 0.7);
 }
 
-button.primary, .btn.primary {
-  background: var(--blue-soft);
+/* Tier 2 — secondary: quiet tinted outline. Never competes with Tier 1. */
+button.primary, .btn.primary,
+button.btn-secondary, .btn-secondary {
+  background: transparent;
   border-color: var(--blue-border);
   color: var(--blue);
 }
-button.primary:hover, .btn.primary:hover {
-  background: rgba(90, 169, 240, 0.2);
+button.primary:hover, .btn.primary:hover,
+button.btn-secondary:hover, .btn-secondary:hover {
+  background: var(--blue-soft);
   border-color: var(--blue);
   color: var(--blue);
 }
 
-button.reject, .btn.reject, button.danger, .btn.danger {
+/* Destructive — text-level danger, spatially separated from primaries. */
+button.reject, .btn.reject, button.danger, .btn.danger,
+button.btn-danger, .btn-danger {
+  background: transparent;
+  border-color: transparent;
+  color: var(--danger);
+}
+button.reject:hover, .btn.reject:hover, button.danger:hover, .btn.danger:hover,
+button.btn-danger:hover, .btn-danger:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+/* Outlined variant for standalone destructive contexts (e.g. reject clip). */
+button.danger-outline, .btn.danger-outline {
   background: transparent;
   border-color: var(--danger-border);
   color: var(--danger);
 }
-button.reject:hover, .btn.reject:hover, button.danger:hover, .btn.danger:hover {
+button.danger-outline:hover, .btn.danger-outline:hover {
   background: var(--danger-soft);
   border-color: var(--danger);
-  color: var(--danger);
 }
 
-button.ghost, .btn.ghost {
+button.ghost, .btn.ghost,
+button.btn-ghost, .btn-ghost {
   background: transparent;
   border-color: transparent;
   color: var(--muted);
 }
-button.ghost:hover, .btn.ghost:hover {
+button.ghost:hover, .btn.ghost:hover,
+button.btn-ghost:hover, .btn-ghost:hover {
   background: var(--panel2);
   color: var(--text);
   border-color: transparent;
@@ -644,8 +709,8 @@ select {
 }
 input:focus, textarea:focus, select:focus {
   outline: none;
-  border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(90, 169, 240, 0.18);
+  border-color: var(--accent);
+  box-shadow: var(--ring);
 }
 input::placeholder, textarea::placeholder { color: #5c6a78; }
 textarea { min-height: 96px; resize: vertical; line-height: 1.6; }
@@ -1430,8 +1495,9 @@ a.cal-event:hover { background: var(--panel3); }
 @media (max-width: 860px) {
   :root { --sidebar-w: 64px; }
   aside.sidebar { padding: 16px 8px; }
-  .brand .name, .nav-section, a.nav .label, a.nav .count, .sidebar .foot { display: none; }
-  a.nav { justify-content: center; padding: 10px; }
+  .brand .name, .nav-section, a.nav .label, a.nav .count, .sidebar .foot,
+  .theme-toggle .label { display: none; }
+  a.nav, .theme-toggle { justify-content: center; padding: 10px; }
   main { padding: 20px 18px 90px; }
   .cal-cell { min-height: 84px; }
   .queue-item { grid-template-columns: 64px minmax(0, 1fr); }
@@ -1644,3 +1710,251 @@ body.cal-committing #cal-layout {
 .cal-event.card.pub .cal-ev-title { color: var(--text-dim); }
 /* Keep the lifted drag state readable on the taller cards. */
 .cal-event.card.cal-drag { cursor: grab; }
+
+/* ============================================================
+   Compose / manage primitives (media-forward pages)
+   ============================================================ */
+
+/* Centered, focused canvas for single-object pages. */
+.canvas {
+  max-width: var(--canvas-w);
+  margin: 0 auto;
+}
+
+/* --- Media stage: the video is the hero, centered on its own plane. --- */
+.media-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: 0 auto var(--sp-5);
+  max-width: var(--stage-w);
+}
+.media-stage video {
+  width: 100%;
+  max-height: 62vh;
+  object-fit: contain;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lift);
+  background: #000;
+}
+.stage-title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text);
+  text-align: center;
+  max-width: 60ch;
+}
+/* Quiet utility links under the stage (download, copy, open). */
+.stage-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+.stage-actions a,
+.stage-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+  text-decoration: none;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.stage-actions a:hover,
+.stage-actions button:hover {
+  color: var(--text);
+  background: var(--panel2);
+  text-decoration: none;
+}
+.stage-actions svg { width: 14px; height: 14px; }
+
+/* Segmented control (e.g. Captioned / Original preview). */
+.seg-ctl {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.seg-ctl button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 999px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.seg-ctl button:hover { background: var(--panel3); color: var(--text); border: none; }
+.seg-ctl button.on,
+.seg-ctl button:disabled {
+  opacity: 1;
+  background: var(--bg-raised);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+/* --- Workflow sections: numbered, one job each. --- */
+.wf-section {
+  margin: 0 auto var(--sp-5);
+  max-width: var(--canvas-w);
+}
+.wf-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: var(--sp-3);
+}
+.wf-num {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+}
+.wf-title { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; }
+.wf-head .meta { margin-left: 2px; }
+.wf-body {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-4) var(--sp-5);
+  box-shadow: var(--shadow);
+}
+.wf-body.plain {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
+/* Inline control strip inside a section (label + control + status). */
+.ctl-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.ctl-strip .push { margin-left: auto; }
+.ctl-strip select { width: auto; }
+
+/* --- Ship rail: sticky action bar, the only place with a Tier-1 button. --- */
+.ship-rail {
+  position: sticky;
+  bottom: 16px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  max-width: var(--canvas-w);
+  margin: var(--sp-6) auto 0;
+  padding: var(--sp-3) var(--sp-4);
+  background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lift);
+  animation: rail-in 0.28s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+@keyframes rail-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ship-rail .rail-note { color: var(--muted); font-size: 12px; }
+.ship-rail .rail-end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.ship-rail label.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.ship-rail input[type="checkbox"] { width: auto; }
+
+/* Toggle-style checkbox row (e.g. "post the captioned version"). */
+label.inline-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+label.inline-label input[type="checkbox"] { width: auto; margin: 0; }
+
+/* Collapsible panel (transcript etc.) that doesn't fight the fold. */
+details.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+details.panel > summary {
+  padding: 12px 18px;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+details.panel > summary::after {
+  content: "";
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-right: 1.6px solid var(--muted);
+  border-bottom: 1.6px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 0.15s ease;
+}
+details.panel[open] > summary::after { transform: rotate(225deg); }
+details.panel[open] > summary { margin-bottom: 0; border-bottom: 1px solid var(--border); }
+details.panel > .panel-body { padding: 14px 18px; }
+
+@media (max-width: 860px) {
+  .media-stage { max-width: 100%; }
+  .media-stage video { max-height: none; }
+  .ship-rail {
+    position: static;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .ship-rail .rail-end { margin-left: 0; }
+  .ship-rail button, .ship-rail .btn { width: 100%; }
+}

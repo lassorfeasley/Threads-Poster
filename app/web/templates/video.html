@@ -1,25 +1,29 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="meta" style="margin-bottom: 10px;"><a href="/">← Dashboard</a></div>
-<div style="display: flex; gap: 16px; align-items: flex-start;">
-  <h1 style="margin-bottom: 4px; flex: 1;">{{ c.title }}</h1>
-  {% if c.status != "rejected" %}
-    <form method="post" action="/video/{{ c.id }}/reject"
-          onsubmit="return confirm({{ 'Reject this clip? It was already downloaded — the file stays on disk but the clip leaves your workflow. You can find it later with the Rejected status filter.' | tojson if state.scraped else 'Reject this clip?' | tojson }});">
-      <button class="reject sm" title="Reject this clip and remove it from the workflow">✕ Reject clip</button>
-    </form>
-  {% else %}
-    <form method="post" action="/video/{{ c.id }}/unreject">
-      <button class="sm" title="Restore this rejected clip to the workflow">↩ Un-reject</button>
-    </form>
-  {% endif %}
-</div>
-<div class="meta" style="margin-bottom: 18px;">
-  {{ c.channel.call_sign }} · {{ c.channel.market }} ·
-  {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
-  {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
-  · <a href="{{ c.url }}" target="_blank">YouTube ↗</a>
-  {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>{% endif %}
+<div class="page-head">
+  <div class="titles">
+    <div class="meta" style="margin-bottom: 6px;"><a href="/">← Dashboard</a></div>
+    <h1 style="margin-bottom: 4px;">{{ c.title }}</h1>
+    <div class="sub">
+      {{ c.channel.call_sign }} · {{ c.channel.market }} ·
+      {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
+      {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
+      · <a href="{{ c.url }}" target="_blank">YouTube ↗</a>
+      {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>{% endif %}
+    </div>
+  </div>
+  <div class="actions">
+    {% if c.status != "rejected" %}
+      <form method="post" action="/video/{{ c.id }}/reject"
+            onsubmit="return confirm({{ 'Reject this clip? It was already downloaded — the file stays on disk but the clip leaves your workflow. You can find it later with the Rejected status filter.' | tojson if state.scraped else 'Reject this clip?' | tojson }});">
+        <button class="reject sm" title="Reject this clip and remove it from the workflow">Reject clip</button>
+      </form>
+    {% else %}
+      <form method="post" action="/video/{{ c.id }}/unreject">
+        <button class="sm" title="Restore this rejected clip to the workflow">Un-reject</button>
+      </form>
+    {% endif %}
+  </div>
 </div>
 
 {# ---- Workflow stepper ---- #}
@@ -49,31 +53,27 @@
       {% if c.relevance_score is not none %}
         <span class="badge score-hi" title="Climate relevance">score {{ "%.2f"|format(c.relevance_score) }}</span>
       {% endif %}
-      {% if c.visual_score is not none %}
-        <span class="badge {{ 'score-hi' if c.visual_score >= 0.5 else 'score-lo' }}"
-              id="visual-badge" title="Visual appeal">👁 {{ "%.2f"|format(c.visual_score) }}</span>
-      {% endif %}
-      {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
+      {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
       {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
       <span class="badge">{{ c.status }}</span>
     </div>
     {% if c.relevance_rationale %}<div class="meta">{{ c.relevance_rationale }}</div>{% endif %}
-    <div class="meta" id="visual-line">{% if c.visual_rationale %}Visuals: {{ c.visual_rationale }}{% endif %}</div>
+    <div class="meta" id="visual-line">{% if c.visual_rationale %}Tags: {{ c.visual_rationale }}{% endif %}</div>
     <div style="margin-top: 8px;">
       <button type="button" class="btn ghost sm" id="score-visuals-btn" onclick="scoreVisuals()">
-        {{ "👁 Re-score visuals" if c.visual_score is not none else "👁 Score visuals" }}</button>
+        {{ "Re-tag traits" if c.visual_traits else "Tag traits" }}</button>
     </div>
     <script>
       async function scoreVisuals() {
         const btn = document.getElementById('score-visuals-btn');
-        btn.disabled = true; btn.textContent = 'Scoring…';
+        btn.disabled = true; btn.textContent = 'Tagging…';
         try {
           const r = await fetch('/video/{{ c.id }}/score-visuals', { method: 'POST' });
           const d = await r.json();
-          if (!r.ok) { alert(d.error || 'Scoring failed'); btn.disabled = false; return; }
-          document.getElementById('visual-line').textContent = d.why ? 'Visuals: ' + d.why : '';
+          if (!r.ok) { alert(d.error || 'Tagging failed'); btn.disabled = false; return; }
+          document.getElementById('visual-line').textContent = d.why ? 'Tags: ' + d.why : '';
           window.location.reload();
-        } catch (e) { alert('Scoring failed: ' + e); btn.disabled = false; }
+        } catch (e) { alert('Tagging failed: ' + e); btn.disabled = false; }
       }
     </script>
     {% if c.description %}
@@ -831,86 +831,110 @@ renderSegments();
   <div class="empty"><strong>No exported clip yet</strong>
     Do the <a href="/video/{{ c.id }}?step=trim">Trim</a> step first.</div>
 {% else %}
-<div class="row">
-  <div style="width: 420px; max-width: 100%;">
+<div class="canvas">
+
+  {# ---- Media stage: the clip is the hero ---- #}
+  <div class="media-stage">
     {% if c.clip_title %}
-      <div class="card-title" style="margin-bottom: 8px;" title="Generated clip title">🎬 {{ c.clip_title }}</div>
+      <div class="stage-title" title="Generated clip title">{{ c.clip_title }}</div>
     {% endif %}
     <video id="clip-player"
            src="{{ '/media/subtitled/' ~ c.id if c.subtitled_clip_path else '/media/clip/' ~ c.id }}"
            controls preload="metadata"></video>
     {% if c.subtitled_clip_path %}
-      <div class="btn-group" style="margin-top: 8px;">
-        <button type="button" class="sm" id="preview-subs-btn" disabled
+      <div class="seg-ctl" role="group" aria-label="Preview version">
+        <button type="button" id="preview-subs-btn" disabled
                 onclick="swapPreview(true)">Captioned</button>
-        <button type="button" class="sm" id="preview-orig-btn"
+        <button type="button" id="preview-orig-btn"
                 onclick="swapPreview(false)">Original</button>
-        <span class="meta">preview</span>
       </div>
     {% endif %}
-    <div class="btn-group" style="margin-top: 8px; flex-wrap: wrap;">
-      <a class="sm" href="/video/{{ c.id }}/download-clip" download>⤓ Download clip</a>
-      <button type="button" class="sm" id="copy-caption-btn"
-              data-caption="{{ c.draft_caption }}" onclick="copyCaption()">⧉ Copy caption</button>
+    <div class="stage-actions">
+      <a href="/video/{{ c.id }}/download-clip" download>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+        Download clip</a>
+      <button type="button" id="copy-caption-btn"
+              data-caption="{{ c.draft_caption }}" onclick="copyCaption()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy caption</button>
+      <a href="/video/{{ c.id }}?step=trim">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg>
+        Re-trim</a>
     </div>
-    <div class="meta" style="margin-top: 8px;">Your exported clip. Download it and copy the
-      caption to post manually elsewhere, or publish to Threads below. Re-trim any time to replace it.</div>
+  </div>
 
-    <div class="card tight" style="margin-top: 14px;">
-      <div class="card-title">Stylized captions</div>
-      <div class="meta" style="margin-bottom: 8px;">Burns word-by-word captions into the clip
-        (Funnel font, current word highlighted). Optional — you choose which version to post.</div>
-      <div class="btn-group" style="align-items: center; flex-wrap: wrap;">
+  {# ---- 1 · Prepare ---- #}
+  <section class="wf-section">
+    <div class="wf-head">
+      <span class="wf-num">1</span>
+      <span class="wf-title">Prepare the clip</span>
+      <span class="meta">Word-by-word captions are burned in automatically after export and posted by default.</span>
+    </div>
+    <div class="wf-body">
+      <div class="ctl-strip">
         <button type="button" class="sm" id="gen-subs-btn" onclick="generateSubtitles()">
-          {{ "↻ Regenerate captions" if c.subtitled_clip_path else "✦ Generate captions" }}</button>
+          {{ "Regenerate captions" if c.subtitled_clip_path else "Generate captions" }}</button>
+        <label class="inline-label" style="margin: 0;" title="Where the captions sit on the frame">
+          Position
+          <select id="subs-position" style="width: auto;">
+            <option value="bottom" {{ "selected" if subs_position != "top" }}>Bottom</option>
+            <option value="top" {{ "selected" if subs_position == "top" }}>Top</option>
+          </select>
+        </label>
         <span class="meta" id="subs-status">
           {% if c.subtitled_clip_path %}Captioned version ready.{% endif %}</span>
       </div>
     </div>
-    <script>
-      function swapPreview(subs) {
-        const p = document.getElementById('clip-player');
-        const t = p.currentTime;
-        p.src = subs ? '/media/subtitled/{{ c.id }}' : '/media/clip/{{ c.id }}';
-        p.currentTime = t;
-        const sb = document.getElementById('preview-subs-btn');
-        const ob = document.getElementById('preview-orig-btn');
-        if (sb) sb.disabled = subs;
-        if (ob) ob.disabled = !subs;
-      }
-      async function generateSubtitles() {
-        const btn = document.getElementById('gen-subs-btn');
-        const status = document.getElementById('subs-status');
-        btn.disabled = true;
-        status.textContent = 'Transcribing + rendering… this can take a minute.';
-        try {
-          const r = await fetch('/video/{{ c.id }}/subtitles', { method: 'POST' });
-          const d = await r.json();
-          if (d.url) { location.reload(); return; }
-          status.textContent = d.error || 'Caption generation failed';
-        } catch (e) { status.textContent = 'Caption generation failed: ' + e; }
-        btn.disabled = false;
-      }
-    </script>
-
-    <div style="margin-top: 14px;">
-      <div class="card-title" style="margin-bottom: 4px;">Clip transcript</div>
-      {% if clip_transcript %}
-        <div class="meta" style="margin-bottom: 8px;">Transcript covering the
-          {{ saved_segments|length }} exported segment{{ "s" if saved_segments|length != 1 }} —
-          click a line to jump to it in the clip.</div>
-        <div class="transcript-box" style="max-height: 300px;">
+    {% if clip_transcript %}
+    <details class="panel" style="margin-top: 10px;">
+      <summary>Clip transcript
+        <span class="meta">{{ saved_segments|length }} exported segment{{ "s" if saved_segments|length != 1 }} — click a line to jump</span>
+      </summary>
+      <div class="panel-body">
+        <div class="transcript-box" style="max-height: 300px; border: none; box-shadow: none; padding: 0;">
           {% for s in clip_transcript %}
             <div class="tline" onclick="clipSeek({{ s.clip_start }})">
               <span class="ts">{{ "%d:%02d"|format(s.clip_start // 60, s.clip_start % 60) }}</span>{{ s.text }}</div>
           {% endfor %}
         </div>
-      {% else %}
-        <div class="meta">No transcript available for the exported segments.</div>
-      {% endif %}
-    </div>
-  </div>
+      </div>
+    </details>
+    {% endif %}
+  </section>
   <script>
+    function swapPreview(subs) {
+      const p = document.getElementById('clip-player');
+      const t = p.currentTime;
+      p.src = subs ? '/media/subtitled/{{ c.id }}' : '/media/clip/{{ c.id }}';
+      p.currentTime = t;
+      const sb = document.getElementById('preview-subs-btn');
+      const ob = document.getElementById('preview-orig-btn');
+      if (sb) sb.disabled = subs;
+      if (ob) ob.disabled = !subs;
+    }
+    async function generateSubtitles() {
+      const btn = document.getElementById('gen-subs-btn');
+      const status = document.getElementById('subs-status');
+      btn.disabled = true;
+      status.classList.add('busy');
+      status.textContent = 'Transcribing + rendering… this can take a minute.';
+      try {
+        const fd = new FormData();
+        fd.append('position', document.getElementById('subs-position').value);
+        const r = await fetch('/video/{{ c.id }}/subtitles', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.url) { location.reload(); return; }
+        status.textContent = d.error || 'Caption generation failed';
+      } catch (e) { status.textContent = 'Caption generation failed: ' + e; }
+      status.classList.remove('busy');
+      btn.disabled = false;
+    }
+    {% if not c.subtitled_clip_path %}
+    // Fresh export lands here with ?autosubs=1: generate captions right away
+    // so the captioned variant is the default. Failures leave the manual
+    // button available as before.
+    if (new URLSearchParams(location.search).get('autosubs') === '1') generateSubtitles();
+    {% endif %}
     function clipSeek(t) {
       const p = document.getElementById('clip-player');
       if (!p) return;
@@ -918,104 +942,119 @@ renderSegments();
       p.play();
     }
   </script>
-  <div class="grow">
-    {% if not threads_ok %}
-      <div class="card">
-        <div class="card-title">Connect Threads first</div>
-        <p class="meta">1. <a href="{{ auth_url }}" target="_blank">Authorize with Threads ↗</a><br>
+  {% if not threads_ok %}
+    {# ---- 2 · Connect (replaces Write + Ship until authorized) ---- #}
+    <section class="wf-section">
+      <div class="wf-head">
+        <span class="wf-num">2</span>
+        <span class="wf-title">Connect Threads</span>
+      </div>
+      <div class="wf-body">
+        <p class="meta" style="margin-top: 0;">1. <a href="{{ auth_url }}" target="_blank">Authorize with Threads ↗</a><br>
            2. Copy the <code>code=</code> value from the redirect URL and paste it here.</p>
         <form method="post" action="/threads/connect">
           <input type="hidden" name="next" value="/video/{{ c.id }}?step=post">
           <input type="text" name="code" placeholder="AQB..." required>
-          <div style="margin-top: 10px;"><button class="primary">Connect</button></div>
+          <div style="margin-top: 10px;"><button class="approve">Connect</button></div>
         </form>
       </div>
-    {% else %}
-      <form method="post" action="/video/{{ c.id }}/post" id="post-form">
-        <label>Clip title
-          <span class="badge score-lo" style="margin-left: 6px;">AI-generated — edit freely</span></label>
-        <input type="text" name="clip_title" id="clip_title" maxlength="120"
-               placeholder="{{ c.title }}" value="{{ c.clip_title }}">
-        <div class="btn-group" style="margin: 8px 0 14px; flex-wrap: wrap;">
-          <button type="button" class="sm" id="suggest-title-btn" onclick="suggestTitle()">
-            {{ "Regenerate" if c.clip_title else "Suggest" }} title</button>
-          <span class="meta">A concise title generated from this clip's transcript. Saved with the post.</span>
+    </section>
+  {% else %}
+    <form method="post" action="/video/{{ c.id }}/post" id="post-form">
+      {# ---- 2 · Write ---- #}
+      <section class="wf-section">
+        <div class="wf-head">
+          <span class="wf-num">2</span>
+          <span class="wf-title">Write the post</span>
+          <span class="meta">AI suggestions are drafts — edit freely.</span>
         </div>
-        <label>Caption
-          <span class="badge score-lo" style="margin-left: 6px;">AI suggestion is a draft — edit freely</span></label>
-        <textarea name="caption" id="caption" required>{{ c.draft_caption }}</textarea>
-        {% if c.subtitled_clip_path %}
-          <label class="inline-label" style="display:flex; align-items:center; gap:8px; margin-top:10px;">
-            <input type="checkbox" name="use_subtitles" value="1"
-                   {{ "checked" if c.use_subtitles }}>
-            Post the captioned version (burned-in word-by-word subtitles)
-          </label>
-        {% endif %}
-        <div class="btn-group" style="margin-top: 12px; flex-wrap: wrap;">
-          <button type="button" class="primary" id="suggest-btn" onclick="suggestCaption()">
-            {{ "Regenerate" if c.draft_caption else "Suggest" }} caption</button>
-          <button class="approve" onclick="return confirm('Post this clip to Threads now?')">
-            Confirm &amp; post now</button>
-          <button class="sm" formaction="/video/{{ c.id }}/save-draft" formnovalidate
-                  onclick="return validateDraft()">💾 Save as draft</button>
-        </div>
-        <div class="meta" style="margin-top: 6px;">Three ways to finish: post now, save a draft, or
-          add it to the adaptive posting queue below.</div>
-
-        <div class="card tight" style="margin-top: 14px;">
-          <div class="card-title">Add to posting queue</div>
-          <div class="meta" style="margin-bottom: 8px;">Publishes at the next open window
-            (≈10am / 2:30pm / 7pm ET), deferring if the last post is still hot.</div>
-          <label class="inline-label" style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
-            <input type="checkbox" name="is_breaking" value="1" id="is_breaking">
-            Breaking news — publish ASAP (ignores windows; still respects the 90-min spacing floor)
-          </label>
-          <div class="btn-group" style="align-items: center; flex-wrap: wrap;">
-            <button class="sm" formaction="/video/{{ c.id }}/queue" formnovalidate
-                    onclick="return validateQueue()">⏱ Add to queue</button>
+        <div class="wf-body">
+          <div class="field">
+            <label for="clip_title">Clip title</label>
+            <input type="text" name="clip_title" id="clip_title" maxlength="120"
+                   placeholder="{{ c.title }}" value="{{ c.clip_title }}">
+            <div class="ctl-strip" style="margin-top: 8px;">
+              <button type="button" class="ghost sm" id="suggest-title-btn" onclick="suggestTitle()">
+                {{ "Regenerate" if c.clip_title else "Suggest" }} title</button>
+              <span class="meta">A concise title generated from this clip's transcript. Saved with the post.</span>
+            </div>
           </div>
+          <div class="field" style="margin-bottom: 0;">
+            <label for="caption">Caption</label>
+            <textarea name="caption" id="caption" required>{{ c.draft_caption }}</textarea>
+            <div class="ctl-strip" style="margin-top: 8px;">
+              <button type="button" class="ghost sm" id="suggest-btn" onclick="suggestCaption()">
+                {{ "Regenerate" if c.draft_caption else "Suggest" }} caption</button>
+            </div>
+          </div>
+          {% if c.subtitled_clip_path %}
+            <label class="inline-label" style="margin-top: 12px;">
+              <input type="checkbox" name="use_subtitles" value="1"
+                     {{ "checked" if c.use_subtitles }}>
+              Post the captioned version (burned-in word-by-word subtitles)
+            </label>
+          {% endif %}
         </div>
-      </form>
-      <script>
-        async function suggestCaption() {
-          const btn = document.getElementById('suggest-btn');
-          btn.disabled = true; btn.textContent = 'Thinking…';
-          try {
-            const r = await fetch('/video/{{ c.id }}/suggest-caption', { method: 'POST' });
-            const d = await r.json();
-            if (d.caption) document.getElementById('caption').value = d.caption;
-            else alert(d.error || 'No caption returned');
-          } catch (e) { alert('Suggestion failed: ' + e); }
-          btn.disabled = false; btn.textContent = 'Regenerate caption';
-        }
-        async function suggestTitle() {
-          const btn = document.getElementById('suggest-title-btn');
-          btn.disabled = true; btn.textContent = 'Thinking…';
-          try {
-            const r = await fetch('/video/{{ c.id }}/suggest-title', { method: 'POST' });
-            const d = await r.json();
-            if (d.title) document.getElementById('clip_title').value = d.title;
-            else alert(d.error || 'No title returned');
-          } catch (e) { alert('Suggestion failed: ' + e); }
-          btn.disabled = false; btn.textContent = 'Regenerate title';
-        }
-        function validateQueue() {
-          const cap = document.getElementById('caption');
-          if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
-          const breaking = document.getElementById('is_breaking')?.checked;
-          return confirm(breaking
-            ? 'Add as breaking news? It will publish as soon as the spacing floor allows.'
-            : 'Add this clip to the posting queue?');
-        }
-        function validateDraft() {
-          const cap = document.getElementById('caption');
-          if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
-          return true;
-        }
-      </script>
-    {% endif %}
+      </section>
 
-    {% if posts %}
+      {# ---- Ship rail: one primary, clear alternatives ---- #}
+      <div class="ship-rail">
+        <button class="approve" onclick="return confirm('Post this clip to Threads now?')">Post now</button>
+        <button class="primary" formaction="/video/{{ c.id }}/queue" formnovalidate
+                onclick="return validateQueue()">Add to queue</button>
+        <label class="inline-check"
+               title="Ignores posting windows; still respects the 90-minute spacing floor">
+          <input type="checkbox" name="is_breaking" value="1" id="is_breaking">
+          Breaking — publish ASAP
+        </label>
+        <div class="rail-end">
+          <span class="rail-note">Queue publishes at the next open window (≈10am / 2:30pm / 7pm ET).</span>
+          <button class="ghost" formaction="/video/{{ c.id }}/save-draft" formnovalidate
+                  onclick="return validateDraft()">Save as draft</button>
+        </div>
+      </div>
+    </form>
+    <script>
+      async function suggestCaption() {
+        const btn = document.getElementById('suggest-btn');
+        btn.disabled = true; btn.textContent = 'Thinking…';
+        try {
+          const r = await fetch('/video/{{ c.id }}/suggest-caption', { method: 'POST' });
+          const d = await r.json();
+          if (d.caption) document.getElementById('caption').value = d.caption;
+          else alert(d.error || 'No caption returned');
+        } catch (e) { alert('Suggestion failed: ' + e); }
+        btn.disabled = false; btn.textContent = 'Regenerate caption';
+      }
+      async function suggestTitle() {
+        const btn = document.getElementById('suggest-title-btn');
+        btn.disabled = true; btn.textContent = 'Thinking…';
+        try {
+          const r = await fetch('/video/{{ c.id }}/suggest-title', { method: 'POST' });
+          const d = await r.json();
+          if (d.title) document.getElementById('clip_title').value = d.title;
+          else alert(d.error || 'No title returned');
+        } catch (e) { alert('Suggestion failed: ' + e); }
+        btn.disabled = false; btn.textContent = 'Regenerate title';
+      }
+      function validateQueue() {
+        const cap = document.getElementById('caption');
+        if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
+        const breaking = document.getElementById('is_breaking')?.checked;
+        return confirm(breaking
+          ? 'Add as breaking news? It will publish as soon as the spacing floor allows.'
+          : 'Add this clip to the posting queue?');
+      }
+      function validateDraft() {
+        const cap = document.getElementById('caption');
+        if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
+        return true;
+      }
+    </script>
+  {% endif %}
+
+  {% if posts %}
+    <section class="wf-section">
       <h2>Posts from this video</h2>
       <div class="video-posts">
         {% for p in posts %}
@@ -1054,8 +1093,8 @@ renderSegments();
         </div>
         {% endfor %}
       </div>
-    {% endif %}
-  </div>
+    </section>
+  {% endif %}
 </div>
 <script>
   async function copyCaption() {

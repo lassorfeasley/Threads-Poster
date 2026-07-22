@@ -48,11 +48,13 @@ from ..models import (
     ThreadsComment,
     ThreadsPost,
     Trait,
+    TraitWeight,
+    TriageDecision,
     utcnow,
 )
 from ..monitor import run_monitor_once
 from ..publishing import maybe_post_first_reply, publish_clip, publish_post, queue_clip, record_post
-from ..ranking import load_trait_weights, order_expr, sort_candidates, trait_guidance_text
+from ..ranking import load_trait_weights, order_expr, sort_candidates
 from ..scheduler import (
     build_window_plan,
     pin_post_to_window,
@@ -61,7 +63,8 @@ from ..scheduler import (
     start_scheduler_thread,
 )
 from ..scrape import archive_candidate
-from ..vision import apply_visual_score
+from ..vision import annotate_post_footage, tag_candidate_storyboard
+from ..voice import voice_context
 
 log = logging.getLogger("web")
 
@@ -133,13 +136,21 @@ _resume_stalled_scrapes()
 
 # --- Workflow step helpers ----------------------------------------------------
 
-def workflow_state(session, c: Candidate) -> dict:
-    """Compute breadcrumb step states for a candidate."""
-    posted = session.execute(
-        select(ThreadsPost.id).where(
-            ThreadsPost.candidate_pk == c.id, ThreadsPost.status == "published"
-        ).limit(1)
-    ).scalar_one_or_none() is not None
+def workflow_state(session, c: Candidate, post_statuses: set[str] | None = None) -> dict:
+    """Compute breadcrumb step states for a candidate.
+
+    Pass ``post_statuses`` (the set of ThreadsPost.status values for this
+    candidate) to skip the per-row published-post lookup — used by the
+    dashboard/archive when rendering many rows against a remote DB.
+    """
+    if post_statuses is None:
+        posted = session.execute(
+            select(ThreadsPost.id).where(
+                ThreadsPost.candidate_pk == c.id, ThreadsPost.status == "published"
+            ).limit(1)
+        ).scalar_one_or_none() is not None
+    else:
+        posted = "published" in post_statuses
 
     reviewed = c.status not in (STATUS_NEW, STATUS_REJECTED)
     scraped = c.status == STATUS_ARCHIVED
@@ -158,6 +169,23 @@ def workflow_state(session, c: Candidate) -> dict:
         "reviewed": reviewed, "scraped": scraped, "trimmed": trimmed, "posted": posted,
         "current": current,
     }
+
+
+def _post_statuses_by_candidate(session, candidate_ids: list[int]) -> dict[int, set[str]]:
+    """One query: candidate_pk -> set of ThreadsPost.status values."""
+    if not candidate_ids:
+        return {}
+    rows = session.execute(
+        select(ThreadsPost.candidate_pk, ThreadsPost.status).where(
+            ThreadsPost.candidate_pk.in_(candidate_ids)
+        )
+    ).all()
+    out: dict[int, set[str]] = {}
+    for pk, status in rows:
+        if pk is None:
+            continue
+        out.setdefault(pk, set()).add(status)
+    return out
 
 
 # --- Dashboard -----------------------------------------------------------------
@@ -221,8 +249,10 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
     with session_scope() as session:
         # Order by the blended relevance+visual ranking so the row cap keeps the
         # top-ranked candidates (not just the most relevant).
-        query = select(Candidate).order_by(
-            order_expr(settings).desc(), Candidate.published_at.desc()
+        query = (
+            select(Candidate)
+            .options(selectinload(Candidate.channel))
+            .order_by(order_expr(settings).desc(), Candidate.published_at.desc())
         )
         if status != "all":
             query = query.where(Candidate.status == status)
@@ -265,14 +295,9 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
         ).scalar_one()
         row_cap = 150
         candidates = session.execute(query.limit(row_cap)).scalars().all()
-        # Re-rank the fetched page by the blended relevance+visual score (nudged
-        # by learned trait weights). SQL already ordered by relevance so the page
-        # is the strongest set; this reorders it to surface visually punchy clips.
+        # Re-rank by relevance, nudged by ACTIVE trait verdicts once unlocked.
         trait_weights = load_trait_weights(session)
         candidates = sort_candidates(candidates, trait_weights, settings)
-        undesirable_traits = active_traits(session)[1]
-        for c in candidates:
-            _ = c.channel
 
         # Filter dropdown options: only channels that actually have candidates.
         filter_channels = session.execute(
@@ -298,37 +323,29 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
         if not filtering:
             in_progress = session.execute(
                 select(Candidate)
+                .options(selectinload(Candidate.channel))
                 .where(Candidate.status.in_([STATUS_APPROVED, STATUS_ARCHIVED, "failed"]))
                 .order_by(Candidate.approved_at.desc())
                 .limit(30)
             ).scalars().all()
+            # One query for all post statuses instead of 2×N per-row lookups.
+            statuses = _post_statuses_by_candidate(session, [c.id for c in in_progress])
+            handled_statuses = {"published", "queued", "publishing", "draft"}
             for c in in_progress:
-                state = workflow_state(session, c)
+                post_st = statuses.get(c.id, set())
+                state = workflow_state(session, c, post_statuses=post_st)
                 # Drop it from "In progress" once the clip has been dealt with:
                 # trimmed clip exported/saved ("ready to post"), posted,
                 # queued, or saved as a draft. A candidate with a FAILED
                 # post stays visible so it can be retried.
-                post_failed = session.execute(
-                    select(ThreadsPost.id).where(
-                        ThreadsPost.candidate_pk == c.id,
-                        ThreadsPost.status == "failed",
-                    ).limit(1)
-                ).scalar_one_or_none() is not None
-                if post_failed:
+                if "failed" in post_st:
                     state["post_failed"] = True  # keep the row visible for retry
-                elif state["current"] == "post":
-                    continue  # clip exported/saved — workflow is done
-                else:
-                    handled = session.execute(
-                        select(ThreadsPost.id).where(
-                            ThreadsPost.candidate_pk == c.id,
-                            ThreadsPost.status.in_(["published", "queued", "publishing", "draft"]),
-                        ).limit(1)
-                    ).scalar_one_or_none() is not None
-                    if handled:
-                        continue
+                elif post_st & handled_statuses:
+                    # Hide once published or sitting in the outbound queue/drafts.
+                    # If the operator deletes their only draft/queue, post_st is
+                    # empty and the clip stays visible so they can re-post.
+                    continue
                 in_progress_rows.append((c, state))
-                _ = c.channel
 
         monitor_running, monitor_result, monitor_last_refreshed = _monitor_view_state(session)
 
@@ -336,7 +353,6 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
         request, "dashboard.html",
         {"candidates": candidates, "total_matches": total_matches, "row_cap": row_cap,
          "in_progress": in_progress_rows, "threshold": threshold,
-         "undesirable_traits": undesirable_traits,
          "date_defaulted": date_defaulted,
          "show_hidden": show_hidden, "filtering": filtering,
          "q": q, "channel_id": channel_id, "keyword": keyword, "region": region,
@@ -495,10 +511,14 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
             query = query.where(
                 (Candidate.relevance_score.is_(None)) | (Candidate.relevance_score >= threshold)
             )
-        candidates = session.execute(query.limit(200)).scalars().all()
+        candidates = session.execute(
+            query.options(selectinload(Candidate.channel)).limit(200)
+        ).scalars().all()
         trait_weights = load_trait_weights(session)
         candidates = sort_candidates(candidates, trait_weights, settings)
-        undesirable_traits = active_traits(session)[1]
+        total_published = session.execute(
+            select(func.count(ThreadsPost.id)).where(ThreadsPost.status == "published")
+        ).scalar_one()
         queue = [
             {
                 "id": c.id,
@@ -509,7 +529,6 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
                 "duration": (f"{c.duration_seconds // 60}m {c.duration_seconds % 60}s"
                              if c.duration_seconds else ""),
                 "score": c.relevance_score,
-                "visual_score": c.visual_score,
                 "visual_traits": [t for t in (c.visual_traits or "").split(",") if t],
                 "visual_rationale": c.visual_rationale,
                 "keywords": [k for k in (c.matched_keywords or "").split(",") if k],
@@ -520,7 +539,11 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
 
     return templates.TemplateResponse(
         request, "triage.html",
-        {"queue": queue, "threshold": threshold, "undesirable_traits": undesirable_traits,
+        {"queue": queue, "threshold": threshold,
+         "trait_stats": trait_weights,
+         "learning_min_trait": settings.get("learning.min_trait_posts", 20),
+         "learning_min_total": settings.get("learning.min_total_posts", 100),
+         "total_published": total_published,
          "msg": msg, "active": "dashboard"},
     )
 
@@ -554,8 +577,8 @@ def video_storyboard(candidate_id: int):
 
 @app.post("/video/{candidate_id}/score-visuals")
 def video_score_visuals(candidate_id: int):
-    """On-demand vision scoring for one candidate (respects the daily budget).
-    Used by the triage/detail 'Score visuals' button and to refresh a score."""
+    """On-demand storyboard trait tagging for one candidate (budget-guarded).
+    Neutral labels only — no visual score."""
     settings = load_settings()
     if not spend.within_budget():
         return JSONResponse(
@@ -568,17 +591,14 @@ def video_score_visuals(candidate_id: int):
         c = session.get(Candidate, candidate_id)
         if c is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        guidance = trait_guidance_text(load_trait_weights(session), settings)
-        desirable, undesirable = active_traits(session)
-        result = apply_visual_score(c, settings, force=True, learned_guidance=guidance,
-                                    desirable=desirable, undesirable=undesirable)
+        traits = active_traits(session)
+        result = tag_candidate_storyboard(c, settings, force=True, traits=traits)
         if result is None:
             return JSONResponse(
-                {"error": "No storyboard available for this video, or scoring failed."},
+                {"error": "No storyboard available for this video, or tagging failed."},
                 status_code=502,
             )
-        return {"visual_score": result["visual_score"], "traits": result["traits"],
-                "why": result["why"]}
+        return {"traits": result["traits"], "why": result["why"]}
 
 
 # --- Per-video workflow ----------------------------------------------------------
@@ -586,11 +606,14 @@ def video_score_visuals(candidate_id: int):
 @app.get("/video/{candidate_id}", response_class=HTMLResponse)
 def video_detail(request: Request, candidate_id: int, step: str = "", msg: str = ""):
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
+        c = session.execute(
+            select(Candidate)
+            .options(selectinload(Candidate.channel))
+            .where(Candidate.id == candidate_id)
+        ).scalar_one_or_none()
         if c is None:
             return _flash("/", "Video not found")
         state = workflow_state(session, c)
-        _ = c.channel
 
         # Operator can revisit any unlocked step; default to the current one.
         allowed = {"review"}
@@ -621,16 +644,16 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
             select(ThreadsPost).where(ThreadsPost.candidate_pk == c.id)
             .order_by(ThreadsPost.created_at.desc())
         ).scalars().all()
-        undesirable_traits = active_traits(session)[1]
 
+    threads_ok = threads_api.is_authenticated()
     return templates.TemplateResponse(
         request, "video.html",
         {"c": c, "state": state, "step": active_step,
          "transcript_segments": transcript_segments, "saved_segments": segments,
          "clip_transcript": clip_transcript,
-         "undesirable_traits": undesirable_traits,
-         "posts": posts, "threads_ok": threads_api.is_authenticated(),
-         "auth_url": "" if threads_api.is_authenticated() else threads_api.authorize_url(),
+         "posts": posts, "threads_ok": threads_ok,
+         "auth_url": "" if threads_ok else threads_api.authorize_url(),
+         "subs_position": load_settings().get("subtitles.position", "bottom"),
          "msg": msg, "active": "dashboard"},
     )
 
@@ -709,6 +732,19 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
     return _flash(f"/video/{cid}", "Uploaded — transcribing now")
 
 
+def _log_triage_decision(session, c: Candidate, action: str) -> None:
+    """Record what the operator decided given the signals on screen. This is
+    the training record for eventual AI-assisted triage."""
+    session.add(TriageDecision(
+        candidate_pk=c.id,
+        video_id=c.video_id,
+        action=action,
+        relevance_score=c.relevance_score,
+        visual_score=c.visual_score,
+        visual_traits=c.visual_traits or "",
+    ))
+
+
 @app.post("/video/{candidate_id}/approve")
 def approve(request: Request, candidate_id: int):
     """The approve gate. This is the ONLY place a download is ever triggered."""
@@ -723,6 +759,7 @@ def approve(request: Request, candidate_id: int):
                     if wants_json else _flash(f"/video/{candidate_id}", "Already archived"))
         c.status = STATUS_APPROVED
         c.approved_at = utcnow()
+        _log_triage_decision(session, c, "approve")
     threading.Thread(target=_scrape_in_thread, args=(candidate_id,), daemon=True).start()
     # AJAX callers transition the page in place (no full reload); others redirect.
     if wants_json:
@@ -736,6 +773,7 @@ def reject(request: Request, candidate_id: int):
         c = session.get(Candidate, candidate_id)
         if c:
             c.status = STATUS_REJECTED
+            _log_triage_decision(session, c, "reject")
     # AJAX callers (dashboard delete buttons) get a light JSON reply so the page
     # can drop the row in place instead of reloading and re-fetching filmstrips.
     if "application/json" in request.headers.get("accept", ""):
@@ -753,6 +791,14 @@ def reset_to_new(candidate_id: int):
             return JSONResponse({"error": "not found"}, status_code=404)
         c.status = STATUS_NEW
         c.approved_at = None
+        last = session.execute(
+            select(TriageDecision)
+            .where(TriageDecision.candidate_pk == c.id, TriageDecision.undone.is_(False))
+            .order_by(TriageDecision.decided_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if last is not None:
+            last.undone = True
     return {"ok": True}
 
 
@@ -821,6 +867,31 @@ def media_subtitled(candidate_id: int):
         return FileResponse(c.subtitled_clip_path, media_type="video/mp4")
 
 
+@app.get("/media/post/{post_id}")
+def media_post_clip(post_id: int):
+    """Serve the exact clip attached to a post (captioned or plain).
+
+    The post page used to always play ``/media/clip/{candidate}`` — the plain
+    trim — even when the queued/published file was the subtitled variant stored
+    on ``ThreadsPost.clip_local_path``. That made burnt-in captions look missing
+    on scheduled-post pages even though publish would upload the right file.
+    """
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        path = p.clip_local_path
+        if (not path or not Path(path).exists()) and p.candidate:
+            c = p.candidate
+            if c.use_subtitles and c.subtitled_clip_path and Path(c.subtitled_clip_path).exists():
+                path = c.subtitled_clip_path
+            else:
+                path = c.trimmed_clip_path
+        if not path or not Path(path).exists():
+            return JSONResponse({"error": "no clip"}, status_code=404)
+        return FileResponse(path, media_type="video/mp4")
+
+
 @app.get("/video/{candidate_id}/download-clip")
 def download_clip(candidate_id: int):
     """Serve the exported clip as a file attachment so the operator can save it
@@ -885,14 +956,16 @@ def export_clip(candidate_id: int, segments_json: str = Form(...)):
                 except Exception:
                     pass
             n = len(segments)
-            return _flash(f"/video/{candidate_id}?step=post",
-                          f"Exported {n} segment{'s' if n > 1 else ''} — ready to post")
+            # autosubs=1 makes the Post step kick off caption generation
+            # immediately, so the captioned variant is the default.
+            return _flash(f"/video/{candidate_id}?step=post&autosubs=1",
+                          f"Exported {n} segment{'s' if n > 1 else ''} — generating captions…")
         except ClipExportError as exc:
             return _flash(f"/video/{candidate_id}?step=trim", f"Export failed: {exc}")
 
 
 @app.post("/video/{candidate_id}/subtitles")
-def generate_subtitles(candidate_id: int):
+def generate_subtitles(candidate_id: int, position: str = Form("")):
     """Generate the stylized-caption variant of the exported clip (AJAX).
 
     Runs whisper word timestamps + the Pillow/ffmpeg burn; takes roughly
@@ -907,7 +980,7 @@ def generate_subtitles(candidate_id: int):
             return JSONResponse({"error": "Export a clip first"}, status_code=404)
         clip_path = c.trimmed_clip_path
     try:
-        out = create_subtitled_clip(clip_path)
+        out = create_subtitled_clip(clip_path, position=position or None)
     except SubtitleError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     except Exception as exc:
@@ -983,13 +1056,20 @@ def suggest_caption(candidate_id: int):
         segments = json.loads(c.trim_segments) if c.trim_segments else []
         excerpt = _transcript_excerpt(c, segments)
         seconds = clip_duration(c.trimmed_clip_path) if c.trimmed_clip_path else None
+        # Voice matching from past captions — never let it break drafting.
+        try:
+            voice = voice_context(session, settings)
+        except Exception as exc:
+            log.warning("Voice context failed (drafting generic): %s", exc)
+            voice = {"examples": [], "style_guide": ""}
         try:
             caption = suggest_post_caption(
                 settings.get("engagement.draft_model", "claude-sonnet-5"),
                 c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
+                examples=voice["examples"], style_guide=voice["style_guide"],
             )
             c.draft_caption = caption
-            return {"caption": caption}
+            return {"caption": caption, "voice_examples": len(voice["examples"])}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -1139,8 +1219,14 @@ def cancel_queued_post(post_id: int, next: str = Form("/posts")):
         if p.status not in ("queued", "draft"):
             return _flash(next, "Only queued or draft posts can be removed")
         was = p.status
+        candidate_id = p.candidate_pk
         session.delete(p)
-    return _flash(next, f"{'Queued post' if was == 'queued' else 'Draft'} removed")
+        # Send the operator back to the clip when deleting its only post record,
+        # so they don't lose track of a trimmed export.
+        if candidate_id and (not next or next in ("/posts", "/")):
+            next = f"/video/{candidate_id}?step=post"
+    label = "Queued post" if was == "queued" else "Draft"
+    return _flash(next, f"{label} removed — your clip is still here; queue or post again when ready.")
 
 
 @app.post("/post/{post_id}/queue")
@@ -1280,15 +1366,26 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
     """A single post's profile: manage the queue before it publishes, and once
     it's live, see its stats and the replies it received."""
     with session_scope() as session:
-        p = session.get(ThreadsPost, post_id)
+        p = session.execute(
+            select(ThreadsPost)
+            .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
+            .where(ThreadsPost.id == post_id)
+        ).scalar_one_or_none()
         if p is None:
             return _flash("/posts", "Post not found")
 
         cand = p.candidate
-        has_clip = bool(
-            (p.clip_local_path and Path(p.clip_local_path).exists())
-            or (cand and cand.trimmed_clip_path and Path(cand.trimmed_clip_path).exists())
-        )
+        clip_path = p.clip_local_path if (p.clip_local_path and Path(p.clip_local_path).exists()) else ""
+        if not clip_path and cand:
+            if (cand.use_subtitles and cand.subtitled_clip_path
+                    and Path(cand.subtitled_clip_path).exists()):
+                clip_path = cand.subtitled_clip_path
+            elif cand.trimmed_clip_path and Path(cand.trimmed_clip_path).exists():
+                clip_path = cand.trimmed_clip_path
+        has_clip = bool(clip_path)
+        # Burnt-in captions live in *_subs.mp4; surface that on the post page
+        # so the plain Threads text caption isn't confused with video subs.
+        has_burned_captions = bool(clip_path and clip_path.endswith("_subs.mp4"))
         snap = session.execute(
             select(MetricSnapshot).where(MetricSnapshot.post_pk == p.id)
             .order_by(MetricSnapshot.captured_at.desc()).limit(1)
@@ -1316,6 +1413,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "video_title": cand.title if cand else "",
             "clip_title": cand.clip_title if cand else "",
             "has_clip": has_clip,
+            "has_burned_captions": has_burned_captions,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
             "is_breaking": bool(p.is_breaking),
@@ -1400,7 +1498,9 @@ def threads_connect(code: str = Form(...), next: str = Form("/posts")):
 def archive_page(request: Request, country: str = "", scope: str = "", msg: str = ""):
     with session_scope() as session:
         query = (
-            select(Candidate).where(Candidate.status == STATUS_ARCHIVED)
+            select(Candidate)
+            .options(selectinload(Candidate.channel))
+            .where(Candidate.status == STATUS_ARCHIVED)
             .order_by(Candidate.archived_at.desc())
         )
         channel_filters = []
@@ -1411,9 +1511,9 @@ def archive_page(request: Request, country: str = "", scope: str = "", msg: str 
         if channel_filters:
             query = query.join(Channel, Candidate.channel_pk == Channel.id).where(*channel_filters)
         items = session.execute(query).scalars().all()
-        rows = [(c, workflow_state(session, c)) for c in items]
-        for c in items:
-            _ = c.channel
+        statuses = _post_statuses_by_candidate(session, [c.id for c in items])
+        rows = [(c, workflow_state(session, c, post_statuses=statuses.get(c.id, set())))
+                for c in items]
 
         # Filter options limited to countries/scopes that have archived items.
         archived_channel_ids = select(Candidate.channel_pk).where(Candidate.status == STATUS_ARCHIVED)
@@ -1528,33 +1628,34 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
 
 @app.get("/posts", response_class=HTMLResponse)
 def posts_page(request: Request, msg: str = ""):
+    post_opts = (
+        selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+    )
     with session_scope() as session:
-        queued = session.execute(
-            select(ThreadsPost).where(ThreadsPost.status.in_(["queued", "publishing"]))
-            .order_by(ThreadsPost.created_at.asc())
-        ).scalars().all()
-        drafts = session.execute(
-            select(ThreadsPost).where(ThreadsPost.status == "draft")
+        # Two queries instead of three: active queue/drafts + recent history.
+        active = session.execute(
+            select(ThreadsPost).options(*post_opts)
+            .where(ThreadsPost.status.in_(["queued", "publishing", "draft"]))
             .order_by(ThreadsPost.created_at.desc())
         ).scalars().all()
+        queued = sorted(
+            [p for p in active if p.status in ("queued", "publishing")],
+            key=lambda p: p.created_at or utcnow(),
+        )
+        drafts = [p for p in active if p.status == "draft"]
         posts = session.execute(
-            select(ThreadsPost).where(ThreadsPost.status.notin_(["queued", "publishing", "draft"]))
+            select(ThreadsPost).options(*post_opts)
+            .where(ThreadsPost.status.notin_(["queued", "publishing", "draft"]))
             .order_by(ThreadsPost.created_at.desc()).limit(100)
         ).scalars().all()
-        for p in [*queued, *drafts, *posts]:
-            # Touch the nested relationships while the session is open so the
-            # template can render them after the session closes.
-            if p.candidate is not None:
-                _ = p.candidate.id, p.candidate.trimmed_clip_path
-                if p.candidate.channel is not None:
-                    _ = p.candidate.channel.call_sign
         status = scheduler_status(session)
+    authenticated = threads_api.is_authenticated()
     return templates.TemplateResponse(
         request, "posts.html",
         {"posts": posts, "queued": queued, "drafts": drafts,
          "scheduler": status,
-         "authenticated": threads_api.is_authenticated(),
-         "auth_url": threads_api.authorize_url() if not threads_api.is_authenticated() else "",
+         "authenticated": authenticated,
+         "auth_url": threads_api.authorize_url() if not authenticated else "",
          "msg": msg, "active": "posts"},
     )
 
@@ -1663,7 +1764,8 @@ def analytics_page(request: Request, msg: str = ""):
         {"rows": report["rows"], "slices": report["slices"], "digest": report["digest"],
          "timeseries": report["timeseries"], "summary": report["summary"],
          "trait_weights": report.get("trait_weights", []),
-         "trait_min_posts": settings.get("ranking.trait_min_posts", 8),
+         "min_trait_posts": settings.get("learning.min_trait_posts", 20),
+         "min_total_posts": settings.get("learning.min_total_posts", 100),
          "spend_today": spend.today_spend(), "spend_budget": spend.daily_budget(),
          "spend_recent": spend.recent(7),
          "msg": msg, "active": "analytics"},
@@ -1766,7 +1868,7 @@ def first_reply_redirect():
     return RedirectResponse("/engagement/first-reply", status_code=303)
 
 
-# --- Traits (visual desirable/undesirable trait database) -----------------------
+# --- Traits (flat footage vocabulary + post-performance learning) ---------------
 
 def _normalize_trait(name: str) -> str:
     """Snake_case a trait name so it stays consistent with the seed + model output."""
@@ -1778,40 +1880,159 @@ def traits_page(request: Request, msg: str = ""):
     settings = load_settings()
     with session_scope() as session:
         traits = session.execute(select(Trait).order_by(Trait.name)).scalars().all()
-        tag_rows = session.execute(select(Candidate.visual_traits)).all()
-        weights = load_trait_weights(session)
-        desirable = [t for t in traits if t.kind == Trait.KIND_DESIRABLE]
-        undesirable = [t for t in traits if t.kind == Trait.KIND_UNDESIRABLE]
-    counts: dict[str, int] = {}
-    scored_total = 0
-    for (v,) in tag_rows:
+        weight_rows = session.execute(
+            select(TraitWeight).where(TraitWeight.metric == "views")
+        ).scalars().all()
+        weights = {
+            w.trait: {"lift": w.lift, "n_posts": w.n_posts or 0,
+                      "effective_n": w.effective_n, "status": w.status,
+                      "median_metric": w.median_metric, "baseline": w.baseline}
+            for w in weight_rows
+        }
+        baseline = next((w.baseline for w in weight_rows if w.baseline is not None), None)
+        post_tag_rows = session.execute(
+            select(ThreadsPost.footage_traits).where(ThreadsPost.status == "published")
+        ).all()
+        published_total = session.execute(
+            select(func.count(ThreadsPost.id)).where(ThreadsPost.status == "published")
+        ).scalar_one()
+        unannotated = session.execute(
+            select(func.count(ThreadsPost.id)).where(
+                ThreadsPost.status == "published",
+                ThreadsPost.footage_scored_at.is_(None),
+                ThreadsPost.clip_local_path != "",
+            )
+        ).scalar_one()
+    post_counts: dict[str, int] = {}
+    annotated_posts = 0
+    for (v,) in post_tag_rows:
         tags = [t.strip() for t in (v or "").split(",") if t.strip()]
         if tags:
-            scored_total += 1
+            annotated_posts += 1
         for t in tags:
-            counts[t] = counts.get(t, 0) + 1
+            post_counts[t] = post_counts.get(t, 0) + 1
     return templates.TemplateResponse(
         request, "traits.html",
-        {"desirable": desirable, "undesirable": undesirable, "counts": counts,
-         "weights": weights, "scored_total": scored_total,
-         "trait_min_posts": settings.get("ranking.trait_min_posts", 8),
+        {"traits": traits, "post_counts": post_counts,
+         "annotated_posts": annotated_posts,
+         "published_total": published_total, "unannotated": unannotated,
+         "weights": weights, "baseline": baseline,
+         "min_trait_posts": settings.get("learning.min_trait_posts", 20),
+         "min_total_posts": settings.get("learning.min_total_posts", 100),
+         "metric_age_hours": settings.get("learning.metric_age_hours", 48),
+         "backfill_running": _post_annotate_running.is_set(),
          "msg": msg, "active": "traits"},
     )
 
 
+@app.get("/traits/{trait_name}", response_class=HTMLResponse)
+def trait_detail(request: Request, trait_name: str):
+    """Published posts carrying this ground-truth footage trait + latest metrics."""
+    name = _normalize_trait(trait_name)
+    with session_scope() as session:
+        weight = session.execute(
+            select(TraitWeight).where(TraitWeight.trait == name, TraitWeight.metric == "views")
+        ).scalar_one_or_none()
+        posts = session.execute(
+            select(ThreadsPost)
+            .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
+            .where(
+                ThreadsPost.status == "published",
+                func.concat(",", func.coalesce(ThreadsPost.footage_traits, ""), ",")
+                .like(f"%,{name},%"),
+            )
+            .order_by(ThreadsPost.published_at.desc().nullslast())
+        ).scalars().all()
+        rows = []
+        for p in posts:
+            snap = session.execute(
+                select(MetricSnapshot)
+                .where(MetricSnapshot.post_pk == p.id)
+                .order_by(MetricSnapshot.captured_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            rows.append({
+                "post": p,
+                "views": snap.views if snap else None,
+                "likes": snap.likes if snap else None,
+            })
+        weight_dict = None
+        if weight is not None:
+            weight_dict = {"n_posts": weight.n_posts, "lift": weight.lift,
+                           "status": weight.status, "median_metric": weight.median_metric,
+                           "baseline": weight.baseline}
+    return templates.TemplateResponse(
+        request, "trait_detail.html",
+        {"trait": name, "posts": rows, "weight": weight_dict, "active": "traits"},
+    )
+
+
+# Background footage-trait backfill (one at a time; it's LLM + ffmpeg work).
+_post_annotate_running = threading.Event()
+
+
+def _annotate_posts_in_thread() -> None:
+    settings = load_settings()
+    try:
+        with session_scope() as session:
+            traits = active_traits(session)
+            posts = session.execute(
+                select(ThreadsPost).where(
+                    ThreadsPost.status == "published",
+                    ThreadsPost.footage_scored_at.is_(None),
+                    ThreadsPost.clip_local_path != "",
+                ).order_by(ThreadsPost.published_at.desc())
+            ).scalars().all()
+            done = 0
+            for post in posts:
+                if not spend.within_budget():
+                    log.info("Footage backfill stopped: daily budget reached")
+                    break
+                if annotate_post_footage(post, settings, traits):
+                    done += 1
+                    session.commit()
+            from ..analytics import learn_trait_weights
+            learn_trait_weights(session)
+            log.info("Footage backfill annotated %d post(s)", done)
+    except Exception:
+        log.exception("Footage trait backfill failed")
+    finally:
+        _post_annotate_running.clear()
+
+
+@app.post("/traits/annotate-posts")
+def traits_annotate_posts():
+    """Backfill ground-truth footage traits for published posts whose clip
+    files are still on disk (runs in the background, budget-guarded)."""
+    if _post_annotate_running.is_set():
+        return _flash("/traits", "A backfill is already running")
+    _post_annotate_running.set()
+    threading.Thread(target=_annotate_posts_in_thread, daemon=True).start()
+    return _flash("/traits", "Backfill started — annotating published clips in the background")
+
+
+@app.post("/traits/relearn")
+def traits_relearn():
+    """Recompute trait verdicts from the current post annotations + metrics."""
+    from ..analytics import learn_trait_weights
+
+    with session_scope() as session:
+        results = learn_trait_weights(session)
+    active_n = sum(1 for r in results if r["status"] == TraitWeight.STATUS_ACTIVE)
+    return _flash("/traits", f"Verdicts recomputed: {len(results)} trait(s) seen, {active_n} active")
+
+
 @app.post("/traits/add")
-def trait_add(name: str = Form(...), kind: str = Form("desirable"), description: str = Form("")):
+def trait_add(name: str = Form(...)):
     name = _normalize_trait(name)
     if not name:
         return _flash("/traits", "Empty trait name")
-    if kind not in (Trait.KIND_DESIRABLE, Trait.KIND_UNDESIRABLE):
-        kind = Trait.KIND_DESIRABLE
     with session_scope() as session:
         exists = session.execute(select(Trait).where(Trait.name == name)).scalar_one_or_none()
         if exists:
             return _flash("/traits", f"'{name}' already exists")
-        session.add(Trait(name=name, kind=kind, description=description.strip(), enabled=True))
-    return _flash("/traits", f"Added '{name}' — applies from the next scoring run")
+        session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, enabled=True))
+    return _flash("/traits", f"Added '{name}'")
 
 
 @app.post("/traits/{trait_id}/toggle")
@@ -1820,17 +2041,6 @@ def trait_toggle(trait_id: int):
         t = session.get(Trait, trait_id)
         if t:
             t.enabled = not t.enabled
-    return _flash("/traits", "Updated")
-
-
-@app.post("/traits/{trait_id}/update")
-def trait_update(trait_id: int, kind: str = Form(...), description: str = Form("")):
-    with session_scope() as session:
-        t = session.get(Trait, trait_id)
-        if t:
-            if kind in (Trait.KIND_DESIRABLE, Trait.KIND_UNDESIRABLE):
-                t.kind = kind
-            t.description = description.strip()
     return _flash("/traits", "Updated")
 
 

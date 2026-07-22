@@ -27,7 +27,7 @@
     <span style="margin-left: auto;"></span>
     <form method="post" action="/threads/import-history" class="inline"
           onsubmit="return confirm('Import your account\'s existing Threads posts (made outside this app) so analytics can include them? This does not post anything.');">
-      <button class="sm" title="Fetch posts you made directly on Threads and pull them in for analytics">⭳ Import my Threads history</button>
+      <button class="sm" title="Fetch posts you made directly on Threads and pull them in for analytics">Import my Threads history</button>
     </form>
   </div>
 </div>
@@ -69,9 +69,9 @@
   <tr><th>Saved</th><th>Caption</th><th>From</th><th>Actions</th></tr>
   {% for p in drafts %}
   <tr>
-    <td class="meta" style="white-space: nowrap;">💾 {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</td>
+    <td class="meta" style="white-space: nowrap;">{{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</td>
     <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
-      {% if p.candidate and p.candidate.clip_title %}<div class="meta" title="Clip title">🎬 {{ p.candidate.clip_title }}</div>{% endif %}</td>
+      {% if p.candidate and p.candidate.clip_title %}<div class="meta" title="Clip title">{{ p.candidate.clip_title }}</div>{% endif %}</td>
     <td class="meta">
       {% if p.candidate %}<a href="/video/{{ p.candidate.id }}">{{ p.candidate.channel.call_sign }}</a>{% else %}—{% endif %}
     </td>
@@ -83,10 +83,10 @@
           <button class="sm">Post now</button></form>
         <form class="inline" method="post" action="/post/{{ p.id }}/queue">
           <input type="hidden" name="next" value="/posts">
-          <button class="sm">⏱ Add to queue</button></form>
-        <a class="sm" href="/post/{{ p.id }}/download-clip" download>⤓ Clip</a>
+          <button class="sm">Add to queue</button></form>
+        <a class="sm" href="/post/{{ p.id }}/download-clip" download>Clip</a>
         <button type="button" class="sm" data-caption="{{ p.caption }}"
-                onclick="copyPostCaption(this)">⧉ Caption</button>
+                onclick="copyPostCaption(this)">Copy caption</button>
         <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
           <input type="hidden" name="next" value="/posts">
           <button class="reject sm" onclick="return confirm('Delete this draft?')">Delete</button></form>
@@ -110,7 +110,7 @@
     <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
       {% if p.is_breaking %}<span class="badge hostile">breaking</span>{% endif %}
       {% if p.defer_count %}<span class="badge">deferred {{ p.defer_count }}×</span>{% endif %}
-      {% if p.candidate and p.candidate.clip_title %}<div class="meta" title="Clip title">🎬 {{ p.candidate.clip_title }}</div>{% endif %}
+      {% if p.candidate and p.candidate.clip_title %}<div class="meta" title="Clip title">{{ p.candidate.clip_title }}</div>{% endif %}
     </td>
     <td class="meta">
       {% if p.candidate %}<a href="/video/{{ p.candidate.id }}">{{ p.candidate.channel.call_sign }}</a>{% else %}—{% endif %}
@@ -125,9 +125,9 @@
       <form class="inline" method="post" action="/post/{{ p.id }}/toggle-breaking">
         <input type="hidden" name="next" value="/posts">
         <button class="sm">{{ "Clear breaking" if p.is_breaking else "Mark breaking" }}</button></form>
-      <a class="sm" href="/post/{{ p.id }}/download-clip" download>⤓ Clip</a>
+      <a class="sm" href="/post/{{ p.id }}/download-clip" download>Clip</a>
       <button type="button" class="sm" data-caption="{{ p.caption }}"
-              onclick="copyPostCaption(this)">⧉ Caption</button>
+              onclick="copyPostCaption(this)">Copy caption</button>
       <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
         <input type="hidden" name="next" value="/posts">
         <button class="reject sm" onclick="return confirm('Remove this from the queue?')">Remove</button></form>
@@ -152,7 +152,7 @@
   <tr>
     <td class="meta" style="white-space: nowrap;">{{ p.published_at.strftime("%b %-d %H:%M") if p.published_at else "—" }}</td>
     <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
-      {% if p.candidate and p.candidate.clip_title %}<div class="meta" title="Clip title">🎬 {{ p.candidate.clip_title }}</div>{% endif %}</td>
+      {% if p.candidate and p.candidate.clip_title %}<div class="meta" title="Clip title">{{ p.candidate.clip_title }}</div>{% endif %}</td>
     <td class="meta">
       {% if p.candidate %}<a href="/video/{{ p.candidate.id }}">{{ p.candidate.channel.call_sign }}</a>
       {% elif p.source == "threads" %}<span class="badge">Threads history</span>
@@ -164,11 +164,11 @@
     <td style="white-space: nowrap;">
       <div class="btn-group" style="align-items:center; gap:6px;">
         {% if p.candidate or p.clip_local_path %}
-        <a class="sm" href="/post/{{ p.id }}/download-clip" download>⤓ Clip</a>
+        <a class="sm" href="/post/{{ p.id }}/download-clip" download>Clip</a>
         {% endif %}
         {% if p.caption %}
         <button type="button" class="sm" data-caption="{{ p.caption }}"
-                onclick="copyPostCaption(this)">⧉ Caption</button>
+                onclick="copyPostCaption(this)">Copy caption</button>
         {% endif %}
       </div>
     </td>

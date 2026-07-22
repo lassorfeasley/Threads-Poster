@@ -2,90 +2,92 @@
 {% block content %}
 <div class="page-head">
   <div class="titles">
-    <h1>Traits ({{ (desirable|length) + (undesirable|length) }})</h1>
-    <div class="sub">The visual vocabulary the vision scorer looks for in each candidate's storyboard.
-      <strong>Desirable</strong> traits raise a clip's visual score; <strong>undesirable</strong> traits lower it.
-      Every scored candidate is tagged with whichever traits its footage shows. Changes apply on the next
-      scoring run (monitor pass or "Score visuals"). Counts below are from {{ scored_total }} scored candidate(s).</div>
+    <h1>Traits ({{ traits|length }})</h1>
+    <div class="sub">Footage labels on <em>published</em> clips. Observations only until learning gates unlock;
+      {{ annotated_posts }} of {{ published_total }} posts annotated so far.</div>
   </div>
+  <div class="actions">
+    <form class="inline" method="post" action="/traits/annotate-posts">
+      <button class="btn" {{ 'disabled' if backfill_running or not unannotated }}
+              title="Tag published posts' clips with ground-truth footage traits">
+        {{ 'Backfill running…' if backfill_running else 'Backfill post traits (' ~ unannotated ~ ')' }}
+      </button>
+    </form>
+    <form class="inline" method="post" action="/traits/relearn">
+      <button class="btn ghost" title="Recompute verdicts from current annotations + metrics">Recompute verdicts</button>
+    </form>
+  </div>
+</div>
+
+<div class="card tight">
+  <strong>Learning status:</strong>
+  {{ published_total }} published post(s), {{ annotated_posts }} with footage traits.
+  Verdicts activate once the account reaches <strong>{{ min_total_posts }}</strong> posts
+  <em>and</em> a trait has been seen on <strong>{{ min_trait_posts }}</strong> posts —
+  until then stats below are early signals only (nothing nudges ranking).
+  {% if published_total < min_total_posts %}
+    <span class="meta">({{ min_total_posts - published_total }} more posts until verdicts can activate.)</span>
+  {% endif %}
+  {% if baseline is not none %}
+    <span class="meta"> · account baseline (median views @ {{ metric_age_hours }}h): {{ "%.0f"|format(baseline) }}</span>
+  {% endif %}
 </div>
 
 <div class="card tight">
   <form method="post" action="/traits/add" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
     <input type="text" name="name" required autocomplete="off"
-           placeholder="new trait, e.g. helicopter_rescue" style="max-width: 260px;">
-    <select name="kind">
-      <option value="desirable">desirable (score up)</option>
-      <option value="undesirable">undesirable (score down)</option>
-    </select>
-    <input type="text" name="description" autocomplete="off"
-           placeholder="optional hint for the model" style="flex: 1; min-width: 200px;">
+           placeholder="new trait, e.g. helicopter_rescue" style="max-width: 320px; flex: 1;">
     <button class="primary">Add trait</button>
   </form>
 </div>
 
-{% macro trait_card(t) %}
+{% for t in traits %}
+{% set w = weights.get(t.name) %}
+{% set n = post_counts.get(t.name, 0) %}
 <div class="card tight item" style="{{ 'opacity: 0.55;' if not t.enabled }}">
   <div class="row center">
     <div class="grow">
-      <div style="font-weight: 650;">{{ t.name }}
+      <div style="font-weight: 650;">
+        <a href="/traits/{{ t.name }}">{{ t.name }}</a>
         {% if not t.enabled %}<span class="badge">disabled</span>{% endif %}
-        {% if counts.get(t.name) %}<span class="badge info" title="candidates tagged">×{{ counts[t.name] }}</span>{% endif %}
-        {% set w = weights.get(t.name) %}
-        {% if w and w.n_posts >= trait_min_posts and w.lift is not none %}
+      </div>
+      <div class="meta" style="margin-top: 4px; display: flex; flex-wrap: wrap; gap: 10px 16px;">
+        {% if n %}
+          <a href="/traits/{{ t.name }}">{{ n }} post{{ 's' if n != 1 }}</a>
+          <span>({{ n }}/{{ min_trait_posts }} toward gate)</span>
+        {% else %}
+          <span>0 posts tagged yet</span>
+        {% endif %}
+        {% if w and w.median_metric is not none %}
+          <span>median views {{ "%.0f"|format(w.median_metric) }}{% if w.baseline is not none %}
+            <span class="meta">vs baseline {{ "%.0f"|format(w.baseline) }}</span>{% endif %}</span>
+        {% endif %}
+        {% if w and w.lift is not none %}
           <span class="badge {{ 'score-hi' if w.lift >= 0 else 'score-lo' }}"
-                title="Learned from {{ w.n_posts }} posts — nudges ranking">
-            {{ "%+.0f%%"|format(w.lift * 100) }} views</span>
-        {% elif w and w.n_posts %}
-          <span class="meta" title="Not enough posts yet to affect ranking">({{ w.n_posts }}/{{ trait_min_posts }} posts)</span>
+                title="{% if w.status == 'active' %}Active — nudges ranking{% else %}Early signal — display only until gates unlock{% endif %}">
+            {{ "%+.0f%%"|format(w.lift * 100) }}{% if w.status != 'active' %} · early{% endif %}
+          </span>
+        {% elif n %}
+          <span class="meta">no metrics yet</span>
         {% endif %}
       </div>
-      {% if t.description %}<div class="meta">{{ t.description }}</div>{% endif %}
     </div>
     <div class="btn-group">
+      <a class="btn sm" href="/traits/{{ t.name }}">Posts</a>
       <form class="inline" method="post" action="/traits/{{ t.id }}/toggle">
         <button class="sm" title="{{ 'Disable' if t.enabled else 'Enable' }}">{{ "Disable" if t.enabled else "Enable" }}</button>
       </form>
       <form class="inline" method="post" action="/traits/{{ t.id }}/delete"
-            onsubmit="return confirm('Delete trait {{ t.name }}? Existing candidate tags are left as-is.')">
+            onsubmit="return confirm('Delete trait {{ t.name }}? Existing tags are left as-is.')">
         <button class="reject sm" title="Delete">✕</button>
       </form>
     </div>
   </div>
-  <details style="margin-top: 8px;">
-    <summary class="meta">Edit</summary>
-    <form method="post" action="/traits/{{ t.id }}/update"
-          style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
-      <label class="meta">Kind
-        <select name="kind">
-          <option value="desirable" {{ "selected" if t.kind == "desirable" }}>desirable</option>
-          <option value="undesirable" {{ "selected" if t.kind == "undesirable" }}>undesirable</option>
-        </select>
-      </label>
-      <input type="text" name="description" value="{{ t.description }}" placeholder="description"
-             style="flex: 1; min-width: 220px;">
-      <button class="primary sm">Save</button>
-    </form>
-  </details>
 </div>
-{% endmacro %}
-
-<h2>Desirable <span class="meta">({{ desirable|length }}) — raise visual score</span></h2>
-{% if desirable %}
-  {% for t in desirable %}{{ trait_card(t) }}{% endfor %}
 {% else %}
-  <div class="meta" style="margin-bottom: 16px;">None yet — add one above.</div>
-{% endif %}
+  <div class="meta">None yet — add one above.</div>
+{% endfor %}
 
-<h2 style="margin-top: 22px;">Undesirable <span class="meta">({{ undesirable|length }}) — lower visual score</span></h2>
-{% if undesirable %}
-  {% for t in undesirable %}{{ trait_card(t) }}{% endfor %}
-{% else %}
-  <div class="meta">None yet — add one above (e.g. talking_head_or_anchor_at_desk).</div>
-{% endif %}
-
-<p class="meta" style="margin-top: 18px;">×N = candidates tagged with that trait so far. The <em>views</em> badge shows
-how posts with that trait have performed vs. your overall average once there are at least {{ trait_min_posts }} posts —
-that's the self-improving signal that nudges ranking. Seed lists live under <code>vision.*</code> in
-<code>config/settings.yaml</code>, but edits here take precedence.</p>
+<p class="meta" style="margin-top: 18px;">Stats use each post's views at {{ metric_age_hours }}h (from metric snapshots),
+  compared to your account median. Seed list: <code>vision.traits</code> in settings; edits here take precedence.</p>
 {% endblock %}

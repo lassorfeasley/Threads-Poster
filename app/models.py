@@ -143,6 +143,19 @@ class ThreadsPost(Base):
     # fill remaining windows FIFO. Cleared on publish.
     pinned_window_key: Mapped[str] = mapped_column(String(40), default="")
 
+    # The LLM's caption draft as it stood when this post was created. The final
+    # ``caption`` is what the operator actually posted, so the diff between the
+    # two is a durable record of the operator's voice (feeds app/voice.py).
+    suggested_caption: Mapped[str] = mapped_column(Text, default="")
+
+    # Ground-truth footage traits, annotated from the POSTED clip's own frames
+    # (not the pre-download storyboard). This is what the learning loop trains
+    # on: it covers uploads and reflects the post-trim footage that actually ran.
+    footage_traits: Mapped[str] = mapped_column(Text, default="")  # comma-separated
+    footage_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    footage_rationale: Mapped[str] = mapped_column(Text, default="")
+    footage_scored_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # Structured attributes for analytics slicing.
     caption_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
     caption_has_question: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -217,42 +230,80 @@ class ThreadsComment(Base):
 
 
 class Trait(Base):
-    """The database of visual traits the vision scorer looks for. ``kind`` marks
-    whether a trait's presence should raise (desirable) or lower (undesirable)
-    a clip's visual appeal. Seeded from config, then editable on the Traits page.
+    """Flat vocabulary of footage traits the tagger can attach to clips.
+
+    Traits are observations only — no desirable/undesirable polarity. Judgment
+    comes later from published-clip performance (``TraitWeight``). The ``kind``
+    column is retained for schema compatibility but ignored.
     """
 
     __tablename__ = "traits"
     __table_args__ = (UniqueConstraint("name", name="uq_trait_name"),)
 
+    KIND_NEUTRAL = "neutral"
+    # Legacy constants kept so older rows / call sites don't break.
     KIND_DESIRABLE = "desirable"
     KIND_UNDESIRABLE = "undesirable"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(60))
-    kind: Mapped[str] = mapped_column(String(20), default=KIND_DESIRABLE)
+    kind: Mapped[str] = mapped_column(String(20), default=KIND_NEUTRAL)
     description: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class TraitWeight(Base):
-    """Learned performance of a visual trait, derived from the operator's own
-    published posts. Recomputed from analytics; used to nudge candidate ranking
-    toward traits that correlate with more views. Correlational only."""
+    """Learned performance of a footage trait, derived from the operator's own
+    published posts (their post-level ``footage_traits`` annotations).
+
+    Verdicts are threshold-gated: a trait's ``status`` only becomes ``active``
+    (allowed to influence ranking/guidance) once the account has enough total
+    posts AND the trait itself has enough observations — see
+    ``analytics.learn_trait_weights`` and the ``learning.*`` settings.
+    Correlational only, recomputed from scratch on every learn pass."""
 
     __tablename__ = "trait_weights"
     __table_args__ = (UniqueConstraint("trait", "metric", name="uq_trait_metric"),)
+
+    STATUS_COLLECTING = "collecting"    # not enough data; influences nothing
+    STATUS_PROVISIONAL = "provisional"  # halfway to the gate; display only
+    STATUS_ACTIVE = "active"            # past both gates; nudges ranking
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     trait: Mapped[str] = mapped_column(String(60))
     metric: Mapped[str] = mapped_column(String(20), default="views")
     n_posts: Mapped[int] = mapped_column(Integer, default=0)
+    # Recency-weighted sample size (sum of decay weights; <= n_posts).
+    effective_n: Mapped[float | None] = mapped_column(Float, nullable=True)
     avg_metric: Mapped[float | None] = mapped_column(Float, nullable=True)
     overall_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # Fractional lift vs. the overall average: (avg_metric - overall) / overall.
+    # Weighted medians (robust to one viral outlier, unlike the means above).
+    median_metric: Mapped[float | None] = mapped_column(Float, nullable=True)
+    baseline: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Fractional lift vs. the account baseline: (median - baseline) / baseline.
     lift: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default=STATUS_COLLECTING)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TriageDecision(Base):
+    """Log of every operator triage decision (approve/reject) with the signals
+    that were visible at decision time. This is the training record for an
+    eventual AI-assisted triage: it captures what the operator chose given the
+    scores and traits shown. ``undone`` marks decisions reverted via Undo."""
+
+    __tablename__ = "triage_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    candidate_pk: Mapped[int] = mapped_column(ForeignKey("candidates.id"))
+    video_id: Mapped[str] = mapped_column(String(20), default="")
+    action: Mapped[str] = mapped_column(String(10))  # approve | reject
+    relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    visual_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    visual_traits: Mapped[str] = mapped_column(Text, default="")  # comma-separated
+    undone: Mapped[bool] = mapped_column(Boolean, default=False)
+    decided_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AppToken(Base):

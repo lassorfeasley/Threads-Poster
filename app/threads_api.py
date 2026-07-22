@@ -29,6 +29,13 @@ SCOPES = "threads_basic,threads_content_publish,threads_manage_replies,threads_r
 
 TOKEN_NAME = "threads"
 
+# In-process cache so pages that call ``is_authenticated()`` (and every API
+# call via ``_auth``) don't pay a remote DB round trip each time. Invalidated
+# on save; TTL covers the rare case of an external writer updating the token.
+_token_cache: dict | None = None
+_token_cache_at: float = 0.0
+_TOKEN_CACHE_TTL = 60.0
+
 
 class ThreadsError(RuntimeError):
     pass
@@ -38,6 +45,7 @@ class ThreadsError(RuntimeError):
 
 def _save_token(token: dict) -> None:
     """Persist the token to the DB (canonical) and the local file (backup)."""
+    global _token_cache, _token_cache_at
     payload = json.dumps(token, indent=1)
     try:
         from .db import session_scope
@@ -57,10 +65,26 @@ def _save_token(token: dict) -> None:
         TOKEN_FILE.write_text(payload)
     except Exception as exc:
         log.warning("Could not write local token file: %s", exc)
+    _token_cache = dict(token)
+    _token_cache_at = time.monotonic()
 
 
 def _peek_token() -> dict | None:
     """Return the stored token or None. Migrates the legacy file into the DB."""
+    global _token_cache, _token_cache_at
+    if (
+        _token_cache is not None
+        and (time.monotonic() - _token_cache_at) < _TOKEN_CACHE_TTL
+    ):
+        return dict(_token_cache)
+    # Negative cache: remember "no token" briefly so unauthenticated pages
+    # don't hammer the DB either.
+    if (
+        _token_cache is None
+        and _token_cache_at
+        and (time.monotonic() - _token_cache_at) < _TOKEN_CACHE_TTL
+    ):
+        return None
     try:
         from .db import session_scope
         from .models import AppToken
@@ -68,13 +92,18 @@ def _peek_token() -> dict | None:
         with session_scope() as session:
             row = session.get(AppToken, TOKEN_NAME)
             if row is not None and row.value:
-                return json.loads(row.value)
+                token = json.loads(row.value)
+                _token_cache = token
+                _token_cache_at = time.monotonic()
+                return dict(token)
     except Exception as exc:
         log.warning("Could not read Threads token from DB (trying local file): %s", exc)
     if TOKEN_FILE.exists():
         token = json.loads(TOKEN_FILE.read_text())
         _save_token(token)  # one-time migration into the DB
         return token
+    _token_cache = None
+    _token_cache_at = time.monotonic()
     return None
 
 

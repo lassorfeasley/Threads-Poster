@@ -6,6 +6,7 @@ Usage:
   python run.py monitor            # one discovery pass over all channels
   python run.py monitor --loop     # poll forever at the configured interval
   python run.py score-visuals      # backfill vision scores for unscored candidates
+  python run.py annotate-posts     # backfill footage traits for published posts
   python run.py metrics            # snapshot Threads metrics for published posts
   python run.py comments           # sync + classify comments on own posts
   python run.py digest             # print the analytics digest to stdout
@@ -28,10 +29,19 @@ log = logging.getLogger("run")
 def cmd_dashboard(args) -> None:
     import uvicorn
 
-    # reload watches the source tree so newly added routes/templates are picked
-    # up without a manual restart. Disable with --no-reload for a stable run.
-    uvicorn.run("app.web.main:app", host="127.0.0.1", port=args.port,
-                log_level="info", reload=args.reload)
+    from app.config import ROOT
+
+    # reload watches only ``app/`` so newly added routes/templates are picked
+    # up without a manual restart — never ``data/`` (multi-GB downloads) or
+    # ``.venv``. Disable with --no-reload for a stable run.
+    uvicorn.run(
+        "app.web.main:app",
+        host="127.0.0.1",
+        port=args.port,
+        log_level="info",
+        reload=args.reload,
+        reload_dirs=[str(ROOT / "app")] if args.reload else None,
+    )
 
 
 def _monitor_pass_with_record(lookback: int | None) -> None:
@@ -92,44 +102,83 @@ def cmd_monitor(args) -> None:
 
 
 def cmd_score_visuals(args) -> None:
-    """Backfill vision scores for stored candidates that don't have one yet
-    (respects vision.min_relevance and the daily budget). Handy after enabling
-    vision on an existing DB, or to score without waiting for a monitor pass."""
+    """Backfill storyboard trait tags for candidates that don't have them yet
+    (respects vision.min_relevance and the daily budget). Neutral labels only."""
     from sqlalchemy import select
 
     from app import spend
     from app.config import load_settings
     from app.db import active_traits, init_db, session_scope, sync_traits_from_config
     from app.models import Candidate
-    from app.ranking import load_trait_weights, trait_guidance_text
-    from app.vision import apply_visual_score
+    from app.vision import tag_candidate_storyboard
 
     init_db()
     settings = load_settings()
     min_rel = settings.get("vision.min_relevance", 0.5)
-    scored = skipped = 0
+    tagged = skipped = 0
     with session_scope() as session:
         sync_traits_from_config(session)
-        guidance = trait_guidance_text(load_trait_weights(session), settings)
-        desirable, undesirable = active_traits(session)
+        traits = active_traits(session)
         query = select(Candidate).where(
-            Candidate.visual_score.is_(None),
+            (Candidate.visual_traits == "") | (Candidate.visual_traits.is_(None)),
             (Candidate.relevance_score.is_(None)) | (Candidate.relevance_score >= min_rel),
         ).order_by(Candidate.relevance_score.desc().nullslast())
         if args.limit:
             query = query.limit(args.limit)
         for c in session.execute(query).scalars().all():
             if not spend.within_budget():
-                log.info("Daily budget reached (${:.2f}); stopping.", spend.today_spend())
+                log.info("Daily budget reached ($%.2f); stopping.", spend.today_spend())
                 break
-            result = apply_visual_score(c, settings, force=True, learned_guidance=guidance,
-                                        desirable=desirable, undesirable=undesirable)
+            result = tag_candidate_storyboard(c, settings, force=True, traits=traits)
             if result is None:
                 skipped += 1
             else:
-                scored += 1
-                session.commit()  # persist incrementally
-    print(f"Vision-scored {scored} candidates, skipped {skipped}. "
+                tagged += 1
+                session.commit()
+    print(f"Tagged {tagged} candidates, skipped {skipped}. "
+          f"Spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today.")
+
+
+def cmd_annotate_posts(args) -> None:
+    """Backfill ground-truth footage traits for published posts whose clip files
+    are still on local disk (extract frames -> tag -> store on the post),
+    then recompute trait verdicts. Budget-guarded like all vision work."""
+    from sqlalchemy import select
+
+    from app import spend
+    from app.analytics import learn_trait_weights
+    from app.config import load_settings
+    from app.db import active_traits, init_db, session_scope
+    from app.models import ThreadsPost, TraitWeight
+    from app.vision import annotate_post_footage
+
+    init_db()
+    settings = load_settings()
+    annotated = skipped = 0
+    with session_scope() as session:
+        traits = active_traits(session)
+        query = select(ThreadsPost).where(
+            ThreadsPost.status == "published",
+            ThreadsPost.clip_local_path != "",
+        ).order_by(ThreadsPost.published_at.desc())
+        if not args.force:
+            query = query.where(ThreadsPost.footage_scored_at.is_(None))
+        if args.limit:
+            query = query.limit(args.limit)
+        for post in session.execute(query).scalars().all():
+            if not spend.within_budget():
+                log.info("Daily budget reached ($%.2f); stopping.", spend.today_spend())
+                break
+            result = annotate_post_footage(post, settings, traits, force=args.force)
+            if result is None:
+                skipped += 1
+            else:
+                annotated += 1
+                session.commit()
+        verdicts = learn_trait_weights(session)
+    active_n = sum(1 for v in verdicts if v["status"] == TraitWeight.STATUS_ACTIVE)
+    print(f"Annotated {annotated} post(s), skipped {skipped} (missing clip/budget). "
+          f"Verdicts: {len(verdicts)} trait(s) seen, {active_n} active. "
           f"Spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today.")
 
 
@@ -242,6 +291,14 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=None, metavar="N",
                    help="score at most N candidates this run")
     p.set_defaults(func=cmd_score_visuals)
+
+    p = sub.add_parser("annotate-posts",
+                       help="backfill footage traits for published posts (from posted clip files)")
+    p.add_argument("--limit", type=int, default=None, metavar="N",
+                   help="annotate at most N posts this run")
+    p.add_argument("--force", action="store_true",
+                   help="re-annotate posts that already have footage traits")
+    p.set_defaults(func=cmd_annotate_posts)
 
     sub.add_parser("metrics", help="snapshot Threads post metrics").set_defaults(func=cmd_metrics)
     sub.add_parser("comments", help="sync and classify comments on own posts").set_defaults(func=cmd_comments)

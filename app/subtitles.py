@@ -97,7 +97,7 @@ def _load_fonts(px: int, font_name: str) -> tuple[ImageFont.FreeTypeFont, ImageF
 
 
 def _render_state(texts: list[str], active: int, width: int, strip_h: int,
-                  fonts: tuple, colors: dict) -> Image.Image:
+                  fonts: tuple, colors: dict, position: str = "bottom") -> Image.Image:
     """One caption state: the group's words, with the ``active`` word set on a
     solid rounded box in inverted colors (the "talks Renewables.org" look)."""
     from PIL import ImageFilter
@@ -131,8 +131,14 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
         lines = [list(range(split)), list(range(split, len(texts)))]
 
     line_h = (ascent + descent) * 1.06
-    baselines = ([strip_h - line_h * 0.55] if len(lines) == 1
-                 else [strip_h - line_h * 1.55, strip_h - line_h * 0.55])
+    if position == "top":
+        # Mirror of the bottom layout: same edge margin, lines flow downward
+        # from the top of the strip (which sits at the top of the frame).
+        first = line_h * 0.55 - descent + ascent
+        baselines = [first] if len(lines) == 1 else [first, first + line_h]
+    else:
+        baselines = ([strip_h - line_h * 0.55] if len(lines) == 1
+                     else [strip_h - line_h * 1.55, strip_h - line_h * 0.55])
 
     # Soft drop shadow (separate blurred layer) keeps white text readable on
     # bright footage without the hard outline of the old style.
@@ -162,8 +168,12 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
     return Image.alpha_composite(shadow, img)
 
 
-def create_subtitled_clip(clip_path: str | Path) -> Path:
-    """Generate ``<clip>_subs.mp4`` with burned-in word captions. Returns path."""
+def create_subtitled_clip(clip_path: str | Path, position: str | None = None) -> Path:
+    """Generate ``<clip>_subs.mp4`` with burned-in word captions. Returns path.
+
+    ``position`` ("top"/"bottom") overrides the ``subtitles.position`` setting
+    for this run — the web UI passes the operator's per-clip choice here.
+    """
     clip = Path(clip_path)
     if not clip.exists():
         raise SubtitleError(f"Clip not found: {clip}")
@@ -173,6 +183,10 @@ def create_subtitled_clip(clip_path: str | Path) -> Path:
     max_words = int(settings.get("subtitles.max_words_per_group", 3))
     font_frac = float(settings.get("subtitles.font_size_frac", 0.11))
     font_name = settings.get("subtitles.font_file", "FunnelDisplay-SemiBold.ttf")
+    dwell = max(0.0, float(settings.get("subtitles.dwell_seconds", 2.0)))
+    position = str(position or settings.get("subtitles.position", "bottom")).strip().lower()
+    if position not in ("top", "bottom"):
+        raise SubtitleError(f"subtitles.position must be 'top' or 'bottom', got {position!r}")
     colors = {
         "text": _hex_to_rgba(settings.get("subtitles.text_color", "#FFFFFF")),
         "box": _hex_to_rgba(settings.get("subtitles.highlight_box_color", "#FFFFFF")),
@@ -199,20 +213,34 @@ def create_subtitled_clip(clip_path: str | Path) -> Path:
         entries: list[tuple[Path, float]] = []
         t = 0.0
         n_png = 0
-        for group in groups:
+        for gi, group in enumerate(groups):
             texts = [w["word"].upper() if uppercase else w["word"] for w in group]
             g_start, g_end = group[0]["start"], group[-1]["end"]
             if g_start > t + 0.01:
                 entries.append((blank, g_start - t))
+            last_png: Path | None = None
             for i, w in enumerate(group):
                 # A word stays highlighted until the next word starts (no flicker).
                 end = group[i + 1]["start"] if i + 1 < len(group) else g_end
                 dur = max(0.05, end - w["start"])
                 png = tmpdir / f"s{n_png:04d}.png"
-                _render_state(texts, i, width, strip_h, fonts, colors).save(png)
+                _render_state(texts, i, width, strip_h, fonts, colors, position).save(png)
                 entries.append((png, dur))
+                last_png = png
                 n_png += 1
             t = g_end
+            # Hold the finished phrase on screen through short pauses so text
+            # doesn't vanish the instant the speaker stops. Cap at ``dwell``,
+            # or cut short when the next phrase is ready to take over.
+            if last_png is not None and dwell > 0:
+                next_start = (
+                    groups[gi + 1][0]["start"] if gi + 1 < len(groups) else None
+                )
+                gap = (next_start - t) if next_start is not None else dwell
+                hold = min(dwell, max(0.0, gap))
+                if hold > 0.01:
+                    entries.append((last_png, hold))
+                    t += hold
         entries.append((blank, 1.0))
 
         concat = tmpdir / "list.txt"
@@ -228,7 +256,7 @@ def create_subtitled_clip(clip_path: str | Path) -> Path:
                 "-i", str(clip),
                 "-safe", "0", "-f", "concat", "-i", str(concat),
                 "-filter_complex",
-                f"[1:v]format=rgba[cap];[0:v][cap]overlay=x=0:y={height - strip_h}:eof_action=pass",
+                f"[1:v]format=rgba[cap];[0:v][cap]overlay=x=0:y={0 if position == 'top' else height - strip_h}:eof_action=pass",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-c:a", "copy", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                 str(out),

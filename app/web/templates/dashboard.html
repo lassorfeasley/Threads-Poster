@@ -196,7 +196,7 @@
      {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
   <div class="vtop">
     <a class="item-title" href="/video/{{ c.id }}" onclick="event.stopPropagation()">{{ c.title }}</a>
-    {% if c.clip_title %}<span class="vmarket" title="Generated clip title">🎬 {{ c.clip_title }}</span>{% endif %}
+    {% if c.clip_title %}<span class="vmarket" title="Generated clip title">{{ c.clip_title }}</span>{% endif %}
     <span class="vmarket">{{ c.channel.call_sign }} · {{ c.channel.market }}
       {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d %H:%M") }}{% endif %}
       {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
@@ -217,11 +217,7 @@
       <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
             title="Climate relevance">{{ "%.2f"|format(c.relevance_score) }}</span>
     {% endif %}
-    {% if c.visual_score is not none %}
-      <span class="badge {{ 'score-hi' if c.visual_score >= 0.5 else 'score-lo' }}"
-            title="{{ c.visual_rationale or 'Visual appeal' }}">👁 {{ "%.2f"|format(c.visual_score) }}</span>
-    {% endif %}
-    {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
+    {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
     {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
   </div>
 </div>
@@ -284,11 +280,7 @@
       <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
             title="Climate relevance score">{{ "%.2f"|format(c.relevance_score) }}</span>
     {% endif %}
-    {% if c.visual_score is not none %}
-      <span class="badge {{ 'score-hi' if c.visual_score >= 0.5 else 'score-lo' }}"
-            title="{{ c.visual_rationale or 'Visual appeal score' }}">👁 {{ "%.2f"|format(c.visual_score) }}</span>
-    {% endif %}
-    {% for t in c.visual_traits.split(",") if t %}<span class="badge {{ 'hostile' if t in undesirable_traits else 'info' }}">{{ t }}</span>{% endfor %}
+    {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
     {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
     {% if c.status != "new" %}<span class="badge">{{ c.status }}</span>{% endif %}
   </div>

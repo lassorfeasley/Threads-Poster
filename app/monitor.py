@@ -16,8 +16,7 @@ from .db import active_traits, session_scope, sync_channels_from_config, sync_tr
 from .llm import score_relevance
 from .matching import find_keyword_matches
 from .models import Candidate, Channel, utcnow
-from .ranking import load_trait_weights, trait_guidance_text
-from .vision import apply_visual_score
+from .vision import tag_candidate_storyboard
 
 log = logging.getLogger("monitor")
 
@@ -41,14 +40,13 @@ def ensure_channel_resolved(channel: Channel) -> bool:
 
 def poll_channel(session, channel: Channel, keywords: list[str], settings,
                  lookback_days: int | None = None, vision_state: dict | None = None,
-                 visual_guidance: str = "", desirable: list[str] | None = None,
-                 undesirable: list[str] | None = None) -> int:
+                 traits: list[str] | None = None) -> int:
     """Check one channel for new uploads; store keyword-matching candidates.
 
     `lookback_days` overrides the normal since-last-check watermark to scan
     further back (backfill). Duplicates are impossible either way — video ids
     are unique in the store. Returns count stored. `vision_state` carries the
-    running per-pass count so the vision-scoring cap spans all channels.
+    running per-pass count so the storyboard-tagging cap spans all channels.
     """
     if not ensure_channel_resolved(channel):
         return 0
@@ -129,20 +127,18 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
             log.warning("LLM scoring failed for %s: %s", up.video_id, exc)
             candidate.relevance_rationale = f"(scoring failed: {exc})"
 
-        # Vision scoring: gated by relevance, a per-pass cap, and the daily
-        # budget (all enforced inside apply_visual_score). Metadata-only.
+        # Optional storyboard tagging: neutral labels only (no visual score).
         if settings.get("vision.enabled", True) and settings.get("vision.score_at_monitor", True):
             try:
-                apply_visual_score(candidate, settings, run_state=vision_state,
-                                   learned_guidance=visual_guidance,
-                                   desirable=desirable, undesirable=undesirable)
-            except Exception as exc:  # never lose a candidate over vision scoring
-                log.warning("Vision scoring failed for %s: %s", up.video_id, exc)
+                tag_candidate_storyboard(candidate, settings, run_state=vision_state,
+                                         traits=traits)
+            except Exception as exc:  # never lose a candidate over tagging
+                log.warning("Storyboard tagging failed for %s: %s", up.video_id, exc)
 
         session.add(candidate)
         stored += 1
-        log.info("Candidate: [%s] %s (score=%s, visual=%s)", channel.call_sign, up.title,
-                 candidate.relevance_score, candidate.visual_score)
+        log.info("Candidate: [%s] %s (score=%s, traits=%s)", channel.call_sign, up.title,
+                 candidate.relevance_score, candidate.visual_traits or "-")
 
     return stored
 
@@ -159,14 +155,11 @@ def run_monitor_once(lookback_days: int | None = None) -> dict:
     with session_scope() as session:
         sync_channels_from_config(session)
         sync_traits_from_config(session)
-        # Feed learned trait performance back into the vision prompt as a soft prior.
-        visual_guidance = trait_guidance_text(load_trait_weights(session), settings)
-        desirable, undesirable = active_traits(session)
+        traits = active_traits(session)
         channels = session.execute(select(Channel).where(Channel.enabled)).scalars().all()
         for channel in channels:
             total_stored += poll_channel(session, channel, keywords, settings, lookback_days,
-                                         vision_state=vision_state, visual_guidance=visual_guidance,
-                                         desirable=desirable, undesirable=undesirable)
+                                         vision_state=vision_state, traits=traits)
             checked += 1
             # Commit per channel: keeps write transactions short (no long lock
             # for other sessions) and preserves progress if a pass is interrupted.

@@ -12,11 +12,27 @@ from .models import Base, Channel, Trait
 _url = database_url()
 _is_sqlite = _url.startswith("sqlite")
 
-engine = create_engine(
-    _url,
-    future=True,
-    connect_args={"timeout": 30} if _is_sqlite else {},
-)
+# Bump when additive migrations in ``_ensure_new_columns`` /
+# ``_drop_removed_columns`` / ``_migrate_scheduled_to_queued`` change.
+# Stored in ``app_tokens`` so remote Postgres startups skip the expensive
+# inspection round trips after the first successful migrate.
+SCHEMA_VERSION = "5"
+_SCHEMA_TOKEN_NAME = "_schema_version"
+
+_engine_kwargs: dict = {"future": True}
+if _is_sqlite:
+    _engine_kwargs["connect_args"] = {"timeout": 30}
+else:
+    # Supabase/Postgres: avoid 1–2s reconnects mid-session and drop stale
+    # pooled connections after idle (Supabase closes them ~30 min).
+    _engine_kwargs.update(
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        pool_recycle=1800,
+    )
+
+engine = create_engine(_url, **_engine_kwargs)
 
 if _is_sqlite:
     @event.listens_for(engine, "connect")
@@ -33,10 +49,71 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
 def init_db() -> None:
+    # Fast path: schema already migrated at SCHEMA_VERSION — skip create_all
+    # inspection and additive migrations (each is a remote round trip).
+    if _schema_is_current():
+        return
     Base.metadata.create_all(engine)
     _ensure_new_columns()
     _drop_removed_columns()
     _migrate_scheduled_to_queued()
+    _set_schema_version()
+
+
+# Cheap probes that must succeed for the schema to really be at SCHEMA_VERSION.
+# Update alongside every version bump. Guards against a stale/premature stamp
+# (e.g. a dev-reload importing db.py between two source edits once wrote the
+# new version while the column list was still old — the stamp then blocked the
+# migration forever while queries crashed on missing columns).
+_SCHEMA_SENTINELS = (
+    "SELECT suggested_caption FROM threads_posts LIMIT 0",
+    "SELECT status FROM trait_weights LIMIT 0",
+)
+
+
+def _schema_is_current() -> bool:
+    """True when migrations already ran at SCHEMA_VERSION (skip re-inspection).
+    Verifies sentinel columns instead of trusting the stamp alone; any failure
+    falls through to a full (idempotent) migration pass."""
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT value FROM app_tokens WHERE name = :n"),
+                {"n": _SCHEMA_TOKEN_NAME},
+            ).first()
+            if not (row and row[0] == SCHEMA_VERSION):
+                return False
+            for probe in _SCHEMA_SENTINELS:
+                conn.execute(text(probe))
+        return True
+    except Exception:
+        return False
+
+
+def _set_schema_version() -> None:
+    from sqlalchemy import text
+
+    from .models import utcnow
+
+    now = utcnow().isoformat()
+    with engine.begin() as conn:
+        # Upsert without depending on dialect-specific ON CONFLICT for SQLite.
+        existing = conn.execute(
+            text("SELECT name FROM app_tokens WHERE name = :n"),
+            {"n": _SCHEMA_TOKEN_NAME},
+        ).first()
+        if existing:
+            conn.execute(
+                text("UPDATE app_tokens SET value = :v, updated_at = :t WHERE name = :n"),
+                {"v": SCHEMA_VERSION, "t": now, "n": _SCHEMA_TOKEN_NAME},
+            )
+        else:
+            conn.execute(
+                text("INSERT INTO app_tokens (name, value, updated_at) VALUES (:n, :v, :t)"),
+                {"n": _SCHEMA_TOKEN_NAME, "v": SCHEMA_VERSION, "t": now},
+            )
 
 
 def _ensure_new_columns() -> None:
@@ -67,6 +144,17 @@ def _ensure_new_columns() -> None:
             "first_reply_text": "TEXT DEFAULT ''",
             "first_reply_error": "TEXT DEFAULT ''",
             "first_reply_at": "TIMESTAMP WITH TIME ZONE",
+            "suggested_caption": "TEXT DEFAULT ''",
+            "footage_traits": "TEXT DEFAULT ''",
+            "footage_score": "FLOAT",
+            "footage_rationale": "TEXT DEFAULT ''",
+            "footage_scored_at": "TIMESTAMP WITH TIME ZONE",
+        },
+        "trait_weights": {
+            "effective_n": "FLOAT",
+            "median_metric": "FLOAT",
+            "baseline": "FLOAT",
+            "status": "VARCHAR(20) DEFAULT 'collecting'",
         },
         "channels": {
             "country": "VARCHAR(60) DEFAULT ''",
@@ -145,13 +233,25 @@ def sync_channels_from_config(session: Session) -> int:
 
     Channels added via the dashboard live only in the DB; this never deletes
     rows, so dashboard-added channels survive a re-sync.
+
+    Loads every existing channel in one query, then upserts in memory — critical
+    when the DB is remote (Supabase), where one SELECT-per-channel was ~20s.
     """
+    seed = load_channel_seed()
+    if not seed:
+        return 0
+
+    by_url = {
+        ch.url: ch
+        for ch in session.execute(select(Channel)).scalars().all()
+        if ch.url
+    }
     added = 0
-    for entry in load_channel_seed():
+    for entry in seed:
         url = str(entry.get("url", "")).strip()
         if not url:
             continue
-        existing = session.execute(select(Channel).where(Channel.url == url)).scalar_one_or_none()
+        existing = by_url.get(url)
         if existing is None:
             session.add(
                 Channel(
@@ -167,6 +267,8 @@ def sync_channels_from_config(session: Session) -> int:
                 )
             )
             added += 1
+            # Prevent duplicate inserts if the seed itself has duplicate URLs.
+            by_url[url] = None  # type: ignore[assignment]
         else:
             # Refresh descriptive fields from config; keep runtime state.
             existing.call_sign = str(entry.get("call_sign", existing.call_sign))
@@ -184,33 +286,29 @@ def sync_channels_from_config(session: Session) -> int:
 
 
 def sync_traits_from_config(session: Session) -> int:
-    """Seed the trait database from settings (``vision.desirable_traits`` /
-    ``vision.undesirable_traits``) on first run. Only adds missing names; never
-    deletes or overwrites, so Traits-page edits survive a re-sync.
+    """Seed the trait vocabulary from settings on first run. Only adds missing
+    names; never deletes or overwrites, so Traits-page edits survive a re-sync.
     """
     settings = load_settings()
-    seed = [
-        (settings.get("vision.desirable_traits") or settings.get("vision.traits") or [],
-         Trait.KIND_DESIRABLE),
-        (settings.get("vision.undesirable_traits") or [], Trait.KIND_UNDESIRABLE),
-    ]
+    names = settings.get("vision.traits") or []
+    if not names:
+        # Legacy keys: merge both old lists into one flat vocabulary.
+        names = list(settings.get("vision.desirable_traits") or []) \
+            + list(settings.get("vision.undesirable_traits") or [])
     existing = {t.name for t in session.execute(select(Trait)).scalars().all()}
     added = 0
-    for names, kind in seed:
-        for raw in names:
-            name = str(raw).strip()
-            if not name or name in existing:
-                continue
-            session.add(Trait(name=name, kind=kind, enabled=True))
-            existing.add(name)
-            added += 1
+    for raw in names:
+        name = str(raw).strip()
+        if not name or name in existing:
+            continue
+        session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, enabled=True))
+        existing.add(name)
+        added += 1
     session.flush()
     return added
 
 
-def active_traits(session: Session) -> tuple[list[str], list[str]]:
-    """Return (desirable_names, undesirable_names) for all enabled traits."""
+def active_traits(session: Session) -> list[str]:
+    """Enabled trait names (flat vocabulary)."""
     rows = session.execute(select(Trait).where(Trait.enabled)).scalars().all()
-    desirable = [t.name for t in rows if t.kind == Trait.KIND_DESIRABLE]
-    undesirable = [t.name for t in rows if t.kind == Trait.KIND_UNDESIRABLE]
-    return desirable, undesirable
+    return [t.name for t in rows]

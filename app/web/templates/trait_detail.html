@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <h1>{{ trait }}</h1>
+    <div class="sub">
+      Published posts tagged with this footage trait
+      {% if weight and weight.n_posts %}· {{ weight.n_posts }} with metrics
+        {% if weight.lift is not none %}·
+          <span class="badge {{ 'score-hi' if weight.lift >= 0 else 'score-lo' }}">
+            {{ "%+.0f%%"|format(weight.lift * 100) }} vs baseline
+          </span>
+          {% if weight.status != 'active' %}<span class="meta">(early — gates not met)</span>{% endif %}
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+  <div class="actions"><a class="btn ghost" href="/traits">← All traits</a></div>
+</div>
+
+{% if not posts %}
+<div class="empty" style="padding: 40px 20px;">
+  <strong>No published posts tagged yet</strong>
+  <div class="meta" style="margin-top: 6px;">Run “Backfill post traits” on the Traits page, or wait for new publishes.</div>
+</div>
+{% else %}
+<div class="table-wrap">
+<table>
+  <tr>
+    <th>Published</th>
+    <th>Caption</th>
+    <th>Traits</th>
+    <th>Views</th>
+    <th>Likes</th>
+    <th></th>
+  </tr>
+  {% for row in posts %}
+  {% set p = row.post %}
+  <tr>
+    <td class="meta" style="white-space: nowrap;">
+      {{ p.published_at.strftime("%b %-d, %Y") if p.published_at else "—" }}
+    </td>
+    <td>
+      <a href="/post/{{ p.id }}">{{ (p.caption or "")[:120] or "(no caption)" }}</a>
+      {% if p.candidate and p.candidate.clip_title %}
+        <div class="meta">{{ p.candidate.clip_title }}</div>
+      {% endif %}
+    </td>
+    <td>
+      {% for t in (p.footage_traits or "").split(",") if t.strip() %}
+        <a class="badge info" href="/traits/{{ t.strip() }}">{{ t.strip() }}</a>
+      {% endfor %}
+    </td>
+    <td>{{ row.views if row.views is not none else "—" }}</td>
+    <td>{{ row.likes if row.likes is not none else "—" }}</td>
+    <td class="meta">
+      {% if p.permalink %}<a href="{{ p.permalink }}" target="_blank" rel="noopener">Threads ↗</a>{% endif %}
+      {% if p.candidate %} · <a href="/video/{{ p.candidate.id }}">clip</a>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+{% endblock %}

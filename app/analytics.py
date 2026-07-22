@@ -241,6 +241,7 @@ def build_post_rows(session) -> list[dict]:
             "matched_keywords": candidate.matched_keywords if candidate else None,
             "visual_traits": candidate.visual_traits if candidate else None,
             "visual_score": candidate.visual_score if candidate else None,
+            "footage_traits": post.footage_traits,
             "clip_length_seconds": post.clip_length_seconds,
             "caption_length": post.caption_length,
             "caption_has_question": post.caption_has_question,
@@ -259,10 +260,11 @@ def build_post_rows(session) -> list[dict]:
 def slice_summaries(rows: list[dict]) -> dict:
     """Mean of each metric grouped by each attribute (simple correlational slices)."""
     attributes = [
-        "region", "matched_keywords", "visual_traits", "caption_tone", "day_of_week",
+        "region", "matched_keywords", "visual_traits", "footage_traits",
+        "caption_tone", "day_of_week",
         "caption_has_question", "caption_has_cta",
     ]
-    multi_value = {"matched_keywords", "visual_traits"}
+    multi_value = {"matched_keywords", "visual_traits", "footage_traits"}
     summaries: dict = {}
     for attr in attributes:
         groups: dict = defaultdict(list)
@@ -361,25 +363,115 @@ def summary_kpis(rows: list[dict]) -> dict:
     return kpi
 
 
-def learn_trait_weights(session, rows: list[dict] | None = None, metric: str = "views") -> list[dict]:
-    """Self-improvement loop: recompute how each visual trait's posts perform
-    vs. the overall average, and upsert TraitWeight rows. Ranking reads these to
-    drift toward footage traits that correlate with more of ``metric``.
+def metric_at_age(session, post: ThreadsPost, metric: str, age_hours: int) -> int | None:
+    """``metric`` value when the post was ``age_hours`` old, from its snapshot
+    time series. Comparing every post at the same age keeps old posts (with
+    months of accumulated views) from always beating young ones.
 
-    Returns the per-trait summaries (also handy for the analytics UI). Purely
-    correlational; ``ranking`` gates influence on sample size.
+    Uses the newest snapshot captured at or before the target age; when
+    snapshots only start later (or the post is still younger than the target),
+    falls back to the closest one available.
     """
-    if rows is None:
-        rows = build_post_rows(session)
-    with_metric = [r for r in rows if r.get(metric) is not None]
-    overall = _mean([r[metric] for r in with_metric])
+    published = post.published_at
+    if published is None:
+        return None
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=dt.timezone.utc)
+    target = published + dt.timedelta(hours=age_hours)
 
-    groups: dict[str, list] = defaultdict(list)
-    for r in with_metric:
-        for t in str(r.get("visual_traits") or "").split(","):
-            t = t.strip()
-            if t:
-                groups[t].append(r[metric])
+    snaps = session.execute(
+        select(MetricSnapshot)
+        .where(MetricSnapshot.post_pk == post.id,
+               getattr(MetricSnapshot, metric).is_not(None))
+        .order_by(MetricSnapshot.captured_at.asc())
+    ).scalars().all()
+    if not snaps:
+        return None
+
+    best = None
+    for snap in snaps:
+        at = snap.captured_at
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=dt.timezone.utc)
+        if at <= target:
+            best = snap
+        else:
+            break
+    chosen = best if best is not None else snaps[0]
+    return getattr(chosen, metric)
+
+
+def _weighted_median(pairs: list[tuple[float, float]]) -> float | None:
+    """Median of (value, weight) pairs; the value where cumulative weight
+    crosses half the total."""
+    pairs = [(v, w) for v, w in pairs if v is not None and w > 0]
+    if not pairs:
+        return None
+    pairs.sort(key=lambda p: p[0])
+    total = sum(w for _, w in pairs)
+    acc = 0.0
+    for v, w in pairs:
+        acc += w
+        if acc >= total / 2:
+            return float(v)
+    return float(pairs[-1][0])
+
+
+def learn_trait_weights(session, rows: list[dict] | None = None, metric: str = "views") -> list[dict]:
+    """Self-improvement loop: recompute each footage trait's performance verdict
+    from the operator's own published posts, and upsert TraitWeight rows.
+
+    Design (all knobs under ``learning.*`` in settings):
+    - Trains on post-level ``footage_traits`` (annotated from the posted clip),
+      never on pre-download predictions.
+    - Every post's metric is read at the same fixed age (``metric_age_hours``)
+      so old and new posts are comparable.
+    - Lift is measured against the account's recency-weighted MEDIAN (one viral
+      post shouldn't define the baseline), with posts decaying at
+      ``halflife_days`` so verdicts drift with the audience.
+    - Threshold-gated verdict ``status``: influence requires BOTH
+      ``min_total_posts`` account-wide AND ``min_trait_posts`` observations of
+      the trait. Below that, traits just collect data.
+
+    Returns per-trait summaries for the UI. Purely correlational.
+    """
+    del rows  # legacy arg; verdicts need the snapshot series, not latest rows
+    settings = load_settings()
+    min_total = int(settings.get("learning.min_total_posts", 100))
+    min_trait = int(settings.get("learning.min_trait_posts", 20))
+    provisional_frac = float(settings.get("learning.provisional_fraction", 0.5))
+    halflife_days = float(settings.get("learning.halflife_days", 90))
+    age_hours = int(settings.get("learning.metric_age_hours", 48))
+
+    posts = session.execute(
+        select(ThreadsPost).where(
+            ThreadsPost.status == "published",
+            ThreadsPost.published_at.is_not(None),
+        )
+    ).scalars().all()
+
+    now = utcnow()
+    observations: list[dict] = []  # one per post with a usable metric value
+    for post in posts:
+        value = metric_at_age(session, post, metric, age_hours)
+        if value is None:
+            continue
+        published = post.published_at
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=dt.timezone.utc)
+        age_days = max(0.0, (now - published).total_seconds() / 86400)
+        weight = 0.5 ** (age_days / halflife_days) if halflife_days > 0 else 1.0
+        traits = [t.strip() for t in (post.footage_traits or "").split(",") if t.strip()]
+        observations.append({"value": float(value), "weight": weight, "traits": traits})
+
+    total_n = len(observations)
+    baseline = _weighted_median([(o["value"], o["weight"]) for o in observations])
+    overall_mean = _mean([o["value"] for o in observations])
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for o in observations:
+        for t in o["traits"]:
+            groups[t].append(o)
 
     existing = {
         w.trait: w for w in session.execute(
@@ -387,20 +479,47 @@ def learn_trait_weights(session, rows: list[dict] | None = None, metric: str = "
         ).scalars().all()
     }
     results = []
-    for trait, vals in groups.items():
-        avg = _mean(vals)
-        lift = ((avg - overall) / overall) if (overall and avg is not None) else None
-        row = existing.get(trait)
+    for trait, obs in groups.items():
+        n = len(obs)
+        eff_n = sum(o["weight"] for o in obs)
+        median = _weighted_median([(o["value"], o["weight"]) for o in obs])
+        avg = _mean([o["value"] for o in obs])
+        lift = ((median - baseline) / baseline) if (baseline and median is not None) else None
+
+        if total_n >= min_total and n >= min_trait and lift is not None:
+            status = TraitWeight.STATUS_ACTIVE
+        elif n >= max(1, int(min_trait * provisional_frac)):
+            status = TraitWeight.STATUS_PROVISIONAL
+        else:
+            status = TraitWeight.STATUS_COLLECTING
+
+        row = existing.pop(trait, None)
         if row is None:
             row = TraitWeight(trait=trait, metric=metric)
             session.add(row)
-        row.n_posts = len(vals)
+        row.n_posts = n
+        row.effective_n = round(eff_n, 2)
         row.avg_metric = avg
-        row.overall_avg = overall
+        row.overall_avg = overall_mean
+        row.median_metric = median
+        row.baseline = baseline
         row.lift = lift
+        row.status = status
         row.updated_at = utcnow()
-        results.append({"trait": trait, "n_posts": len(vals), "avg_metric": avg,
-                        "overall_avg": overall, "lift": lift, "metric": metric})
+        results.append({"trait": trait, "n_posts": n, "effective_n": round(eff_n, 2),
+                        "avg_metric": avg, "overall_avg": overall_mean,
+                        "median_metric": median, "baseline": baseline,
+                        "lift": lift, "status": status, "metric": metric})
+
+    # Traits that vanished from the data (e.g. annotations re-run) must not keep
+    # a stale verdict.
+    for row in existing.values():
+        row.n_posts = 0
+        row.effective_n = 0.0
+        row.lift = None
+        row.status = TraitWeight.STATUS_COLLECTING
+        row.updated_at = utcnow()
+
     session.flush()
     results.sort(key=lambda d: (d["lift"] if d["lift"] is not None else -99), reverse=True)
     return results

@@ -5,7 +5,7 @@
 # immediately after the main post succeeds. A reply failure never rolls
 # back the post — check the post page and retry there if needed.
 
-enabled: true
+enabled: false
 text: Nonprofit Renewables.org allows anyone to invest as little as $25 in Global South solar
   and get paid back as they generate and sell clean electricity to the grid. You don't earn
   an interest rate, but dollar-for-dollar, you'll create 550% more carbon avoidance than you

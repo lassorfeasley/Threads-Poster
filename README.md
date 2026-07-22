@@ -39,8 +39,13 @@ cp .env.example .env   # then fill in keys (below)
 Optional extras:
 
 - **Supabase Postgres instead of local SQLite**: `pip install psycopg2-binary`
-  and set `DATABASE_URL` in `.env`. SQLite (default, zero-config) is fine for
-  single-user local use.
+  and set `DATABASE_URL` in `.env`. SQLite (default, zero-config) is the right
+  choice for day-to-day local development — every page hit stays under ~100ms.
+  Use Supabase Postgres when you need a shared DB (headless runners, a future
+  multi-user deploy). Remote DBs cost ~100ms per query; the app batches those
+  round trips, but local SQLite is still much snappier for UI work. Supabase
+  **Storage** (clip hosting for Threads) is independent of which database you
+  use — keep `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` either way.
 
 ### API keys (`.env`)
 
@@ -48,7 +53,7 @@ Optional extras:
 |---|---|
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key. Create at [console.cloud.google.com](https://console.cloud.google.com) → enable "YouTube Data API v3" → Credentials → API key. Used for discovery only. |
 | `ANTHROPIC_API_KEY` | Claude API key ([console.anthropic.com](https://console.anthropic.com)) for relevance scoring, comment classification, drafts, digest. |
-| `DATABASE_URL` | Optional. Empty = local SQLite at `data/app.db`. For Supabase Postgres use the connection string from Project Settings → Database. |
+| `DATABASE_URL` | Optional. Empty = local SQLite at `data/app.db` (fast for local UI work). For Supabase Postgres use the connection string from Project Settings → Database. Keep Storage (`SUPABASE_*`) even when using SQLite. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Supabase project (Settings → API). Used for the trimmed-clip bucket only. Create a **private** Storage bucket named `trimmed-clips` (or change `storage.trimmed_clip_bucket` in settings). |
 | `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_REDIRECT_URI` | Meta app for the Threads API (below). |
 
@@ -71,9 +76,11 @@ Optional extras:
 
 ```bash
 python run.py dashboard        # web UI at http://127.0.0.1:8321
+python run.py dashboard --no-reload   # stable run (skip auto-reload on edits)
 python run.py monitor          # one discovery pass (or use the dashboard button)
 python run.py monitor --loop   # keep polling at the configured interval
 python run.py score-visuals    # backfill vision scores for unscored candidates
+python run.py annotate-posts   # backfill footage traits for published posts (from posted clips)
 python run.py comments         # pull + classify comments on your own posts
 python run.py metrics          # snapshot Threads metrics (time series)
 python run.py digest           # print the analytics digest
@@ -94,15 +101,11 @@ Channels / Keywords / Traits) guides each video through four breadcrumbed steps:
 1. **Monitor** polls each channel's uploads playlist via the YouTube Data API,
    keyword-filters title+description, LLM-scores each hit for genuine climate
    relevance (cuts "political climate" false positives), and stores candidates.
-   Candidates that clear the relevance threshold are also **vision-scored**:
-   their YouTube storyboard stills (a metadata-only fetch — nothing downloaded)
-   go to a multimodal LLM that rates how engaging the footage looks (0–1) and
-   tags it with **desirable** traits that raise appeal (fire, flood, crowds,
-   action, rescue…) and **undesirable** traits that lower it (talking-head,
-   slideshow, charts…). The trait vocabulary is an editable database — see the
-   **Traits** page below. The Dashboard lists new matches plus anything
-   mid-workflow, ranked by a blend of relevance and visual appeal, with detected
-   traits shown as badges (undesirable ones flagged in red).
+   Candidates that clear the relevance threshold can also be **trait-tagged**
+   from YouTube storyboard stills (metadata-only — nothing downloaded): a flat
+   vocabulary of labels with no good/bad score. The Dashboard lists new matches
+   ranked by climate relevance (later nudged by learned trait verdicts once
+   unlocked), with detected traits shown as badges.
 2. **Review** (step 1): embedded player, matched keywords, score + rationale.
    Approve or Reject. Approve is the hard gate — nothing downloads before it.
 3. **Scrape & Transcribe** (step 2): on approval the tool fetches the transcript
@@ -116,9 +119,16 @@ Channels / Keywords / Traits) guides each video through four breadcrumbed steps:
    (ffmpeg, frame-accurate re-encode) saved to `data/clips/`. An LLM-suggested
    highlight window is shown as a hint, clearly marked as a draft.
 5. **Post** (step 4): preview the exported clip, generate an LLM caption
-   suggestion (a draft — edit freely), and confirm. The clip uploads to a private
+   suggestion (a draft — edit freely), and confirm. Caption drafts are
+   **voice-matched**: past published captions (hand-written and heavily-edited
+   ones weighted highest) are fed to the model as few-shot examples plus a
+   cached distilled style guide, so drafts read like you (`voice.*` in
+   settings). The draft is also stored alongside your final caption, so every
+   edit you make becomes future voice signal. The clip uploads to a private
    Supabase bucket (Threads fetches video by signed URL), posts on your
    confirmation, and is retained as the canonical record linked to the post ID.
+   At publish, the posted clip's frames are tagged with **ground-truth footage
+   traits** (works for uploads too — no YouTube storyboard needed).
 6. **Engagement**: "Sync comments" reads replies on your own posts only. An LLM
    classifies each (supportive / genuine question / neutral / hostile / bait /
    spam / off-topic) plus risk flags (duplicate text, political bait, sus).
@@ -128,12 +138,21 @@ Channels / Keywords / Traits) guides each video through four breadcrumbed steps:
 7. **Analytics**: metric snapshots over time, per-post attribute tagging (topic,
    region, clip length, caption traits, day/time, **footage traits**), slice
    tables, and an LLM digest with clearly-labeled correlational hypotheses and
-   small-sample caveats. This is also the **self-improvement loop**: it measures
-   how each visual trait's posts perform vs. your overall average and stores
-   per-trait weights, which then nudge how future candidates are ranked — so the
-   tool drifts toward whatever footage actually earns views on *your* account.
-   Influence is capped and gated on a minimum sample size, so a few lucky posts
-   can't dominate (all correlational, never presented as proven cause).
+   small-sample caveats.    This is also the **self-improvement loop**, built
+   collect-first / judge-later: every published post is annotated with footage
+   traits from its actual posted clip, but trait *verdicts* only activate once
+   two gates are met — `learning.min_total_posts` (default 100) posts overall
+   and `learning.min_trait_posts` (default 20) observations of that trait.
+   Verdicts compare each trait's recency-weighted **median views at a fixed
+   post age** (48h by default, from metric snapshots) against the account
+   baseline, so old posts' accumulated views and one viral outlier can't skew
+   the read, and conclusions decay as your audience drifts
+   (`learning.halflife_days`). Only *active* verdicts nudge candidate ranking
+   (influence still capped by `ranking.trait_influence`); everything below the
+   gates is display-only on the Traits page. Triage decisions (approve/reject
+   plus the signals on screen) are logged to `triage_decisions` — the training
+   record for eventually letting AI assist with, then take over, screening.
+   All correlational, never presented as proven cause.
 
 ### Cost control
 
@@ -154,11 +173,9 @@ Everything lives in `config/` — no code changes needed:
   automatically. You can also add/remove/disable channels on the dashboard's
   **Channels** page.
 - `config/keywords.yaml` — climate keyword list for the first-pass filter.
-- The **trait database** (desirable/undesirable visual traits) is seeded from
-  `vision.desirable_traits` / `vision.undesirable_traits` in `settings.yaml` on
-  first run, then managed on the dashboard's **Traits** page (add/edit/disable,
-  switch a trait's polarity, see how often each is detected and how its posts
-  perform). Page edits take precedence over the seed.
+- The **trait vocabulary** is seeded from `vision.traits` in `settings.yaml` on
+  first run, then managed on the dashboard's **Traits** page (add/edit/disable).
+  Traits are observations only; performance verdicts come from published clips.
 - `config/settings.yaml` — poll interval, score threshold, storage paths,
   retention (defaults to keep-everything), politeness delays,
   engagement categories + reply-eligibility + pacing caps + reply guidance,

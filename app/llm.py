@@ -154,38 +154,28 @@ def suggest_highlight(model: str, title: str, transcript_segments: list[dict]) -
     }
 
 
-def score_visuals(model: str, images: list[bytes], desirable_traits: list[str],
-                  undesirable_traits: list[str] | None = None,
-                  title: str = "", learned_guidance: str = "") -> dict:
-    """Judge how visually engaging a clip's FOOTAGE looks from storyboard stills.
+def tag_footage(model: str, images: list[bytes], traits: list[str],
+                title: str = "") -> dict:
+    """Tag which traits from the vocabulary are visibly present in footage stills.
 
-    ``images`` are JPEG bytes (YouTube storyboard sprite sheets — each is a
-    contact-sheet of small stills sampled across the clip). The model tags which
-    DESIRABLE traits (raise appeal) and UNDESIRABLE traits (lower appeal) are
-    present, and scores overall visual punch. Returns
-    {visual_score: 0-1, traits: [detected, both kinds], why: str}. The score
-    reflects action/drama/human interest, NOT climate relevance.
+    Neutral observation only — no good/bad score. ``images`` are JPEG bytes
+    (YouTube storyboard sheets or a contact sheet from a posted clip). Returns
+    {traits: [detected], why: str}.
     """
-    undesirable_traits = undesirable_traits or []
+    vocab = [t for t in traits if t]
     system = (
-        "You rate how visually engaging a short news clip would be on social "
-        "media, judging ONLY the footage shown in these storyboard stills (a "
-        "grid of small preview frames sampled across the clip). This is about "
-        "visual punch, not topic importance. Raise the score for DESIRABLE "
-        f"traits and lower it for UNDESIRABLE traits.\n"
-        f"DESIRABLE traits (score UP): {', '.join(desirable_traits)}.\n"
-        f"UNDESIRABLE traits (score DOWN): {', '.join(undesirable_traits) or '(none)'}.\n"
-        "In 'traits', list every trait from EITHER list that is visibly present "
-        "(use the exact names given). "
-        "JSON shape: {\"visual_score\": 0.0-1.0, \"traits\": [\"...\"], "
-        "\"why\": \"one line\"}"
+        "You label footage stills with a fixed vocabulary. These may be YouTube "
+        "storyboard grids or a contact sheet of frames from a short clip. "
+        "List ONLY traits from the vocabulary that are clearly visible — do not "
+        "guess, and do not invent new trait names. Do not judge quality or "
+        "appeal; observation only.\n"
+        f"Vocabulary: {', '.join(vocab) or '(empty)'}.\n"
+        "JSON shape: {\"traits\": [\"...\"], \"why\": \"one line\"}"
     )
-    if learned_guidance:
-        system += "\n\nObserved performance so far (use as a soft prior, not a rule):\n" + learned_guidance
     blocks: list = [{
         "type": "text",
         "text": (f"Clip title: {title}\n" if title else "")
-        + "Rate the footage in these storyboard stills.",
+        + "Tag the footage in these stills.",
     }]
     for img in images:
         blocks.append({
@@ -199,27 +189,55 @@ def score_visuals(model: str, images: list[bytes], desirable_traits: list[str],
     resp = _create(model, system + "\nRespond with a single JSON object only — no prose, no code fences.",
                    blocks, max_tokens=500, temperature=0.2)
     data = _parse_json(_text_from(resp))
-    allowed = set(desirable_traits) | set(undesirable_traits)
+    allowed = set(vocab)
     found = [t for t in (str(x).strip() for x in data.get("traits", [])) if t in allowed]
     return {
-        "visual_score": max(0.0, min(1.0, float(data.get("visual_score", 0.0)))),
         "traits": found,
         "why": str(data.get("why", ""))[:300],
     }
 
 
+def score_visuals(model: str, images: list[bytes], desirable_traits: list[str],
+                  undesirable_traits: list[str] | None = None,
+                  title: str = "", learned_guidance: str = "") -> dict:
+    """Backward-compatible wrapper: tag-only (score dropped)."""
+    del learned_guidance
+    traits = list(desirable_traits or []) + list(undesirable_traits or [])
+    result = tag_footage(model, images, traits, title=title)
+    return {"visual_score": None, "traits": result["traits"], "why": result["why"]}
+
+
 def suggest_post_caption(model: str, title: str, station: str, market: str,
-                         excerpt: str, clip_seconds: float | None) -> str:
+                         excerpt: str, clip_seconds: float | None,
+                         examples: list[str] | None = None,
+                         style_guide: str = "") -> str:
     """Recommend Threads post text for the operator's trimmed clip. The operator
-    reviews/edits before posting — this is a DRAFT, never auto-posted."""
+    reviews/edits before posting — this is a DRAFT, never auto-posted.
+
+    ``examples``/``style_guide`` come from ``app/voice.py``: real captions the
+    operator wrote, so the draft matches their voice instead of a generic one.
+    """
     system = (
         "You draft a Threads caption for a short local-TV climate news clip. The "
-        "operator will edit it before posting. Style: concrete and human, lead with "
-        "the most striking fact from the excerpt, mention the place, no hype, no "
-        "emojis unless truly fitting, at most one question, under 350 characters. "
-        "Do not invent facts not in the excerpt. "
-        "JSON shape: {\"caption\": \"...\"}"
+        "operator will edit it before posting. Hard constraints: do not invent "
+        "facts not in the excerpt, mention the place, under 350 characters. "
     )
+    if examples:
+        system += (
+            "\n\nVOICE: Write in the operator's own voice. Below are real captions "
+            "they published — study the sentence rhythm, openings, punctuation, "
+            "emoji/hashtag habits, and attitude, then write the new caption as if "
+            "they wrote it. Match voice, never reuse their facts.\n\n"
+            + "\n".join(f"<example>\n{e[:500]}\n</example>" for e in examples)
+        )
+        if style_guide:
+            system += "\n\nStyle notes distilled from their full history:\n" + style_guide[:2000]
+    else:
+        system += (
+            "Style: concrete and human, lead with the most striking fact from the "
+            "excerpt, no hype, no emojis unless truly fitting, at most one question."
+        )
+    system += "\nJSON shape: {\"caption\": \"...\"}"
     user = json.dumps({
         "video_title": title,
         "station": station,
@@ -227,8 +245,25 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
         "clip_length_seconds": clip_seconds,
         "transcript_excerpt_of_clip": excerpt[:3000],
     })
-    data = _json_chat(model, system, user)
+    data = _json_chat(model, system, user, max_tokens=1500)
     return str(data.get("caption", "")).strip()[:500]
+
+
+def distill_style_guide(model: str, captions: list[str]) -> str:
+    """Distill the operator's caption-writing voice into a short reusable style
+    guide (plain text bullets). Rebuilt occasionally as history grows."""
+    system = (
+        "You are a writing-voice analyst. Given social media captions all written "
+        "by one person, produce a compact style guide (6-10 plain-text bullets, "
+        "no headers) that would let a ghostwriter imitate them: sentence length "
+        "and rhythm, how they open and close, punctuation and capitalization "
+        "quirks, emoji/hashtag habits, tone and attitude, recurring moves (e.g. "
+        "quotes, stats, questions). Describe only patterns actually present. "
+        "JSON shape: {\"style_guide\": \"- bullet\\n- bullet\"}"
+    )
+    user = json.dumps({"captions": [c[:500] for c in captions[:30]]})
+    data = _json_chat(model, system, user, max_tokens=1200)
+    return str(data.get("style_guide", "")).strip()[:3000]
 
 
 def suggest_title(model: str, source_title: str, transcript_excerpt: str,

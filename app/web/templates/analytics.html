@@ -87,30 +87,33 @@
 {% endfor %}
 </div>
 
-{# ---- Learned footage-trait weights (self-improving ranking) ---- #}
+{# ---- Learned footage-trait verdicts (self-improving ranking) ---- #}
 <h2>Footage traits <span class="meta">(what the ranking is learning from views)</span></h2>
-<div class="meta" style="margin: -6px 0 12px;">Mean views of posts whose footage shows each trait, vs. the
-  overall average. Traits with at least {{ trait_min_posts }} posts (bold) actively nudge how new candidates are
-  ranked; the rest are shown for context only. Correlational — treat as a hint, not proof.</div>
+<div class="meta" style="margin: -6px 0 12px;">Median views at a fixed post age for posts whose footage shows each
+  trait, vs. the account baseline (recency-weighted). A verdict only becomes <strong>active</strong> — and starts
+  nudging ranking — once you have {{ min_total_posts }} total posts <em>and</em> the trait has {{ min_trait_posts }}
+  observations; everything else is still collecting. Correlational — treat as a hint, not proof.</div>
 {% if trait_weights %}
 <div class="card">
   <table style="margin-top: 4px;">
-    <tr><th>Trait</th><th>Posts</th><th>Avg views</th><th>Overall avg</th><th>Lift</th><th>Ranking effect</th></tr>
+    <tr><th>Trait</th><th>Posts</th><th>Median views</th><th>Baseline</th><th>Lift</th><th>Verdict</th></tr>
     {% for w in trait_weights %}
     <tr>
-      <td>{% if w.n_posts >= trait_min_posts %}<strong>{{ w.trait }}</strong>{% else %}{{ w.trait }}{% endif %}</td>
+      <td>{% if w.status == 'active' %}<strong>{{ w.trait }}</strong>{% else %}{{ w.trait }}{% endif %}</td>
       <td>{{ w.n_posts }}</td>
-      <td>{{ w.avg_metric if w.avg_metric is not none else "—" }}</td>
-      <td>{{ w.overall_avg if w.overall_avg is not none else "—" }}</td>
+      <td>{{ w.median_metric if w.median_metric is not none else "—" }}</td>
+      <td>{{ w.baseline if w.baseline is not none else "—" }}</td>
       <td>{% if w.lift is not none %}{{ "%+.0f%%"|format(w.lift * 100) }}{% else %}—{% endif %}</td>
-      <td>{% if w.n_posts >= trait_min_posts %}<span class="badge {{ 'score-hi' if (w.lift or 0) >= 0 else 'score-lo' }}">active</span>{% else %}<span class="meta">needs {{ trait_min_posts - w.n_posts }} more</span>{% endif %}</td>
+      <td>{% if w.status == 'active' %}<span class="badge {{ 'score-hi' if (w.lift or 0) >= 0 else 'score-lo' }}">active</span>
+          {% elif w.status == 'provisional' %}<span class="badge">provisional · {{ w.n_posts }}/{{ min_trait_posts }}</span>
+          {% else %}<span class="meta">collecting · {{ w.n_posts }}/{{ min_trait_posts }}</span>{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
 </div>
 {% else %}
-<div class="meta" style="margin-bottom: 16px;">No vision-scored posts yet — trait weights appear once you've
-  published clips whose candidates were vision-scored.</div>
+<div class="meta" style="margin-bottom: 16px;">No annotated posts yet — verdicts appear once published posts carry
+  footage traits (they're tagged automatically at publish; backfill older ones from the Traits page).</div>
 {% endif %}
 
 {# ---- Per-post table (collapsed) ---- #}

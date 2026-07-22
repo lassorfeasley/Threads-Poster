@@ -1,5 +1,8 @@
 fastapi>=0.111
 uvicorn>=0.30
+# Efficient file watcher for uvicorn --reload (avoids polling the whole tree,
+# including data/ and .venv, which burns CPU and freezes the UI on every edit).
+watchfiles>=0.21
 jinja2>=3.1
 python-multipart>=0.0.9
 sqlalchemy>=2.0

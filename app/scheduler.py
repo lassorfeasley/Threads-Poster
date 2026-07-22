@@ -18,12 +18,13 @@ import time
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 
 from . import threads_api
 from .analytics import is_last_post_hot, poll_recent_metrics
 from .config import load_settings
 from .db import session_scope
-from .models import SchedulerState, ThreadsPost, utcnow
+from .models import Candidate, SchedulerState, ThreadsPost, utcnow
 from .publishing import publish_post
 
 log = logging.getLogger("scheduler")
@@ -566,32 +567,25 @@ def build_window_plan(
 
     queued = session.execute(
         select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
         .where(ThreadsPost.status == STATUS_QUEUED)
         .order_by(ThreadsPost.created_at.asc())
     ).scalars().all()
     breaking = [p for p in queued if p.is_breaking]
     regular = [p for p in queued if not p.is_breaking]
 
-    # Touch relationships while session is open.
-    for p in queued:
-        if p.candidate is not None:
-            _ = p.candidate.id
-            if p.candidate.channel is not None:
-                _ = p.candidate.channel.call_sign
-
     start_utc = start_local.astimezone(dt.timezone.utc)
     end_utc = end_local.astimezone(dt.timezone.utc)
     published = session.execute(
-        select(ThreadsPost).where(
+        select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate))
+        .where(
             ThreadsPost.status == "published",
             ThreadsPost.published_at.is_not(None),
             ThreadsPost.published_at >= start_utc,
             ThreadsPost.published_at < end_utc,
         ).order_by(ThreadsPost.published_at.asc())
     ).scalars().all()
-    for p in published:
-        if p.candidate is not None:
-            _ = p.candidate.id
 
     plan: list[dict] = []
 

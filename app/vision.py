@@ -1,20 +1,24 @@
-"""Vision scoring: judge how engaging a candidate's footage looks from YouTube's
-storyboard stills, before anything is downloaded.
+"""Footage trait tagging — observation only, no good/bad scores.
 
-Pipeline: storyboard sprite sheets (metadata-only fetch, already cached by
-``storyboard.get_storyboard``) -> download a few sheet JPEGs -> Claude vision ->
-a 0-1 ``visual_score`` plus detected popularity traits. All gated by relevance,
-a per-run cap, and the daily spend budget so cost stays bounded.
+Two entry points:
+
+- ``tag_candidate_storyboard`` — optional pre-download tags from YouTube
+  storyboard stills (metadata-only). Neutral labels for triage visibility;
+  not used for ranking judgment.
+- ``annotate_post_footage`` — ground truth from the actual posted clip file
+  (ffmpeg contact sheet). This is what the learning loop trains on.
 """
 from __future__ import annotations
 
 import logging
+import subprocess
+from pathlib import Path
 
 import requests
 
 from . import llm, spend
 from .config import Settings
-from .models import Candidate, utcnow
+from .models import Candidate, ThreadsPost, utcnow
 from .storyboard import get_storyboard
 
 log = logging.getLogger("vision")
@@ -22,11 +26,10 @@ log = logging.getLogger("vision")
 DEFAULT_TRAITS = [
     "action", "people_doing_things", "fire", "flood", "storm_damage",
     "destruction", "rescue_or_emergency_response", "crowd", "dramatic_weather",
-    "aerial_or_sweeping_shot",
-]
-DEFAULT_UNDESIRABLE_TRAITS = [
-    "talking_head_or_anchor_at_desk", "static_graphic_or_slideshow",
-    "chart_or_data_screen", "text_heavy_lower_thirds",
+    "aerial_or_sweeping_shot", "talking_head_or_anchor_at_desk",
+    "static_graphic_or_slideshow", "chart_or_data_screen",
+    "text_heavy_lower_thirds", "press_conference_podium",
+    "low_motion_studio_segment",
 ]
 
 
@@ -34,12 +37,15 @@ def _clean(values) -> list[str]:
     return [str(x).strip() for x in (values or []) if str(x).strip()]
 
 
-def _settings_traits(settings: Settings) -> tuple[list[str], list[str]]:
-    """Fallback trait lists from config (used when the DB lists aren't passed)."""
-    desirable = _clean(settings.get("vision.desirable_traits") or settings.get("vision.traits")) \
-        or DEFAULT_TRAITS
-    undesirable = _clean(settings.get("vision.undesirable_traits")) or DEFAULT_UNDESIRABLE_TRAITS
-    return desirable, undesirable
+def vocabulary_from_settings(settings: Settings) -> list[str]:
+    """Flat trait vocabulary from config (fallback when DB list isn't passed)."""
+    traits = _clean(settings.get("vision.traits"))
+    if traits:
+        return traits
+    # Legacy seed keys still accepted so old settings keep working.
+    return _clean(settings.get("vision.desirable_traits")) \
+        + _clean(settings.get("vision.undesirable_traits")) \
+        or list(DEFAULT_TRAITS)
 
 
 def storyboard_images(video_id: str, max_sheets: int = 4) -> list[bytes]:
@@ -52,7 +58,6 @@ def storyboard_images(video_id: str, max_sheets: int = 4) -> list[bytes]:
     if not frags:
         return []
     if len(frags) > max_sheets:
-        # Evenly sample sheets across the timeline for broad coverage.
         idxs = [round(k * (len(frags) - 1) / (max_sheets - 1)) for k in range(max_sheets)] \
             if max_sheets > 1 else [len(frags) // 2]
         frags = [frags[i] for i in sorted(set(idxs))]
@@ -67,12 +72,15 @@ def storyboard_images(video_id: str, max_sheets: int = 4) -> list[bytes]:
     return images
 
 
-def should_score(candidate: Candidate, settings: Settings, run_state: dict | None,
-                 force: bool) -> tuple[bool, str]:
-    """Gate a candidate for vision scoring. Returns (ok, reason_if_not)."""
+def should_tag(candidate: Candidate, settings: Settings, run_state: dict | None,
+               force: bool) -> tuple[bool, str]:
+    """Gate a candidate for storyboard tagging. Returns (ok, reason_if_not)."""
     if not settings.get("vision.enabled", True):
         return False, "vision disabled"
-    if candidate.visual_score is not None and not force:
+    if candidate.visual_traits and not force:
+        return False, "already tagged"
+    # Legacy: previously gated on visual_score; treat any prior score as tagged.
+    if candidate.visual_score is not None and not force and not candidate.visual_traits:
         return False, "already scored"
     if not force:
         min_rel = settings.get("vision.min_relevance", 0.5)
@@ -81,52 +89,121 @@ def should_score(candidate: Candidate, settings: Settings, run_state: dict | Non
         cap = settings.get("vision.max_per_run", 40)
         if run_state is not None and run_state.get("scored", 0) >= cap:
             return False, "max_per_run reached"
-    # Budget guard applies even to manual/forced scoring — cost is real either way.
     if not spend.within_budget():
         return False, "daily budget reached"
     return True, ""
 
 
-def apply_visual_score(candidate: Candidate, settings: Settings,
-                       run_state: dict | None = None, force: bool = False,
-                       learned_guidance: str = "",
-                       desirable: list[str] | None = None,
-                       undesirable: list[str] | None = None) -> dict | None:
-    """Score one candidate's visuals and write the result onto it (caller
-    commits). ``desirable``/``undesirable`` come from the trait database; if not
-    passed they fall back to config. Returns the score dict, or None if
-    skipped/unavailable."""
-    ok, reason = should_score(candidate, settings, run_state, force)
+def tag_candidate_storyboard(candidate: Candidate, settings: Settings,
+                             run_state: dict | None = None, force: bool = False,
+                             traits: list[str] | None = None) -> dict | None:
+    """Tag a candidate from YouTube storyboard stills (caller commits). Neutral
+    labels only — does not write a visual score. Returns the tag dict, or None
+    if skipped/unavailable."""
+    ok, reason = should_tag(candidate, settings, run_state, force)
     if not ok:
-        log.info("Skipping visual score for %s: %s", candidate.video_id, reason)
+        log.info("Skipping storyboard tag for %s: %s", candidate.video_id, reason)
         return None
 
     images = storyboard_images(candidate.video_id, settings.get("vision.max_sheets", 4))
     if not images:
-        log.info("No storyboard images for %s; cannot vision-score", candidate.video_id)
+        log.info("No storyboard images for %s; cannot tag", candidate.video_id)
         return None
 
-    if desirable is None or undesirable is None:
-        cfg_desirable, cfg_undesirable = _settings_traits(settings)
-        desirable = desirable if desirable is not None else cfg_desirable
-        undesirable = undesirable if undesirable is not None else cfg_undesirable
-
+    vocab = traits if traits is not None else vocabulary_from_settings(settings)
     try:
-        result = llm.score_visuals(
+        result = llm.tag_footage(
             settings.get("vision.model", "claude-haiku-4-5"),
-            images, desirable, undesirable, title=candidate.title,
-            learned_guidance=learned_guidance,
+            images, vocab, title=candidate.title,
         )
     except Exception as exc:
-        log.warning("Visual scoring failed for %s: %s", candidate.video_id, exc)
+        log.warning("Storyboard tagging failed for %s: %s", candidate.video_id, exc)
         return None
 
-    candidate.visual_score = result["visual_score"]
     candidate.visual_traits = ",".join(result["traits"])
     candidate.visual_rationale = result["why"]
     candidate.visual_scored_at = utcnow()
+    # Stop writing judgment scores; clear any stale value on re-tag.
+    candidate.visual_score = None
     if run_state is not None:
         run_state["scored"] = run_state.get("scored", 0) + 1
-    log.info("Visual score for %s: %.2f [%s]", candidate.video_id,
-             result["visual_score"], candidate.visual_traits)
+    log.info("Storyboard tags for %s: [%s]", candidate.video_id, candidate.visual_traits)
+    return result
+
+
+# Back-compat alias used by older call sites / CLI.
+apply_visual_score = tag_candidate_storyboard
+
+
+def _clip_duration(path: Path) -> float | None:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(out.stdout.strip())
+    except Exception:
+        return None
+
+
+def clip_contact_sheet(path: str | Path, frames: int = 12, tile: str = "4x3",
+                       width: int = 320) -> bytes | None:
+    """One JPEG contact sheet of ``frames`` evenly spaced stills from a local
+    video file. Returns None when ffmpeg/ffprobe fail."""
+    clip = Path(path).expanduser()
+    if not clip.exists():
+        return None
+    duration = _clip_duration(clip)
+    if not duration or duration <= 0:
+        return None
+    vf = f"fps={frames}/{duration:.3f},scale={width}:-2,tile={tile}"
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-i", str(clip), "-vf", vf, "-frames:v", "1",
+             "-q:v", "5", "-f", "image2pipe", "-c:v", "mjpeg", "-"],
+            capture_output=True, timeout=120,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            log.info("Contact sheet failed for %s: %s", clip,
+                     proc.stderr.decode(errors="replace")[-300:])
+            return None
+        return proc.stdout
+    except Exception as exc:
+        log.info("Contact sheet failed for %s: %s", clip, exc)
+        return None
+
+
+def annotate_post_footage(post: ThreadsPost, settings: Settings,
+                          traits: list[str], force: bool = False) -> dict | None:
+    """Tag a published post from its posted clip file (caller commits). This is
+    the ground-truth signal for learning — traits of what actually shipped,
+    paired later with performance. Budget-guarded; returns None when skipped."""
+    if post.footage_scored_at is not None and not force:
+        return None
+    if not post.clip_local_path:
+        return None
+    if not spend.within_budget():
+        log.info("Skipping footage annotation for post %s: daily budget reached", post.id)
+        return None
+
+    sheet = clip_contact_sheet(post.clip_local_path,
+                               settings.get("vision.post_frames", 12))
+    if sheet is None:
+        return None
+    try:
+        result = llm.tag_footage(
+            settings.get("vision.model", "claude-haiku-4-5"),
+            [sheet], traits, title=post.caption[:200],
+        )
+    except Exception as exc:
+        log.warning("Footage annotation failed for post %s: %s", post.id, exc)
+        return None
+
+    post.footage_traits = ",".join(result["traits"])
+    post.footage_rationale = result["why"]
+    post.footage_score = None  # judgment scores retired
+    post.footage_scored_at = utcnow()
+    log.info("Footage traits for post %s: [%s]", post.id, post.footage_traits)
     return result
