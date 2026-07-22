@@ -10,15 +10,38 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import subprocess
+import threading
 from pathlib import Path
 
 from .config import load_first_reply, load_settings
 from .llm import caption_attributes
-from .models import Candidate, ThreadsPost, utcnow
+from .models import Candidate, Cut, ThreadsPost, utcnow
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import publish_text_reply, publish_video
 
 log = logging.getLogger("publishing")
+
+# Post IDs currently being published *in this process* (manual publish thread or
+# scheduler tick). Used so recovery can tell a genuinely in-flight publish apart
+# from one orphaned in the ``publishing`` status by a restart/crash. Single
+# process only, which is exactly where both publish paths run.
+_ACTIVE_PUBLISHES: set[int] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def mark_publishing(post_id: int) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE_PUBLISHES.add(post_id)
+
+
+def clear_publishing(post_id: int) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE_PUBLISHES.discard(post_id)
+
+
+def is_publish_active(post_id: int) -> bool:
+    with _ACTIVE_LOCK:
+        return post_id in _ACTIVE_PUBLISHES
 
 
 def _clip_duration_seconds(path: Path) -> int | None:
@@ -39,18 +62,28 @@ def _object_key(clip: Path) -> str:
 
 
 def record_post(session, candidate: Candidate | None, clip_path: str, caption: str,
-                *, status: str, is_breaking: bool = False) -> ThreadsPost:
+                *, status: str, is_breaking: bool = False,
+                cut: Cut | None = None) -> ThreadsPost:
     """Create a ThreadsPost row without contacting Threads. Used for immediate
     post, draft, and queue paths; publishing happens in ``publish_post``."""
     clip = Path(clip_path).expanduser()
     if not clip.exists():
         raise FileNotFoundError(f"Clip not found: {clip}")
+    if candidate is None and cut is not None:
+        candidate = cut.candidate
+    # Freeze the LLM draft as it stood, so the diff against the operator's final
+    # caption survives as a voice signal (see app/voice.py). Prefer the cut's
+    # own draft, falling back to the video-level seed.
+    draft = ""
+    if cut is not None:
+        draft = cut.draft_caption or ""
+    if not draft and candidate is not None:
+        draft = candidate.draft_caption or ""
     post = ThreadsPost(
         candidate_pk=candidate.id if candidate else None,
+        cut_pk=cut.id if cut else None,
         caption=caption,
-        # Freeze the LLM draft as it stood, so the diff against the operator's
-        # final caption survives as a voice signal (see app/voice.py).
-        suggested_caption=(candidate.draft_caption if candidate else "") or "",
+        suggested_caption=draft,
         clip_local_path=str(clip),
         clip_object_path=_object_key(clip),
         status=status,
@@ -179,14 +212,15 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
         return False
 
 
-def publish_clip(session, candidate: Candidate | None, clip_path: str, caption: str) -> ThreadsPost:
+def publish_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
+                 *, cut: Cut | None = None) -> ThreadsPost:
     """Immediate publish: record the post, then post it to Threads right away."""
-    post = record_post(session, candidate, clip_path, caption, status="draft")
+    post = record_post(session, candidate, clip_path, caption, status="draft", cut=cut)
     return publish_post(session, post)
 
 
 def queue_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
-               *, is_breaking: bool = False) -> ThreadsPost:
+               *, is_breaking: bool = False, cut: Cut | None = None) -> ThreadsPost:
     """Add a post to the adaptive FIFO queue. The window scheduler publishes it."""
     return record_post(session, candidate, clip_path, caption,
-                       status="queued", is_breaking=is_breaking)
+                       status="queued", is_breaking=is_breaking, cut=cut)

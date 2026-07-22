@@ -25,14 +25,54 @@ from .analytics import is_last_post_hot, poll_recent_metrics
 from .config import load_settings
 from .db import session_scope
 from .models import Candidate, SchedulerState, ThreadsPost, utcnow
-from .publishing import publish_post
+from .publishing import (
+    clear_publishing,
+    is_publish_active,
+    mark_publishing,
+    publish_post,
+)
 
 log = logging.getLogger("scheduler")
 
 STATUS_QUEUED = "queued"
 STATUS_PUBLISHING = "publishing"
 
+_INTERRUPTED_PUBLISH_MSG = (
+    "Publishing was interrupted before it finished — the app restarted or "
+    "crashed mid-publish. Check Threads to see if this clip went out; if it "
+    "didn't, retry from here."
+)
+
 _thread: threading.Thread | None = None
+
+
+def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
+    """Rescue posts orphaned in the ``publishing`` status.
+
+    A manual publish (or scheduler tick) flips a post to ``publishing`` and then
+    uploads to Threads in a background thread. If that process is killed first
+    (dashboard ``--reload``, a crash, or a machine shutting down), the post is
+    stranded: it's no longer ``queued`` so the scheduler won't retry it, and it
+    isn't ``published`` so the calendar drops it — the post silently disappears.
+
+    Flip those back to ``failed`` with an explanatory error so they resurface in
+    the Posts list and can be retried. ``only_inactive`` skips posts this process
+    is actively publishing right now (so a live in-flight publish is never
+    clobbered); pass False only at startup, when nothing can be in flight yet.
+    """
+    rows = session.execute(
+        select(ThreadsPost).where(ThreadsPost.status == STATUS_PUBLISHING)
+    ).scalars().all()
+    recovered = 0
+    for p in rows:
+        if only_inactive and is_publish_active(p.id):
+            continue
+        p.status = "failed"
+        p.error = _INTERRUPTED_PUBLISH_MSG
+        p.pinned_window_key = ""
+        recovered += 1
+        log.warning("Recovered post %s stuck in 'publishing' -> 'failed'", p.id)
+    return recovered
 
 
 def _parse_hhmm(value: str) -> tuple[int, int]:
@@ -258,15 +298,19 @@ def _claim_and_publish(post_id: int, state_action: str) -> bool:
             return False
 
     ok = False
-    with session_scope() as session:
-        post = session.get(ThreadsPost, post_id)
-        if post is None:
-            return False
-        try:
-            publish_post(session, post)
-            ok = True
-        except Exception as exc:
-            log.warning("Queue post %s failed: %s", post_id, exc)
+    mark_publishing(post_id)
+    try:
+        with session_scope() as session:
+            post = session.get(ThreadsPost, post_id)
+            if post is None:
+                return False
+            try:
+                publish_post(session, post)
+                ok = True
+            except Exception as exc:
+                log.warning("Queue post %s failed: %s", post_id, exc)
+    finally:
+        clear_publishing(post_id)
 
     with session_scope() as session:
         state = _get_state(session)
@@ -532,6 +576,13 @@ def _upcoming_window_slots(
     return slots
 
 
+def _post_display_title(p) -> str:
+    """Best label for a post: its cut's clip title, else the source video title."""
+    if p.cut and (p.cut.clip_title or "").strip():
+        return p.cut.clip_title
+    return p.candidate.title if p.candidate else ""
+
+
 def build_window_plan(
     session,
     start_local: dt.datetime,
@@ -567,7 +618,10 @@ def build_window_plan(
 
     queued = session.execute(
         select(ThreadsPost)
-        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
+        .options(
+            selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+            selectinload(ThreadsPost.cut),
+        )
         .where(ThreadsPost.status == STATUS_QUEUED)
         .order_by(ThreadsPost.created_at.asc())
     ).scalars().all()
@@ -578,7 +632,10 @@ def build_window_plan(
     end_utc = end_local.astimezone(dt.timezone.utc)
     published = session.execute(
         select(ThreadsPost)
-        .options(selectinload(ThreadsPost.candidate))
+        .options(
+            selectinload(ThreadsPost.candidate),
+            selectinload(ThreadsPost.cut),
+        )
         .where(
             ThreadsPost.status == "published",
             ThreadsPost.published_at.is_not(None),
@@ -605,7 +662,7 @@ def build_window_plan(
             "channel": (p.candidate.channel.call_sign
                         if p.candidate and p.candidate.channel else ""),
             "thumbnail": (p.candidate.thumbnail_url if p.candidate else ""),
-            "title": ((p.candidate.clip_title or p.candidate.title) if p.candidate else ""),
+            "title": _post_display_title(p),
             "permalink": p.permalink,
             "projected": True,
             "is_breaking": True,
@@ -671,8 +728,8 @@ def build_window_plan(
                 "video_id": post.candidate.id if post.candidate else None,
                 "channel": (post.candidate.channel.call_sign
                             if post.candidate and post.candidate.channel else ""),
-                "thumbnail": (post.candidate.thumbnail_url if post.candidate else ""),
-                "title": ((post.candidate.clip_title or post.candidate.title) if post.candidate else ""),
+            "thumbnail": (post.candidate.thumbnail_url if post.candidate else ""),
+            "title": _post_display_title(post),
                 "permalink": post.permalink,
                 "projected": True,
                 "is_breaking": False,
@@ -714,7 +771,7 @@ def build_window_plan(
             "channel": (p.candidate.channel.call_sign
                         if p.candidate and p.candidate.channel else ""),
             "thumbnail": (p.candidate.thumbnail_url if p.candidate else ""),
-            "title": ((p.candidate.clip_title or p.candidate.title) if p.candidate else ""),
+            "title": _post_display_title(p),
             "permalink": p.permalink,
             "projected": False,
             "is_breaking": False,
@@ -743,7 +800,15 @@ def projected_window_slots(
 
 
 def run_tick() -> None:
-    """One scheduler loop iteration: metrics → breaking → window."""
+    """One scheduler loop iteration: recover → metrics → breaking → window."""
+    try:
+        with session_scope() as session:
+            n = recover_stuck_publishing(session, only_inactive=True)
+        if n:
+            log.info("Recovered %d post(s) stuck in 'publishing'", n)
+    except Exception:
+        log.exception("Stuck-publish recovery failed")
+
     try:
         n = run_metrics_poll()
         if n:
@@ -774,6 +839,15 @@ def start_scheduler_thread(interval_seconds: int = 60) -> None:
 
     def _loop() -> None:
         log.info("Adaptive scheduler started (checking every %ss)", interval_seconds)
+        # Nothing can be mid-publish in a freshly started process, so any post
+        # sitting in 'publishing' is an orphan from a previous run — recover it.
+        try:
+            with session_scope() as session:
+                n = recover_stuck_publishing(session, only_inactive=False)
+            if n:
+                log.info("Startup: recovered %d post(s) stuck in 'publishing'", n)
+        except Exception:
+            log.exception("Startup stuck-publish recovery failed")
         while True:
             try:
                 run_tick()

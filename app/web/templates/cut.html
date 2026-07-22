@@ -1,0 +1,928 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div class="titles">
+    <div class="meta" style="margin-bottom: 6px;">
+      <a href="/">Dashboard</a> ›
+      <a href="/video/{{ c.id }}?step=cuts">{{ c.title[:70] }}</a> › Cut
+    </div>
+    <h1 style="margin-bottom: 4px;">{{ cut.clip_title or "Untitled cut" }}</h1>
+    <div class="sub">
+      {{ c.channel.call_sign }} · {{ c.channel.market }}
+      · <a href="{{ c.url }}" target="_blank">YouTube ↗</a>
+      · from <a href="/video/{{ c.id }}?step=cuts">source video</a>
+    </div>
+  </div>
+  <div class="actions">
+    <form method="post" action="/cut/{{ cut.id }}/delete"
+          onsubmit="return confirm('Delete this cut? Its draft/queued posts are removed; published posts are kept.');">
+      <button class="reject sm" title="Delete this cut">Delete cut</button>
+    </form>
+  </div>
+</div>
+
+{# ---- Cut stepper ---- #}
+<div class="steps">
+  <a class="step {{ 'done' if state.exported }} {{ 'current' if step == 'trim' }}"
+     href="/cut/{{ cut.id }}?step=trim"><span class="n">{{ "✓" if state.exported else "1" }}</span> Trim</a>
+  <span class="sep">›</span>
+  <a class="step {{ 'done' if state.posted }} {{ 'current' if step == 'post' }} {{ 'locked' if not state.exported }}"
+     href="/cut/{{ cut.id }}?step=post"><span class="n">{{ "✓" if state.posted else "2" }}</span> Post</a>
+</div>
+
+{# ============ STEP 1: TRIM ============ #}
+{% if step == "trim" %}
+<div class="row">
+  <div style="flex: 1.4; min-width: 420px;">
+    <video id="player" src="/media/source/{{ c.id }}" controls preload="metadata"></video>
+  </div>
+  <div style="flex: 1; min-width: 320px;">
+    <div class="transcript-box" id="transcript-box" title="Click a line to jump">
+      {% for s in transcript_segments %}
+        <div class="tline" onclick="seek({{ s.start }})">
+          <span class="ts">{{ "%d:%02d"|format(s.start // 60, s.start % 60) }}</span>{{ s.text }}</div>
+      {% else %}
+        <div class="meta">No transcript segments found.</div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{# Waveform scrubber spans the full width of player + transcript. #}
+<div style="margin-top: 14px; position: relative;">
+  <canvas id="wave"></canvas>
+  <div class="meta" id="wave-hint" style="position: absolute; inset: 0; display: flex;
+       align-items: center; justify-content: center; pointer-events: none;">loading waveform…</div>
+</div>
+
+<div class="btn-group" style="margin-top: 12px;">
+  <span class="badge info" id="cur-time" style="font-family: var(--mono); min-width: 64px; justify-content: center;">0.0s</span>
+  <button type="button" class="sm" onclick="setStart()">⇤ Set start</button>
+  <button type="button" class="sm" onclick="setEnd()">Set end ⇥</button>
+  <span class="meta" id="pending-range">start: — · end: —</span>
+  <button type="button" class="primary sm" onclick="addSegment()">＋ Add segment</button>
+</div>
+<div class="meta" style="margin-top: 6px;">Click or drag the waveform to scrub. Drag a red pending line or a green segment
+  edge to fine-tune it — dropping a start edge plays from that moment. Click a green band to select it, then press
+  <kbd>Delete</kbd> to remove it. <kbd>⌘Z</kbd> / <kbd>Ctrl+Z</kbd> undoes the last edit.</div>
+{% if c.suggested_highlight %}
+  <div class="meta" style="margin-top: 10px;">💡 Suggested highlight <span class="badge score-lo">draft</span>:
+    {{ c.suggested_highlight }}</div>
+{% endif %}
+
+<h2>Cut list</h2>
+<div id="segments"></div>
+<div class="meta" id="total-len" style="margin: 6px 0;"></div>
+<div class="btn-group" style="margin-top: 8px;">
+  <button type="button" class="sm" id="preview-all-btn" onclick="togglePreviewAll()">▶ Preview supercut</button>
+  <span class="meta">Plays only your selected segments, back to back, exactly as they'll be joined — no export.</span>
+</div>
+<form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return prepExport(this)">
+  <input type="hidden" name="segments_json" value="">
+  <div class="btn-group" style="margin-top: 8px;">
+    <button class="approve">Export {{ "new " if state.exported }}clip →</button>
+    <span class="meta">Segments are joined in order into one video.</span>
+  </div>
+</form>
+{% if state.exported %}
+  <div class="meta" style="margin-top: 10px;">A clip was already exported —
+    <a href="/cut/{{ cut.id }}?step=post">continue to Post</a> or export again to replace it.</div>
+{% endif %}
+
+<script>
+const player = document.getElementById('player');
+let pending = { start: null, end: null };
+let segments = {{ saved_segments | tojson }};
+let selectedSeg = null;         // index of the segment highlighted for deletion
+
+// ---- Undo stack (Cmd/Ctrl+Z) ----
+let undoStack = [];
+function pushUndo() {
+  undoStack.push(JSON.stringify({ segments, pending }));
+  if (undoStack.length > 100) undoStack.shift();
+}
+function undoEdit() {
+  const snap = undoStack.pop();
+  if (!snap) return;
+  const st = JSON.parse(snap);
+  segments = st.segments;
+  pending = st.pending;
+  if (selectedSeg !== null && selectedSeg >= segments.length) selectedSeg = null;
+  renderPending();
+  renderSegments();
+}
+
+const fmt = t => `${t.toFixed(1)}s`;
+player.addEventListener('timeupdate', () =>
+  document.getElementById('cur-time').textContent = fmt(player.currentTime));
+
+// Keep the transcript exactly as tall as the video player (no dead space).
+function sizeTranscript() {
+  const box = document.getElementById('transcript-box');
+  if (box && player.clientHeight > 100) {
+    box.style.height = player.clientHeight + 'px';
+    box.style.maxHeight = 'none';
+  }
+}
+player.addEventListener('loadedmetadata', sizeTranscript);
+window.addEventListener('resize', sizeTranscript);
+sizeTranscript();
+
+function seek(t) { cancelPlayback(); activeStop = null; player.currentTime = t; player.play(); }
+function setStart() { pushUndo(); pending.start = player.currentTime; renderPending(); }
+function setEnd() { pushUndo(); pending.end = player.currentTime; renderPending(); }
+function renderPending() {
+  document.getElementById('pending-range').textContent =
+    `start: ${pending.start === null ? '—' : fmt(pending.start)} · end: ${pending.end === null ? '—' : fmt(pending.end)}`;
+  drawWave();
+}
+function addSegment() {
+  if (pending.start === null || pending.end === null) { alert('Set both start and end first.'); return; }
+  if (pending.end - pending.start < 0.5) { alert('Segment must be at least 0.5s.'); return; }
+  pushUndo();
+  segments.push({ start: +pending.start.toFixed(2), end: +pending.end.toFixed(2) });
+  pending = { start: null, end: null };
+  renderPending(); renderSegments();
+}
+function removeSegment(i) {
+  pushUndo();
+  segments.splice(i, 1);
+  if (selectedSeg === i) selectedSeg = null;
+  else if (selectedSeg !== null && selectedSeg > i) selectedSeg--;
+  renderSegments();
+}
+function moveSegment(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= segments.length) return;
+  pushUndo();
+  [segments[i], segments[j]] = [segments[j], segments[i]];
+  if (selectedSeg === i) selectedSeg = j;
+  else if (selectedSeg === j) selectedSeg = i;
+  renderSegments();
+}
+// ---- Segment playback (single preview + full supercut preview) ----
+let playback = null;
+let activeStop = null;
+
+function setPreviewBtn(active) {
+  const btn = document.getElementById('preview-all-btn');
+  if (btn) btn.textContent = active ? '■ Stop preview' : '▶ Preview supercut';
+}
+function playSegments(segs) {
+  segs = segs.filter(s => s.end > s.start);
+  if (!segs.length) return;
+  activeStop = null;
+  playback = { segs, idx: 0 };
+  setPreviewBtn(true);
+  player.currentTime = segs[0].start;
+  player.play();
+}
+function stopPlayback() { if (playback) { playback = null; setPreviewBtn(false); player.pause(); } }
+function cancelPlayback() { if (playback) { playback = null; setPreviewBtn(false); } }
+
+function previewSegment(i) { playSegments([{ ...segments[i] }]); }
+function togglePreviewAll() {
+  if (playback) { stopPlayback(); return; }
+  if (!segments.length) { alert('Add at least one segment first.'); return; }
+  playSegments(segments.map(s => ({ ...s })));
+}
+
+player.addEventListener('timeupdate', () => {
+  if (!playback) return;
+  const seg = playback.segs[playback.idx];
+  if (player.currentTime >= seg.end - 0.02) {
+    playback.idx++;
+    if (playback.idx >= playback.segs.length) stopPlayback();
+    else player.currentTime = playback.segs[playback.idx].start;
+  }
+});
+
+player.addEventListener('timeupdate', () => {
+  if (playback || activeStop === null) return;
+  if (player.currentTime >= activeStop - 0.02) {
+    player.pause();
+    player.currentTime = activeStop;
+    activeStop = null;
+  }
+});
+
+// ---- Waveform editor ----
+const wave = document.getElementById('wave');
+const wctx = wave.getContext('2d');
+let wf = null;   // {peaks: [...], duration}
+
+async function loadWave() {
+  try {
+    const r = await fetch('/video/{{ c.id }}/waveform');
+    if (!r.ok) throw new Error('waveform unavailable');
+    wf = await r.json();
+    document.getElementById('wave-hint').style.display = 'none';
+    sizeWave();
+    drawWave();
+    redrawAllSegWaves(true);
+  } catch (e) {
+    document.getElementById('wave-hint').textContent = 'waveform unavailable';
+  }
+}
+
+function sizeWave() {
+  const dpr = window.devicePixelRatio || 1;
+  wave.width = wave.clientWidth * dpr;
+  wave.height = wave.clientHeight * dpr;
+}
+window.addEventListener('resize', () => { sizeWave(); drawWave(); redrawAllSegWaves(true); });
+
+const duration = () => (wf && wf.duration) || player.duration || 1;
+const xOf = t => (t / duration()) * wave.width;
+
+function drawWave() {
+  if (!wf) return;
+  const W = wave.width, H = wave.height, mid = H / 2;
+  const css = getComputedStyle(document.documentElement);
+  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(126,140,154,0.55)';
+  const gridColor = css.getPropertyValue('--wave-grid').trim() || 'rgba(126,140,154,0.25)';
+  wctx.clearRect(0, 0, W, H);
+
+  segments.forEach((s, i) => {
+    const x0 = xOf(s.start), x1 = xOf(s.end);
+    wctx.fillStyle = i === selectedSeg ? 'rgba(62,207,142,0.32)' : 'rgba(62,207,142,0.18)';
+    wctx.fillRect(x0, 0, x1 - x0, H);
+    if (i === selectedSeg) {
+      wctx.strokeStyle = 'rgba(62,207,142,0.95)';
+      wctx.lineWidth = 2;
+      wctx.strokeRect(x0 + 1, 1, (x1 - x0) - 2, H - 2);
+    }
+  });
+
+  if (pending.start !== null && pending.end !== null && pending.end > pending.start) {
+    wctx.fillStyle = 'rgba(239,112,112,0.15)';
+    wctx.fillRect(xOf(pending.start), 0, xOf(pending.end) - xOf(pending.start), H);
+  }
+
+  const n = wf.peaks.length, barW = W / n;
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * duration();
+    const inSeg = segments.some(s => t >= s.start && t <= s.end);
+    wctx.fillStyle = inSeg ? 'rgba(62,207,142,0.85)' : barColor;
+    const h = Math.max(1, wf.peaks[i] * (H * 0.86));
+    wctx.fillRect(i * barW, mid - h / 2, Math.max(1, barW * 0.7), h);
+  }
+
+  wctx.fillStyle = gridColor;
+  wctx.font = `${10 * (window.devicePixelRatio || 1)}px sans-serif`;
+  for (let t = 30; t < duration(); t += 30) {
+    wctx.fillRect(xOf(t), 0, 1, H);
+    wctx.fillText(`${t}s`, xOf(t) + 3, H - 4);
+  }
+
+  wctx.fillStyle = 'rgba(40,150,100,0.95)';
+  for (const s of segments) {
+    wctx.fillRect(xOf(s.start) - 1, 0, 2, H);
+    wctx.fillRect(xOf(s.end) - 1, 0, 2, H);
+  }
+
+  wctx.fillStyle = '#ef7070';
+  for (const t of [pending.start, pending.end]) {
+    if (t === null) continue;
+    wctx.fillRect(xOf(t) - 1, 0, 3, H);
+  }
+
+  wctx.fillStyle = '#5aa9f0';
+  wctx.fillRect(xOf(player.currentTime) - 1, 0, 2, H);
+}
+
+(function tick() {
+  drawWave();
+  if (!player.paused) redrawAllSegWaves(false);
+  requestAnimationFrame(tick);
+})();
+
+let dragging = null;
+const GRAB_PX = 8;
+
+function timeAt(e) {
+  const rect = wave.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  return frac * duration();
+}
+
+function handleAt(e) {
+  const rect = wave.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const px = t => (t / duration()) * rect.width;
+  let best = null, bestDist = GRAB_PX + 1;
+  for (const edge of ['start', 'end']) {
+    if (pending[edge] === null) continue;
+    const d = Math.abs(x - px(pending[edge]));
+    if (d <= GRAB_PX && d < bestDist) { best = { kind: 'pending', edge }; bestDist = d; }
+  }
+  segments.forEach((s, index) => {
+    for (const edge of ['start', 'end']) {
+      const d = Math.abs(x - px(s[edge]));
+      if (d <= GRAB_PX && d < bestDist) { best = { kind: 'seg', index, edge }; bestDist = d; }
+    }
+  });
+  return best;
+}
+
+function segAtTime(t) {
+  for (let i = 0; i < segments.length; i++)
+    if (t >= segments[i].start && t <= segments[i].end) return i;
+  return -1;
+}
+
+function setSegEdge(i, edge, t) {
+  const s = segments[i];
+  t = Math.max(0, Math.min(t, duration()));
+  if (edge === 'start') s.start = +Math.min(t, s.end - 0.1).toFixed(2);
+  else s.end = +Math.max(t, s.start + 0.1).toFixed(2);
+  syncSegInputs(i);
+  updateTotal();
+  drawSegWave(i);
+}
+
+function syncSegInputs(i) {
+  const a = document.getElementById(`seg-start-${i}`);
+  const b = document.getElementById(`seg-end-${i}`);
+  const len = document.getElementById(`seg-len-${i}`);
+  if (a) a.value = segments[i].start.toFixed(1);
+  if (b) b.value = segments[i].end.toFixed(1);
+  if (len) len.textContent = `(${(segments[i].end - segments[i].start).toFixed(1)}s)`;
+}
+
+wave.addEventListener('pointerdown', e => {
+  cancelPlayback();
+  activeStop = null;
+  try { wave.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
+  const h = handleAt(e);
+  const t = timeAt(e);
+  if (h) {
+    pushUndo();
+    dragging = h;
+    if (h.kind === 'pending') { pending[h.edge] = t; renderPending(); }
+    else { selectedSeg = h.index; setSegEdge(h.index, h.edge, t); }
+  } else {
+    const i = segAtTime(t);
+    selectedSeg = i >= 0 ? i : null;
+    dragging = { kind: 'scrub' };
+    player.currentTime = t;
+    renderSegments();
+  }
+});
+wave.addEventListener('pointermove', e => {
+  if (!dragging) {
+    const h = handleAt(e);
+    wave.style.cursor = h ? 'ew-resize' : (segAtTime(timeAt(e)) >= 0 ? 'pointer' : 'crosshair');
+    return;
+  }
+  const t = timeAt(e);
+  if (dragging.kind === 'scrub') player.currentTime = t;
+  else if (dragging.kind === 'pending') { pending[dragging.edge] = t; renderPending(); }
+  else setSegEdge(dragging.index, dragging.edge, t);
+});
+wave.addEventListener('pointerup', () => {
+  if (dragging) {
+    if (dragging.kind === 'pending' && dragging.edge === 'start' && pending.start !== null) {
+      player.currentTime = pending.start; player.play();
+    } else if (dragging.kind === 'seg') {
+      if (dragging.edge === 'start') { player.currentTime = segments[dragging.index].start; player.play(); }
+      renderSegments();
+    }
+  }
+  dragging = null;
+});
+
+document.addEventListener('keydown', e => {
+  const el = document.activeElement;
+  const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+                        || el.tagName === 'SELECT' || el.isContentEditable);
+
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    if (typing) return;
+    e.preventDefault();
+    undoEdit();
+    return;
+  }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && !typing) {
+    if (selectedSeg !== null && selectedSeg < segments.length) {
+      e.preventDefault();
+      removeSegment(selectedSeg);
+    }
+    return;
+  }
+  if (e.code === 'Space') {
+    if (typing) return;
+    e.preventDefault();
+    if (player.paused) player.play(); else player.pause();
+  }
+});
+
+loadWave();
+function renderSegments() {
+  const box = document.getElementById('segments');
+  box.innerHTML = segments.length ? '' : '<div class="meta">No segments yet — set start/end and add one.</div>';
+  segments.forEach((s, i) => {
+    const div = document.createElement('div');
+    div.className = 'seg-row' + (i === selectedSeg ? ' selected' : '');
+    div.onclick = ev => {
+      if (ev.target.closest('button') || ev.target.closest('input') || ev.target.closest('canvas')) return;
+      selectedSeg = i; renderSegments();
+    };
+    div.innerHTML = `<div class="seg-main">
+      <strong>#${i + 1}</strong>
+      <input type="number" id="seg-start-${i}" class="seg-num" step="0.1" min="0" value="${s.start.toFixed(1)}"
+             title="Start (seconds) — changing it plays from there"
+             onchange="updateSegment(${i}, 'start', this.value)">
+      <span class="meta">→</span>
+      <input type="number" id="seg-end-${i}" class="seg-num" step="0.1" min="0" value="${s.end.toFixed(1)}"
+             title="End (seconds)" onchange="updateSegment(${i}, 'end', this.value)">
+      <span class="meta">s</span>
+      <span class="meta" id="seg-len-${i}">(${(s.end - s.start).toFixed(1)}s)</span>
+      <span style="margin-left:auto"></span>
+      <button type="button" title="Preview" onclick="previewSegment(${i})">▶</button>
+      <button type="button" title="Move up" onclick="moveSegment(${i},-1)">↑</button>
+      <button type="button" title="Move down" onclick="moveSegment(${i},1)">↓</button>
+      <button type="button" class="reject" title="Remove (or select + Delete)" onclick="removeSegment(${i})">✕</button>
+      </div>
+      <canvas class="seg-wave" id="seg-wave-${i}" title="Drag the green edges to fine-trim. Click to play from there up to the end line (it stops so you can check the transition). The dim sides are lead-in / lead-out room."></canvas>`;
+    box.appendChild(div);
+    initSegWave(i, div.querySelector(`#seg-wave-${i}`));
+  });
+  updateTotal();
+  drawWave();
+}
+
+let frozenSegIdx = null, frozenSegWin = null;
+
+function segWindow(i) {
+  if (frozenSegWin && frozenSegIdx === i) return frozenSegWin;
+  const s = segments[i];
+  const len = s.end - s.start;
+  const pad = Math.min(Math.max(len * 0.25, 2), 10);
+  return { a: s.start - pad, b: s.end + pad };
+}
+
+function sizeSegWave(i) {
+  const canvas = document.getElementById(`seg-wave-${i}`);
+  if (!canvas || !canvas.clientWidth) return;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+}
+
+function drawSegWave(i) {
+  const canvas = document.getElementById(`seg-wave-${i}`);
+  if (!canvas || !segments[i] || !canvas.width) return;
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height, mid = H / 2;
+  const css = getComputedStyle(document.documentElement);
+  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(126,140,154,0.55)';
+  ctx.clearRect(0, 0, W, H);
+
+  const s = segments[i], win = segWindow(i), span = (win.b - win.a) || 1;
+  const xOfT = t => ((t - win.a) / span) * W;
+
+  ctx.fillStyle = 'rgba(62,207,142,0.16)';
+  ctx.fillRect(xOfT(s.start), 0, xOfT(s.end) - xOfT(s.start), H);
+
+  if (wf && wf.peaks && wf.peaks.length) {
+    const n = wf.peaks.length, total = duration(), step = 2 * dpr;
+    for (let x = 0; x < W; x += step) {
+      const t = win.a + (x / W) * span;
+      if (t < 0 || t > total) continue;
+      const k = Math.min(n - 1, Math.max(0, Math.floor((t / total) * n)));
+      const inSeg = t >= s.start && t <= s.end;
+      const h = Math.max(1, wf.peaks[k] * (H * 0.8));
+      ctx.fillStyle = inSeg ? 'rgba(62,207,142,0.9)' : barColor;
+      ctx.fillRect(x, mid - h / 2, Math.max(1, step * 0.7), h);
+    }
+  } else {
+    ctx.fillStyle = barColor;
+    ctx.fillRect(0, mid - 1, W, 2);
+  }
+
+  ctx.fillStyle = 'rgba(40,150,100,0.95)';
+  ctx.fillRect(xOfT(s.start) - 1, 0, 2, H);
+  ctx.fillRect(xOfT(s.end) - 1, 0, 2, H);
+
+  const pt = player.currentTime;
+  if (pt >= win.a && pt <= win.b) {
+    ctx.fillStyle = '#5aa9f0';
+    ctx.fillRect(xOfT(pt) - 1, 0, 2, H);
+  }
+}
+
+function initSegWave(i, canvas) {
+  if (!canvas) return;
+  const GRAB = 9;
+  const winX = clientX => {
+    const r = canvas.getBoundingClientRect();
+    const win = segWindow(i), span = (win.b - win.a) || 1;
+    const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    return { t: win.a + frac * span, r, win, span };
+  };
+  const edgeAt = clientX => {
+    const { r, win, span } = winX(clientX);
+    const x = clientX - r.left;
+    const px = t => ((t - win.a) / span) * r.width;
+    let best = null, bd = GRAB + 1;
+    for (const e of ['start', 'end']) {
+      const d = Math.abs(x - px(segments[i][e]));
+      if (d <= GRAB && d < bd) { best = e; bd = d; }
+    }
+    return best;
+  };
+  let drag = null;
+  canvas.addEventListener('pointerdown', ev => {
+    cancelPlayback();
+    try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic */ }
+    if (selectedSeg !== i) { selectedSeg = i; highlightSelectedRow(); }
+    const edge = edgeAt(ev.clientX);
+    const { t } = winX(ev.clientX);
+    if (edge) {
+      pushUndo(); drag = edge;
+      frozenSegWin = null; frozenSegIdx = null;
+      frozenSegWin = segWindow(i); frozenSegIdx = i;
+      setSegEdge(i, edge, t); drawSegWave(i);
+    }
+    else {
+      drag = 'scrub';
+      player.currentTime = Math.max(0, t);
+      if (t < segments[i].end - 0.02) { activeStop = segments[i].end; player.play(); }
+      else activeStop = null;
+    }
+  });
+  canvas.addEventListener('pointermove', ev => {
+    if (!drag) { canvas.style.cursor = edgeAt(ev.clientX) ? 'ew-resize' : 'pointer'; return; }
+    const { t } = winX(ev.clientX);
+    if (drag === 'scrub') player.currentTime = Math.max(0, t);
+    else { setSegEdge(i, drag, t); drawSegWave(i); }
+  });
+  canvas.addEventListener('pointerup', () => {
+    if (drag === 'start') {
+      player.currentTime = segments[i].start;
+      activeStop = segments[i].end;
+      player.play();
+    }
+    const wasEdge = drag && drag !== 'scrub';
+    frozenSegWin = null; frozenSegIdx = null;
+    if (wasEdge) renderSegments();
+    drag = null;
+  });
+  sizeSegWave(i);
+  drawSegWave(i);
+}
+
+function redrawAllSegWaves(resize) {
+  segments.forEach((_, i) => { if (resize) sizeSegWave(i); drawSegWave(i); });
+}
+
+function highlightSelectedRow() {
+  document.querySelectorAll('#segments .seg-row').forEach((el, idx) =>
+    el.classList.toggle('selected', idx === selectedSeg));
+}
+
+function updateSegment(i, key, val) {
+  let v = parseFloat(val);
+  if (isNaN(v)) return;
+  v = Math.max(0, Math.min(v, duration()));
+  pushUndo();
+  segments[i][key] = +v.toFixed(1);
+  const lenEl = document.getElementById(`seg-len-${i}`);
+  if (lenEl) lenEl.textContent = `(${(segments[i].end - segments[i].start).toFixed(1)}s)`;
+  updateTotal();
+  drawWave();
+  drawSegWave(i);
+  if (key === 'start') { cancelPlayback(); player.currentTime = v; player.play(); }
+}
+
+function updateTotal() {
+  const total = segments.reduce((a, s) => a + (s.end - s.start), 0);
+  document.getElementById('total-len').textContent =
+    segments.length ? `Total clip length: ${total.toFixed(1)}s${total > 300 ? ' — Threads max is 300s' : ''}` : '';
+}
+function prepExport(form) {
+  if (!segments.length) { alert('Add at least one segment.'); return false; }
+  form.segments_json.value = JSON.stringify(segments);
+  return true;
+}
+renderSegments();
+</script>
+{% endif %}
+
+{# ============ STEP 2: POST ============ #}
+{% if step == "post" %}
+{% if not state.exported %}
+  <div class="empty"><strong>No exported clip yet</strong>
+    Do the <a href="/cut/{{ cut.id }}?step=trim">Trim</a> step first.</div>
+{% else %}
+<div class="canvas">
+
+  {# ---- Media stage: the clip is the hero ---- #}
+  <div class="media-stage">
+    {% if cut.clip_title %}
+      <div class="stage-title" title="Generated clip title">{{ cut.clip_title }}</div>
+    {% endif %}
+    <video id="clip-player"
+           src="{{ '/media/subtitled/' ~ cut.id if cut.subtitled_clip_path else '/media/clip/' ~ cut.id }}"
+           controls preload="metadata"></video>
+    {% if cut.subtitled_clip_path %}
+      <div class="seg-ctl" role="group" aria-label="Preview version">
+        <button type="button" id="preview-subs-btn" disabled
+                onclick="swapPreview(true)">Captioned</button>
+        <button type="button" id="preview-orig-btn"
+                onclick="swapPreview(false)">Original</button>
+      </div>
+    {% endif %}
+    <div class="stage-actions">
+      <a href="/cut/{{ cut.id }}/download-clip" download>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+        Download clip</a>
+      <button type="button" id="copy-caption-btn"
+              data-caption="{{ cut.draft_caption }}" onclick="copyCaption()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy caption</button>
+      {% if clip_transcript_text %}
+      <button type="button" id="copy-transcript-btn" onclick="copyTranscript(this)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy transcript</button>
+      <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
+      {% endif %}
+      <a href="/cut/{{ cut.id }}?step=trim">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg>
+        Re-trim</a>
+    </div>
+  </div>
+
+  {# ---- 1 · Prepare ---- #}
+  <section class="wf-section">
+    <div class="wf-head">
+      <span class="wf-num">1</span>
+      <span class="wf-title">Prepare the clip</span>
+      <span class="meta">Word-by-word captions are burned in automatically after export and posted by default.</span>
+    </div>
+    <div class="wf-body">
+      <div class="ctl-strip">
+        <button type="button" class="sm" id="gen-subs-btn" onclick="generateSubtitles()">
+          {{ "Regenerate captions" if cut.subtitled_clip_path else "Generate captions" }}</button>
+        <label class="inline-label" style="margin: 0;" title="Where the captions sit on the frame">
+          Position
+          <select id="subs-position" style="width: auto;">
+            <option value="bottom" {{ "selected" if subs_position != "top" }}>Bottom</option>
+            <option value="top" {{ "selected" if subs_position == "top" }}>Top</option>
+          </select>
+        </label>
+        <span class="meta" id="subs-status">
+          {% if cut.subtitled_clip_path %}Captioned version ready.{% endif %}</span>
+      </div>
+    </div>
+    {% if clip_transcript %}
+    <details class="panel" style="margin-top: 10px;">
+      <summary>Clip transcript
+        <span class="meta">{{ saved_segments|length }} exported segment{{ "s" if saved_segments|length != 1 }} — click a line to jump</span>
+      </summary>
+      <div class="panel-body">
+        <div class="ctl-strip" style="margin-bottom: 8px;">
+          <button type="button" class="sm" onclick="copyTranscript(this)">Copy transcript</button>
+        </div>
+        <div class="transcript-box" style="max-height: 300px; border: none; box-shadow: none; padding: 0;">
+          {% for s in clip_transcript %}
+            <div class="tline" onclick="clipSeek({{ s.clip_start }})">
+              <span class="ts">{{ "%d:%02d"|format(s.clip_start // 60, s.clip_start % 60) }}</span>{{ s.text }}</div>
+          {% endfor %}
+        </div>
+      </div>
+    </details>
+    {% endif %}
+  </section>
+  <script>
+    function swapPreview(subs) {
+      const p = document.getElementById('clip-player');
+      const t = p.currentTime;
+      p.src = subs ? '/media/subtitled/{{ cut.id }}' : '/media/clip/{{ cut.id }}';
+      p.currentTime = t;
+      const sb = document.getElementById('preview-subs-btn');
+      const ob = document.getElementById('preview-orig-btn');
+      if (sb) sb.disabled = subs;
+      if (ob) ob.disabled = !subs;
+    }
+    async function generateSubtitles() {
+      const btn = document.getElementById('gen-subs-btn');
+      const status = document.getElementById('subs-status');
+      btn.disabled = true;
+      status.classList.add('busy');
+      status.textContent = 'Transcribing + rendering… this can take a minute.';
+      try {
+        const fd = new FormData();
+        fd.append('position', document.getElementById('subs-position').value);
+        const r = await fetch('/cut/{{ cut.id }}/subtitles', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.url) { location.reload(); return; }
+        status.textContent = d.error || 'Caption generation failed';
+      } catch (e) { status.textContent = 'Caption generation failed: ' + e; }
+      status.classList.remove('busy');
+      btn.disabled = false;
+    }
+    {% if not cut.subtitled_clip_path %}
+    if (new URLSearchParams(location.search).get('autosubs') === '1') generateSubtitles();
+    {% endif %}
+    function clipSeek(t) {
+      const p = document.getElementById('clip-player');
+      if (!p) return;
+      p.currentTime = t;
+      p.play();
+    }
+    async function copyTranscript(btn) {
+      const box = document.getElementById('clip-transcript-plain');
+      const text = (box && box.value) || '';
+      if (!text.trim()) { alert('No transcript to copy.'); return; }
+      const labelNode = btn && btn.querySelector('svg')
+        ? btn.childNodes[btn.childNodes.length - 1] : null;
+      try { await navigator.clipboard.writeText(text); }
+      catch (e) {
+        box.hidden = false; box.focus(); box.select();
+        try { document.execCommand('copy'); } catch (e2) { alert('Copy failed: ' + e); return; }
+        finally { box.hidden = true; }
+      }
+      if (labelNode) {
+        const original = labelNode.textContent;
+        labelNode.textContent = ' Copied';
+        setTimeout(() => { labelNode.textContent = original; }, 1500);
+      } else if (btn) {
+        const original = btn.textContent;
+        btn.textContent = '✓ Copied';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      }
+    }
+  </script>
+  {% if not threads_ok %}
+    <section class="wf-section">
+      <div class="wf-head">
+        <span class="wf-num">2</span>
+        <span class="wf-title">Connect Threads</span>
+      </div>
+      <div class="wf-body">
+        <p class="meta" style="margin-top: 0;">1. <a href="{{ auth_url }}" target="_blank">Authorize with Threads ↗</a><br>
+           2. Copy the <code>code=</code> value from the redirect URL and paste it here.</p>
+        <form method="post" action="/threads/connect">
+          <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
+          <input type="text" name="code" placeholder="AQB..." required>
+          <div style="margin-top: 10px;"><button class="approve">Connect</button></div>
+        </form>
+      </div>
+    </section>
+  {% else %}
+    <form method="post" action="/cut/{{ cut.id }}/post" id="post-form">
+      {# ---- 2 · Write ---- #}
+      <section class="wf-section">
+        <div class="wf-head">
+          <span class="wf-num">2</span>
+          <span class="wf-title">Write the post</span>
+          <span class="meta">AI suggestions are drafts — edit freely.</span>
+        </div>
+        <div class="wf-body">
+          <div class="field">
+            <label for="clip_title">Clip title</label>
+            <input type="text" name="clip_title" id="clip_title" maxlength="120"
+                   placeholder="{{ c.title }}" value="{{ cut.clip_title }}">
+            <div class="ctl-strip" style="margin-top: 8px;">
+              <button type="button" class="ghost sm" id="suggest-title-btn" onclick="suggestTitle()">
+                {{ "Regenerate" if cut.clip_title else "Suggest" }} title</button>
+              <span class="meta">A concise title generated from this clip's transcript. Saved with the post.</span>
+            </div>
+          </div>
+          <div class="field" style="margin-bottom: 0;">
+            <label for="caption">Caption</label>
+            <textarea name="caption" id="caption" required>{{ cut.draft_caption }}</textarea>
+            <div class="ctl-strip" style="margin-top: 8px;">
+              <button type="button" class="ghost sm" id="suggest-btn" onclick="suggestCaption()">
+                {{ "Regenerate" if cut.draft_caption else "Suggest" }} caption</button>
+            </div>
+          </div>
+          {% if cut.subtitled_clip_path %}
+            <label class="inline-label" style="margin-top: 12px;">
+              <input type="checkbox" name="use_subtitles" value="1"
+                     {{ "checked" if cut.use_subtitles }}>
+              Post the captioned version (burned-in word-by-word subtitles)
+            </label>
+          {% endif %}
+        </div>
+      </section>
+
+      {# ---- Ship rail: one primary, clear alternatives ---- #}
+      <div class="ship-rail">
+        <button class="approve" onclick="return confirm('Post this clip to Threads now?')">Post now</button>
+        <button class="primary" formaction="/cut/{{ cut.id }}/queue" formnovalidate
+                onclick="return validateQueue()">Add to queue</button>
+        <label class="inline-check"
+               title="Ignores posting windows; still respects the 90-minute spacing floor">
+          <input type="checkbox" name="is_breaking" value="1" id="is_breaking">
+          Breaking — publish ASAP
+        </label>
+        <div class="rail-end">
+          <span class="rail-note">Queue publishes at the next open window (≈10am / 2:30pm / 7pm ET).</span>
+          <button class="ghost" formaction="/cut/{{ cut.id }}/save-draft" formnovalidate
+                  onclick="return validateDraft()">Save as draft</button>
+        </div>
+      </div>
+    </form>
+    <script>
+      async function suggestCaption() {
+        const btn = document.getElementById('suggest-btn');
+        btn.disabled = true; btn.textContent = 'Thinking…';
+        try {
+          const r = await fetch('/cut/{{ cut.id }}/suggest-caption', { method: 'POST' });
+          const d = await r.json();
+          if (d.caption) document.getElementById('caption').value = d.caption;
+          else alert(d.error || 'No caption returned');
+        } catch (e) { alert('Suggestion failed: ' + e); }
+        btn.disabled = false; btn.textContent = 'Regenerate caption';
+      }
+      async function suggestTitle() {
+        const btn = document.getElementById('suggest-title-btn');
+        btn.disabled = true; btn.textContent = 'Thinking…';
+        try {
+          const r = await fetch('/cut/{{ cut.id }}/suggest-title', { method: 'POST' });
+          const d = await r.json();
+          if (d.title) document.getElementById('clip_title').value = d.title;
+          else alert(d.error || 'No title returned');
+        } catch (e) { alert('Suggestion failed: ' + e); }
+        btn.disabled = false; btn.textContent = 'Regenerate title';
+      }
+      function validateQueue() {
+        const cap = document.getElementById('caption');
+        if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
+        const breaking = document.getElementById('is_breaking')?.checked;
+        return confirm(breaking
+          ? 'Add as breaking news? It will publish as soon as the spacing floor allows.'
+          : 'Add this clip to the posting queue?');
+      }
+      function validateDraft() {
+        const cap = document.getElementById('caption');
+        if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
+        return true;
+      }
+    </script>
+  {% endif %}
+
+  {% if posts %}
+    <section class="wf-section">
+      <h2>Posts from this cut</h2>
+      <div class="video-posts">
+        {% for p in posts %}
+        <div class="video-post">
+          <div class="video-post-main">
+            <div class="video-post-meta">
+              <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
+              {% if p.is_breaking %}<span class="badge hostile">breaking</span>{% endif %}
+              {% if p.defer_count %}<span class="badge">deferred {{ p.defer_count }}×</span>{% endif %}
+              <span class="meta">
+                {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
+                {% elif p.status == "publishing" %}publishing…
+                {% elif p.created_at %}added {{ p.created_at.strftime("%b %-d") }}
+                {% endif %}
+              </span>
+            </div>
+            <a class="video-post-caption" href="/post/{{ p.id }}" title="{{ p.caption }}">{{ p.caption or "(untitled)" }}</a>
+          </div>
+          <div class="video-post-actions">
+            <a class="sm" href="/post/{{ p.id }}">Details</a>
+            {% if p.permalink %}<a class="sm" href="{{ p.permalink }}" target="_blank">Open ↗</a>{% endif %}
+            {% if p.status in ("queued", "draft") %}
+              <form class="inline" method="post" action="/post/{{ p.id }}/publish-now">
+                <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
+                <button class="sm" onclick="return confirm('Publish to Threads now?')">Post now</button>
+              </form>
+              <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
+                <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
+                <button class="reject sm" onclick="return confirm('Remove this {{ p.status }} post?')">Delete</button>
+              </form>
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+</div>
+<script>
+  async function copyCaption() {
+    const btn = document.getElementById('copy-caption-btn');
+    const box = document.getElementById('caption');
+    const text = (box ? box.value : btn.dataset.caption) || '';
+    if (!text.trim()) { alert('No caption to copy yet.'); return; }
+    const original = btn.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      if (box) { box.focus(); box.select(); document.execCommand('copy'); }
+      else { alert('Copy failed: ' + e); return; }
+    }
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  }
+</script>
+{% endif %}
+{% endif %}
+{% endblock %}

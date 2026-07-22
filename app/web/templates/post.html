@@ -13,7 +13,8 @@
     <div class="sub">
       <a href="/posts">← Back to Posts</a>
       {% if candidate_id %} · from
-        <a href="/video/{{ candidate_id }}">{{ channel_sign or "clip page" }}</a>{% endif %}
+        <a href="/video/{{ candidate_id }}?step=cuts">{{ channel_sign or "video" }}</a>{% endif %}
+      {% if cut_id %} · <a href="/cut/{{ cut_id }}?step=post">cut</a>{% endif %}
       {% if clip_title %} · {{ clip_title[:80] }}{% elif video_title %} · {{ video_title[:80] }}{% endif %}
       {% if source == "threads" %} · <span class="badge">Threads history</span>{% endif %}
     </div>
@@ -60,6 +61,12 @@
               data-caption="{{ caption }}" onclick="copyPostCaption(this)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         Copy caption</button>
+    {% endif %}
+    {% if clip_transcript_text %}
+      <button type="button" id="copy-transcript-btn" onclick="copyPostTranscript(this)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy transcript</button>
+      <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
     {% endif %}
     {% if permalink %}
       <a href="{{ permalink }}" target="_blank">
@@ -247,6 +254,23 @@
     const label = btn.querySelector('svg') ? btn.childNodes[btn.childNodes.length - 1] : null;
     try { await navigator.clipboard.writeText(text); }
     catch (e) { alert('Copy failed: ' + e); return; }
+    if (label) {
+      const original = label.textContent;
+      label.textContent = ' Copied';
+      setTimeout(() => { label.textContent = original; }, 1500);
+    }
+  }
+  async function copyPostTranscript(btn) {
+    const box = document.getElementById('clip-transcript-plain');
+    const text = (box && box.value) || '';
+    if (!text.trim()) { alert('No transcript to copy.'); return; }
+    const label = btn.querySelector('svg') ? btn.childNodes[btn.childNodes.length - 1] : null;
+    try { await navigator.clipboard.writeText(text); }
+    catch (e) {
+      box.hidden = false; box.focus(); box.select();
+      try { document.execCommand('copy'); } catch (e2) { alert('Copy failed: ' + e); return; }
+      finally { box.hidden = true; }
+    }
     if (label) {
       const original = label.textContent;
       label.textContent = ' Copied';

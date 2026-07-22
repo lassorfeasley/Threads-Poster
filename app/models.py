@@ -85,11 +85,11 @@ class Candidate(Base):
     transcript_text: Mapped[str] = mapped_column(Text, default="")
     transcription_method: Mapped[str] = mapped_column(String(20), default="")  # captions | "" (none)
 
-    # Optional LLM assists (clearly drafts).
+    # Optional LLM assists (clearly drafts). ``draft_caption`` is a video-level
+    # seed suggestion; each Cut gets its own editable ``draft_caption`` copied
+    # from this when the cut is created.
     suggested_highlight: Mapped[str] = mapped_column(Text, default="")  # e.g. "00:42-01:10: ..."
     draft_caption: Mapped[str] = mapped_column(Text, default="")
-    # LLM-generated, human-readable title for the exported clip (editable).
-    clip_title: Mapped[str] = mapped_column(Text, default="")
 
     # Vision scoring: how engaging the FOOTAGE looks, judged from YouTube's
     # storyboard stills (0-1) plus which popularity traits were detected.
@@ -98,8 +98,35 @@ class Candidate(Base):
     visual_rationale: Mapped[str] = mapped_column(Text, default="")
     visual_scored_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Trim step: operator-chosen segments (JSON [{start, end}, ...]) and the
-    # exported supercut file produced from them.
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    channel: Mapped[Channel] = relationship(back_populates="candidates")
+    # A video can be trimmed into several cuts (each a distinct topic/segment).
+    cuts: Mapped[list["Cut"]] = relationship(
+        back_populates="candidate", cascade="all, delete-orphan",
+        order_by="Cut.created_at",
+    )
+    threads_posts: Mapped[list["ThreadsPost"]] = relationship(back_populates="candidate")
+
+
+class Cut(Base):
+    """A trimmed clip cut from a source video. One video can yield several cuts
+    (e.g. two different topics covered in the same broadcast). A cut is the unit
+    that gets captioned, titled, and posted; each post links back to its cut.
+    """
+
+    __tablename__ = "cuts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    candidate_pk: Mapped[int] = mapped_column(ForeignKey("candidates.id"))
+
+    # LLM-generated, human-readable title for this clip (editable).
+    clip_title: Mapped[str] = mapped_column(Text, default="")
+    # Per-cut caption draft (seeded from the video's draft_caption, then edited).
+    draft_caption: Mapped[str] = mapped_column(Text, default="")
+
+    # Operator-chosen segments (JSON [{start, end}, ...]) and the exported
+    # supercut file produced from them.
     trim_segments: Mapped[str] = mapped_column(Text, default="")
     trimmed_clip_path: Mapped[str] = mapped_column(Text, default="")
     # Optional stylized-caption variant of the exported clip (Funnel font,
@@ -109,9 +136,10 @@ class Candidate(Base):
     use_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    channel: Mapped[Channel] = relationship(back_populates="candidates")
-    threads_posts: Mapped[list["ThreadsPost"]] = relationship(back_populates="candidate")
+    candidate: Mapped[Candidate] = relationship(back_populates="cuts")
+    threads_posts: Mapped[list["ThreadsPost"]] = relationship(back_populates="cut")
 
 
 class ThreadsPost(Base):
@@ -119,6 +147,8 @@ class ThreadsPost(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     candidate_pk: Mapped[int | None] = mapped_column(ForeignKey("candidates.id"), nullable=True)
+    # The specific cut this post was made from (null for imported Threads history).
+    cut_pk: Mapped[int | None] = mapped_column(ForeignKey("cuts.id"), nullable=True)
     threads_media_id: Mapped[str] = mapped_column(String(60), default="")
     permalink: Mapped[str] = mapped_column(String(300), default="")
     caption: Mapped[str] = mapped_column(Text, default="")
@@ -176,6 +206,7 @@ class ThreadsPost(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     candidate: Mapped[Candidate | None] = relationship(back_populates="threads_posts")
+    cut: Mapped["Cut | None"] = relationship(back_populates="threads_posts")
     comments: Mapped[list["ThreadsComment"]] = relationship(back_populates="post")
     metrics: Mapped[list["MetricSnapshot"]] = relationship(back_populates="post")
 

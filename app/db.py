@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "6"
+SCHEMA_VERSION = "7"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -58,6 +58,7 @@ def init_db() -> None:
         return
     Base.metadata.create_all(engine)
     _ensure_new_columns()
+    _migrate_cuts()          # must run before old candidate clip columns are dropped
     _drop_removed_columns()
     _migrate_scheduled_to_queued()
     _ensure_indexes()
@@ -72,6 +73,8 @@ def init_db() -> None:
 _SCHEMA_SENTINELS = (
     "SELECT suggested_caption FROM threads_posts LIMIT 0",
     "SELECT status FROM trait_weights LIMIT 0",
+    "SELECT cut_pk FROM threads_posts LIMIT 0",
+    "SELECT id FROM cuts LIMIT 0",
 )
 
 
@@ -127,17 +130,13 @@ def _ensure_new_columns() -> None:
     bool_default = "FALSE" if not _is_sqlite else "0"
     tables = {
         "candidates": {
-            "clip_title": "TEXT DEFAULT ''",
-            "trim_segments": "TEXT DEFAULT ''",
-            "trimmed_clip_path": "TEXT DEFAULT ''",
-            "subtitled_clip_path": "TEXT DEFAULT ''",
-            "use_subtitles": f"BOOLEAN DEFAULT {bool_default}",
             "visual_score": "FLOAT",
             "visual_traits": "TEXT DEFAULT ''",
             "visual_rationale": "TEXT DEFAULT ''",
             "visual_scored_at": "TIMESTAMP",
         },
         "threads_posts": {
+            "cut_pk": "INTEGER",
             "source": "VARCHAR(20) DEFAULT 'app'",
             "scheduled_at": "TIMESTAMP WITH TIME ZONE",
             "is_breaking": f"BOOLEAN DEFAULT {bool_default}",
@@ -183,6 +182,66 @@ def _ensure_new_columns() -> None:
             ))
 
 
+def _migrate_cuts() -> None:
+    """Promote the per-video trim columns to first-class ``cuts`` rows.
+
+    Before this release the trimmed clip lived as columns on ``candidates``
+    (one implicit cut per video). This backfills one ``Cut`` per candidate that
+    had trim data, then points its posts at the new cut. Idempotent: runs only
+    while the old columns still exist and skips candidates already migrated.
+    """
+    from sqlalchemy import inspect, text
+
+    from .models import utcnow
+
+    with engine.begin() as conn:
+        insp = inspect(conn)
+        cand_cols = {c["name"] for c in insp.get_columns("candidates")}
+        # Old columns already dropped -> migration ran on a prior startup.
+        if "trimmed_clip_path" not in cand_cols and "trim_segments" not in cand_cols:
+            return
+
+        already = {
+            r[0] for r in conn.execute(
+                text("SELECT DISTINCT candidate_pk FROM cuts")
+            ).fetchall()
+        }
+        rows = conn.execute(text(
+            "SELECT id, clip_title, trim_segments, trimmed_clip_path, "
+            "subtitled_clip_path, use_subtitles, draft_caption "
+            "FROM candidates "
+            "WHERE (trim_segments IS NOT NULL AND trim_segments != '') "
+            "   OR (trimmed_clip_path IS NOT NULL AND trimmed_clip_path != '')"
+        )).fetchall()
+        now = utcnow().isoformat()
+        for r in rows:
+            cid = r[0]
+            if cid in already:
+                continue
+            conn.execute(text(
+                "INSERT INTO cuts (candidate_pk, clip_title, draft_caption, "
+                "trim_segments, trimmed_clip_path, subtitled_clip_path, "
+                "use_subtitles, created_at, updated_at) VALUES "
+                "(:cid, :title, :draft, :segs, :clip, :subs, :use_subs, :now, :now)"
+            ), {
+                "cid": cid,
+                "title": r[1] or "",
+                "draft": r[6] or "",
+                "segs": r[2] or "",
+                "clip": r[3] or "",
+                "subs": r[4] or "",
+                "use_subs": bool(r[5]),
+                "now": now,
+            })
+            new_cut = conn.execute(text(
+                "SELECT id FROM cuts WHERE candidate_pk = :cid ORDER BY id DESC LIMIT 1"
+            ), {"cid": cid}).scalar()
+            conn.execute(text(
+                "UPDATE threads_posts SET cut_pk = :cut "
+                "WHERE candidate_pk = :cid AND (cut_pk IS NULL)"
+            ), {"cut": new_cut, "cid": cid})
+
+
 def _ensure_indexes() -> None:
     """Indexes for the hot query filters. Without them a remote Postgres scans
     whole tables for every dashboard/analytics filter. ``IF NOT EXISTS`` works
@@ -192,7 +251,9 @@ def _ensure_indexes() -> None:
     statements = (
         "CREATE INDEX IF NOT EXISTS ix_threads_posts_status ON threads_posts (status)",
         "CREATE INDEX IF NOT EXISTS ix_threads_posts_candidate_pk ON threads_posts (candidate_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_threads_posts_cut_pk ON threads_posts (cut_pk)",
         "CREATE INDEX IF NOT EXISTS ix_threads_posts_published_at ON threads_posts (published_at)",
+        "CREATE INDEX IF NOT EXISTS ix_cuts_candidate_pk ON cuts (candidate_pk)",
         "CREATE INDEX IF NOT EXISTS ix_metric_snapshots_post_captured "
         "ON metric_snapshots (post_pk, captured_at)",
         "CREATE INDEX IF NOT EXISTS ix_candidates_status ON candidates (status)",
@@ -228,7 +289,9 @@ def _drop_removed_columns() -> None:
 
     insp = inspect(engine)
     removed = {
-        "candidates": ["climate_topic"],
+        # Trim columns promoted to the ``cuts`` table (see _migrate_cuts).
+        "candidates": ["climate_topic", "clip_title", "trim_segments",
+                       "trimmed_clip_path", "subtitled_clip_path", "use_subtitles"],
     }
     with engine.begin() as conn:
         for table, columns in removed.items():

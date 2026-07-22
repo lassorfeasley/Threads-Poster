@@ -685,6 +685,19 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(
 }
 .modal-head strong { font-size: 15px; font-weight: 650; }
 
+/* New-cut source-video picker (Library → Cuts). */
+.video-picker { max-height: 52vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.video-picker .picker-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.video-picker .picker-row:hover { border-color: var(--accent); }
+.video-picker .picker-row .item-title { font-weight: 600; }
+
 .btn-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 form.inline { display: inline-flex; }
@@ -1946,6 +1959,42 @@ details.panel > summary::after {
 details.panel[open] > summary::after { transform: rotate(225deg); }
 details.panel[open] > summary { margin-bottom: 0; border-bottom: 1px solid var(--border); }
 details.panel > .panel-body { padding: 14px 18px; }
+
+/* ---- Library accordion (Videos / Cuts / Posts) ---- */
+.lib-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.lib-section > summary {
+  padding: 15px 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.lib-section > summary::-webkit-details-marker { display: none; }
+.lib-section > summary:hover { background: var(--panel-hover, rgba(127,127,127,0.04)); }
+.lib-section[open] > summary { border-bottom: 1px solid var(--border); }
+.lib-section .lib-caret {
+  color: var(--muted);
+  font-size: 12px;
+  width: 12px;
+  flex: none;
+}
+.lib-section .lib-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.lib-section .lib-body { padding: 14px 16px; }
+.lib-section .lib-body .card.item:last-child { margin-bottom: 0; }
+.cut-list .card.item:last-child { margin-bottom: 0; }
 
 @media (max-width: 860px) {
   .media-stage { max-width: 100%; }

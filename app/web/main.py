@@ -43,6 +43,7 @@ from ..models import (
     STATUS_REJECTED,
     Candidate,
     Channel,
+    Cut,
     MetricSnapshot,
     MonitorRun,
     SchedulerState,
@@ -54,7 +55,15 @@ from ..models import (
     utcnow,
 )
 from ..monitor import run_monitor_once
-from ..publishing import maybe_post_first_reply, publish_clip, publish_post, queue_clip, record_post
+from ..publishing import (
+    clear_publishing,
+    mark_publishing,
+    maybe_post_first_reply,
+    publish_clip,
+    publish_post,
+    queue_clip,
+    record_post,
+)
 from ..ranking import load_trait_weights, order_expr, sort_candidates
 from ..scheduler import (
     build_window_plan,
@@ -138,12 +147,15 @@ _resume_stalled_scrapes()
 
 # --- Workflow step helpers ----------------------------------------------------
 
-def workflow_state(session, c: Candidate, post_statuses: set[str] | None = None) -> dict:
+def workflow_state(session, c: Candidate, post_statuses: set[str] | None = None,
+                   has_exported_cut: bool | None = None) -> dict:
     """Compute breadcrumb step states for a candidate.
 
     Pass ``post_statuses`` (the set of ThreadsPost.status values for this
-    candidate) to skip the per-row published-post lookup — used by the
-    dashboard/archive when rendering many rows against a remote DB.
+    candidate) to skip the per-row published-post lookup, and
+    ``has_exported_cut`` (whether the video has at least one cut with an
+    exported clip) to skip a per-row cuts lookup — used by the dashboard/library
+    when rendering many rows against a remote DB.
     """
     if post_statuses is None:
         posted = session.execute(
@@ -154,9 +166,17 @@ def workflow_state(session, c: Candidate, post_statuses: set[str] | None = None)
     else:
         posted = "published" in post_statuses
 
+    if has_exported_cut is None:
+        trimmed = session.execute(
+            select(Cut.id).where(
+                Cut.candidate_pk == c.id, Cut.trimmed_clip_path != ""
+            ).limit(1)
+        ).scalar_one_or_none() is not None
+    else:
+        trimmed = has_exported_cut
+
     reviewed = c.status not in (STATUS_NEW, STATUS_REJECTED)
     scraped = c.status == STATUS_ARCHIVED
-    trimmed = bool(c.trimmed_clip_path) and Path(c.trimmed_clip_path).exists()
 
     if not reviewed:
         current = "review"
@@ -188,6 +208,18 @@ def _post_statuses_by_candidate(session, candidate_ids: list[int]) -> dict[int, 
             continue
         out.setdefault(pk, set()).add(status)
     return out
+
+
+def _exported_cut_candidate_ids(session, candidate_ids: list[int]) -> set[int]:
+    """Candidate ids that have at least one cut with an exported clip (one query)."""
+    if not candidate_ids:
+        return set()
+    rows = session.execute(
+        select(Cut.candidate_pk).where(
+            Cut.candidate_pk.in_(candidate_ids), Cut.trimmed_clip_path != ""
+        ).distinct()
+    ).all()
+    return {pk for (pk,) in rows if pk is not None}
 
 
 # --- Dashboard -----------------------------------------------------------------
@@ -316,11 +348,14 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
                 .limit(30)
             ).scalars().all()
             # One query for all post statuses instead of 2×N per-row lookups.
-            statuses = _post_statuses_by_candidate(session, [c.id for c in in_progress])
+            ip_ids = [c.id for c in in_progress]
+            statuses = _post_statuses_by_candidate(session, ip_ids)
+            exported = _exported_cut_candidate_ids(session, ip_ids)
             handled_statuses = {"published", "queued", "publishing", "draft"}
             for c in in_progress:
                 post_st = statuses.get(c.id, set())
-                state = workflow_state(session, c, post_statuses=post_st)
+                state = workflow_state(session, c, post_statuses=post_st,
+                                       has_exported_cut=c.id in exported)
                 # Drop it from "In progress" once the clip has been dealt with:
                 # trimmed clip exported/saved ("ready to post"), posted,
                 # queued, or saved as a draft. A candidate with a FAILED
@@ -588,25 +623,141 @@ def video_score_visuals(candidate_id: int):
 
 # --- Per-video workflow ----------------------------------------------------------
 
+def _cut_state(cut: Cut, posted_cut_pks: set[int]) -> dict:
+    """Per-cut status for the video page cut list."""
+    exported = bool(cut.trimmed_clip_path) and Path(cut.trimmed_clip_path).exists()
+    return {
+        "exported": exported,
+        "posted": cut.id in posted_cut_pks,
+        "captioned": bool(cut.subtitled_clip_path),
+    }
+
+
 @app.get("/video/{candidate_id}", response_class=HTMLResponse)
 def video_detail(request: Request, candidate_id: int, step: str = "", msg: str = ""):
     with session_scope() as session:
         c = session.execute(
             select(Candidate)
-            .options(selectinload(Candidate.channel))
+            .options(selectinload(Candidate.channel), selectinload(Candidate.cuts))
             .where(Candidate.id == candidate_id)
         ).scalar_one_or_none()
         if c is None:
             return _flash("/", "Video not found")
-        state = workflow_state(session, c)
+
+        cuts = list(c.cuts)
+        has_exported_cut = any(cut.trimmed_clip_path for cut in cuts)
+        state = workflow_state(session, c, has_exported_cut=has_exported_cut)
 
         # Operator can revisit any unlocked step; default to the current one.
+        # The video page has three video-level steps: review, scrape, cuts.
         allowed = {"review"}
         if state["reviewed"]:
             allowed.add("scrape")
         if state["scraped"]:
-            allowed.update({"trim", "post"})
-        active_step = step if step in allowed else state["current"]
+            allowed.add("cuts")
+        default_step = "cuts" if state["scraped"] else state["current"]
+        active_step = step if step in allowed else default_step
+
+        posts = session.execute(
+            select(ThreadsPost).where(ThreadsPost.candidate_pk == c.id)
+            .order_by(ThreadsPost.created_at.desc())
+        ).scalars().all()
+        posted_cut_pks = {p.cut_pk for p in posts
+                          if p.status == "published" and p.cut_pk is not None}
+        posts_by_cut: dict[int, int] = {}
+        for p in posts:
+            if p.cut_pk is not None:
+                posts_by_cut[p.cut_pk] = posts_by_cut.get(p.cut_pk, 0) + 1
+
+        cut_rows = [
+            {"cut": cut, "state": _cut_state(cut, posted_cut_pks),
+             "post_count": posts_by_cut.get(cut.id, 0)}
+            for cut in cuts
+        ]
+
+    return templates.TemplateResponse(
+        request, "video.html",
+        {"c": c, "state": state, "step": active_step,
+         "cut_rows": cut_rows, "posts": posts,
+         "msg": msg, "active": "dashboard"},
+    )
+
+
+# --- Cuts (first-class trimmed clips) ---------------------------------------------
+
+@app.post("/video/{candidate_id}/cuts")
+def create_cut(candidate_id: int):
+    """Start a new cut for a video and jump straight into its trim editor."""
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return _flash("/", "Video not found")
+        if c.status != STATUS_ARCHIVED:
+            return _flash(f"/video/{candidate_id}", "Download the video before cutting it")
+        cut = Cut(candidate_pk=c.id, draft_caption=c.draft_caption or "")
+        session.add(cut)
+        session.flush()
+        cut_id = cut.id
+    return _flash(f"/cut/{cut_id}?step=trim", "New cut — pick your segments")
+
+
+@app.get("/video/{candidate_id}/cut")
+def open_cut(candidate_id: int):
+    """Jump straight into the trim editor for a video.
+
+    Right after a download the operator expects to land in the editor, not on an
+    empty Cuts list. So: no cuts yet → create the first one and open its trim
+    editor; exactly one cut → reopen it; several cuts → show the Cuts list so
+    they can pick which one to work on (or add another)."""
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return _flash("/", "Video not found")
+        if c.status != STATUS_ARCHIVED:
+            return _flash(f"/video/{candidate_id}", "Download the video before cutting it")
+        existing = session.execute(
+            select(Cut.id).where(Cut.candidate_pk == c.id).order_by(Cut.created_at.desc())
+        ).scalars().all()
+        if len(existing) > 1:
+            return RedirectResponse(f"/video/{candidate_id}?step=cuts", status_code=303)
+        if len(existing) == 1:
+            return RedirectResponse(f"/cut/{existing[0]}?step=trim", status_code=303)
+        cut = Cut(candidate_pk=c.id, draft_caption=c.draft_caption or "")
+        session.add(cut)
+        session.flush()
+        cut_id = cut.id
+    return _flash(f"/cut/{cut_id}?step=trim", "New cut — pick your segments")
+
+
+@app.get("/cut/{cut_id}", response_class=HTMLResponse)
+def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
+    with session_scope() as session:
+        cut = session.execute(
+            select(Cut)
+            .options(selectinload(Cut.candidate).selectinload(Candidate.channel))
+            .where(Cut.id == cut_id)
+        ).scalar_one_or_none()
+        if cut is None:
+            return _flash("/", "Cut not found")
+        c = cut.candidate
+
+        exported = bool(cut.trimmed_clip_path) and Path(cut.trimmed_clip_path).exists()
+        posts = session.execute(
+            select(ThreadsPost).where(ThreadsPost.cut_pk == cut.id)
+            .order_by(ThreadsPost.created_at.desc())
+        ).scalars().all()
+        posted = any(p.status == "published" for p in posts)
+        cut_state = {"exported": exported, "posted": posted,
+                     "captioned": bool(cut.subtitled_clip_path)}
+
+        active_step = step if step in ("trim", "post") else ("post" if exported else "trim")
+
+        segments = []
+        if cut.trim_segments:
+            try:
+                segments = json.loads(cut.trim_segments)
+            except Exception:
+                pass
 
         transcript_segments = []
         if c.transcript_path and Path(c.transcript_path).exists():
@@ -614,33 +765,41 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
                 transcript_segments = json.loads(Path(c.transcript_path).read_text())
             except Exception:
                 pass
-
-        segments = []
-        if c.trim_segments:
-            try:
-                segments = json.loads(c.trim_segments)
-            except Exception:
-                pass
-
-        # Transcript covering just the exported segments, in clip order.
-        clip_transcript = _excerpt_segments(transcript_segments, segments) if segments else []
-
-        posts = session.execute(
-            select(ThreadsPost).where(ThreadsPost.candidate_pk == c.id)
-            .order_by(ThreadsPost.created_at.desc())
-        ).scalars().all()
+        clip_transcript, clip_transcript_text = _load_clip_transcript(c, cut.trim_segments or "")
 
     threads_ok = threads_api.is_authenticated()
     return templates.TemplateResponse(
-        request, "video.html",
-        {"c": c, "state": state, "step": active_step,
+        request, "cut.html",
+        {"cut": cut, "c": c, "state": cut_state, "step": active_step,
          "transcript_segments": transcript_segments, "saved_segments": segments,
          "clip_transcript": clip_transcript,
+         "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
          "subs_position": load_settings().get("subtitles.position", "bottom"),
          "msg": msg, "active": "dashboard"},
     )
+
+
+@app.post("/cut/{cut_id}/delete")
+def delete_cut(cut_id: int):
+    """Delete a cut and any of its not-yet-published posts. Published posts are
+    detached (kept for history) rather than removed."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return _flash("/", "Cut not found")
+        candidate_id = cut.candidate_pk
+        posts = session.execute(
+            select(ThreadsPost).where(ThreadsPost.cut_pk == cut.id)
+        ).scalars().all()
+        for p in posts:
+            if p.status in ("queued", "draft", "failed"):
+                session.delete(p)
+            else:
+                p.cut_pk = None  # keep published history, drop the link
+        session.delete(cut)
+    return _flash(f"/video/{candidate_id}?step=cuts", "Cut deleted")
 
 
 
@@ -933,22 +1092,22 @@ def media_source(candidate_id: int):
         return FileResponse(c.local_video_path, media_type="video/mp4")
 
 
-@app.get("/media/clip/{candidate_id}")
-def media_clip(candidate_id: int):
+@app.get("/media/clip/{cut_id}")
+def media_clip(cut_id: int):
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is None or not c.trimmed_clip_path or not Path(c.trimmed_clip_path).exists():
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
             return JSONResponse({"error": "no clip"}, status_code=404)
-        return FileResponse(c.trimmed_clip_path, media_type="video/mp4")
+        return FileResponse(cut.trimmed_clip_path, media_type="video/mp4")
 
 
-@app.get("/media/subtitled/{candidate_id}")
-def media_subtitled(candidate_id: int):
+@app.get("/media/subtitled/{cut_id}")
+def media_subtitled(cut_id: int):
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is None or not c.subtitled_clip_path or not Path(c.subtitled_clip_path).exists():
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.subtitled_clip_path or not Path(cut.subtitled_clip_path).exists():
             return JSONResponse({"error": "no subtitled clip"}, status_code=404)
-        return FileResponse(c.subtitled_clip_path, media_type="video/mp4")
+        return FileResponse(cut.subtitled_clip_path, media_type="video/mp4")
 
 
 @app.get("/media/post/{post_id}")
@@ -965,27 +1124,28 @@ def media_post_clip(post_id: int):
         if p is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         path = p.clip_local_path
-        if (not path or not Path(path).exists()) and p.candidate:
-            c = p.candidate
-            if c.use_subtitles and c.subtitled_clip_path and Path(c.subtitled_clip_path).exists():
-                path = c.subtitled_clip_path
+        if (not path or not Path(path).exists()) and p.cut:
+            cut = p.cut
+            if cut.use_subtitles and cut.subtitled_clip_path and Path(cut.subtitled_clip_path).exists():
+                path = cut.subtitled_clip_path
             else:
-                path = c.trimmed_clip_path
+                path = cut.trimmed_clip_path
         if not path or not Path(path).exists():
             return JSONResponse({"error": "no clip"}, status_code=404)
         return FileResponse(path, media_type="video/mp4")
 
 
-@app.get("/video/{candidate_id}/download-clip")
-def download_clip(candidate_id: int):
+@app.get("/cut/{cut_id}/download-clip")
+def download_clip(cut_id: int):
     """Serve the exported clip as a file attachment so the operator can save it
     locally and post it manually elsewhere."""
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is None or not c.trimmed_clip_path or not Path(c.trimmed_clip_path).exists():
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
             return JSONResponse({"error": "no clip"}, status_code=404)
-        return FileResponse(c.trimmed_clip_path, media_type="video/mp4",
-                            filename=f"{c.video_id or f'clip-{c.id}'}.mp4")
+        vid = cut.candidate.video_id if cut.candidate else None
+        return FileResponse(cut.trimmed_clip_path, media_type="video/mp4",
+                            filename=f"{vid or 'clip'}-cut{cut.id}.mp4")
 
 
 @app.get("/post/{post_id}/download-clip")
@@ -996,8 +1156,8 @@ def download_post_clip(post_id: int):
         if p is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         path = p.clip_local_path
-        if (not path or not Path(path).exists()) and p.candidate:
-            path = p.candidate.trimmed_clip_path
+        if (not path or not Path(path).exists()) and p.cut:
+            path = p.cut.trimmed_clip_path
         if not path or not Path(path).exists():
             return JSONResponse({"error": "no clip"}, status_code=404)
         return FileResponse(path, media_type="video/mp4",
@@ -1006,50 +1166,54 @@ def download_post_clip(post_id: int):
 
 # --- Trim / export ----------------------------------------------------------------
 
-@app.post("/video/{candidate_id}/export")
-def export_clip(candidate_id: int, segments_json: str = Form(...)):
+@app.post("/cut/{cut_id}/export")
+def export_clip(cut_id: int, segments_json: str = Form(...)):
     try:
         segments = json.loads(segments_json)
         assert isinstance(segments, list) and segments
     except Exception:
-        return _flash(f"/video/{candidate_id}?step=trim", "No segments to export")
+        return _flash(f"/cut/{cut_id}?step=trim", "No segments to export")
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return _flash("/", "Cut not found")
+        c = cut.candidate
         if c is None or not c.local_video_path:
             return _flash("/", "Video not found or not downloaded")
         try:
-            out = export_supercut(c.local_video_path, segments, f"{c.video_id}_cut")
-            c.trim_segments = json.dumps(segments)
-            c.trimmed_clip_path = str(out)
+            out = export_supercut(c.local_video_path, segments, f"{c.video_id}_cut{cut.id}")
+            cut.trim_segments = json.dumps(segments)
+            cut.trimmed_clip_path = str(out)
+            cut.updated_at = utcnow()
             # Any previously generated captions no longer match the new cut.
-            c.subtitled_clip_path = ""
-            c.use_subtitles = False
+            cut.subtitled_clip_path = ""
+            cut.use_subtitles = False
             # Auto-title the fresh clip from its own transcript, but only when the
             # operator hasn't already set one (regeneration stays available in the
             # Post step). A titling failure must never block the export.
-            if not (c.clip_title or "").strip():
+            if not (cut.clip_title or "").strip():
                 try:
                     settings = load_settings()
                     excerpt = _transcript_excerpt(c, segments)
                     title = suggest_title(
                         settings.get("engagement.draft_model", "claude-sonnet-5"),
-                        c.title, excerpt, c.draft_caption or None,
+                        c.title, excerpt, cut.draft_caption or None,
                     )
                     if title:
-                        c.clip_title = title
+                        cut.clip_title = title
                 except Exception:
                     pass
             n = len(segments)
             # autosubs=1 makes the Post step kick off caption generation
             # immediately, so the captioned variant is the default.
-            return _flash(f"/video/{candidate_id}?step=post&autosubs=1",
+            return _flash(f"/cut/{cut_id}?step=post&autosubs=1",
                           f"Exported {n} segment{'s' if n > 1 else ''} — generating captions…")
         except ClipExportError as exc:
-            return _flash(f"/video/{candidate_id}?step=trim", f"Export failed: {exc}")
+            return _flash(f"/cut/{cut_id}?step=trim", f"Export failed: {exc}")
 
 
-@app.post("/video/{candidate_id}/subtitles")
-def generate_subtitles(candidate_id: int, position: str = Form("")):
+@app.post("/cut/{cut_id}/subtitles")
+def generate_subtitles(cut_id: int, position: str = Form("")):
     """Generate the stylized-caption variant of the exported clip (AJAX).
 
     Runs whisper word timestamps + the Pillow/ffmpeg burn; takes roughly
@@ -1059,33 +1223,34 @@ def generate_subtitles(candidate_id: int, position: str = Form("")):
     from ..subtitles import SubtitleError, create_subtitled_clip
 
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is None or not c.trimmed_clip_path or not Path(c.trimmed_clip_path).exists():
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
             return JSONResponse({"error": "Export a clip first"}, status_code=404)
-        clip_path = c.trimmed_clip_path
+        clip_path = cut.trimmed_clip_path
     try:
         out = create_subtitled_clip(clip_path, position=position or None)
     except SubtitleError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     except Exception as exc:
-        log.exception("Caption generation failed for candidate %s", candidate_id)
+        log.exception("Caption generation failed for cut %s", cut_id)
         return JSONResponse({"error": f"Caption generation failed: {exc}"}, status_code=500)
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is not None:
-            c.subtitled_clip_path = str(out)
-            c.use_subtitles = True
-    return {"url": f"/media/subtitled/{candidate_id}"}
+        cut = session.get(Cut, cut_id)
+        if cut is not None:
+            cut.subtitled_clip_path = str(out)
+            cut.use_subtitles = True
+            cut.updated_at = utcnow()
+    return {"url": f"/media/subtitled/{cut_id}"}
 
 
-def _chosen_clip_path(c: Candidate, use_subtitles_form: str) -> str:
+def _chosen_clip_path(cut: Cut, use_subtitles_form: str) -> str:
     """The file the operator wants to post: captioned variant when the box is
     ticked and the file exists, otherwise the plain export. Persists the choice."""
     want = str(use_subtitles_form).lower() in ("1", "true", "on", "yes")
-    c.use_subtitles = want and bool(c.subtitled_clip_path)
-    if c.use_subtitles and Path(c.subtitled_clip_path).exists():
-        return c.subtitled_clip_path
-    return c.trimmed_clip_path
+    cut.use_subtitles = want and bool(cut.subtitled_clip_path)
+    if cut.use_subtitles and Path(cut.subtitled_clip_path).exists():
+        return cut.subtitled_clip_path
+    return cut.trimmed_clip_path
 
 
 # --- Caption suggestion + posting -------------------------------------------------
@@ -1130,16 +1295,45 @@ def _transcript_excerpt(c: Candidate, segments: list[dict]) -> str:
     return " ".join(parts)[:3000] or c.transcript_text[:3000]
 
 
-@app.post("/video/{candidate_id}/suggest-caption")
-def suggest_caption(candidate_id: int):
+def _clip_transcript_plain(clip_transcript: list[dict]) -> str:
+    """Newline-joined text of the trimmed clip's transcript lines (for copy)."""
+    lines = [str(s.get("text", "")).strip() for s in clip_transcript]
+    return "\n".join(line for line in lines if line)
+
+
+def _load_clip_transcript(candidate: Candidate | None, trim_segments_json: str) -> tuple[list[dict], str]:
+    """Return (timestamped lines, plain text) for a cut's exported windows."""
+    if not candidate or not trim_segments_json:
+        return [], ""
+    try:
+        windows = json.loads(trim_segments_json)
+    except Exception:
+        return [], ""
+    if not windows:
+        return [], ""
+    all_segments: list[dict] = []
+    if candidate.transcript_path and Path(candidate.transcript_path).exists():
+        try:
+            all_segments = json.loads(Path(candidate.transcript_path).read_text())
+        except Exception:
+            all_segments = []
+    if not all_segments:
+        return [], ""
+    lines = _excerpt_segments(all_segments, windows)
+    return lines, _clip_transcript_plain(lines)
+
+
+@app.post("/cut/{cut_id}/suggest-caption")
+def suggest_caption(cut_id: int):
     settings = load_settings()
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is None:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        segments = json.loads(c.trim_segments) if c.trim_segments else []
+        c = cut.candidate
+        segments = json.loads(cut.trim_segments) if cut.trim_segments else []
         excerpt = _transcript_excerpt(c, segments)
-        seconds = clip_duration(c.trimmed_clip_path) if c.trimmed_clip_path else None
+        seconds = clip_duration(cut.trimmed_clip_path) if cut.trimmed_clip_path else None
         # Voice matching from past captions — never let it break drafting.
         try:
             voice = voice_context(session, settings)
@@ -1152,54 +1346,56 @@ def suggest_caption(candidate_id: int):
                 c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
                 examples=voice["examples"], style_guide=voice["style_guide"],
             )
-            c.draft_caption = caption
+            cut.draft_caption = caption
             return {"caption": caption, "voice_examples": len(voice["examples"])}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@app.post("/video/{candidate_id}/suggest-title")
-def suggest_clip_title(candidate_id: int):
+@app.post("/cut/{cut_id}/suggest-title")
+def suggest_clip_title(cut_id: int):
     settings = load_settings()
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is None:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        segments = json.loads(c.trim_segments) if c.trim_segments else []
+        c = cut.candidate
+        segments = json.loads(cut.trim_segments) if cut.trim_segments else []
         excerpt = _transcript_excerpt(c, segments)
         try:
             title = suggest_title(
                 settings.get("engagement.draft_model", "claude-sonnet-5"),
-                c.title, excerpt, c.draft_caption or None,
+                c.title, excerpt, cut.draft_caption or None,
             )
             if title:
-                c.clip_title = title
-            return {"title": title or c.clip_title}
+                cut.clip_title = title
+            return {"title": title or cut.clip_title}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@app.post("/video/{candidate_id}/post")
-def post_to_threads(candidate_id: int, caption: str = Form(...),
+@app.post("/cut/{cut_id}/post")
+def post_to_threads(cut_id: int, caption: str = Form(...),
                     clip_title: str = Form(""), use_subtitles: str = Form("")):
     """Operator-confirmed publish of the exported clip."""
     caption = caption.strip()
     if not caption:
-        return _flash(f"/video/{candidate_id}?step=post", "Caption is empty")
+        return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
     with session_scope() as session:
         ok, wait_min = spacing_allows_publish(session)
         if not ok:
             return _flash(
-                f"/video/{candidate_id}?step=post",
+                f"/cut/{cut_id}?step=post",
                 f"Spacing floor: wait ~{wait_min} more minute{'s' if wait_min != 1 else ''} "
                 f"before publishing another post",
             )
-        c = session.get(Candidate, candidate_id)
-        if c is None or not c.trimmed_clip_path:
-            return _flash(f"/video/{candidate_id}", "Export a clip first")
-        c.clip_title = clip_title.strip()
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path:
+            return _flash(f"/cut/{cut_id}", "Export a clip first")
+        cut.clip_title = clip_title.strip()
         try:
-            post = publish_clip(session, c, _chosen_clip_path(c, use_subtitles), caption)
+            post = publish_clip(session, cut.candidate,
+                                _chosen_clip_path(cut, use_subtitles), caption, cut=cut)
             state = session.get(SchedulerState, 1)
             if state is None:
                 state = SchedulerState(id=1)
@@ -1212,32 +1408,32 @@ def post_to_threads(candidate_id: int, caption: str = Form(...),
                 msg += " · first reply posted"
             elif post.first_reply_error:
                 msg += f" · first reply failed: {post.first_reply_error[:120]}"
-            return _flash(f"/video/{candidate_id}?step=post", msg)
+            return _flash(f"/cut/{cut_id}?step=post", msg)
         except Exception as exc:
-            return _flash(f"/video/{candidate_id}?step=post", f"Publish failed: {exc}")
+            return _flash(f"/cut/{cut_id}?step=post", f"Publish failed: {exc}")
 
 
-@app.post("/video/{candidate_id}/queue")
-def queue_to_threads(candidate_id: int, caption: str = Form(...),
+@app.post("/cut/{cut_id}/queue")
+def queue_to_threads(cut_id: int, caption: str = Form(...),
                      is_breaking: str = Form(""), clip_title: str = Form(""),
                      use_subtitles: str = Form("")):
     """Add the exported clip to the adaptive FIFO queue (no immediate post)."""
     caption = caption.strip()
     if not caption:
-        return _flash(f"/video/{candidate_id}?step=post", "Caption is empty")
+        return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
     breaking = str(is_breaking).lower() in ("1", "true", "on", "yes")
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is None or not c.trimmed_clip_path:
-            return _flash(f"/video/{candidate_id}", "Export a clip first")
-        c.clip_title = clip_title.strip()
-        clip_path = _chosen_clip_path(c, use_subtitles)
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path:
+            return _flash(f"/cut/{cut_id}", "Export a clip first")
+        cut.clip_title = clip_title.strip()
+        clip_path = _chosen_clip_path(cut, use_subtitles)
         try:
-            # Reuse an existing not-yet-published post for this clip rather than
+            # Reuse an existing not-yet-published post for THIS cut rather than
             # creating a duplicate queue entry.
             existing = session.execute(
                 select(ThreadsPost).where(
-                    ThreadsPost.candidate_pk == c.id,
+                    ThreadsPost.cut_pk == cut.id,
                     ThreadsPost.status.in_(["queued", "draft", "failed"]),
                 ).order_by(ThreadsPost.created_at.desc())
             ).scalars().all()
@@ -1265,31 +1461,33 @@ def queue_to_threads(candidate_id: int, caption: str = Form(...),
                 for extra in existing[1:]:
                     session.delete(extra)
             else:
-                queue_clip(session, c, clip_path, caption, is_breaking=breaking)
+                queue_clip(session, cut.candidate, clip_path, caption,
+                           is_breaking=breaking, cut=cut)
         except Exception as exc:
-            return _flash(f"/video/{candidate_id}?step=post", f"Queue failed: {exc}")
+            return _flash(f"/cut/{cut_id}?step=post", f"Queue failed: {exc}")
     note = " (breaking — publishes ASAP)" if breaking else ""
-    return _flash(f"/video/{candidate_id}?step=post",
+    return _flash(f"/cut/{cut_id}?step=post",
                   f"Added to the posting queue{note}")
 
 
-@app.post("/video/{candidate_id}/save-draft")
-def save_draft(candidate_id: int, caption: str = Form(...),
+@app.post("/cut/{cut_id}/save-draft")
+def save_draft(cut_id: int, caption: str = Form(...),
                clip_title: str = Form(""), use_subtitles: str = Form("")):
     """Save the exported clip + caption as a draft to publish or queue later."""
     caption = caption.strip()
     if not caption:
-        return _flash(f"/video/{candidate_id}?step=post", "Caption is empty")
+        return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
     with session_scope() as session:
-        c = session.get(Candidate, candidate_id)
-        if c is None or not c.trimmed_clip_path:
-            return _flash(f"/video/{candidate_id}", "Export a clip first")
-        c.clip_title = clip_title.strip()
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path:
+            return _flash(f"/cut/{cut_id}", "Export a clip first")
+        cut.clip_title = clip_title.strip()
         try:
-            record_post(session, c, _chosen_clip_path(c, use_subtitles), caption, status="draft")
+            record_post(session, cut.candidate, _chosen_clip_path(cut, use_subtitles),
+                        caption, status="draft", cut=cut)
         except Exception as exc:
-            return _flash(f"/video/{candidate_id}?step=post", f"Save failed: {exc}")
-    return _flash(f"/video/{candidate_id}?step=post",
+            return _flash(f"/cut/{cut_id}?step=post", f"Save failed: {exc}")
+    return _flash(f"/cut/{cut_id}?step=post",
                   "Saved as draft — publish or queue it any time from Posts")
 
 
@@ -1303,12 +1501,12 @@ def cancel_queued_post(post_id: int, next: str = Form("/posts")):
         if p.status not in ("queued", "draft"):
             return _flash(next, "Only queued or draft posts can be removed")
         was = p.status
-        candidate_id = p.candidate_pk
+        cut_id = p.cut_pk
         session.delete(p)
-        # Send the operator back to the clip when deleting its only post record,
+        # Send the operator back to the cut when deleting its only post record,
         # so they don't lose track of a trimmed export.
-        if candidate_id and (not next or next in ("/posts", "/")):
-            next = f"/video/{candidate_id}?step=post"
+        if cut_id and (not next or next in ("/posts", "/")):
+            next = f"/cut/{cut_id}?step=post"
     label = "Queued post" if was == "queued" else "Draft"
     return _flash(next, f"{label} removed — your clip is still here; queue or post again when ready.")
 
@@ -1330,10 +1528,10 @@ def queue_existing_post(post_id: int, caption: str = Form(""),
         if breaking:
             p.pinned_window_key = ""
         p.error = ""
-        if p.candidate_pk is not None:
+        if p.cut_pk is not None:
             dupes = session.execute(
                 select(ThreadsPost).where(
-                    ThreadsPost.candidate_pk == p.candidate_pk,
+                    ThreadsPost.cut_pk == p.cut_pk,
                     ThreadsPost.id != p.id,
                     ThreadsPost.status.in_(["queued", "draft", "failed"]),
                 )
@@ -1382,21 +1580,24 @@ def pin_window(request: Request, post_id: int, window_key: str = Form(...),
 def _publish_in_thread(post_id: int) -> None:
     """Publish a post in the background. publish_post sets status to
     published/failed (+ error) itself, so we just swallow the exception here."""
-    with session_scope() as session:
-        p = session.get(ThreadsPost, post_id)
-        if p is None:
-            return
-        try:
-            publish_post(session, p)
-            state = session.get(SchedulerState, 1)
-            if state is None:
-                state = SchedulerState(id=1)
-                session.add(state)
-            state.last_publish_at = utcnow()
-            state.last_action = f"manual_publish:post={post_id}"
-            state.updated_at = utcnow()
-        except Exception:
-            log.exception("Background publish failed for post %s", post_id)
+    try:
+        with session_scope() as session:
+            p = session.get(ThreadsPost, post_id)
+            if p is None:
+                return
+            try:
+                publish_post(session, p)
+                state = session.get(SchedulerState, 1)
+                if state is None:
+                    state = SchedulerState(id=1)
+                    session.add(state)
+                state.last_publish_at = utcnow()
+                state.last_action = f"manual_publish:post={post_id}"
+                state.updated_at = utcnow()
+            except Exception:
+                log.exception("Background publish failed for post %s", post_id)
+    finally:
+        clear_publishing(post_id)
 
 
 @app.post("/post/{post_id}/publish-now")
@@ -1422,6 +1623,9 @@ def publish_scheduled_now(request: Request, post_id: int, next: str = Form("/pos
                     if wants_json else _flash(next, "Nothing to publish"))
         p.status = "publishing"
         p.error = ""
+    # Register before spawning so a scheduler tick in the gap between here and
+    # the thread starting doesn't mistake this for an orphaned publish.
+    mark_publishing(post_id)
     threading.Thread(target=_publish_in_thread, args=(post_id,), daemon=True).start()
     if wants_json:
         return JSONResponse({"ok": True, "status": "publishing"})
@@ -1452,24 +1656,31 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
     with session_scope() as session:
         p = session.execute(
             select(ThreadsPost)
-            .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
+            .options(
+                selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+                selectinload(ThreadsPost.cut),
+            )
             .where(ThreadsPost.id == post_id)
         ).scalar_one_or_none()
         if p is None:
             return _flash("/posts", "Post not found")
 
         cand = p.candidate
+        cut = p.cut
         clip_path = p.clip_local_path if (p.clip_local_path and Path(p.clip_local_path).exists()) else ""
-        if not clip_path and cand:
-            if (cand.use_subtitles and cand.subtitled_clip_path
-                    and Path(cand.subtitled_clip_path).exists()):
-                clip_path = cand.subtitled_clip_path
-            elif cand.trimmed_clip_path and Path(cand.trimmed_clip_path).exists():
-                clip_path = cand.trimmed_clip_path
+        if not clip_path and cut:
+            if (cut.use_subtitles and cut.subtitled_clip_path
+                    and Path(cut.subtitled_clip_path).exists()):
+                clip_path = cut.subtitled_clip_path
+            elif cut.trimmed_clip_path and Path(cut.trimmed_clip_path).exists():
+                clip_path = cut.trimmed_clip_path
         has_clip = bool(clip_path)
         # Burnt-in captions live in *_subs.mp4; surface that on the post page
         # so the plain Threads text caption isn't confused with video subs.
         has_burned_captions = bool(clip_path and clip_path.endswith("_subs.mp4"))
+        _clip_lines, clip_transcript_text = _load_clip_transcript(
+            cand, cut.trim_segments if cut else "",
+        )
         snap = session.execute(
             select(MetricSnapshot).where(MetricSnapshot.post_pk == p.id)
             .order_by(MetricSnapshot.captured_at.desc()).limit(1)
@@ -1493,11 +1704,13 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "pid": p.id, "status": p.status, "caption": p.caption or "",
             "permalink": p.permalink, "source": p.source, "error": p.error,
             "candidate_id": cand.id if cand else None,
+            "cut_id": cut.id if cut else None,
             "channel_sign": cand.channel.call_sign if (cand and cand.channel) else "",
             "video_title": cand.title if cand else "",
-            "clip_title": cand.clip_title if cand else "",
+            "clip_title": cut.clip_title if cut else "",
             "has_clip": has_clip,
             "has_burned_captions": has_burned_captions,
+            "clip_transcript_text": clip_transcript_text,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
             "is_breaking": bool(p.is_breaking),
@@ -1578,40 +1791,82 @@ def threads_connect(code: str = Form(...), next: str = Form("/posts")):
 
 # --- Archive -----------------------------------------------------------------
 
-@app.get("/archive", response_class=HTMLResponse)
-def archive_page(request: Request, country: str = "", scope: str = "", msg: str = ""):
+@app.get("/archive")
+def archive_redirect(section: str = ""):
+    """Back-compat: the Archive page is now the Library's Videos section."""
+    return RedirectResponse("/library" + (f"?section={section}" if section else ""),
+                            status_code=307)
+
+
+@app.get("/library", response_class=HTMLResponse)
+def library_page(request: Request, section: str = "videos", msg: str = ""):
+    """The content library: Videos → Cuts → Posts, the three types that cascade
+    into each other, in one accordion. ``section`` sets which panel opens."""
+    if section not in ("videos", "cuts", "posts"):
+        section = "videos"
     with session_scope() as session:
-        query = (
+        # --- Videos (downloaded/archived source clips) ---
+        videos = session.execute(
             select(Candidate)
             .options(selectinload(Candidate.channel))
             .where(Candidate.status == STATUS_ARCHIVED)
             .order_by(Candidate.archived_at.desc())
-        )
-        channel_filters = []
-        if country:
-            channel_filters.append(Channel.country == country)
-        if scope:
-            channel_filters.append(Channel.scope == scope)
-        if channel_filters:
-            query = query.join(Channel, Candidate.channel_pk == Channel.id).where(*channel_filters)
-        items = session.execute(query).scalars().all()
-        statuses = _post_statuses_by_candidate(session, [c.id for c in items])
-        rows = [(c, workflow_state(session, c, post_statuses=statuses.get(c.id, set())))
-                for c in items]
-
-        # Filter options limited to countries/scopes that have archived items.
-        archived_channel_ids = select(Candidate.channel_pk).where(Candidate.status == STATUS_ARCHIVED)
-        countries = [
-            c for (c,) in session.execute(
-                select(Channel.country).where(Channel.id.in_(archived_channel_ids))
-                .distinct().order_by(Channel.country)
-            ).all() if c
+        ).scalars().all()
+        vids = [c.id for c in videos]
+        statuses = _post_statuses_by_candidate(session, vids)
+        exported_ids = _exported_cut_candidate_ids(session, vids)
+        cut_counts: dict[int, int] = {}
+        if vids:
+            for pk, n in session.execute(
+                select(Cut.candidate_pk, func.count(Cut.id))
+                .where(Cut.candidate_pk.in_(vids)).group_by(Cut.candidate_pk)
+            ).all():
+                cut_counts[pk] = n
+        video_rows = [
+            {"c": c,
+             "state": workflow_state(session, c, post_statuses=statuses.get(c.id, set()),
+                                     has_exported_cut=c.id in exported_ids),
+             "cut_count": cut_counts.get(c.id, 0)}
+            for c in videos
         ]
+
+        # --- Cuts (first-class trimmed clips) ---
+        cuts = session.execute(
+            select(Cut)
+            .options(selectinload(Cut.candidate).selectinload(Candidate.channel))
+            .order_by(Cut.created_at.desc())
+        ).scalars().all()
+        published_cut_pks = {
+            pk for (pk,) in session.execute(
+                select(ThreadsPost.cut_pk).where(
+                    ThreadsPost.status == "published", ThreadsPost.cut_pk.is_not(None)
+                ).distinct()
+            ).all()
+        }
+        cut_rows = [
+            {"cut": cut,
+             "exported": bool(cut.trimmed_clip_path),
+             "posted": cut.id in published_cut_pks,
+             "captioned": bool(cut.subtitled_clip_path)}
+            for cut in cuts
+        ]
+
+        # --- Posts (recent, any status) ---
+        posts = session.execute(
+            select(ThreadsPost)
+            .options(
+                selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+                selectinload(ThreadsPost.cut),
+            )
+            .order_by(ThreadsPost.created_at.desc()).limit(100)
+        ).scalars().all()
+
     return templates.TemplateResponse(
-        request, "archive.html",
-        {"rows": rows, "country": country, "scope": scope,
-         "countries": countries, "scopes": ["local", "national", "international"],
-         "filtering": bool(country or scope), "msg": msg, "active": "archive"},
+        request, "library.html",
+        {"video_rows": video_rows, "cut_rows": cut_rows, "posts": posts,
+         "section": section,
+         "counts": {"videos": len(video_rows), "cuts": len(cut_rows), "posts": len(posts)},
+         "msg": msg, "active": "library"},
     )
 
 
@@ -1714,6 +1969,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
 def posts_page(request: Request, msg: str = ""):
     post_opts = (
         selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+        selectinload(ThreadsPost.cut),
     )
     with session_scope() as session:
         # Two queries instead of three: active queue/drafts + recent history.
@@ -2019,7 +2275,10 @@ def trait_detail(request: Request, trait_name: str):
         ).scalar_one_or_none()
         posts = session.execute(
             select(ThreadsPost)
-            .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
+            .options(
+                selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+                selectinload(ThreadsPost.cut),
+            )
             .where(
                 ThreadsPost.status == "published",
                 func.concat(",", func.coalesce(ThreadsPost.footage_traits, ""), ",")
