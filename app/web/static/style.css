@@ -964,6 +964,58 @@ input[type="file"]::file-selector-button:hover {
   border-color: var(--muted);
 }
 
+/* Drag-and-drop upload zone (manual clip upload). */
+.dropzone {
+  position: relative;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--panel2);
+  padding: 30px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.dropzone:hover { border-color: var(--muted); background: var(--panel3); }
+.dropzone.is-dragover {
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--accent-soft);
+  box-shadow: var(--ring);
+}
+.dropzone.has-file { cursor: default; text-align: left; padding: 14px 16px; }
+/* The .dz-* display rules below would otherwise override the [hidden] attribute
+   (specificity), leaving both the prompt and the file row visible at once. */
+.dz-prompt[hidden], .dz-file[hidden] { display: none; }
+.dz-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+}
+.dz-prompt > svg { color: var(--muted); margin-bottom: 2px; transition: color 0.15s ease; }
+.dropzone.is-dragover .dz-prompt > svg { color: var(--accent); }
+.dz-title { font-size: 14px; font-weight: 650; color: var(--text); }
+.dz-sub { font-size: 12.5px; color: var(--muted); }
+.dz-browse { color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.dz-formats { font-size: 11px; color: var(--muted); letter-spacing: 0.5px; margin-top: 3px; }
+.dz-file { display: flex; align-items: center; gap: 12px; }
+.dz-file > svg { color: var(--accent); flex: none; }
+.dz-file-info { display: flex; flex-direction: column; min-width: 0; }
+.dz-file-name {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px;
+}
+.dz-file-size { font-size: 12px; color: var(--muted); }
+.dz-clear {
+  margin-left: auto; flex: none;
+  background: none; border: none; color: var(--muted);
+  font-size: 14px; line-height: 1; cursor: pointer;
+  padding: 5px 8px; border-radius: 6px;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.dz-clear:hover { color: var(--text); background: var(--panel3); }
+
 label {
   display: block;
   margin: 0 0 5px;

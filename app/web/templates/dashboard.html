@@ -113,15 +113,31 @@
               onclick="document.getElementById('upload-dialog').close()">✕</button>
     </div>
     <p class="meta" style="margin: 0 0 16px;">Runs through the same trim → caption → post
-      workflow. Transcribed locally.</p>
-    <div class="field">
-      <label>Video file</label>
+      workflow. Transcribed locally, and titled automatically by AI.</p>
+    <div class="dropzone" id="upload-drop">
       <input type="file" name="file" id="upload-file"
-             accept="video/mp4,video/quicktime,.mp4,.mov,.m4v,.mkv,.webm" required>
-    </div>
-    <div class="field" style="margin-top: 12px;">
-      <label>Title (optional)</label>
-      <input type="text" name="title" placeholder="Title (optional)">
+             accept="video/mp4,video/quicktime,.mp4,.mov,.m4v,.mkv,.webm" required hidden>
+      <div class="dz-prompt" id="dz-prompt">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 13v8"/><path d="m8 17 4-4 4 4"/>
+          <path d="M20 16.7A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25"/>
+        </svg>
+        <div class="dz-title">Drag &amp; drop your clip here</div>
+        <div class="dz-sub">or <span class="dz-browse">browse files</span></div>
+        <div class="dz-formats">MP4 · MOV · M4V · MKV · WEBM</div>
+      </div>
+      <div class="dz-file" id="dz-file" hidden>
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <path d="M14 2v6h6"/><path d="m10 11 5 3-5 3z"/></svg>
+        <div class="dz-file-info">
+          <span class="dz-file-name" id="dz-file-name"></span>
+          <span class="dz-file-size" id="dz-file-size"></span>
+        </div>
+        <button type="button" class="dz-clear" id="dz-clear" aria-label="Remove file" title="Remove">✕</button>
+      </div>
     </div>
     <div class="btn-group" style="margin-top: 18px; justify-content: flex-end;">
       <button type="button" class="btn ghost"
@@ -130,6 +146,57 @@
     </div>
   </form>
   <script>
+    (function () {
+      const dz = document.getElementById('upload-drop');
+      const input = document.getElementById('upload-file');
+      const prompt = document.getElementById('dz-prompt');
+      const fileBox = document.getElementById('dz-file');
+      const nameEl = document.getElementById('dz-file-name');
+      const sizeEl = document.getElementById('dz-file-size');
+      const clearBtn = document.getElementById('dz-clear');
+      const ACCEPT = ['.mp4', '.mov', '.m4v', '.mkv', '.webm'];
+
+      function fmtSize(b) {
+        if (b < 1024) return b + ' B';
+        if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+        if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+        return (b / 1073741824).toFixed(2) + ' GB';
+      }
+      function accepted(f) {
+        return ACCEPT.includes('.' + (f.name.split('.').pop() || '').toLowerCase());
+      }
+      function showFile(f) {
+        nameEl.textContent = f.name;
+        sizeEl.textContent = fmtSize(f.size);
+        prompt.hidden = true; fileBox.hidden = false; dz.classList.add('has-file');
+      }
+      function clearFile() {
+        input.value = '';
+        prompt.hidden = false; fileBox.hidden = true; dz.classList.remove('has-file');
+      }
+      dz.addEventListener('click', (e) => { if (!e.target.closest('#dz-clear')) input.click(); });
+      input.addEventListener('change', () => {
+        if (input.files.length) showFile(input.files[0]); else clearFile();
+      });
+      clearBtn.addEventListener('click', clearFile);
+      ['dragenter', 'dragover'].forEach((ev) => dz.addEventListener(ev, (e) => {
+        e.preventDefault(); dz.classList.add('is-dragover');
+      }));
+      ['dragleave', 'dragend'].forEach((ev) => dz.addEventListener(ev, (e) => {
+        if (!dz.contains(e.relatedTarget)) dz.classList.remove('is-dragover');
+      }));
+      dz.addEventListener('drop', (e) => {
+        e.preventDefault(); dz.classList.remove('is-dragover');
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (!files || !files.length) return;
+        if (!accepted(files[0])) { alert('Unsupported file type. Use: ' + ACCEPT.join(', ')); return; }
+        const dt = new DataTransfer();
+        dt.items.add(files[0]);
+        input.files = dt.files;
+        showFile(files[0]);
+      });
+    })();
+
     function onUploadSubmit() {
       const f = document.getElementById('upload-file');
       if (!f.files.length) { alert('Choose a video file first.'); return false; }

@@ -37,20 +37,26 @@
 <div class="chart-card">
   <div class="chart-head">
     <div class="card-title">Engagement over time</div>
-    <label class="meta">Metric
-      <select id="metric-select">
-        <option value="views">Views</option>
-        <option value="likes">Likes</option>
-        <option value="replies">Replies</option>
-        <option value="reposts">Reposts</option>
-        <option value="quotes">Quotes</option>
-        <option value="shares">Shares</option>
-      </select>
-    </label>
+    <div style="display: flex; align-items: center; gap: 16px;">
+      <label class="meta" style="display: inline-flex; align-items: center; gap: 6px;">
+        <input type="checkbox" id="show-daily" style="width: auto;"> Show daily averages
+      </label>
+      <label class="meta">Metric
+        <select id="metric-select">
+          <option value="views">Views</option>
+          <option value="likes">Likes</option>
+          <option value="replies">Replies</option>
+          <option value="reposts">Reposts</option>
+          <option value="quotes">Quotes</option>
+          <option value="shares">Shares</option>
+        </select>
+      </label>
+    </div>
   </div>
   <div class="chart-wrap"><canvas id="engagementChart"></canvas></div>
-  <div class="meta" style="margin-top: 6px;">Bold line is the trailing 7-day average per post; faint points are each
-    day's average. Grouped by the day each post was published.</div>
+  <div class="meta" style="margin-top: 6px;">The line is the trailing 7-day average per post. Toggle
+    <strong>Show daily averages</strong> to overlay each day's actual average — handy for spotting spikes, but a single
+    viral post can rescale the chart. Grouped by the day each post was published.</div>
 </div>
 
 {% if digest %}
@@ -174,7 +180,8 @@ if (window.Chart && TS.days && TS.days.length) {
           tension: 0.3, pointRadius: 0, spanGaps: true },
         { label: 'Daily avg / post', data: TS.metrics.views.daily_avg,
           borderColor: blue, backgroundColor: blue, borderWidth: 0,
-          pointRadius: 3, pointHoverRadius: 5, showLine: false, spanGaps: false },
+          pointRadius: 3, pointHoverRadius: 5, showLine: false, spanGaps: false,
+          hidden: true },
       ],
     },
     options: {
@@ -191,6 +198,13 @@ if (window.Chart && TS.days && TS.days.length) {
     engChart.data.datasets[1].data = TS.metrics[m].daily_avg;
     engChart.data.datasets[0].label = `7-day avg ${METRIC_LABELS[m].toLowerCase()} / post`;
     engChart.data.datasets[1].label = `Daily avg ${METRIC_LABELS[m].toLowerCase()} / post`;
+    engChart.update();
+  });
+
+  // Daily averages are hidden by default: a single viral outlier rescales the
+  // y-axis and flattens the 7-day line. The toggle overlays them on demand.
+  document.getElementById('show-daily').addEventListener('change', (e) => {
+    engChart.data.datasets[1].hidden = !e.target.checked;
     engChart.update();
   });
 }
