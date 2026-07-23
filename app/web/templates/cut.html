@@ -617,9 +617,10 @@ renderSegments();
   <div class="empty"><strong>No exported clip yet</strong>
     Do the <a href="/cut/{{ cut.id }}?step=trim">Trim</a> step first.</div>
 {% else %}
-<div class="canvas">
+<div class="post-layout">
+<div class="post-main">
 
-  {# ---- Media stage: the clip is the hero ---- #}
+  {# ---- Media stage: the clip is the hero (sticky while the rail scrolls) ---- #}
   <div class="media-stage">
     {% if cut.clip_title %}
       <div class="stage-title" title="Generated clip title">{{ cut.clip_title }}</div>
@@ -655,6 +656,9 @@ renderSegments();
         Re-trim</a>
     </div>
   </div>
+</div>{# /.post-main #}
+
+<div class="post-side">
 
   {# ---- 1 · Prepare ---- #}
   <section class="wf-section">
@@ -909,7 +913,8 @@ renderSegments();
       </div>
     </section>
   {% endif %}
-</div>
+</div>{# /.post-side #}
+</div>{# /.post-layout #}
 <script>
   async function copyCaption() {
     const btn = document.getElementById('copy-caption-btn');
