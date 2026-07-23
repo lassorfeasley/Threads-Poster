@@ -9,21 +9,25 @@
     <span class="cal-ev-sub"><span class="cal-ev-dot"></span>{{ e.time }}{% if e.pinned %} · pinned{% endif %}</span>
   </span>
 {% endmacro %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Calendar</h1>
-    <div class="sub">Posting windows
-      {% if windows_et %}({{ windows_et|join(' · ') }} ET){% endif %}
-      — drag a queued post onto an open window to pin it there.</div>
+{% import "components/toolbar.html" as ui %}
+{% set cal_actions %}
+  <div class="segmented cal-viewtoggle" role="tablist" aria-label="Switch calendar view">
+    <button type="button" class="seg-btn is-active" data-view="calendar" role="tab" aria-selected="true">Calendar</button>
+    <button type="button" class="seg-btn" data-view="queue" role="tab" aria-selected="false">Queue
+      {% if queue_count %}<span class="seg-count">{{ queue_count }}</span>{% endif %}</button>
   </div>
-  <div class="actions">
-    <div class="segmented cal-viewtoggle" role="tablist" aria-label="Switch calendar view">
-      <button type="button" class="seg-btn is-active" data-view="calendar" role="tab" aria-selected="true">Calendar</button>
-      <button type="button" class="seg-btn" data-view="queue" role="tab" aria-selected="false">Queue
-        {% if queue_count %}<span class="seg-count">{{ queue_count }}</span>{% endif %}</button>
-    </div>
+{% endset %}
+{% set cal_sub %}Posting windows {% if windows_et %}({{ windows_et|join(' · ') }} ET){% endif %} — drag a queued post onto an open window to pin it there.{% endset %}
+{{ ui.pagebar("Calendar", sub=cal_sub, actions=cal_actions) }}
+
+{% if failed_count %}
+<div class="card tight" style="margin-bottom: 14px; border-left: 3px solid var(--danger);">
+  <div class="meta" style="color: var(--danger);">
+    ⚠ {{ failed_count }} post{{ 's' if failed_count != 1 }} failed to publish and dropped out of the calendar.
+    <a href="/posts">Review &amp; re-queue on Posts →</a>
   </div>
 </div>
+{% endif %}
 
 <div class="cal-layout" id="cal-layout">
   <section class="cal-month" id="view-calendar">
@@ -46,46 +50,71 @@
     <div class="cal-grid cal-head">
       {% for d in dow %}<div class="cal-dow">{{ d }}</div>{% endfor %}
     </div>
+    {% set n_windows = (windows_et|length) or 3 %}
     <div class="cal-grid" id="cal-dnd">
       {% for week in weeks %}
         {% for day in week %}
           {% if day == 0 %}
             <div class="cal-cell out"></div>
           {% else %}
+          {# Bucket the day's events by their posting-window index so each cell
+             renders exactly n_windows equal-height slots. Events with no window
+             (e.g. off-window published posts) are surfaced as a small +N badge. #}
+          {% set win_map = {} %}
+          {% set ns = namespace(extras=[]) %}
+          {% for e in events.get(day, []) %}
+            {% if e.window_index is not none and e.window_index < n_windows %}
+              {% set _ = win_map.__setitem__(e.window_index, e) %}
+            {% else %}
+              {% set ns.extras = ns.extras + [e] %}
+            {% endif %}
+          {% endfor %}
           <div class="cal-cell {{ 'today' if day == today }}">
-            <div class="cal-daynum">{{ day }}</div>
-            {% for e in events.get(day, []) %}
-              {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind in ('queued', 'breaking') else ('pub' if e.kind == 'published' else 'draft')) %}
-              {% set label = e.title or e.caption %}
-              {% if e.kind == 'open' %}
-                <div class="cal-event {{ cls }} empty cal-drop"
-                     data-window-key="{{ e.window_key }}"
-                     title="{{ e.time }} · open window — drop a queued post here">
-                  <b>{{ e.time }}</b> <em>open</em></div>
-              {% elif e.kind == 'queued' and e.post_id %}
-                <div class="cal-event {{ cls }} card cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
-                     draggable="true"
-                     data-post-id="{{ e.post_id }}"
-                     data-window-key="{{ e.window_key }}"
-                     title="{{ e.time }} · queued{% if e.pinned %} (pinned){% endif %} · drag to another window · {{ label }}">
-                  <a href="/post/{{ e.post_id }}" class="cal-ev"
-                     onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
-                    {{ ev_card(e, label) }}
-                  </a>
-                </div>
-              {% elif e.post_id %}
-                <a class="cal-event {{ cls }} card" href="/post/{{ e.post_id }}"
-                   title="{{ e.time }} · {{ e.status }} · {{ label }}">
-                  <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
-              {% elif e.permalink %}
-                <a class="cal-event {{ cls }} card" href="{{ e.permalink }}" target="_blank"
-                   title="{{ e.time }} · {{ e.status }} · {{ label }}">
-                  <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
-              {% else %}
-                <span class="cal-event {{ cls }} card" title="{{ e.time }} · {{ e.status }} · {{ label }}">
-                  <span class="cal-ev">{{ ev_card(e, label) }}</span></span>
-              {% endif %}
-            {% endfor %}
+            <div class="cal-cell-head">
+              <span class="cal-daynum">{{ day }}</span>
+              {% if ns.extras %}<span class="cal-extra"
+                title="{{ ns.extras|length }} more post{{ 's' if ns.extras|length != 1 }} this day">+{{ ns.extras|length }}</span>{% endif %}
+            </div>
+            <div class="cal-slots">
+              {% for i in range(n_windows) %}
+                {% set e = win_map.get(i) %}
+                {% if e is none %}
+                  <div class="cal-slot vacant"
+                       title="{{ windows_et[i] if (windows_et and i < windows_et|length) else '' }} — no post"></div>
+                {% else %}
+                  {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind in ('queued', 'breaking') else ('pub' if e.kind == 'published' else 'draft')) %}
+                  {% set label = e.title or e.caption %}
+                  {% if e.kind == 'open' %}
+                    <div class="cal-event cal-slot {{ cls }} empty cal-drop"
+                         data-window-key="{{ e.window_key }}"
+                         title="{{ e.time }} · open window — drop a queued post here">
+                      <b>{{ e.time }}</b> <em>open</em></div>
+                  {% elif e.kind == 'queued' and e.post_id %}
+                    <div class="cal-event cal-slot {{ cls }} card cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
+                         draggable="true"
+                         data-post-id="{{ e.post_id }}"
+                         data-window-key="{{ e.window_key }}"
+                         title="{{ e.time }} · queued{% if e.pinned %} (pinned){% endif %} · drag to another window · {{ label }}">
+                      <a href="/post/{{ e.post_id }}" class="cal-ev"
+                         onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
+                        {{ ev_card(e, label) }}
+                      </a>
+                    </div>
+                  {% elif e.post_id %}
+                    <a class="cal-event cal-slot {{ cls }} card" href="/post/{{ e.post_id }}"
+                       title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                      <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
+                  {% elif e.permalink %}
+                    <a class="cal-event cal-slot {{ cls }} card" href="{{ e.permalink }}" target="_blank"
+                       title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                      <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
+                  {% else %}
+                    <span class="cal-event cal-slot {{ cls }} card" title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                      <span class="cal-ev">{{ ev_card(e, label) }}</span></span>
+                  {% endif %}
+                {% endif %}
+              {% endfor %}
+            </div>
           </div>
           {% endif %}
         {% endfor %}

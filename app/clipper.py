@@ -7,6 +7,7 @@ with the concat demuxer. Output goes to data/clips/.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -33,6 +34,53 @@ def _run_ffmpeg(args: list[str]) -> None:
                           capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
         raise ClipExportError(f"ffmpeg failed: {proc.stderr[-500:]}")
+
+
+def compress_to_fit(source_path: str | Path, max_bytes: int, *, audio_kbps: int = 128) -> Path:
+    """Re-encode ``source_path`` so the result fits under ``max_bytes``.
+
+    Threads only accepts video by URL, and the Supabase upload rejects anything
+    over the project's per-file limit (413 Payload too large) — which silently
+    fails the publish. We compute a target video bitrate from the clip duration
+    and the size budget so the output lands just under the ceiling in one pass.
+    Returns a temp file path (caller is responsible for cleanup); raises
+    ClipExportError if the clip can't be measured.
+    """
+    source = Path(source_path)
+    if not source.exists():
+        raise ClipExportError(f"Clip to compress not found: {source}")
+    duration = clip_duration(source)
+    if not duration or duration <= 0:
+        raise ClipExportError(f"Could not read duration of {source} to compress it")
+
+    # 0.92 leaves headroom for container/muxing overhead so we stay under the cap.
+    total_kbps = (max_bytes * 8 / 1000.0) / duration * 0.92
+    video_kbps = int(total_kbps - audio_kbps)
+    if video_kbps < 200:
+        # Clip is long enough that fitting the budget needs an aggressive bitrate;
+        # floor it so the video stays watchable and downscale to 720p to help.
+        video_kbps = 200
+    scale = ["-vf", "scale='min(1280,iw)':-2"] if video_kbps <= 1500 else []
+
+    fd, tmp_name = tempfile.mkstemp(prefix="compressed_", suffix=".mp4")
+    os.close(fd)
+    dest = Path(tmp_name)
+    _run_ffmpeg([
+        "-i", str(source),
+        *scale,
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-b:v", f"{video_kbps}k",
+        "-maxrate", f"{int(video_kbps * 1.45)}k", "-bufsize", f"{video_kbps * 2}k",
+        "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        str(dest),
+    ])
+    log.info(
+        "Compressed %s (%.1fMB) -> %.1fMB at ~%dkbps to fit %.1fMB cap",
+        source.name, source.stat().st_size / 1e6, dest.stat().st_size / 1e6,
+        video_kbps, max_bytes / 1e6,
+    )
+    return dest
 
 
 def export_supercut(source_path: str | Path, segments: list[dict], output_name: str) -> Path:

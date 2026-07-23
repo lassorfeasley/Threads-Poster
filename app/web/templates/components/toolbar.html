@@ -1,0 +1,101 @@
+{#
+  Reusable page toolbar component.
+
+  A single cohesive band at the top of the content area:
+    Row 1  header  — title (+ count / sub) on the left, key actions on the right
+    Row 2  tabs    — optional segmented control that scopes the view
+    Row 3  tools   — optional search + filter controls + view toggle
+
+  Fill only the slots you need. Pre-render slot HTML with {% set %} blocks and
+  pass them in (they are injected verbatim):
+
+    {% import "components/toolbar.html" as ui %}
+    {% set actions %}<button class="btn primary">＋ Add</button>{% endset %}
+    {% set filters %}
+      {{ ui.search(value=q) }}
+      {{ ui.select("status", ["new","all"], selected=status) }}
+      {{ ui.clear("/") if filtering }}
+    {% endset %}
+    {{ ui.pagebar("Dashboard", count=total, actions=actions, filters=filters,
+                  filter_action="/") }}
+
+  Behaviour is layered on by /static/toolbar.js via data- attributes, so the
+  markup stays presentational and each page keeps its own server/client model.
+#}
+
+{% macro pagebar(title, count=none, sub=none, actions='', tabs='', filters='',
+                 filter_action=none, sticky=true, crumbs='', title_extra='') %}
+<div class="pagebar{{ ' is-sticky' if sticky }}">
+  <div class="pagebar-inner">
+    <div class="pagebar-head">
+      <div class="pagebar-title">
+        {% if crumbs %}<div class="pagebar-crumbs">{{ crumbs|safe }}</div>{% endif %}
+        <h1>{{ title }}{% if count is not none %} <span class="pagebar-count">{{ count }}</span>{% endif %}{% if title_extra %} {{ title_extra|safe }}{% endif %}</h1>
+        {% if sub %}<div class="sub">{{ sub }}</div>{% endif %}
+      </div>
+      {% if actions %}<div class="pagebar-actions">{{ actions|safe }}</div>{% endif %}
+    </div>
+    {% if tabs %}<div class="pagebar-tabs">{{ tabs|safe }}</div>{% endif %}
+    {% if filters %}
+      {% if filter_action is not none %}
+      <form class="pagebar-tools" method="get" action="{{ filter_action }}" data-toolbar-form>
+        {{ filters|safe }}
+      </form>
+      {% else %}
+      <div class="pagebar-tools" data-toolbar>
+        {{ filters|safe }}
+      </div>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endmacro %}
+
+
+{# ---- Field helpers (reused across pages) ---- #}
+
+{# Search box. In a server form pass debounce=true to auto-submit; for client-side
+   filtering pass filter_target="#some-list" to filter [data-filter-row] in it. #}
+{% macro search(name='q', value='', placeholder='Search…', debounce=true, filter_target=none) %}
+<div class="tb-field tb-search">
+  <svg class="tb-search-ic" width="15" height="15" viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+  <input type="text" name="{{ name }}" value="{{ value }}" autocomplete="off"
+         placeholder="{{ placeholder }}"
+         {% if debounce %}data-toolbar-search{% endif %}
+         {% if filter_target %}data-filter-input data-filter-target="{{ filter_target }}"{% endif %}>
+</div>
+{% endmacro %}
+
+{# Native select that submits its form on change (server model) or filters a list.
+   `options` is a list of values or (value, label) pairs. #}
+{% macro select(name, options, selected='', label=none, submit=true, filter_target=none, filter_key=none, all_label=none) %}
+<label class="tb-field tb-select">
+  {% if label %}<span class="tb-label">{{ label }}</span>{% endif %}
+  <select name="{{ name }}"
+          {% if submit %}data-submit-on-change{% endif %}
+          {% if filter_target %}data-filter-input data-filter-target="{{ filter_target }}" data-filter-key="{{ filter_key or name }}"{% endif %}>
+    {% if all_label is not none %}<option value="">{{ all_label }}</option>{% endif %}
+    {% for opt in options %}
+      {% if opt is string %}
+        <option value="{{ opt }}" {{ "selected" if opt == selected }}>{{ opt }}</option>
+      {% else %}
+        <option value="{{ opt[0] }}" {{ "selected" if opt[0] == selected }}>{{ opt[1] }}</option>
+      {% endif %}
+    {% endfor %}
+  </select>
+</label>
+{% endmacro %}
+
+{% macro date(name, value='', label=none, submit=true) %}
+<label class="tb-field tb-date">
+  {% if label %}<span class="tb-label">{{ label }}</span>{% endif %}
+  <input type="date" name="{{ name }}" value="{{ value }}" {% if submit %}data-submit-on-change{% endif %}>
+</label>
+{% endmacro %}
+
+{# Reset link (server model) — render only when filters are active. #}
+{% macro clear(href) %}
+<a class="btn ghost sm tb-clear" href="{{ href }}">Clear</a>
+{% endmacro %}

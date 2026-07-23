@@ -1,33 +1,41 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="canvas">
-<div class="page-head">
-  <div class="titles">
-    <h1>Post
-      <span class="badge {{ 'supportive' if status == 'published' else ('hostile' if status == 'failed' else ('info' if status == 'queued' else '')) }}"
-            style="margin-left: 8px; vertical-align: middle;">{{ status }}</span>
-      {% if is_breaking and status == "queued" %}
-        <span class="badge hostile" style="margin-left: 4px; vertical-align: middle;">breaking</span>
-      {% endif %}
-    </h1>
-    <div class="sub">
-      <a href="/posts">← Back to Posts</a>
-      {% if candidate_id %} · from
-        <a href="/video/{{ candidate_id }}?step=cuts">{{ channel_sign or "video" }}</a>{% endif %}
-      {% if cut_id %} · <a href="/cut/{{ cut_id }}?step=post">cut</a>{% endif %}
-      {% if clip_title %} · {{ clip_title[:80] }}{% elif video_title %} · {{ video_title[:80] }}{% endif %}
-      {% if source == "threads" %} · <span class="badge">Threads history</span>{% endif %}
-    </div>
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{% set post_crumbs %}
+<nav class="crumbs" aria-label="Breadcrumb">
+  <a href="/posts" class="crumb">Posts</a>
+  {% if candidate_id %}
+    <span class="crumb-sep" aria-hidden="true">›</span>
+    <a href="/video/{{ candidate_id }}?step=cuts" class="crumb" title="Video{% if video_title %}: {{ video_title }}{% endif %}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      {{ channel_sign or "Video" }}{% if video_title %} · {{ video_title[:40] }}{% endif %}
+    </a>
+  {% endif %}
+  {% if cut_id %}
+    <span class="crumb-sep" aria-hidden="true">›</span>
+    <a href="/cut/{{ cut_id }}?step=post" class="crumb" title="Cut{% if clip_title %}: {{ clip_title }}{% endif %}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/></svg>
+      {{ clip_title[:44] if clip_title else "Cut" }}
+    </a>
+  {% endif %}
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  <span class="crumb crumb-current" aria-current="page">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+    Post
+  </span>
+  {% if source == "threads" %}<span class="badge">Threads history</span>{% endif %}
+</nav>
+{% endset %}
+{% set post_title_extra %}
+  <span class="badge {{ 'supportive' if status == 'published' else ('hostile' if status == 'failed' else ('info' if status == 'queued' else '')) }}">{{ status }}</span>
+  {% if is_breaking and status == "queued" %}<span class="badge hostile">breaking</span>{% endif %}
+{% endset %}
 
-{% if error %}
-<div class="card" style="border-color: var(--danger-border); max-width: var(--canvas-w);">
-  <div class="card-title" style="color: var(--danger);">Last error</div>
-  <div class="meta">{{ error }}</div>
-</div>
-{% endif %}
+<div class="canvas canvas-wide">
+{{ ui.pagebar("Post", crumbs=post_crumbs, title_extra=post_title_extra) }}
 
+<div class="post-layout">
+<div class="post-main">
 {# ---- Media stage ---- #}
 <div class="media-stage">
   {% if has_clip %}
@@ -75,6 +83,15 @@
     {% endif %}
   </div>
 </div>
+</div>{# /post-main #}
+
+<div class="post-side">
+{% if error %}
+<div class="card" style="border-color: var(--danger-border);">
+  <div class="card-title" style="color: var(--danger);">Last error</div>
+  <div class="meta">{{ error }}</div>
+</div>
+{% endif %}
 
 {% if status in ("draft", "queued", "failed") %}
   {# ---- Caption (editable) ---- #}
@@ -245,7 +262,9 @@
   {% endif %}
 </section>
 {% endif %}
-</div>
+</div>{# /post-side #}
+</div>{# /post-layout #}
+</div>{# /canvas #}
 
 <script>
   async function copyPostCaption(btn) {

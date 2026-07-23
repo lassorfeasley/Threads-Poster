@@ -1,11 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Posts</h1>
-    <div class="sub">Your Threads connection, the adaptive posting queue, and publish history.</div>
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{{ ui.pagebar("Posts",
+              sub="Your Threads connection, the adaptive posting queue, and publish history.") }}
 
 {% if not authenticated %}
 <div class="card">
@@ -62,22 +59,74 @@
 </div>
 {% endif %}
 
+{% if failed %}
+<div class="card tight" style="margin-top: 14px; border-left: 3px solid var(--danger);">
+  <div class="card-title" style="color: var(--danger);">Needs attention — {{ failed|length }} failed {{ "post" if failed|length == 1 else "posts" }}</div>
+  <p class="meta">These posts didn't publish and dropped out of the queue. Fix the issue (see the error), then re-queue or retry.</p>
+  <div class="post-list">
+    {% for p in failed %}
+    {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
+    <div class="post-card">
+      {% if cand and cand.thumbnail_url %}
+      <img class="pc-thumb" src="{{ cand.thumbnail_url }}" alt="" loading="lazy"
+           onerror="this.classList.add('is-broken')">
+      {% else %}
+      <div class="pc-thumb is-empty" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+      </div>
+      {% endif %}
+      <div class="pc-body">
+        <a class="item-title" href="/post/{{ p.id }}">{{ p.caption[:140] or "(open post)" }}</a>
+        <div class="badges">
+          <span class="badge hostile">failed</span>
+          <span class="meta">Added {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</span>
+        </div>
+        {% if p.error %}<div class="meta" style="color: var(--danger);">{{ p.error[:240] }}</div>{% endif %}
+        <div class="pc-actions">
+          <form class="inline" method="post" action="/post/{{ p.id }}/queue">
+            <input type="hidden" name="next" value="/posts">
+            <button class="sm" title="Put it back in the posting queue to retry">Re-queue</button></form>
+          <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
+                data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
+            <input type="hidden" name="next" value="/posts">
+            <button class="sm">Retry now</button></form>
+          <a class="sm" href="/post/{{ p.id }}/download-clip" download>Clip</a>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 {% if drafts %}
 <h2>Drafts</h2>
-<div class="table-wrap">
-<table>
-  <tr><th>Saved</th><th>Caption</th><th>From</th><th>Actions</th></tr>
+<div class="post-list">
   {% for p in drafts %}
-  <tr>
-    <td class="meta" style="white-space: nowrap;">{{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</td>
-    <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
-      {% if p.cut and p.cut.clip_title %}<div class="meta" title="Clip title">{{ p.cut.clip_title }}</div>{% endif %}</td>
-    <td class="meta">
-      {% if p.cut %}<a href="/cut/{{ p.cut.id }}?step=post">cut</a>
-      {% elif p.candidate %}<a href="/video/{{ p.candidate.id }}?step=cuts">{{ p.candidate.channel.call_sign }}</a>{% else %}—{% endif %}
-    </td>
-    <td>
-      <div class="btn-group" style="align-items:center; flex-wrap:wrap; gap:6px;">
+  {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
+  <div class="post-card">
+    {% if cand and cand.thumbnail_url %}
+    <img class="pc-thumb" src="{{ cand.thumbnail_url }}" alt="" loading="lazy"
+         onerror="this.classList.add('is-broken')">
+    {% else %}
+    <div class="pc-thumb is-empty" aria-hidden="true">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+    </div>
+    {% endif %}
+    <div class="pc-body">
+      <a class="item-title" href="/post/{{ p.id }}">{{ p.caption[:140] or "(open post)" }}</a>
+      <div class="badges">
+        <span class="badge">draft</span>
+        <span class="meta">Saved {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</span>
+        {% if p.cut %}<span class="meta">· <a href="/cut/{{ p.cut.id }}?step=post">cut</a></span>
+        {% elif p.candidate %}<span class="meta">· <a href="/video/{{ p.candidate.id }}?step=cuts">{{ p.candidate.channel.call_sign }}</a></span>{% endif %}
+      </div>
+      {% if p.cut and p.cut.clip_title %}<div class="meta" title="Clip title">{{ p.cut.clip_title }}</div>{% endif %}
+      <div class="pc-actions">
         <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
               data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
           <input type="hidden" name="next" value="/posts">
@@ -92,52 +141,60 @@
           <input type="hidden" name="next" value="/posts">
           <button class="reject sm" onclick="return confirm('Delete this draft?')">Delete</button></form>
       </div>
-    </td>
-  </tr>
+    </div>
+  </div>
   {% endfor %}
-</table>
 </div>
 {% endif %}
 
 {% if queued %}
 <h2>Queue <span class="meta">(FIFO · oldest first)</span></h2>
-<div class="table-wrap">
-<table>
-  <tr><th>#</th><th>Added</th><th>Caption</th><th>From</th><th>Status</th><th>Actions</th></tr>
+<div class="post-list">
   {% for p in queued %}
-  <tr>
-    <td class="meta">{{ loop.index }}</td>
-    <td class="meta" style="white-space: nowrap;">{{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</td>
-    <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
-      {% if p.is_breaking %}<span class="badge hostile">breaking</span>{% endif %}
-      {% if p.defer_count %}<span class="badge">deferred {{ p.defer_count }}×</span>{% endif %}
+  {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
+  <div class="post-card">
+    <div class="pc-rank" title="Queue position">{{ loop.index }}</div>
+    {% if cand and cand.thumbnail_url %}
+    <img class="pc-thumb" src="{{ cand.thumbnail_url }}" alt="" loading="lazy"
+         onerror="this.classList.add('is-broken')">
+    {% else %}
+    <div class="pc-thumb is-empty" aria-hidden="true">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+    </div>
+    {% endif %}
+    <div class="pc-body">
+      <a class="item-title" href="/post/{{ p.id }}">{{ p.caption[:140] or "(open post)" }}</a>
+      <div class="badges">
+        <span class="badge">{{ p.status }}</span>
+        {% if p.is_breaking %}<span class="badge hostile">breaking</span>{% endif %}
+        {% if p.defer_count %}<span class="badge">deferred {{ p.defer_count }}×</span>{% endif %}
+        <span class="meta">Added {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</span>
+        {% if p.cut %}<span class="meta">· <a href="/cut/{{ p.cut.id }}?step=post">cut</a></span>
+        {% elif p.candidate %}<span class="meta">· <a href="/video/{{ p.candidate.id }}?step=cuts">{{ p.candidate.channel.call_sign }}</a></span>{% endif %}
+      </div>
       {% if p.cut and p.cut.clip_title %}<div class="meta" title="Clip title">{{ p.cut.clip_title }}</div>{% endif %}
-    </td>
-    <td class="meta">
-      {% if p.cut %}<a href="/cut/{{ p.cut.id }}?step=post">cut</a>
-      {% elif p.candidate %}<a href="/video/{{ p.candidate.id }}?step=cuts">{{ p.candidate.channel.call_sign }}</a>{% else %}—{% endif %}
-    </td>
-    <td><span class="badge">{{ p.status }}</span></td>
-    <td style="white-space: nowrap;">
-      {% if p.status == "queued" %}
-      <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
-            data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
-        <input type="hidden" name="next" value="/posts">
-        <button class="sm">Post now</button></form>
-      <form class="inline" method="post" action="/post/{{ p.id }}/toggle-breaking">
-        <input type="hidden" name="next" value="/posts">
-        <button class="sm">{{ "Clear breaking" if p.is_breaking else "Mark breaking" }}</button></form>
-      <a class="sm" href="/post/{{ p.id }}/download-clip" download>Clip</a>
-      <button type="button" class="sm" data-caption="{{ p.caption }}"
-              onclick="copyPostCaption(this)">Copy caption</button>
-      <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
-        <input type="hidden" name="next" value="/posts">
-        <button class="reject sm" onclick="return confirm('Remove this from the queue?')">Remove</button></form>
-      {% else %}<span class="meta">publishing…</span>{% endif %}
-    </td>
-  </tr>
+      <div class="pc-actions">
+        {% if p.status == "queued" %}
+        <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
+              data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
+          <input type="hidden" name="next" value="/posts">
+          <button class="sm">Post now</button></form>
+        <form class="inline" method="post" action="/post/{{ p.id }}/toggle-breaking">
+          <input type="hidden" name="next" value="/posts">
+          <button class="sm">{{ "Clear breaking" if p.is_breaking else "Mark breaking" }}</button></form>
+        <a class="sm" href="/post/{{ p.id }}/download-clip" download>Clip</a>
+        <button type="button" class="sm" data-caption="{{ p.caption }}"
+                onclick="copyPostCaption(this)">Copy caption</button>
+        <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
+          <input type="hidden" name="next" value="/posts">
+          <button class="reject sm" onclick="return confirm('Remove this from the queue?')">Remove</button></form>
+        {% else %}<span class="meta">publishing…</span>{% endif %}
+      </div>
+    </div>
+  </div>
   {% endfor %}
-</table>
 </div>
 {% endif %}
 
@@ -221,7 +278,8 @@
           btn.textContent = '✓ Published';
           const link = s.permalink
             ? ' — <a href="' + s.permalink + '" target="_blank">open ↗</a>' : '';
-          btn.closest('td').innerHTML =
+          const slot = btn.closest('td') || btn.closest('.pc-actions');
+          if (slot) slot.innerHTML =
             '<span class="badge supportive">published</span>' + link;
         } else if (s.status === 'failed') {
           clearInterval(poll);

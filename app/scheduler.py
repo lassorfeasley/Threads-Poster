@@ -297,18 +297,35 @@ def _claim_and_publish(post_id: int, state_action: str) -> bool:
         if claimed != 1:
             return False
 
+    settings = load_settings()
+    retries = max(0, int(settings.get("scheduler.publish_retries", 1)))
+    retry_delay = max(0, int(settings.get("scheduler.publish_retry_delay_seconds", 30)))
+
     ok = False
     mark_publishing(post_id)
     try:
-        with session_scope() as session:
-            post = session.get(ThreadsPost, post_id)
-            if post is None:
-                return False
-            try:
-                publish_post(session, post)
-                ok = True
-            except Exception as exc:
-                log.warning("Queue post %s failed: %s", post_id, exc)
+        # Auto-retry once (by default) before giving up: a first-of-day publish
+        # can fail on a transient hiccup (token refresh, Meta processing) that
+        # succeeds on a second attempt, sparing the operator a silent failure.
+        for attempt in range(retries + 1):
+            with session_scope() as session:
+                post = session.get(ThreadsPost, post_id)
+                if post is None:
+                    return False
+                try:
+                    publish_post(session, post)
+                    ok = True
+                except Exception as exc:
+                    log.warning(
+                        "Queue post %s publish attempt %d/%d failed: %s",
+                        post_id, attempt + 1, retries + 1, exc,
+                    )
+            if ok:
+                break
+            if attempt < retries:
+                time.sleep(retry_delay)
+        if not ok:
+            log.warning("Queue post %s failed after %d attempt(s)", post_id, retries + 1)
     finally:
         clear_publishing(post_id)
 

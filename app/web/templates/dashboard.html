@@ -1,64 +1,77 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Dashboard</h1>
-    <div class="sub">New climate segments from your monitored channels. Review a match to start the clip workflow.</div>
-  </div>
-  <div class="actions">
-    <div class="monitor-status">
-      {% if monitor_running %}
-        <span class="badge info"><span class="dot"></span> monitor running</span>
-        <script>setTimeout(() => location.reload(), 10000);</script>
-      {% else %}
-        <span class="meta" title="{{ monitor_result }}">Monitor {{ 'never run' if monitor_last_refreshed == 'never' else 'last refreshed ' + monitor_last_refreshed }}</span>
-        <form method="post" action="/monitor/run">
-          <button type="submit" class="btn ghost icon-btn" title="Refresh monitor"
-                  aria-label="Refresh monitor">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M23 4v6h-6"/>
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-            </svg>
-          </button>
-        </form>
-      {% endif %}
-    </div>
-    <button type="button" class="btn ghost icon-btn" title="Paste a YouTube URL"
-            aria-label="Paste a YouTube URL" onclick="document.getElementById('url-dialog').showModal()">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-        <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-      </svg>
-    </button>
-    <button type="button" class="btn ghost icon-btn" title="Upload your own clip"
-            aria-label="Upload your own clip" onclick="document.getElementById('upload-dialog').showModal()">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 15V4M8 8l4-4 4 4"/>
-        <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
-      </svg>
-    </button>
-    <div class="view-toggle" role="group" aria-label="Switch view">
-      <a class="view-seg is-active" aria-current="page" title="Table view" aria-label="Table view"
-         href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+{% import "components/toolbar.html" as ui %}
+
+{% set dash_actions %}
+  <div class="tb-group" role="group" aria-label="Manual upload">
+    <span class="tb-group-label">Manual upload</span>
+    <div class="tb-group-btns">
+      <button type="button" class="btn ghost icon-btn" title="Paste a YouTube URL"
+              aria-label="Paste a YouTube URL" onclick="document.getElementById('url-dialog').showModal()">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="4" width="18" height="16" rx="1.5"/>
-          <path d="M3 9h18M3 14h18M9 9v11"/>
+          <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
         </svg>
-      </a>
-      <a class="view-seg" title="Triage view" aria-label="Triage view"
-         href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+      </button>
+      <button type="button" class="btn ghost icon-btn" title="Upload your own clip"
+              aria-label="Upload your own clip" onclick="document.getElementById('upload-dialog').showModal()">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M5 4v16M9 5.5v13a1 1 0 0 0 1.5.86l9-6.5a1 1 0 0 0 0-1.72l-9-6.5A1 1 0 0 0 9 5.5z"/>
+          <path d="M12 15V4M8 8l4-4 4 4"/>
+          <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
         </svg>
-      </a>
+      </button>
     </div>
   </div>
-</div>
+{% endset %}
+
+{% set dash_tabs %}
+  <div class="segmented" role="tablist" aria-label="Switch list view">
+    <button type="button" class="seg-btn is-active" role="tab" aria-selected="true"
+            data-tab="candidates" onclick="setDashTab('candidates')">
+      Candidates <span class="seg-count">{{ total_matches }}</span>
+    </button>
+    <button type="button" class="seg-btn" role="tab" aria-selected="false"
+            data-tab="inprogress" onclick="setDashTab('inprogress')">
+      Selected clips to trim <span class="seg-count">{{ in_progress|length }}</span>
+    </button>
+    <button type="button" class="seg-btn" role="tab" aria-selected="false"
+            data-tab="trimmed" onclick="setDashTab('trimmed')">
+      Trimmed, not posted <span class="seg-count">{{ trimmed|length }}</span>
+    </button>
+  </div>
+{% endset %}
+
+{% set dash_filters %}
+  {{ ui.search(name="q", value=q, placeholder="title, description, keywords…") }}
+  <div class="tb-field">
+    <span class="tb-label">Keywords</span>
+    <details class="combo" id="keyword-combo">
+      <summary class="combo-summary">
+        <span id="keyword-summary">{{ (keyword|length ~ " selected") if keyword else "All keywords" }}</span>
+        <svg class="combo-caret" width="10" height="6" viewBox="0 0 10 6" fill="none"
+             stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 1l4 4 4-4"/></svg>
+      </summary>
+      <div class="combo-panel">
+        {% for k in keywords_options %}
+        <label class="combo-opt">
+          <input type="checkbox" name="keyword" value="{{ k }}" {{ "checked" if k in keyword }}> {{ k }}
+        </label>
+        {% endfor %}
+      </div>
+    </details>
+  </div>
+  {{ ui.select("status", ["new", "approved", "archived", "rejected", "failed", "all"], selected=status, label="Status") }}
+  {{ ui.date("date_from", value=date_from, label="From") }}
+  {{ ui.date("date_to", value=date_to, label="To") }}
+  {% if filtering %}{{ ui.clear("/") }}{% endif %}
+{% endset %}
+
+{{ ui.pagebar("Dashboard", actions=dash_actions,
+              filters=dash_filters, filter_action="/") }}
+
+<div class="list-tabs">{{ dash_tabs }}</div>
 
 <dialog id="url-dialog" class="modal">
   <form method="post" action="/upload-url" id="url-form" onsubmit="return onUrlSubmit()">
@@ -127,137 +140,52 @@
   </script>
 </dialog>
 
-<div class="card tight" id="filter-card">
-  <form method="get" action="/" id="filter-form">
-    <div class="form-row single-row">
-      <div class="field search">
-        <label>Search</label>
-        <input type="text" name="q" id="q-input" value="{{ q }}" autocomplete="off"
-               placeholder="title, description, keywords…" oninput="onSearchInput()">
-      </div>
-      <div class="field">
-        <label>Keywords</label>
-        <details class="combo" id="keyword-combo">
-          <summary class="combo-summary">
-            <span id="keyword-summary">{{ (keyword|length ~ " selected") if keyword else "All keywords" }}</span>
-            <svg class="combo-caret" width="10" height="6" viewBox="0 0 10 6" fill="none"
-                 stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 1l4 4 4-4"/></svg>
-          </summary>
-          <div class="combo-panel">
-            {% for k in keywords_options %}
-            <label class="combo-opt">
-              <input type="checkbox" name="keyword" value="{{ k }}" {{ "checked" if k in keyword }}> {{ k }}
-            </label>
-            {% endfor %}
-          </div>
-        </details>
-      </div>
-      <div class="field">
-        <label>Status</label>
-        <select name="status" onchange="this.form.requestSubmit()">
-          {% for s in ["new", "approved", "archived", "rejected", "failed", "all"] %}
-          <option value="{{ s }}" {{ "selected" if s == status }}>{{ s }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div class="field date"><label>From</label>
-        <input type="date" name="date_from" value="{{ date_from }}" onchange="this.form.requestSubmit()"></div>
-      <div class="field date"><label>To</label>
-        <input type="date" name="date_to" value="{{ date_to }}" onchange="this.form.requestSubmit()"></div>
-      <div class="field btn-group">
-        {% if filtering %}<a class="btn ghost" href="/">Clear</a>{% endif %}
-      </div>
-    </div>
-  </form>
-  <script>
-    // Live filtering: selects/dates/keywords submit on change (inline above);
-    // the search box submits on a short debounce so typing isn't interrupted,
-    // and focus + caret are restored after the reload.
-    let searchTimer = null;
-    function onSearchInput() {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => {
-        try { sessionStorage.setItem('focusSearch', '1'); } catch (e) {}
-        document.getElementById('filter-form').requestSubmit();
-      }, 400);
-    }
-    (function restoreSearchFocus() {
-      let flag = null;
-      try { flag = sessionStorage.getItem('focusSearch'); sessionStorage.removeItem('focusSearch'); } catch (e) {}
-      if (flag) {
-        const el = document.getElementById('q-input');
-        if (el) { el.focus(); const v = el.value; el.value = ''; el.value = v; }
-      }
-    })();
-    // Keyword combo: apply the filter once when the dropdown closes (so several
-    // keywords can be toggled in one go), and close it when clicking outside.
-    (function () {
-      const combo = document.getElementById('keyword-combo');
-      if (!combo) return;
-      let dirty = false;
-      combo.querySelectorAll('input[type="checkbox"]').forEach(cb =>
-        cb.addEventListener('change', () => { dirty = true; }));
-      combo.addEventListener('toggle', () => {
-        if (!combo.open && dirty) {
-          dirty = false;
-          document.getElementById('filter-form').requestSubmit();
-        }
-      });
-      document.addEventListener('click', (e) => {
-        if (combo.open && !combo.contains(e.target)) combo.open = false;
-      });
-    })();
-  </script>
-  <div style="margin-top: 10px;">
-    <a class="meta" href="/?status={{ status }}&q={{ q }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ 0 if show_hidden else 1 }}">
-      {{ "Hide" if show_hidden else "Show" }} below-threshold matches (score &lt; {{ threshold }})</a>
-  </div>
-</div>
-
-<div class="segmented" role="tablist" aria-label="Switch list view">
-  <button type="button" class="seg-btn is-active" role="tab" aria-selected="true"
-          data-tab="candidates" onclick="setDashTab('candidates')">
-    Candidates <span class="seg-count">{{ total_matches }}</span>
-  </button>
-  <button type="button" class="seg-btn" role="tab" aria-selected="false"
-          data-tab="inprogress" onclick="setDashTab('inprogress')">
-    Selected clips to trim <span class="seg-count">{{ in_progress|length }}</span>
-  </button>
-</div>
-
 <div id="inprogress-panel" class="list-panel" hidden>
 {% if in_progress %}
-<div id="in-progress-section">
+<div id="in-progress-section" class="card-grid">
 {% for c, state in in_progress %}
-<div class="vrow" tabindex="0" role="link"
+<div class="media-card is-clickable" tabindex="0" role="link"
      onclick="location.href='/video/{{ c.id }}'"
      onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
      {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
-  <div class="vtop">
-    <a class="item-title" href="/video/{{ c.id }}" onclick="event.stopPropagation()">{{ c.title }}</a>
-    {% if c.clip_title %}<span class="vmarket" title="Generated clip title">{{ c.clip_title }}</span>{% endif %}
-    <span class="vmarket">{{ c.channel.call_sign }} · {{ c.channel.market }}
-      {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d %H:%M") }}{% endif %}
-      {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
-    <span class="vx">
+  <div class="thumb-wrap{{ '' if c.thumbnail_url else ' is-empty' }}">
+    {% if c.thumbnail_url %}
+    <img src="{{ c.thumbnail_url }}" alt="" loading="lazy"
+         onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
+    {% else %}
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+    {% endif %}
+    <span class="thumb-badge">
       {% if state.post_failed %}<span class="badge hostile">post failed — retry</span>
       {% elif state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
       {% elif state.current == "trim" %}<span class="badge score-lo">ready to trim</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
-      <a class="btn sm" href="/video/{{ c.id }}" onclick="event.stopPropagation()">Continue →</a>
-      <button class="reject sm" title="Delete this clip from your workflow"
-              onclick="event.stopPropagation(); deleteRow({{ c.id }}, this, 'Remove this clip from your workflow? You can restore it later from Archive.')">✕</button>
     </span>
-  </div>
-  <div class="filmstrip mini" data-cid="{{ c.id }}"></div>
-  <div class="vtags">
-    {% if c.relevance_score is not none %}
-      <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
-            title="Climate relevance">{{ "%.2f"|format(c.relevance_score) }}</span>
+    {% if c.duration_seconds %}
+    <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>
     {% endif %}
-    {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
-    {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
+    <button class="mc-x" title="Delete this clip from your workflow" aria-label="Delete clip"
+            onclick="event.stopPropagation(); deleteRow({{ c.id }}, this, 'Remove this clip from your workflow? You can restore it later from Archive.')">✕</button>
+  </div>
+  <div class="mc-body">
+    <div class="item-title">{{ c.title }}</div>
+    {% if c.clip_title %}<div class="meta clip-title" title="Generated clip title">{{ c.clip_title }}</div>{% endif %}
+    <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
+      {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
+    <div class="badges">
+      {% if c.relevance_score is not none %}
+        <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
+              title="Climate relevance">{{ "%.2f"|format(c.relevance_score) }}</span>
+      {% endif %}
+      {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
+      {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
+    </div>
+    <div class="mc-actions">
+      <a class="btn sm" href="/video/{{ c.id }}" onclick="event.stopPropagation()">Continue →</a>
+    </div>
   </div>
 </div>
 {% endfor %}
@@ -271,10 +199,99 @@
 {% endif %}
 </div>
 
+<div id="trimmed-panel" class="list-panel" hidden>
+{% if trimmed %}
+<div id="trimmed-section" class="card-grid">
+{% for c, state in trimmed %}
+<div class="media-card is-clickable" tabindex="0" role="link"
+     onclick="location.href='/video/{{ c.id }}'"
+     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
+     {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
+  <div class="thumb-wrap{{ '' if c.thumbnail_url else ' is-empty' }}">
+    {% if c.thumbnail_url %}
+    <img src="{{ c.thumbnail_url }}" alt="" loading="lazy"
+         onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
+    {% else %}
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+    {% endif %}
+    <span class="thumb-badge">
+      {% if state.post_failed %}<span class="badge hostile">post failed — retry</span>
+      {% else %}<span class="badge supportive">ready to schedule</span>{% endif %}
+    </span>
+    {% if c.duration_seconds %}
+    <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>
+    {% endif %}
+    <button class="mc-x" title="Delete this clip from your workflow" aria-label="Delete clip"
+            onclick="event.stopPropagation(); deleteRow({{ c.id }}, this, 'Remove this clip from your workflow? You can restore it later from Archive.')">✕</button>
+  </div>
+  <div class="mc-body">
+    <div class="item-title">{{ c.title }}</div>
+    {% if c.clip_title %}<div class="meta clip-title" title="Generated clip title">{{ c.clip_title }}</div>{% endif %}
+    <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
+      {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
+    <div class="mc-actions">
+      <a class="btn sm" href="/video/{{ c.id }}" onclick="event.stopPropagation()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+        Schedule</a>
+    </div>
+  </div>
+</div>
+{% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  <span class="icon">◎</span>
+  <strong>Nothing waiting to post</strong>
+  Trimmed clips that haven't been posted yet will show up here.
+</div>
+{% endif %}
+</div>
+
 <div id="candidates-panel" class="list-panel">
-<h2>{{ "Results" if filtering else "New matches" }}
-  ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})
-  <span class="meta" style="font-weight: 400;">· ranked by relevance + visual appeal</span></h2>
+<div class="panel-head">
+  <h2>{{ "Results" if filtering else "New matches" }}
+    ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})
+    <span class="meta" style="font-weight: 400;">· ranked by relevance + visual appeal</span></h2>
+  <div class="monitor-status">
+    {% if monitor_running %}
+      <span class="badge info"><span class="dot"></span> monitor running</span>
+      <script>setTimeout(() => location.reload(), 10000);</script>
+    {% else %}
+      <span class="meta" title="{{ monitor_result }}">Monitor {{ 'never run' if monitor_last_refreshed == 'never' else 'last refreshed ' + monitor_last_refreshed }}</span>
+      <form method="post" action="/monitor/run">
+        <button type="submit" class="btn ghost icon-btn" title="Refresh monitor"
+                aria-label="Refresh monitor">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M23 4v6h-6"/>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+          </svg>
+        </button>
+      </form>
+    {% endif %}
+  </div>
+  <div class="view-toggle" role="group" aria-label="Switch view">
+    <a class="view-seg is-active" aria-current="page" title="Table view" aria-label="Table view"
+       href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="16" rx="1.5"/>
+        <path d="M3 9h18M3 14h18M9 9v11"/>
+      </svg>
+    </a>
+    <a class="view-seg" title="Triage view" aria-label="Triage view"
+       href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 4v16M9 5.5v13a1 1 0 0 0 1.5.86l9-6.5a1 1 0 0 0 0-1.72l-9-6.5A1 1 0 0 0 9 5.5z"/>
+      </svg>
+    </a>
+  </div>
+</div>
 {% if date_defaulted %}
   <div class="meta" style="margin: -6px 0 12px;">Showing today + yesterday by publish date.
     <a href="/?status=new{{ '&show_hidden=1' if show_hidden else '' }}">Show all dates</a></div>
@@ -296,53 +313,71 @@
   </div>
 {% endif %}
 
+<div class="card-grid">
 {% for c in candidates %}
-<div class="vrow" tabindex="0" role="link"
+<div class="media-card is-clickable" tabindex="0" role="link"
      onclick="location.href='/video/{{ c.id }}'"
      onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
      {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
-  <div class="vtop">
-    <a class="item-title" href="/video/{{ c.id }}" onclick="event.stopPropagation()">{{ c.title }}</a>
-    <span class="vmarket">{{ c.channel.call_sign }} · {{ c.channel.market }} ·
-      {{ c.published_at.strftime("%b %-d %H:%M") if c.published_at else "?" }}
-      {%- if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}</span>
-    {% if c.status == "new" %}
-    <span class="vx">
-      <button class="reject sm" title="Reject"
-              onclick="event.stopPropagation(); deleteRow({{ c.id }}, this)">✕</button>
-    </span>
+  <div class="thumb-wrap{{ '' if c.thumbnail_url else ' is-empty' }}">
+    {% if c.thumbnail_url %}
+    <img src="{{ c.thumbnail_url }}" alt="" loading="lazy"
+         onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
+    {% else %}
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
     {% endif %}
-  </div>
-  <div class="filmstrip mini" data-cid="{{ c.id }}"></div>
-  <div class="vtags">
     {% if c.relevance_score is not none %}
+    <span class="thumb-badge">
       <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
             title="Climate relevance score">{{ "%.2f"|format(c.relevance_score) }}</span>
+    </span>
     {% endif %}
-    {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
-    {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
-    {% if c.status != "new" %}<span class="badge">{{ c.status }}</span>{% endif %}
+    {% if c.duration_seconds %}
+    <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>
+    {% endif %}
+    {% if c.status == "new" %}
+    <button class="mc-x" title="Reject" aria-label="Reject"
+            onclick="event.stopPropagation(); deleteRow({{ c.id }}, this)">✕</button>
+    {% endif %}
+  </div>
+  <div class="mc-body">
+    <div class="item-title">{{ c.title }}</div>
+    <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
+      {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
+    <div class="badges mc-foot">
+      {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
+      {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
+      {% if c.status != "new" %}<span class="badge">{{ c.status }}</span>{% endif %}
+    </div>
   </div>
 </div>
 {% endfor %}
 </div>
+</div>
 
 <script>
-// Segmented toggle: switch between the Candidates list and the in-progress
-// ("Selected clips to trim") list. The chosen tab is persisted in localStorage
-// so it survives the periodic 10s auto-reload while the monitor is running.
+// Segmented toggle: switch between the Candidates list, the clips-to-trim
+// list, and the trimmed-but-not-posted list. The chosen tab is persisted in
+// localStorage so it survives the periodic 10s auto-reload while monitoring.
+const DASH_PANELS = {
+  candidates: 'candidates-panel',
+  inprogress: 'inprogress-panel',
+  trimmed: 'trimmed-panel',
+};
 function setDashTab(tab) {
-  const isCandidates = tab !== 'inprogress';
-  const candPanel = document.getElementById('candidates-panel');
-  const progPanel = document.getElementById('inprogress-panel');
-  if (candPanel) candPanel.hidden = !isCandidates;
-  if (progPanel) progPanel.hidden = isCandidates;
+  if (!DASH_PANELS[tab]) tab = 'candidates';
+  for (const [name, id] of Object.entries(DASH_PANELS)) {
+    const panel = document.getElementById(id);
+    if (panel) panel.hidden = name !== tab;
+  }
   document.querySelectorAll('.segmented .seg-btn').forEach(btn => {
-    const active = btn.dataset.tab === (isCandidates ? 'candidates' : 'inprogress');
+    const active = btn.dataset.tab === tab;
     btn.classList.toggle('is-active', active);
     btn.setAttribute('aria-selected', active ? 'true' : 'false');
   });
-  try { localStorage.setItem('dashTab', isCandidates ? 'candidates' : 'inprogress'); } catch (e) {}
+  try { localStorage.setItem('dashTab', tab); } catch (e) {}
 }
 (function restoreDashTab() {
   let tab = 'candidates';
@@ -350,8 +385,8 @@ function setDashTab(tab) {
   setDashTab(tab);
 })();
 
-// Remove a clip in place (no full-page reload, so we don't re-fetch every
-// row's filmstrip). Rejected clips can be restored from Archive.
+// Remove a clip in place (no full-page reload). Rejected clips can be
+// restored from Archive.
 async function deleteRow(cid, btn, confirmMsg) {
   if (confirmMsg && !confirm(confirmMsg)) return;
   btn.disabled = true;
@@ -360,88 +395,18 @@ async function deleteRow(cid, btn, confirmMsg) {
       method: 'POST', headers: { 'Accept': 'application/json' },
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const row = btn.closest('.vrow');
+    const row = btn.closest('.media-card');
+    const section = row.closest('#in-progress-section, #trimmed-section');
     row.style.transition = 'opacity .15s ease';
     row.style.opacity = '0';
     setTimeout(() => {
-      const section = document.getElementById('in-progress-section');
       row.remove();
-      if (section && !section.querySelector('.vrow')) section.remove();
+      if (section && !section.querySelector('.media-card')) section.remove();
     }, 150);
   } catch (e) {
     alert('Delete failed: ' + e);
     btn.disabled = false;
   }
 }
-
-// Lazy-load mini filmstrips as rows scroll into view, max 2 fetches at a
-// time (uncached storyboards trigger a yt-dlp metadata extraction).
-const TILE_W = 64, TILE_GAP = 3;
-const stripQueue = [];
-let stripActive = 0;
-
-function pumpStrips() {
-  while (stripActive < 2 && stripQueue.length) {
-    stripActive++;
-    loadStrip(stripQueue.shift()).finally(() => { stripActive--; pumpStrips(); });
-  }
-}
-
-async function loadStrip(strip) {
-  try {
-    const r = await fetch(`/video/${strip.dataset.cid}/storyboard`);
-    const sb = await r.json();
-    if (!sb.available || !sb.fragments || !sb.fragments.length) return;
-
-    const cols = sb.columns, rows = sb.rows;
-    const tw = sb.tile_width, th = sb.tile_height;
-    const perSheet = cols * rows;
-    const tiles = [];
-    let t = 0;
-    for (const frag of sb.fragments) {
-      const dur = (frag.duration || 0) / perSheet;
-      for (let i = 0; i < perSheet; i++) {
-        tiles.push({ url: frag.url, index: i, time: t });
-        t += dur;
-      }
-    }
-    if (!tiles.length) return;
-
-    // Representative sample: as many evenly-spaced frames as fit the strip.
-    const count = Math.max(3, Math.floor((strip.clientWidth + TILE_GAP) / (TILE_W + TILE_GAP)));
-    const seen = new Set();
-    const picks = [];
-    for (let k = 0; k < count; k++) {
-      const i = Math.round(k * (tiles.length - 1) / Math.max(count - 1, 1));
-      if (!seen.has(i)) { seen.add(i); picks.push(tiles[i]); }
-    }
-
-    const scale = TILE_W / tw;
-    const h = Math.round(th * scale);
-    for (const tile of picks) {
-      const col = tile.index % cols, row = Math.floor(tile.index / cols);
-      const m = Math.floor(tile.time / 60), s = Math.floor(tile.time % 60);
-      const cell = document.createElement('div');
-      cell.title = `${m}:${String(s).padStart(2, '0')}`;
-      cell.style.cssText = `flex:0 0 auto;width:${TILE_W}px;height:${h}px;border-radius:4px;
-        background-image:url('${tile.url.replace(/'/g, "%27")}');
-        background-position:-${Math.round(col * tw * scale)}px -${Math.round(row * th * scale)}px;
-        background-size:${Math.round(cols * tw * scale)}px ${Math.round(rows * th * scale)}px;`;
-      strip.appendChild(cell);
-    }
-    strip.classList.add('loaded');
-  } catch (e) { /* storyboard unavailable — placeholder stays */ }
-}
-
-const stripObserver = new IntersectionObserver((entries) => {
-  for (const en of entries) {
-    if (en.isIntersecting) {
-      stripObserver.unobserve(en.target);
-      stripQueue.push(en.target);
-      pumpStrips();
-    }
-  }
-}, { rootMargin: '300px' });
-document.querySelectorAll('.filmstrip.mini').forEach(el => stripObserver.observe(el));
 </script>
 {% endblock %}

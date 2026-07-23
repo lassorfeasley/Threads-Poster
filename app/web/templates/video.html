@@ -1,30 +1,25 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <div class="meta" style="margin-bottom: 6px;"><a href="/">← Dashboard</a></div>
-    <h1 style="margin-bottom: 4px;">{{ c.title }}</h1>
-    <div class="sub">
-      {{ c.channel.call_sign }} · {{ c.channel.market }} ·
-      {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
-      {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
-      · <a href="{{ c.url }}" target="_blank">YouTube ↗</a>
-      {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>{% endif %}
-    </div>
-  </div>
-  <div class="actions">
-    {% if c.status != "rejected" %}
-      <form method="post" action="/video/{{ c.id }}/reject"
-            onsubmit="return confirm({{ 'Reject this clip? It was already downloaded — the file stays on disk but the clip leaves your workflow. You can find it later with the Rejected status filter.' | tojson if state.scraped else 'Reject this clip?' | tojson }});">
-        <button class="reject sm" title="Reject this clip and remove it from the workflow">Reject clip</button>
-      </form>
-    {% else %}
-      <form method="post" action="/video/{{ c.id }}/unreject">
-        <button class="sm" title="Restore this rejected clip to the workflow">Un-reject</button>
-      </form>
-    {% endif %}
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{% set vid_crumbs %}<a href="/">← Dashboard</a>{% endset %}
+{% set vid_sub %}{{ c.channel.call_sign }} · {{ c.channel.market }} ·
+  {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
+  {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
+  · <a href="{{ c.url }}" target="_blank">YouTube ↗</a>
+  {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>{% endif %}{% endset %}
+{% set vid_actions %}
+  {% if c.status != "rejected" %}
+    <form method="post" action="/video/{{ c.id }}/reject"
+          onsubmit="return confirm({{ 'Reject this clip? It was already downloaded — the file stays on disk but the clip leaves your workflow. You can find it later with the Rejected status filter.' | tojson if state.scraped else 'Reject this clip?' | tojson }});">
+      <button class="reject sm" title="Reject this clip and remove it from the workflow">Reject clip</button>
+    </form>
+  {% else %}
+    <form method="post" action="/video/{{ c.id }}/unreject">
+      <button class="sm" title="Restore this rejected clip to the workflow">Un-reject</button>
+    </form>
+  {% endif %}
+{% endset %}
+{{ ui.pagebar(c.title, crumbs=vid_crumbs, sub=vid_sub, actions=vid_actions) }}
 
 {# ---- Workflow stepper ---- #}
 <div class="steps">

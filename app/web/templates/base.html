@@ -11,7 +11,16 @@
       var t = localStorage.getItem('theme') || 'dark';
       document.documentElement.setAttribute('data-theme', t);
     } catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
+    // Apply saved sidebar state pre-paint to avoid a collapse flash.
+    try {
+      if (localStorage.getItem('navCollapsed') === '1')
+        document.documentElement.classList.add('nav-collapsed');
+    } catch (e) {}
   })();
+  function toggleSidebar() {
+    var collapsed = document.documentElement.classList.toggle('nav-collapsed');
+    try { localStorage.setItem('navCollapsed', collapsed ? '1' : '0'); } catch (e) {}
+  }
   function toggleTheme() {
     var cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
     var next = cur === 'light' ? 'dark' : 'light';
@@ -25,6 +34,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400..800;1,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
+<script src="/static/toolbar.js?v={{ static_v }}" defer></script>
 </head>
 <body>
 <aside class="sidebar">
@@ -36,6 +46,12 @@
     </div>
     <div class="name">Climate Clip<small>Monitor &amp; Poster</small></div>
   </div>
+
+  <button class="nav-collapse" type="button" onclick="toggleSidebar()"
+          title="Collapse sidebar" aria-label="Collapse sidebar">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m11 17-5-5 5-5"/><path d="m18 17-5-5 5-5"/></svg>
+    <span class="label">Collapse</span>
+  </button>
 
   <div class="nav-section">Workflow</div>
   <a class="nav {{ 'active' if active == 'dashboard' }}" href="/">
@@ -91,8 +107,18 @@
   })();
 </script>
 <main>
-  {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
   {% block content %}{% endblock %}
 </main>
+{% if msg %}
+<div class="toast-wrap" aria-live="polite">
+  <div class="toast" role="status">
+    <span class="toast-ic">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+    </span>
+    <span class="toast-msg">{{ msg }}</span>
+    <button type="button" class="toast-x" aria-label="Dismiss">✕</button>
+  </div>
+</div>
+{% endif %}
 </body>
 </html>

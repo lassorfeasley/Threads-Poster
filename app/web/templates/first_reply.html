@@ -1,15 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>First reply</h1>
-    <div class="sub">
-      <a href="/engagement">← Back to Replies</a>
-      · Text automatically posted under every post this app publishes.
-      Failures never undo the main post — retry from the post page.
-    </div>
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{% set fr_sub %}<a href="/engagement">← Back to Replies</a> · Text automatically posted under every post this app publishes. Failures never undo the main post — retry from the post page.{% endset %}
+{{ ui.pagebar("First reply", sub=fr_sub) }}
 
 <div class="card">
   <form method="post" action="/engagement/first-reply">

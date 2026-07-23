@@ -1,104 +1,114 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Library</h1>
-    <div class="sub">Your content, in the order it cascades: <strong>Videos</strong> →
-      <strong>Cuts</strong> → <strong>Posts</strong>. Open a section to browse.</div>
+{% import "components/toolbar.html" as ui %}
+
+{% set lib_filters %}
+  {{ ui.search(name="q", placeholder="title, channel, caption…", debounce=false, filter_target="#lib-panels") }}
+{% endset %}
+{% set lib_tabs %}
+  <div class="segmented" role="tablist" aria-label="Switch library view">
+    <button type="button" class="seg-btn" role="tab" data-tab="videos" onclick="setLibTab('videos')">
+      Videos <span class="seg-count">{{ counts.videos }}</span>
+    </button>
+    <button type="button" class="seg-btn" role="tab" data-tab="cuts" onclick="setLibTab('cuts')">
+      Cuts <span class="seg-count">{{ counts.cuts }}</span>
+    </button>
+    <button type="button" class="seg-btn" role="tab" data-tab="posts" onclick="setLibTab('posts')">
+      Posts <span class="seg-count">{{ counts.posts }}</span>
+    </button>
   </div>
+{% endset %}
+{{ ui.pagebar("Library", filters=lib_filters) }}
+
+<div class="list-tabs">{{ lib_tabs }}</div>
+
+<div id="lib-panels">
+{# ============ VIDEOS ============ #}
+<div id="videos-panel" class="lib-panel">
+  {% if not video_rows %}
+    <div class="empty"><span class="icon">▤</span><strong>Nothing downloaded yet</strong>
+      Approve videos from the <a href="/">Dashboard</a> to download them.</div>
+  {% else %}
+  <div class="card-grid">
+    {% for row in video_rows %}
+    <a class="media-card" href="/video/{{ row.c.id }}?step=cuts"
+       data-filter-row data-search="{{ (row.c.title ~ ' ' ~ row.c.channel.call_sign ~ ' ' ~ row.c.channel.market) | lower }}">
+      <div class="thumb-wrap{{ '' if row.c.thumbnail_url else ' is-empty' }}">
+        {% if row.c.thumbnail_url %}
+        <img src="{{ row.c.thumbnail_url }}" alt="" loading="lazy" onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
+        {% else %}
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+        {% endif %}
+        {% if row.c.duration_seconds %}
+        <span class="thumb-dur">{{ row.c.duration_seconds // 60 }}:{{ "%02d"|format(row.c.duration_seconds % 60) }}</span>
+        {% endif %}
+      </div>
+      <div class="mc-body">
+        <div class="item-title">{{ row.c.title }}</div>
+        <div class="meta">
+          {{ row.c.channel.call_sign }} · {{ row.c.channel.market }}<br>
+          archived {{ row.c.archived_at.strftime("%b %-d, %Y") if row.c.archived_at else "?" }}
+        </div>
+        <div class="badges mc-foot">
+          {% if row.state.posted %}<span class="badge supportive">posted</span>
+          {% elif row.state.trimmed %}<span class="badge info">has cuts</span>
+          {% else %}<span class="badge score-lo">not cut yet</span>{% endif %}
+          {% if row.cut_count %}<span class="badge">{{ row.cut_count }} cut{{ "s" if row.cut_count != 1 }}</span>{% endif %}
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
 
-{# ============ VIDEOS ============ #}
-<details class="lib-section" {{ "open" if section == "videos" }}>
-  <summary>
-    <span class="lib-caret">▸</span>
-    <span class="lib-name">Videos</span>
-    <span class="badge">{{ counts.videos }}</span>
-    <span class="meta">Downloaded source clips with transcripts</span>
-  </summary>
-  <div class="lib-body">
-    {% if not video_rows %}
-      <div class="empty"><span class="icon">▤</span><strong>Nothing downloaded yet</strong>
-        Approve videos from the <a href="/">Dashboard</a> to download them.</div>
-    {% endif %}
-    {% for row in video_rows %}
-    <div class="card item">
-      <div class="row center">
-        <div class="grow stack-sm">
-          <a class="item-title" href="/video/{{ row.c.id }}?step=cuts">{{ row.c.title }}</a>
-          <div class="meta">
-            {{ row.c.channel.call_sign }} · {{ row.c.channel.market }} ·
-            archived {{ row.c.archived_at.strftime("%b %-d, %Y") if row.c.archived_at else "?" }} ·
-            transcript via {{ row.c.transcription_method or "?" }}
-          </div>
-          <div class="badges">
-            {% if row.state.posted %}<span class="badge supportive">posted</span>
-            {% elif row.state.trimmed %}<span class="badge info">has cuts</span>
-            {% else %}<span class="badge score-lo">not cut yet</span>{% endif %}
-            {% if row.cut_count %}<span class="badge">{{ row.cut_count }} cut{{ "s" if row.cut_count != 1 }}</span>{% endif %}
-            {% for k in row.c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
-          </div>
-        </div>
-        <div>
-          <a class="btn primary" href="/video/{{ row.c.id }}?step=cuts">Open →</a>
-        </div>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-</details>
-
 {# ============ CUTS ============ #}
-<details class="lib-section" {{ "open" if section == "cuts" }}>
-  <summary>
-    <span class="lib-caret">▸</span>
-    <span class="lib-name">Cuts</span>
-    <span class="badge">{{ counts.cuts }}</span>
-    <span class="meta">Trimmed clips, ready to caption &amp; post</span>
-  </summary>
-  <div class="lib-body">
-    <div class="btn-group" style="margin-bottom: 14px;">
-      {% if video_rows %}
-        <button type="button" class="btn primary"
-                onclick="document.getElementById('new-cut-dialog').showModal()">＋ New cut</button>
-      {% else %}
-        <span class="meta">Download a video from the <a href="/">Dashboard</a> first, then you can cut from it.</span>
-      {% endif %}
-    </div>
-    {% if not cut_rows %}
-      <div class="empty"><span class="icon">✂</span><strong>No cuts yet</strong>
-        Use <strong>＋ New cut</strong> above (or open a video) to pick the segments you want to post.</div>
+<div id="cuts-panel" class="lib-panel" hidden>
+  <div class="lib-toolbar">
+    {% if video_rows %}
+      <button type="button" class="btn primary"
+              onclick="document.getElementById('new-cut-dialog').showModal()">＋ New cut</button>
+    {% else %}
+      <span class="meta">Download a video from the <a href="/">Dashboard</a> first, then you can cut from it.</span>
     {% endif %}
+  </div>
+  {% if not cut_rows %}
+    <div class="empty"><span class="icon">✂</span><strong>No cuts yet</strong>
+      Use <strong>＋ New cut</strong> above (or open a video) to pick the segments you want to post.</div>
+  {% else %}
+  <div class="card-grid">
     {% for row in cut_rows %}
-    <div class="card item">
-      <div class="row center">
-        <div class="grow stack-sm">
-          <a class="item-title" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.exported else 'trim' }}">
-            {{ row.cut.clip_title or "Untitled cut" }}</a>
-          <div class="meta">
-            {% if row.cut.candidate %}
-              from <a href="/video/{{ row.cut.candidate.id }}?step=cuts">{{ row.cut.candidate.title[:70] }}</a>
-              · {{ row.cut.candidate.channel.call_sign if row.cut.candidate.channel else "" }}
-            {% endif %}
-            · created {{ row.cut.created_at.strftime("%b %-d, %Y") if row.cut.created_at else "?" }}
-          </div>
-          <div class="badges">
-            {% if row.posted %}<span class="badge supportive">posted</span>
-            {% elif row.exported %}<span class="badge info">exported — not posted</span>
-            {% else %}<span class="badge score-lo">not trimmed yet</span>{% endif %}
-            {% if row.captioned %}<span class="badge">captioned</span>{% endif %}
-          </div>
+    <a class="media-card" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.exported else 'trim' }}"
+       data-filter-row data-search="{{ ((row.cut.clip_title or '') ~ ' ' ~ (row.cut.candidate.title if row.cut.candidate else '')) | lower }}">
+      <div class="thumb-wrap{{ '' if (row.cut.candidate and row.cut.candidate.thumbnail_url) else ' is-empty' }}">
+        {% if row.cut.candidate and row.cut.candidate.thumbnail_url %}
+        <img src="{{ row.cut.candidate.thumbnail_url }}" alt="" loading="lazy" onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
+        {% else %}
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 4v16M9 5.5v13a1 1 0 0 0 1.5.86l9-6.5a1 1 0 0 0 0-1.72l-9-6.5A1 1 0 0 0 9 5.5z"/></svg>
+        {% endif %}
+      </div>
+      <div class="mc-body">
+        <div class="item-title">{{ row.cut.clip_title or "Untitled cut" }}</div>
+        <div class="meta">
+          {% if row.cut.candidate %}from {{ row.cut.candidate.title[:60] }}<br>{% endif %}
+          created {{ row.cut.created_at.strftime("%b %-d, %Y") if row.cut.created_at else "?" }}
         </div>
-        <div>
-          <a class="btn {{ '' if row.posted else 'primary' }}"
-             href="/cut/{{ row.cut.id }}?step={{ 'post' if row.exported else 'trim' }}">
-            {{ "Open" if row.posted else ("Post →" if row.exported else "Trim →") }}</a>
+        <div class="badges mc-foot">
+          {% if row.posted %}<span class="badge supportive">posted</span>
+          {% elif row.exported %}<span class="badge info">exported — not posted</span>
+          {% else %}<span class="badge score-lo">not trimmed yet</span>{% endif %}
+          {% if row.captioned %}<span class="badge">captioned</span>{% endif %}
         </div>
       </div>
-    </div>
+    </a>
     {% endfor %}
   </div>
-</details>
+  {% endif %}
+</div>
 
 <dialog id="new-cut-dialog" class="modal">
   <div class="modal-head">
@@ -123,50 +133,63 @@
 </dialog>
 
 {# ============ POSTS ============ #}
-<details class="lib-section" {{ "open" if section == "posts" }}>
-  <summary>
-    <span class="lib-caret">▸</span>
-    <span class="lib-name">Posts</span>
-    <span class="badge">{{ counts.posts }}</span>
-    <span class="meta">Everything drafted, queued, or published</span>
-  </summary>
-  <div class="lib-body">
-    {% if not posts %}
-      <div class="empty"><span class="icon">✦</span><strong>No posts yet</strong>
-        Post a cut to Threads and it'll show up here.</div>
-    {% endif %}
-    {% if posts %}
-    <div class="table-wrap">
-    <table>
-      <tr><th>When</th><th>Caption</th><th>From</th><th>Status</th><th>Link</th></tr>
-      {% for p in posts %}
-      <tr>
-        <td class="meta" style="white-space: nowrap;">
-          {{ (p.published_at or p.created_at).strftime("%b %-d %H:%M") if (p.published_at or p.created_at) else "—" }}</td>
-        <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
-          {% if p.cut and p.cut.clip_title %}<div class="meta" title="Clip title">{{ p.cut.clip_title }}</div>{% endif %}</td>
-        <td class="meta">
-          {% if p.cut %}<a href="/cut/{{ p.cut.id }}?step=post">cut</a>
-          {% elif p.candidate %}<a href="/video/{{ p.candidate.id }}?step=cuts">{{ p.candidate.channel.call_sign }}</a>
-          {% elif p.source == "threads" %}<span class="badge">Threads history</span>
-          {% else %}—{% endif %}
-        </td>
-        <td><span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span></td>
-        <td>{% if p.permalink %}<a href="{{ p.permalink }}" target="_blank">open ↗</a>{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </table>
-    </div>
-    {% endif %}
+<div id="posts-panel" class="lib-panel" hidden>
+  {% if not posts %}
+    <div class="empty"><span class="icon">✦</span><strong>No posts yet</strong>
+      Post a cut to Threads and it'll show up here.</div>
+  {% else %}
+  <div class="table-wrap">
+  <table>
+    <tr><th>When</th><th>Caption</th><th>From</th><th>Status</th><th>Link</th></tr>
+    {% for p in posts %}
+    <tr data-filter-row data-search="{{ ((p.caption or '') ~ ' ' ~ (p.cut.clip_title if (p.cut and p.cut.clip_title) else '')) | lower }}">
+      <td class="meta" style="white-space: nowrap;">
+        {{ (p.published_at or p.created_at).strftime("%b %-d %H:%M") if (p.published_at or p.created_at) else "—" }}</td>
+      <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
+        {% if p.cut and p.cut.clip_title %}<div class="meta" title="Clip title">{{ p.cut.clip_title }}</div>{% endif %}</td>
+      <td class="meta">
+        {% if p.cut %}<a href="/cut/{{ p.cut.id }}?step=post">cut</a>
+        {% elif p.candidate %}<a href="/video/{{ p.candidate.id }}?step=cuts">{{ p.candidate.channel.call_sign }}</a>
+        {% elif p.source == "threads" %}<span class="badge">Threads history</span>
+        {% else %}—{% endif %}
+      </td>
+      <td><span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span></td>
+      <td>{% if p.permalink %}<a href="{{ p.permalink }}" target="_blank">open ↗</a>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
   </div>
-</details>
+  {% endif %}
+</div>
+</div>{# /lib-panels #}
 
 <script>
-  // Rotate the caret when a section opens/closes.
-  document.querySelectorAll('.lib-section').forEach(d => {
-    const caret = d.querySelector('.lib-caret');
-    const sync = () => { if (caret) caret.textContent = d.open ? '▾' : '▸'; };
-    d.addEventListener('toggle', sync); sync();
+// Library view toggle: Videos / Cuts / Posts. Persist the choice, but honour
+// an explicit ?section= from a link (e.g. "back to cuts") on first load.
+const LIB_PANELS = { videos: 'videos-panel', cuts: 'cuts-panel', posts: 'posts-panel' };
+function setLibTab(tab) {
+  if (!LIB_PANELS[tab]) tab = 'videos';
+  for (const [name, id] of Object.entries(LIB_PANELS)) {
+    const panel = document.getElementById(id);
+    if (panel) panel.hidden = name !== tab;
+  }
+  document.querySelectorAll('.segmented .seg-btn').forEach(btn => {
+    const active = btn.dataset.tab === tab;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
   });
+  try { localStorage.setItem('libTab', tab); } catch (e) {}
+}
+(function restoreLibTab() {
+  const requested = "{{ section }}";
+  const explicit = {{ 'true' if request.query_params.get('section') else 'false' }};
+  let tab = 'videos';
+  if (explicit && LIB_PANELS[requested]) {
+    tab = requested;
+  } else {
+    try { tab = localStorage.getItem('libTab') || 'videos'; } catch (e) {}
+  }
+  setLibTab(tab);
+})();
 </script>
 {% endblock %}

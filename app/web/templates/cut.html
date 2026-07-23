@@ -1,25 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <div class="meta" style="margin-bottom: 6px;">
-      <a href="/">Dashboard</a> ›
-      <a href="/video/{{ c.id }}?step=cuts">{{ c.title[:70] }}</a> › Cut
-    </div>
-    <h1 style="margin-bottom: 4px;">{{ cut.clip_title or "Untitled cut" }}</h1>
-    <div class="sub">
-      {{ c.channel.call_sign }} · {{ c.channel.market }}
-      · <a href="{{ c.url }}" target="_blank">YouTube ↗</a>
-      · from <a href="/video/{{ c.id }}?step=cuts">source video</a>
-    </div>
-  </div>
-  <div class="actions">
-    <form method="post" action="/cut/{{ cut.id }}/delete"
-          onsubmit="return confirm('Delete this cut? Its draft/queued posts are removed; published posts are kept.');">
-      <button class="reject sm" title="Delete this cut">Delete cut</button>
-    </form>
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{% set cut_crumbs %}<a href="/">Dashboard</a> › <a href="/video/{{ c.id }}?step=cuts">{{ c.title[:70] }}</a> › Cut{% endset %}
+{% set cut_sub %}{{ c.channel.call_sign }} · {{ c.channel.market }} · <a href="{{ c.url }}" target="_blank">YouTube ↗</a> · from <a href="/video/{{ c.id }}?step=cuts">source video</a>{% endset %}
+{% set cut_actions %}
+  <form method="post" action="/cut/{{ cut.id }}/delete"
+        onsubmit="return confirm('Delete this cut? Its draft/queued posts are removed; published posts are kept.');">
+    <button class="reject sm" title="Delete this cut">Delete cut</button>
+  </form>
+{% endset %}
+{{ ui.pagebar(cut.clip_title or "Untitled cut", crumbs=cut_crumbs, sub=cut_sub, actions=cut_actions) }}
 
 {# ---- Cut stepper ---- #}
 <div class="steps">
@@ -32,12 +22,18 @@
 
 {# ============ STEP 1: TRIM ============ #}
 {% if step == "trim" %}
-<div class="row">
-  <div style="flex: 1.4; min-width: 420px;">
+{# Waveform scrubber sits on top, spanning the full width. #}
+<div style="margin-top: 6px; position: relative;">
+  <canvas id="wave"></canvas>
+  <div class="meta" id="wave-hint" style="position: absolute; inset: 0; display: flex;
+       align-items: center; justify-content: center; pointer-events: none;">loading waveform…</div>
+</div>
+
+<div class="row" style="margin-top: 16px; align-items: flex-start;">
+  {# Left column: the video with its transcript beneath it. #}
+  <div style="flex: 1; min-width: 300px;">
     <video id="player" src="/media/source/{{ c.id }}" controls preload="metadata"></video>
-  </div>
-  <div style="flex: 1; min-width: 320px;">
-    <div class="transcript-box" id="transcript-box" title="Click a line to jump">
+    <div class="transcript-box" id="transcript-box" title="Click a line to jump" style="margin-top: 14px;">
       {% for s in transcript_segments %}
         <div class="tline" onclick="seek({{ s.start }})">
           <span class="ts">{{ "%d:%02d"|format(s.start // 60, s.start % 60) }}</span>{{ s.text }}</div>
@@ -46,48 +42,33 @@
       {% endfor %}
     </div>
   </div>
-</div>
 
-{# Waveform scrubber spans the full width of player + transcript. #}
-<div style="margin-top: 14px; position: relative;">
-  <canvas id="wave"></canvas>
-  <div class="meta" id="wave-hint" style="position: absolute; inset: 0; display: flex;
-       align-items: center; justify-content: center; pointer-events: none;">loading waveform…</div>
-</div>
+  {# Right sidebar: trim controls + the cut list (each clip shows its own waveform). #}
+  <div style="flex: 1.7; min-width: 420px;">
+    <div class="btn-group">
+      <button type="button" class="sm" onclick="setStart()">⇤ Set start</button>
+      <button type="button" class="sm" onclick="setEnd()">Set end ⇥</button>
+      <button type="button" class="primary sm" onclick="addSegment()">＋ Add segment</button>
+    </div>
+    <div class="meta" id="pending-range" style="margin-top: 6px;">start: — · end: —</div>
 
-<div class="btn-group" style="margin-top: 12px;">
-  <span class="badge info" id="cur-time" style="font-family: var(--mono); min-width: 64px; justify-content: center;">0.0s</span>
-  <button type="button" class="sm" onclick="setStart()">⇤ Set start</button>
-  <button type="button" class="sm" onclick="setEnd()">Set end ⇥</button>
-  <span class="meta" id="pending-range">start: — · end: —</span>
-  <button type="button" class="primary sm" onclick="addSegment()">＋ Add segment</button>
-</div>
-<div class="meta" style="margin-top: 6px;">Click or drag the waveform to scrub. Drag a red pending line or a green segment
-  edge to fine-tune it — dropping a start edge plays from that moment. Click a green band to select it, then press
-  <kbd>Delete</kbd> to remove it. <kbd>⌘Z</kbd> / <kbd>Ctrl+Z</kbd> undoes the last edit.</div>
-{% if c.suggested_highlight %}
-  <div class="meta" style="margin-top: 10px;">💡 Suggested highlight <span class="badge score-lo">draft</span>:
-    {{ c.suggested_highlight }}</div>
-{% endif %}
-
-<h2>Cut list</h2>
-<div id="segments"></div>
-<div class="meta" id="total-len" style="margin: 6px 0;"></div>
-<div class="btn-group" style="margin-top: 8px;">
-  <button type="button" class="sm" id="preview-all-btn" onclick="togglePreviewAll()">▶ Preview supercut</button>
-  <span class="meta">Plays only your selected segments, back to back, exactly as they'll be joined — no export.</span>
-</div>
-<form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return prepExport(this)">
-  <input type="hidden" name="segments_json" value="">
-  <div class="btn-group" style="margin-top: 8px;">
-    <button class="approve">Export {{ "new " if state.exported }}clip →</button>
-    <span class="meta">Segments are joined in order into one video.</span>
+    <div id="segments" style="margin-top: 14px;"></div>
+    <div class="meta" id="total-len" style="margin: 6px 0;"></div>
+    <div class="btn-group" style="margin-top: 8px;">
+      <button type="button" class="sm" id="preview-all-btn" onclick="togglePreviewAll()">▶ Preview supercut</button>
+    </div>
+    <form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return prepExport(this)">
+      <input type="hidden" name="segments_json" value="">
+      <div class="btn-group" style="margin-top: 8px;">
+        <button class="approve">Export {{ "new " if state.exported }}clip →</button>
+      </div>
+    </form>
+    {% if state.exported %}
+      <div class="meta" style="margin-top: 10px;">A clip was already exported —
+        <a href="/cut/{{ cut.id }}?step=post">continue to Post</a> or export again to replace it.</div>
+    {% endif %}
   </div>
-</form>
-{% if state.exported %}
-  <div class="meta" style="margin-top: 10px;">A clip was already exported —
-    <a href="/cut/{{ cut.id }}?step=post">continue to Post</a> or export again to replace it.</div>
-{% endif %}
+</div>
 
 <script>
 const player = document.getElementById('player');
@@ -113,20 +94,6 @@ function undoEdit() {
 }
 
 const fmt = t => `${t.toFixed(1)}s`;
-player.addEventListener('timeupdate', () =>
-  document.getElementById('cur-time').textContent = fmt(player.currentTime));
-
-// Keep the transcript exactly as tall as the video player (no dead space).
-function sizeTranscript() {
-  const box = document.getElementById('transcript-box');
-  if (box && player.clientHeight > 100) {
-    box.style.height = player.clientHeight + 'px';
-    box.style.maxHeight = 'none';
-  }
-}
-player.addEventListener('loadedmetadata', sizeTranscript);
-window.addEventListener('resize', sizeTranscript);
-sizeTranscript();
 
 function seek(t) { cancelPlayback(); activeStop = null; player.currentTime = t; player.play(); }
 function setStart() { pushUndo(); pending.start = player.currentTime; renderPending(); }
@@ -151,13 +118,17 @@ function removeSegment(i) {
   else if (selectedSeg !== null && selectedSeg > i) selectedSeg--;
   renderSegments();
 }
-function moveSegment(i, d) {
-  const j = i + d;
-  if (j < 0 || j >= segments.length) return;
+// ---- Drag-to-reorder (grip handle) ----
+let dragFrom = null;
+function reorderSegment(from, to) {
+  if (from === null || to === null || from === to) return;
   pushUndo();
-  [segments[i], segments[j]] = [segments[j], segments[i]];
-  if (selectedSeg === i) selectedSeg = j;
-  else if (selectedSeg === j) selectedSeg = i;
+  const selObj = selectedSeg !== null ? segments[selectedSeg] : null;
+  const [moved] = segments.splice(from, 1);
+  const insertAt = from < to ? to - 1 : to;
+  segments.splice(insertAt, 0, moved);
+  selectedSeg = selObj ? segments.indexOf(selObj) : null;
+  if (selectedSeg === -1) selectedSeg = null;
   renderSegments();
 }
 // ---- Segment playback (single preview + full supercut preview) ----
@@ -425,11 +396,13 @@ function renderSegments() {
     const div = document.createElement('div');
     div.className = 'seg-row' + (i === selectedSeg ? ' selected' : '');
     div.onclick = ev => {
-      if (ev.target.closest('button') || ev.target.closest('input') || ev.target.closest('canvas')) return;
+      if (ev.target.closest('button') || ev.target.closest('input') || ev.target.closest('canvas') || ev.target.closest('.seg-grip')) return;
       selectedSeg = i; renderSegments();
     };
     div.innerHTML = `<div class="seg-main">
-      <strong>#${i + 1}</strong>
+      <span class="seg-grip" title="Drag to reorder" aria-label="Drag to reorder">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="5" r="1.6"/><circle cx="15" cy="5" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="19" r="1.6"/><circle cx="15" cy="19" r="1.6"/></svg>
+      </span>
       <input type="number" id="seg-start-${i}" class="seg-num" step="0.1" min="0" value="${s.start.toFixed(1)}"
              title="Start (seconds) — changing it plays from there"
              onchange="updateSegment(${i}, 'start', this.value)">
@@ -440,12 +413,39 @@ function renderSegments() {
       <span class="meta" id="seg-len-${i}">(${(s.end - s.start).toFixed(1)}s)</span>
       <span style="margin-left:auto"></span>
       <button type="button" title="Preview" onclick="previewSegment(${i})">▶</button>
-      <button type="button" title="Move up" onclick="moveSegment(${i},-1)">↑</button>
-      <button type="button" title="Move down" onclick="moveSegment(${i},1)">↓</button>
       <button type="button" class="reject" title="Remove (or select + Delete)" onclick="removeSegment(${i})">✕</button>
       </div>
       <canvas class="seg-wave" id="seg-wave-${i}" title="Drag the green edges to fine-trim. Click to play from there up to the end line (it stops so you can check the transition). The dim sides are lead-in / lead-out room."></canvas>`;
     box.appendChild(div);
+
+    // Drag-to-reorder: only the grip handle arms dragging so canvas/input edits still work.
+    const grip = div.querySelector('.seg-grip');
+    grip.addEventListener('mousedown', () => { div.draggable = true; });
+    grip.addEventListener('mouseup', () => { div.draggable = false; });
+    div.addEventListener('dragstart', e => {
+      dragFrom = i;
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', String(i)); } catch (_) {}
+      div.classList.add('dragging');
+    });
+    div.addEventListener('dragend', () => {
+      div.draggable = false;
+      dragFrom = null;
+      document.querySelectorAll('#segments .seg-row').forEach(el =>
+        el.classList.remove('dragging', 'drag-over'));
+    });
+    div.addEventListener('dragover', e => {
+      if (dragFrom === null || dragFrom === i) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      div.classList.add('drag-over');
+    });
+    div.addEventListener('dragleave', () => div.classList.remove('drag-over'));
+    div.addEventListener('drop', e => {
+      e.preventDefault();
+      div.classList.remove('drag-over');
+      reorderSegment(dragFrom, i);
+    });
     initSegWave(i, div.querySelector(`#seg-wave-${i}`));
   });
   updateTotal();
@@ -636,7 +636,8 @@ renderSegments();
       </div>
     {% endif %}
     <div class="stage-actions">
-      <a href="/cut/{{ cut.id }}/download-clip" download>
+      <a id="download-clip-link"
+         href="/cut/{{ cut.id }}/download-clip?captioned={{ 1 if cut.subtitled_clip_path else 0 }}" download>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
         Download clip</a>
       <button type="button" id="copy-caption-btn"
@@ -706,6 +707,9 @@ renderSegments();
       const ob = document.getElementById('preview-orig-btn');
       if (sb) sb.disabled = subs;
       if (ob) ob.disabled = !subs;
+      // Keep the download link pointed at whichever version is being previewed.
+      const dl = document.getElementById('download-clip-link');
+      if (dl) dl.href = '/cut/{{ cut.id }}/download-clip?captioned=' + (subs ? '1' : '0');
     }
     async function generateSubtitles() {
       const btn = document.getElementById('gen-subs-btn');

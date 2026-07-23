@@ -48,17 +48,39 @@ def _ensure_bucket(client, bucket: str) -> None:
 
 
 def upload_trimmed_clip(local_path: str | Path, object_key: str) -> str:
-    """Upload the clip and return a signed URL. Idempotent via upsert."""
+    """Upload the clip and return a signed URL. Idempotent via upsert.
+
+    Clips larger than ``storage.max_upload_mb`` are transparently recompressed to
+    fit first: Supabase rejects oversized uploads with a 413 that otherwise fails
+    the whole publish (and the post silently drops out of the queue)."""
     settings = load_settings()
     bucket = settings.get("storage.trimmed_clip_bucket", "trimmed-clips")
     ttl = settings.get("storage.signed_url_ttl_seconds", 3600)
+    max_mb = settings.get("storage.max_upload_mb", 45)
     local_path = Path(local_path)
+
+    upload_path = local_path
+    compressed: Path | None = None
+    max_bytes = int(max_mb * 1024 * 1024)
+    if max_bytes > 0 and local_path.stat().st_size > max_bytes:
+        from .clipper import compress_to_fit
+
+        log.info(
+            "Clip %s is %.1fMB, over the %sMB upload cap — recompressing to fit",
+            local_path.name, local_path.stat().st_size / 1e6, max_mb,
+        )
+        compressed = compress_to_fit(local_path, max_bytes)
+        upload_path = compressed
 
     client = _client()
     _ensure_bucket(client, bucket)
     storage = client.storage.from_(bucket)
-    with open(local_path, "rb") as f:
-        storage.upload(object_key, f.read(), {"content-type": "video/mp4", "upsert": "true"})
+    try:
+        with open(upload_path, "rb") as f:
+            storage.upload(object_key, f.read(), {"content-type": "video/mp4", "upsert": "true"})
+    finally:
+        if compressed is not None:
+            compressed.unlink(missing_ok=True)
     signed = storage.create_signed_url(object_key, ttl)
     url = signed.get("signedURL") or signed.get("signedUrl") or ""
     if not url:

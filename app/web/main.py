@@ -84,10 +84,20 @@ _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 # Cache-bust static assets whenever style.css changes so browsers pick up edits.
-try:
-    templates.env.globals["static_v"] = str(int((_STATIC_DIR / "style.css").stat().st_mtime))
-except OSError:
-    templates.env.globals["static_v"] = "0"
+# Evaluated lazily on every render (via __str__) so CSS-only edits bust the cache
+# immediately, without needing an app restart.
+class _StaticVersion:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def __str__(self) -> str:
+        try:
+            return str(int(self._path.stat().st_mtime))
+        except OSError:
+            return "0"
+
+
+templates.env.globals["static_v"] = _StaticVersion(_STATIC_DIR / "style.css")
 
 init_db()
 with session_scope() as _s:
@@ -337,8 +347,11 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
         # for), so removed/legacy terms never show up as filters.
         keywords_options = sorted(load_keywords())
 
-        # Items mid-workflow (shown on the default view only).
-        in_progress_rows = []
+        # Items mid-workflow (shown on the default view only), split into two
+        # buckets: clips still awaiting a trim, and clips already trimmed but
+        # never posted (a supercut was exported, yet nothing was published).
+        in_progress_rows = []   # selected clips still needing a trim
+        trimmed_rows = []       # trimmed clips that were never posted
         if not filtering:
             in_progress = session.execute(
                 select(Candidate)
@@ -356,25 +369,29 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
                 post_st = statuses.get(c.id, set())
                 state = workflow_state(session, c, post_statuses=post_st,
                                        has_exported_cut=c.id in exported)
-                # Drop it from "In progress" once the clip has been dealt with:
-                # trimmed clip exported/saved ("ready to post"), posted,
-                # queued, or saved as a draft. A candidate with a FAILED
-                # post stays visible so it can be retried.
+                # A candidate with a FAILED post stays visible so it can be
+                # retried; it's already trimmed, so it belongs in "Trimmed".
                 if "failed" in post_st:
-                    state["post_failed"] = True  # keep the row visible for retry
-                elif post_st & handled_statuses:
-                    # Hide once published or sitting in the outbound queue/drafts.
-                    # If the operator deletes their only draft/queue, post_st is
-                    # empty and the clip stays visible so they can re-post.
+                    state["post_failed"] = True
+                    trimmed_rows.append((c, state))
                     continue
-                in_progress_rows.append((c, state))
+                # Hide once published or sitting in the outbound queue/drafts.
+                # If the operator deletes their only draft/queue, post_st is
+                # empty and the clip stays visible so they can re-post.
+                if post_st & handled_statuses:
+                    continue
+                # "post" = supercut exported but nothing published yet.
+                if state["current"] == "post":
+                    trimmed_rows.append((c, state))
+                else:
+                    in_progress_rows.append((c, state))
 
         monitor_running, monitor_result, monitor_last_refreshed = _monitor_view_state(session)
 
     return templates.TemplateResponse(
         request, "dashboard.html",
         {"candidates": candidates, "total_matches": total_matches, "row_cap": row_cap,
-         "in_progress": in_progress_rows, "threshold": threshold,
+         "in_progress": in_progress_rows, "trimmed": trimmed_rows, "threshold": threshold,
          "date_defaulted": date_defaulted,
          "show_hidden": show_hidden, "filtering": filtering,
          "q": q, "channel_id": channel_id, "keyword": keyword, "region": region,
@@ -1136,16 +1153,21 @@ def media_post_clip(post_id: int):
 
 
 @app.get("/cut/{cut_id}/download-clip")
-def download_clip(cut_id: int):
+def download_clip(cut_id: int, captioned: int = 1):
     """Serve the exported clip as a file attachment so the operator can save it
-    locally and post it manually elsewhere."""
+    locally and post it manually elsewhere. Defaults to the captioned version
+    (matching the preview default); pass ``captioned=0`` for the original."""
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
             return JSONResponse({"error": "no clip"}, status_code=404)
+        use_subs = bool(captioned) and bool(cut.subtitled_clip_path) \
+            and Path(cut.subtitled_clip_path).exists()
+        path = cut.subtitled_clip_path if use_subs else cut.trimmed_clip_path
         vid = cut.candidate.video_id if cut.candidate else None
-        return FileResponse(cut.trimmed_clip_path, media_type="video/mp4",
-                            filename=f"{vid or 'clip'}-cut{cut.id}.mp4")
+        suffix = "-captioned" if use_subs else ""
+        return FileResponse(path, media_type="video/mp4",
+                            filename=f"{vid or 'clip'}-cut{cut.id}{suffix}.mp4")
 
 
 @app.get("/post/{post_id}/download-clip")
@@ -1801,7 +1823,7 @@ def archive_redirect(section: str = ""):
 @app.get("/library", response_class=HTMLResponse)
 def library_page(request: Request, section: str = "videos", msg: str = ""):
     """The content library: Videos → Cuts → Posts, the three types that cascade
-    into each other, in one accordion. ``section`` sets which panel opens."""
+    into each other, shown as a toggle group. ``section`` selects the open tab."""
     if section not in ("videos", "cuts", "posts"):
         section = "videos"
     with session_scope() as session:
@@ -1928,6 +1950,13 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
         queue_count = session.execute(
             select(func.count()).select_from(ThreadsPost).where(ThreadsPost.status == "queued")
         ).scalar_one()
+        # Failed posts vanish from the calendar grid; surface a banner so the
+        # operator notices a post dropped out instead of silently disappearing.
+        failed_posts = session.execute(
+            select(ThreadsPost).where(ThreadsPost.status == "failed")
+            .order_by(ThreadsPost.created_at.desc()).limit(10)
+        ).scalars().all()
+        failed_count = len(failed_posts)
         status = scheduler_status(session)
         windows_et = list(status.get("windows") or [])
 
@@ -1960,6 +1989,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
          "prev_y": prev_y, "prev_m": prev_m, "next_y": next_y, "next_m": next_m,
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
          "drafts_count": drafts_count, "queue_count": queue_count,
+         "failed_count": failed_count,
          "linear": linear, "scheduler": status, "windows_et": windows_et,
          "msg": msg, "active": "calendar"},
     )
@@ -1969,7 +1999,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
 def posts_page(request: Request, msg: str = ""):
     post_opts = (
         selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
-        selectinload(ThreadsPost.cut),
+        selectinload(ThreadsPost.cut).selectinload(Cut.candidate),
     )
     with session_scope() as session:
         # Two queries instead of three: active queue/drafts + recent history.
@@ -1988,11 +2018,15 @@ def posts_page(request: Request, msg: str = ""):
             .where(ThreadsPost.status.notin_(["queued", "publishing", "draft"]))
             .order_by(ThreadsPost.created_at.desc()).limit(100)
         ).scalars().all()
+        # Failed posts drop out of the queue/calendar entirely, so surface them
+        # as a distinct "needs attention" list rather than letting them silently
+        # vanish into the history table.
+        failed = [p for p in posts if p.status == "failed"]
         status = scheduler_status(session)
     authenticated = threads_api.is_authenticated()
     return templates.TemplateResponse(
         request, "posts.html",
-        {"posts": posts, "queued": queued, "drafts": drafts,
+        {"posts": posts, "queued": queued, "drafts": drafts, "failed": failed,
          "scheduler": status,
          "authenticated": authenticated,
          "auth_url": threads_api.authorize_url() if not authenticated else "",

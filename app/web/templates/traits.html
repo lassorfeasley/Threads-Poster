@@ -1,23 +1,24 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Traits ({{ traits|length }})</h1>
-    <div class="sub">Footage labels on <em>published</em> clips. Observations only until learning gates unlock;
-      {{ annotated_posts }} of {{ published_total }} posts annotated so far.</div>
-  </div>
-  <div class="actions">
-    <form class="inline" method="post" action="/traits/annotate-posts">
-      <button class="btn" {{ 'disabled' if backfill_running or not unannotated }}
-              title="Tag published posts' clips with ground-truth footage traits">
-        {{ 'Backfill running…' if backfill_running else 'Backfill post traits (' ~ unannotated ~ ')' }}
-      </button>
-    </form>
-    <form class="inline" method="post" action="/traits/relearn">
-      <button class="btn ghost" title="Recompute verdicts from current annotations + metrics">Recompute verdicts</button>
-    </form>
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
+
+{% set tr_actions %}
+  <form class="inline" method="post" action="/traits/annotate-posts">
+    <button class="btn" {{ 'disabled' if backfill_running or not unannotated }}
+            title="Tag published posts' clips with ground-truth footage traits">
+      {{ 'Backfill running…' if backfill_running else 'Backfill post traits (' ~ unannotated ~ ')' }}
+    </button>
+  </form>
+  <form class="inline" method="post" action="/traits/relearn">
+    <button class="btn ghost" title="Recompute verdicts from current annotations + metrics">Recompute verdicts</button>
+  </form>
+{% endset %}
+{% set tr_filters %}
+  {{ ui.search(name="q", placeholder="trait name…", debounce=false, filter_target="#traits-list") }}
+{% endset %}
+{{ ui.pagebar("Traits", count=traits|length,
+              sub="Footage labels on published clips. Observations only until learning gates unlock; " ~ annotated_posts ~ " of " ~ published_total ~ " posts annotated so far.",
+              actions=tr_actions, filters=tr_filters) }}
 
 <div class="card tight">
   <strong>Learning status:</strong>
@@ -41,10 +42,12 @@
   </form>
 </div>
 
+<div id="traits-list">
 {% for t in traits %}
 {% set w = weights.get(t.name) %}
 {% set n = post_counts.get(t.name, 0) %}
-<div class="card tight item" style="{{ 'opacity: 0.55;' if not t.enabled }}">
+<div class="card tight item" style="{{ 'opacity: 0.55;' if not t.enabled }}"
+     data-filter-row data-search="{{ t.name | lower }}">
   <div class="row center">
     <div class="grow">
       <div style="font-weight: 650;">
@@ -87,6 +90,7 @@
 {% else %}
   <div class="meta">None yet — add one above.</div>
 {% endfor %}
+</div>{# /traits-list #}
 
 <p class="meta" style="margin-top: 18px;">Stats use each post's views at {{ metric_age_hours }}h (from metric snapshots),
   compared to your account median. Seed list: <code>vision.traits</code> in settings; edits here take precedence.</p>

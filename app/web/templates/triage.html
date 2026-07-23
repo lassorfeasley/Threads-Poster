@@ -1,13 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Triage</h1>
-    <div class="sub"><span id="progress"></span></div>
-    <div class="progressbar" id="progbar" style="display: none;"><i></i></div>
-  </div>
-  <div class="actions"><a class="btn ghost" href="/">← Back to dashboard</a></div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{% set tri_sub %}<span id="progress"></span><div class="progressbar" id="progbar" style="display: none;"><i></i></div>{% endset %}
+{% set tri_actions %}<a class="btn ghost" href="/">← Back to dashboard</a>{% endset %}
+{{ ui.pagebar("Triage", sub=tri_sub, actions=tri_actions) }}
 
 <div id="done" class="empty" style="display: none; padding: 56px 20px;">
   <span class="icon">🎉</span>

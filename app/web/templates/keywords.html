@@ -1,13 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Keywords ({{ keywords|length }})</h1>
-    <div class="sub">Case-insensitive whole-word/phrase filter on every new upload's title and description.
-      Hits are then LLM-scored for genuine climate relevance, so it's fine to keep this list inclusive.
-      Changes apply on the next monitor run.</div>
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{{ ui.pagebar("Keywords", count=keywords|length,
+              sub="Case-insensitive whole-word/phrase filter on every new upload's title and description. Hits are then LLM-scored for genuine climate relevance, so it's fine to keep this list inclusive. Changes apply on the next monitor run.") }}
 
 <div class="card tight">
   <form method="post" action="/keywords/add" id="add-form" style="display: flex; gap: 10px; align-items: center;">

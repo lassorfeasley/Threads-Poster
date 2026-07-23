@@ -1,37 +1,19 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Archive</h1>
-    <div class="sub">Downloaded videos with transcripts — pick up any of them where you left off.</div>
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
 
 {% if countries or scope %}
-<div class="card tight">
-  <form method="get" action="/archive" id="archive-filter">
-    <div class="form-row">
-      <div class="field" style="min-width: 150px;">
-        <label>Country</label>
-        <select name="country" onchange="this.form.requestSubmit()">
-          <option value="">All countries</option>
-          {% for c in countries %}<option value="{{ c }}" {{ "selected" if c == country }}>{{ c }}</option>{% endfor %}
-        </select>
-      </div>
-      <div class="field" style="min-width: 130px;">
-        <label>Scope</label>
-        <select name="scope" onchange="this.form.requestSubmit()">
-          <option value="">All scopes</option>
-          {% for s in scopes %}<option value="{{ s }}" {{ "selected" if s == scope }}>{{ s }}</option>{% endfor %}
-        </select>
-      </div>
-      <div class="field btn-group">
-        {% if filtering %}<a class="btn ghost" href="/archive">Clear</a>{% endif %}
-      </div>
-    </div>
-  </form>
-</div>
+{% set ar_filters %}
+  {{ ui.select("country", countries, selected=country, label="Country", all_label="All countries") }}
+  {{ ui.select("scope", scopes, selected=scope, label="Scope", all_label="All scopes") }}
+  {% if filtering %}{{ ui.clear("/archive") }}{% endif %}
+{% endset %}
+{% else %}
+{% set ar_filters = '' %}
 {% endif %}
+{{ ui.pagebar("Archive",
+              sub="Downloaded videos with transcripts — pick up any of them where you left off.",
+              filters=ar_filters, filter_action="/archive") }}
 
 {% if not rows %}
   <div class="empty">

@@ -1,22 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>{{ trait }}</h1>
-    <div class="sub">
-      Published posts tagged with this footage trait
-      {% if weight and weight.n_posts %}· {{ weight.n_posts }} with metrics
-        {% if weight.lift is not none %}·
-          <span class="badge {{ 'score-hi' if weight.lift >= 0 else 'score-lo' }}">
-            {{ "%+.0f%%"|format(weight.lift * 100) }} vs baseline
-          </span>
-          {% if weight.status != 'active' %}<span class="meta">(early — gates not met)</span>{% endif %}
-        {% endif %}
-      {% endif %}
-    </div>
-  </div>
-  <div class="actions"><a class="btn ghost" href="/traits">← All traits</a></div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{% set td_sub %}Published posts tagged with this footage trait
+  {% if weight and weight.n_posts %}· {{ weight.n_posts }} with metrics
+    {% if weight.lift is not none %}·
+      <span class="badge {{ 'score-hi' if weight.lift >= 0 else 'score-lo' }}">
+        {{ "%+.0f%%"|format(weight.lift * 100) }} vs baseline
+      </span>
+      {% if weight.status != 'active' %}<span class="meta">(early — gates not met)</span>{% endif %}
+    {% endif %}
+  {% endif %}{% endset %}
+{% set td_actions %}<a class="btn ghost" href="/traits">← All traits</a>{% endset %}
+{{ ui.pagebar(trait, sub=td_sub, actions=td_actions) }}
 
 {% if not posts %}
 <div class="empty" style="padding: 40px 20px;">

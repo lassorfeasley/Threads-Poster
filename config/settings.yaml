@@ -130,6 +130,11 @@ storage:
   # Seconds a signed clip URL stays valid; must outlive Meta's fetch+processing
   # window. 1 hour is comfortable.
   signed_url_ttl_seconds: 3600
+  # Max clip size (MB) to upload to Supabase. Clips larger than this are
+  # recompressed to fit before upload — Supabase rejects oversized uploads with
+  # a 413 that otherwise fails the publish. Keep a margin under your project's
+  # per-file limit (50MB on the free plan). Set 0 to disable recompression.
+  max_upload_mb: 45
 
 scrape:
   # Politeness delays between any two yt-dlp operations (seconds, randomized range).
@@ -215,6 +220,11 @@ scheduler:
     - "10:00"
     - "14:30"
     - "19:00"
+  # Retry a failed publish this many times (per tick) before marking the post
+  # failed, with this delay between attempts. Guards against transient token /
+  # Meta-processing hiccups on the day's first post. Set retries to 0 to disable.
+  publish_retries: 1
+  publish_retry_delay_seconds: 30
   # Never publish two posts less than this many minutes apart (any path).
   spacing_floor_minutes: 90
   # Cap consecutive hot-deferrals for the queue head; after this, publish anyway.

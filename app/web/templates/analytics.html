@@ -1,21 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-head">
-  <div class="titles">
-    <h1>Analytics</h1>
-    <div class="sub">Post performance pulled from Threads, smoothed with a rolling 7-day average,
-      plus an LLM digest of what's working.</div>
-    <div class="meta" style="margin-top: 6px;">LLM spend today:
-      <strong>${{ "%.2f"|format(spend_today) }}</strong> of ${{ "%.2f"|format(spend_budget) }} budget
-      {%- if spend_recent %} · last 7 days: {% for d in spend_recent %}{{ "%.2f"|format(d.spend_usd) }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
-    </div>
-  </div>
-  <div class="actions">
-    <form class="inline" method="post" action="/analytics/snapshot">
-      <button class="primary">Pull latest metrics</button>
-    </form>
-  </div>
-</div>
+{% import "components/toolbar.html" as ui %}
+{% set an_actions %}
+  <form class="inline" method="post" action="/analytics/snapshot">
+    <button class="primary">Pull latest metrics</button>
+  </form>
+{% endset %}
+{% set an_sub %}Post performance pulled from Threads, smoothed with a rolling 7-day average, plus an LLM digest of what's working.<div class="meta" style="margin-top: 6px;">LLM spend today: <strong>${{ "%.2f"|format(spend_today) }}</strong> of ${{ "%.2f"|format(spend_budget) }} budget{%- if spend_recent %} · last 7 days: {% for d in spend_recent %}{{ "%.2f"|format(d.spend_usd) }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}</div>{% endset %}
+{{ ui.pagebar("Analytics", sub=an_sub, actions=an_actions) }}
 
 {% if not rows %}
   <div class="empty"><span class="icon">▁▃▅</span><strong>No published posts yet</strong>
