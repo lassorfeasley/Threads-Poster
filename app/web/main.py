@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
-from .. import spend, threads_api
+from .. import spend, threads_api, youtube
 from ..analytics import generate_report, snapshot_metrics
 from ..clipper import ClipExportError, clip_duration, export_supercut, extract_still, get_waveform
 from ..config import (
@@ -38,7 +38,7 @@ from ..db import (
 )
 from ..engagement import PacingLimitError, post_approved_reply, redraft_comment, sync_comments
 from ..history import import_history
-from ..llm import suggest_post_caption, suggest_title
+from ..llm import suggest_channel_fields, suggest_post_caption, suggest_title
 from ..models import (
     STATUS_APPROVED,
     STATUS_ARCHIVED,
@@ -2566,6 +2566,58 @@ def channel_add(call_sign: str = Form(...), network: str = Form(""), market: str
                             market=market.strip(), region=region.strip(),
                             country=country.strip(), scope=scope, url=url.strip()))
     return _flash("/channels", f"Added {call_sign}")
+
+
+@app.post("/channels/prefill")
+def channel_prefill(url: str = Form(...)):
+    """Resolve a YouTube channel URL and let an agent draft the editorial fields.
+
+    Returns JSON the add-channel dialog uses to prefill its inputs. Nothing is
+    saved — the operator reviews and submits the form as usual."""
+    url = url.strip()
+    if not url:
+        return JSONResponse({"error": "Enter a YouTube channel URL first"}, status_code=400)
+    try:
+        info = youtube.resolve_channel(url)
+    except youtube.YouTubeAPIError as exc:
+        return JSONResponse({"error": f"Could not resolve channel: {exc}"}, status_code=400)
+
+    with session_scope() as session:
+        existing = session.execute(
+            select(Channel).where(
+                or_(Channel.url == url, Channel.channel_id == info["channel_id"])
+            )
+        ).scalar_one_or_none()
+        already = existing.call_sign if existing else None
+
+    # Recent upload titles give the agent extra signal (best-effort, low quota).
+    recent_titles: list[str] = []
+    try:
+        uploads = youtube.list_recent_uploads(
+            info["uploads_playlist_id"], dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=120),
+            max_results=10,
+        )
+        recent_titles = [u.title for u in uploads]
+    except youtube.YouTubeAPIError:
+        pass
+
+    settings = load_settings()
+    model = settings.get("engagement.draft_model", "claude-sonnet-5")
+    try:
+        fields = suggest_channel_fields(
+            model, url, title=info.get("title", ""),
+            description=info.get("description", ""),
+            country_code=info.get("country", ""), recent_titles=recent_titles,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface any LLM/parse error to the UI
+        return JSONResponse({"error": f"Agent prefill failed: {exc}"}, status_code=500)
+
+    return JSONResponse({
+        "fields": fields,
+        "channel_title": info.get("title", ""),
+        "channel_id": info["channel_id"],
+        "already_exists": already,
+    })
 
 
 @app.post("/channels/import-csv")

@@ -94,6 +94,61 @@ def score_relevance(model: str, title: str, description: str, matched_keywords: 
     }
 
 
+def suggest_channel_fields(model: str, url: str, title: str = "", description: str = "",
+                           country_code: str = "", recent_titles: list[str] | None = None) -> dict:
+    """Infer editorial channel metadata from a YouTube channel's public info.
+
+    Given the channel URL plus whatever the Data API returned (title,
+    description, ISO country code, and a few recent upload titles), guess the
+    fields the operator would otherwise type by hand. Everything is a best-effort
+    DRAFT the operator reviews before saving.
+
+    Returns {call_sign, network, market, region, country, scope} where scope is
+    one of local | national | international.
+    """
+    system = (
+        "You help catalog news/media YouTube channels. From a channel's public "
+        "info, infer these fields for a media-monitoring database:\n"
+        "- call_sign: the station call sign or short brand name (e.g. 'KXYZ', "
+        "'BBC News', 'Al Jazeera'). Prefer an official call sign for US/Canada "
+        "broadcast stations; otherwise the common brand name.\n"
+        "- network: parent network/affiliation if clear (e.g. 'ABC', 'NBC', "
+        "'CBS', 'FOX', 'CNN', 'BBC'), else empty.\n"
+        "- market: the primary city/metro the outlet covers (e.g. "
+        "'Springfield', 'San Diego'), empty for national/international outlets.\n"
+        "- region: state/province or broader region (e.g. 'California', "
+        "'Midwest'), else empty.\n"
+        "- country: full country name (e.g. 'United States', 'United Kingdom'). "
+        "Convert any ISO country code to its full name.\n"
+        "- scope: 'local' for a single-market station, 'national' for a "
+        "country-wide outlet, 'international' for a global outlet.\n"
+        "Only assert what the info supports; leave a field as an empty string "
+        "when genuinely unknown rather than guessing wildly. "
+        "JSON shape: {\"call_sign\": \"...\", \"network\": \"...\", "
+        "\"market\": \"...\", \"region\": \"...\", \"country\": \"...\", "
+        "\"scope\": \"local|national|international\"}"
+    )
+    user = json.dumps({
+        "url": url,
+        "channel_title": title,
+        "channel_description": (description or "")[:1500],
+        "country_code": country_code,
+        "recent_video_titles": [t[:120] for t in (recent_titles or [])[:10]],
+    })
+    data = _json_chat(model, system, user)
+    scope = str(data.get("scope", "local")).strip().lower()
+    if scope not in ("local", "national", "international"):
+        scope = "local"
+    return {
+        "call_sign": str(data.get("call_sign", "")).strip()[:40],
+        "network": str(data.get("network", "")).strip()[:40],
+        "market": str(data.get("market", "")).strip()[:80],
+        "region": str(data.get("region", "")).strip()[:80],
+        "country": str(data.get("country", "")).strip()[:60],
+        "scope": scope,
+    }
+
+
 def classify_comment(model: str, categories: list[str], post_caption: str, comment_text: str, username: str) -> dict:
     """Return {category, rationale, risk_flags: [..]}."""
     system = (

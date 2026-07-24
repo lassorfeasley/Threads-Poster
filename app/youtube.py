@@ -100,7 +100,10 @@ def parse_video_url(url: str) -> str:
 def resolve_channel(url: str) -> dict:
     """Resolve any channel URL form to canonical info.
 
-    Returns {channel_id, uploads_playlist_id, title}.
+    Returns {channel_id, uploads_playlist_id, title, description, country,
+    custom_url}. The last three are best-effort context (may be empty) used to
+    prefill channel metadata; callers that only need the identifiers can ignore
+    them.
     """
     kind, value = parse_channel_url(url)
     params: dict = {"part": "id,snippet,contentDetails"}
@@ -129,10 +132,14 @@ def resolve_channel(url: str) -> dict:
         raise YouTubeAPIError(f"Could not resolve channel for URL: {url}")
 
     item = items[0]
+    snippet = item.get("snippet") or {}
     return {
         "channel_id": item["id"],
         "uploads_playlist_id": item["contentDetails"]["relatedPlaylists"]["uploads"],
-        "title": item["snippet"]["title"],
+        "title": snippet.get("title", ""),
+        "description": snippet.get("description", ""),
+        "country": snippet.get("country", ""),
+        "custom_url": snippet.get("customUrl", ""),
     }
 
 

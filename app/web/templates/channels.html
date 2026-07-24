@@ -21,8 +21,18 @@
     <button type="button" class="btn ghost sm" aria-label="Close"
             onclick="document.getElementById('add-channel-dialog').close()">✕</button>
   </div>
-  <form method="post" action="/channels/add" style="margin-top: 10px;">
-    <div class="form-row" style="margin-bottom: 12px;">
+  <form id="add-channel-form" method="post" action="/channels/add" style="margin-top: 10px;">
+    <div class="form-row" style="margin-bottom: 6px; align-items: flex-end;">
+      <div class="field grow" style="flex: 2; min-width: 220px;"><label>YouTube channel URL</label>
+        <input type="text" id="ac-url" name="url" required placeholder="https://www.youtube.com/@example"></div>
+      <div class="field" style="flex: 0 0 auto;">
+        <button type="button" id="ac-prefill-btn" class="btn">✨ Prefill with AI</button>
+      </div>
+    </div>
+    <p class="hint" id="ac-prefill-hint" style="margin-top: 0;">Paste the URL and let an agent
+      fill in the rest — review the fields below before adding. Handle, /channel/, /c/ or /user/
+      URLs all work.</p>
+    <div class="form-row" style="margin: 12px 0;">
       <div class="field grow" style="min-width: 100px;"><label>Call sign</label>
         <input type="text" name="call_sign" required placeholder="KXYZ / BBC"></div>
       <div class="field grow" style="min-width: 80px;"><label>Network</label>
@@ -41,17 +51,52 @@
           <option value="national">National</option>
           <option value="international">International</option>
         </select></div>
-      <div class="field grow" style="flex: 2; min-width: 180px;"><label>YouTube channel URL</label>
-        <input type="text" name="url" required placeholder="https://www.youtube.com/@example"></div>
     </div>
-    <p class="hint" style="margin-top: 0;">Handle, /channel/, /c/ or /user/ URLs all work — the channel ID
-      is resolved automatically on the next monitor run.</p>
     <div class="btn-group" style="margin-top: 16px; justify-content: flex-end;">
       <button type="button" class="btn ghost"
               onclick="document.getElementById('add-channel-dialog').close()">Cancel</button>
       <button class="primary">Add channel</button>
     </div>
   </form>
+  <script>
+    (function () {
+      const btn = document.getElementById('ac-prefill-btn');
+      const form = document.getElementById('add-channel-form');
+      const hint = document.getElementById('ac-prefill-hint');
+      const setField = (name, value) => {
+        const el = form.elements[name];
+        if (el && value) el.value = value;
+      };
+      btn.addEventListener('click', async () => {
+        const url = document.getElementById('ac-url').value.trim();
+        if (!url) { hint.textContent = 'Enter a YouTube channel URL first.'; return; }
+        btn.disabled = true; btn.textContent = 'Thinking…';
+        hint.textContent = 'Resolving channel and drafting fields…';
+        try {
+          const fd = new FormData();
+          fd.append('url', url);
+          const r = await fetch('/channels/prefill', { method: 'POST', body: fd });
+          const d = await r.json();
+          if (!r.ok) { hint.textContent = d.error || 'Prefill failed.'; return; }
+          const f = d.fields || {};
+          setField('call_sign', f.call_sign);
+          setField('network', f.network);
+          setField('market', f.market);
+          setField('region', f.region);
+          setField('country', f.country);
+          if (f.scope) setField('scope', f.scope);
+          let msg = d.channel_title ? `Prefilled from “${d.channel_title}”. Review and edit before adding.`
+                                    : 'Prefilled — review and edit before adding.';
+          if (d.already_exists) msg = `Heads up: “${d.already_exists}” already uses this channel. ` + msg;
+          hint.textContent = msg;
+        } catch (e) {
+          hint.textContent = 'Prefill failed: ' + e;
+        } finally {
+          btn.disabled = false; btn.textContent = '✨ Prefill with AI';
+        }
+      });
+    })();
+  </script>
 
   <details class="modal-more">
     <summary>Bulk import (CSV)</summary>
