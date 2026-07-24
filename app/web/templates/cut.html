@@ -49,14 +49,14 @@
       <button type="button" class="sm" onclick="setStart()">⇤ Set start</button>
       <button type="button" class="sm" onclick="setEnd()">Set end ⇥</button>
       <button type="button" class="primary sm" onclick="addSegment()">＋ Add segment</button>
+      <button type="button" class="sm" id="preview-mode-btn" style="margin-left: auto;"
+              onclick="togglePreviewMode()"
+              title="Play through every segment in order, skipping the gaps. Pause and resume from anywhere — it keeps flowing and loops, so you can fine-tune start/end points without restarting from the top.">▶ Preview mode</button>
     </div>
     <div class="meta" id="pending-range" style="margin-top: 6px;">start: — · end: —</div>
 
     <div id="segments" style="margin-top: 14px;"></div>
     <div class="meta" id="total-len" style="margin: 6px 0;"></div>
-    <div class="btn-group" style="margin-top: 8px;">
-      <button type="button" class="sm" id="preview-all-btn" onclick="togglePreviewAll()">▶ Preview supercut</button>
-    </div>
     <form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return prepExport(this)">
       <input type="hidden" name="segments_json" value="">
       <div class="btn-group" style="margin-top: 8px;">
@@ -131,51 +131,101 @@ function reorderSegment(from, to) {
   if (selectedSeg === -1) selectedSeg = null;
   renderSegments();
 }
-// ---- Segment playback (single preview + full supercut preview) ----
+// ---- Segment playback --------------------------------------------------
+// The <video> serves two playback flavors: a one-shot single-segment preview
+// (row ▶) + edge-drag scrub via `playback`/`activeStop` below, and a sustained
+// "Preview mode" pass over every segment (further down).
 let playback = null;
 let activeStop = null;
 
-function setPreviewBtn(active) {
-  const btn = document.getElementById('preview-all-btn');
-  if (btn) btn.textContent = active ? '■ Stop preview' : '▶ Preview supercut';
-}
 function playSegments(segs) {
   segs = segs.filter(s => s.end > s.start);
   if (!segs.length) return;
+  if (previewMode) setPreviewMode(false);  // a single preview overrides the mode
   activeStop = null;
   playback = { segs, idx: 0 };
-  setPreviewBtn(true);
   player.currentTime = segs[0].start;
   player.play();
 }
-function stopPlayback() { if (playback) { playback = null; setPreviewBtn(false); player.pause(); } }
-function cancelPlayback() { if (playback) { playback = null; setPreviewBtn(false); } }
+function cancelPlayback() { if (playback) { playback = null; } }
 
 function previewSegment(i) { playSegments([{ ...segments[i] }]); }
-function togglePreviewAll() {
-  if (playback) { stopPlayback(); return; }
-  if (!segments.length) { alert('Add at least one segment first.'); return; }
-  playSegments(segments.map(s => ({ ...s })));
+
+// Replay the last ~0.5s leading into an out point so the operator can hear the
+// tail and catch any clipped/garbled word. Stops exactly on the out point.
+function auditionEnd(end) {
+  const from = Math.max(0, end - 0.5);
+  if (end - from < 0.05) return;
+  playSegments([{ start: from, end }]);
 }
 
-player.addEventListener('timeupdate', () => {
-  if (!playback) return;
-  const seg = playback.segs[playback.idx];
-  if (player.currentTime >= seg.end - 0.02) {
-    playback.idx++;
-    if (playback.idx >= playback.segs.length) stopPlayback();
-    else player.currentTime = playback.segs[playback.idx].start;
-  }
-});
+// ---- Preview mode ------------------------------------------------------
+// A continuous pass through the segments (in start-time order) that skips the
+// gaps between them. Unlike a one-shot supercut it's a sustained toggle: pause
+// and resume from anywhere and it keeps flowing, and it loops at the end — so
+// you can fine-tune start/end points without ever restarting from the top.
+let previewMode = false;
 
-player.addEventListener('timeupdate', () => {
-  if (playback || activeStop === null) return;
-  if (player.currentTime >= activeStop - 0.02) {
+function orderedSegs() {
+  return segments.filter(s => s.end > s.start).slice().sort((a, b) => a.start - b.start);
+}
+function setPreviewMode(on) {
+  previewMode = on;
+  const btn = document.getElementById('preview-mode-btn');
+  if (btn) {
+    btn.classList.toggle('primary', on);
+    btn.textContent = on ? '■ Stop preview' : '▶ Preview mode';
+  }
+  if (!on) return;
+  playback = null; activeStop = null;  // preview mode is the authority
+  const segs = orderedSegs();
+  if (!segs.length) { alert('Add at least one segment first.'); setPreviewMode(false); return; }
+  const t = player.currentTime;
+  if (!segs.some(s => t >= s.start && t < s.end)) {
+    player.currentTime = (segs.find(s => s.start > t) || segs[0]).start;
+  }
+  player.play();
+}
+function togglePreviewMode() { setPreviewMode(!previewMode); }
+
+// Frame-accurate boundary enforcement, run every frame from the rAF draw loop.
+// `timeupdate` only fires ~4x/sec, letting clips overshoot their out point by a
+// noticeable fraction of a second; checking each frame stops right on the dot.
+function enforceBounds() {
+  if (player.paused) return;
+  // Single-segment / audition playback: advance or stop exactly at the out point.
+  if (playback) {
+    const seg = playback.segs[playback.idx];
+    if (player.currentTime >= seg.end) {
+      if (playback.idx + 1 >= playback.segs.length) {
+        player.pause();
+        player.currentTime = seg.end;  // land exactly on the out point
+        playback = null;
+      } else {
+        playback.idx++;
+        player.currentTime = playback.segs[playback.idx].start;
+      }
+    }
+    return;
+  }
+  // Preview mode: jump out of any gap to the next segment, or loop to the first.
+  if (previewMode) {
+    if (dragging) return;
+    const segs = orderedSegs();
+    if (!segs.length) return;
+    const t = player.currentTime;
+    if (segs.some(s => t >= s.start && t < s.end)) return;  // inside a clip — let it play
+    const next = segs.find(s => s.start >= t);
+    player.currentTime = next ? next.start : segs[0].start;
+    return;
+  }
+  // Edge-drag scrub: pause exactly at the segment's out point.
+  if (activeStop !== null && player.currentTime >= activeStop) {
     player.pause();
     player.currentTime = activeStop;
     activeStop = null;
   }
-});
+}
 
 // ---- Waveform editor ----
 const wave = document.getElementById('wave');
@@ -263,6 +313,7 @@ function drawWave() {
 }
 
 (function tick() {
+  enforceBounds();
   drawWave();
   if (!player.paused) redrawAllSegWaves(false);
   requestAnimationFrame(tick);
@@ -353,10 +404,12 @@ wave.addEventListener('pointermove', e => {
 });
 wave.addEventListener('pointerup', () => {
   if (dragging) {
-    if (dragging.kind === 'pending' && dragging.edge === 'start' && pending.start !== null) {
-      player.currentTime = pending.start; player.play();
+    if (dragging.kind === 'pending') {
+      if (dragging.edge === 'start' && pending.start !== null) { player.currentTime = pending.start; player.play(); }
+      else if (dragging.edge === 'end' && pending.end !== null) { auditionEnd(pending.end); }
     } else if (dragging.kind === 'seg') {
       if (dragging.edge === 'start') { player.currentTime = segments[dragging.index].start; player.play(); }
+      else if (dragging.edge === 'end') { auditionEnd(segments[dragging.index].end); }
       renderSegments();
     }
   }
@@ -564,6 +617,8 @@ function initSegWave(i, canvas) {
       player.currentTime = segments[i].start;
       activeStop = segments[i].end;
       player.play();
+    } else if (drag === 'end') {
+      auditionEnd(segments[i].end);  // replay the last 0.5s into the out point
     }
     const wasEdge = drag && drag !== 'scrub';
     frozenSegWin = null; frozenSegIdx = null;
@@ -595,6 +650,7 @@ function updateSegment(i, key, val) {
   drawWave();
   drawSegWave(i);
   if (key === 'start') { cancelPlayback(); player.currentTime = v; player.play(); }
+  else if (key === 'end') { auditionEnd(segments[i].end); }
 }
 
 function updateTotal() {
