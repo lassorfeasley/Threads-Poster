@@ -30,9 +30,16 @@
   <span class="badge {{ 'supportive' if status == 'published' else ('hostile' if status == 'failed' else ('info' if status == 'queued' else '')) }}">{{ status }}</span>
   {% if is_breaking and status == "queued" %}<span class="badge hostile">breaking</span>{% endif %}
 {% endset %}
+{% set post_actions %}
+  {% if has_clip %}
+    <a class="btn sm" href="/post/{{ pid }}/download-clip" download>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+      Download clip</a>
+  {% endif %}
+{% endset %}
 
 <div class="canvas canvas-wide">
-{{ ui.pagebar("Post", crumbs=post_crumbs, title_extra=post_title_extra) }}
+{{ ui.pagebar("Post", crumbs=post_crumbs, title_extra=post_title_extra, actions=post_actions) }}
 
 <div class="post-layout">
 <div class="post-main">
@@ -49,27 +56,6 @@
     </div>
   {% endif %}
   <div class="stage-actions">
-    {% if candidate_id %}
-      <a href="/video/{{ candidate_id }}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
-        Open clip page</a>
-    {% endif %}
-    {% if has_clip %}
-      <a href="/post/{{ pid }}/download-clip" download>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-        Download clip</a>
-      {% if has_burned_captions %}
-        <span class="meta">Burned-in captions on</span>
-      {% elif candidate_id %}
-        <span class="meta">Plain trim — open clip page to add captions</span>
-      {% endif %}
-    {% endif %}
-    {% if clip_transcript_text %}
-      <button type="button" id="copy-transcript-btn" onclick="copyPostTranscript(this)">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-        Copy transcript</button>
-      <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
-    {% endif %}
     {% if permalink %}
       <a href="{{ permalink }}" target="_blank">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
@@ -193,6 +179,21 @@
     </div>
     <div class="wf-body" style="white-space: pre-wrap;">{{ caption }}</div>
   </section>
+{% endif %}
+
+{# ---- Transcript ---- #}
+{% if clip_transcript_text %}
+<section class="wf-section">
+  <div class="wf-head">
+    <span class="wf-title">Transcript</span>
+    <button type="button" id="copy-transcript-btn" class="copy-btn" style="margin-left: auto;"
+            onclick="copyPostTranscript(this)" title="Copy transcript" aria-label="Copy transcript">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    </button>
+  </div>
+  <div class="wf-body" style="white-space: pre-wrap;">{{ clip_transcript_text }}</div>
+  <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
+</section>
 {% endif %}
 
 {# ---- Performance ---- #}
@@ -321,18 +322,13 @@
     const box = document.getElementById('clip-transcript-plain');
     const text = (box && box.value) || '';
     if (!text.trim()) { alert('No transcript to copy.'); return; }
-    const label = btn.querySelector('svg') ? btn.childNodes[btn.childNodes.length - 1] : null;
     try { await navigator.clipboard.writeText(text); }
     catch (e) {
       box.hidden = false; box.focus(); box.select();
       try { document.execCommand('copy'); } catch (e2) { alert('Copy failed: ' + e); return; }
       finally { box.hidden = true; }
     }
-    if (label) {
-      const original = label.textContent;
-      label.textContent = ' Copied';
-      setTimeout(() => { label.textContent = original; }, 1500);
-    }
+    flashCopied(btn);
   }
 </script>
 {% endblock %}
