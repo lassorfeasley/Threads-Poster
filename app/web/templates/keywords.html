@@ -20,7 +20,7 @@
     <span class="term">{{ kw }}</span>
     {% if hits.get(kw) %}<span class="hits" title="candidates matched">×{{ hits[kw] }}</span>{% endif %}
     <form class="inline" method="post" action="/keywords/delete"
-          onsubmit="return confirm('Remove keyword: {{ kw }}?')">
+          data-confirm="Remove keyword: {{ kw }}?" data-confirm-ok="Remove" data-confirm-variant="danger">
       <input type="hidden" name="keyword" value="{{ kw }}">
       <button type="submit" title="Remove">✕</button>
     </form>

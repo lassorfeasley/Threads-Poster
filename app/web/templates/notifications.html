@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{% if failed %}
+  {% set ntitle %}<span class="badge hostile">{{ failed|length }} failed</span>{% endset %}
+{% endif %}
+{{ ui.pagebar("Notifications", title_extra=(ntitle if failed else ''),
+              sub="Failed posts that dropped out of the queue. Fix the issue (see the error), then re-queue or retry — or dismiss once you're OK with it.") }}
+
+{% if not failed %}
+  <div class="empty">
+    <span class="icon">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+    </span>
+    <strong>All clear</strong>
+    No issues need your attention right now.
+  </div>
+{% else %}
+  <div class="post-list">
+    {% for p in failed %}
+    {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
+    <div class="post-card is-alert">
+      {% if cand and cand.thumbnail_url %}
+      <img class="pc-thumb" src="{{ cand.thumbnail_url }}" alt="" loading="lazy"
+           onerror="this.classList.add('is-broken')">
+      {% else %}
+      <div class="pc-thumb is-empty" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+      </div>
+      {% endif %}
+      <div class="pc-body">
+        <a class="item-title" href="/post/{{ p.id }}">{{ p.caption[:140] or "(open post)" }}</a>
+        <div class="badges">
+          <span class="badge hostile">failed</span>
+          <span class="meta">Added {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</span>
+        </div>
+        {% if p.error %}<div class="meta" style="color: var(--danger);">{{ p.error[:240] }}</div>{% endif %}
+        <div class="pc-actions">
+          <form class="inline" method="post" action="/post/{{ p.id }}/queue">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="sm" title="Put it back in the posting queue to retry">Re-queue</button></form>
+          <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
+                data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="sm">Retry now</button></form>
+          <a class="sm" href="/post/{{ p.id }}/download-clip" download>Clip</a>
+          <form class="inline" method="post" action="/post/{{ p.id }}/dismiss">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="reject sm" title="Acknowledge and remove from notifications (kept in history)"
+                    data-confirm="Dismiss this notification? It stays in your history but leaves this list."
+                    data-confirm-ok="Dismiss" data-confirm-variant="danger">Dismiss</button></form>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+{% endif %}
+
+<script>
+  async function publishNow(ev) {
+    ev.preventDefault();
+    const form = ev.target;
+    const pid = form.dataset.pid;
+    if (!(await confirmDialog('Publish to Threads now?', { okText: 'Post now', okVariant: 'approve' }))) return false;
+    const btn = form.querySelector('button');
+    btn.disabled = true; btn.textContent = 'Publishing…';
+    fetch(form.action, {
+      method: 'POST', headers: { 'Accept': 'application/json' },
+      body: new FormData(form),
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      pollPublish(pid, btn);
+    }).catch((e) => {
+      alert('Publish failed: ' + e.message);
+      btn.disabled = false; btn.textContent = 'Retry now';
+    });
+    return false;
+  }
+  function pollPublish(pid, btn) {
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch('/post/' + pid + '/status');
+        const s = await r.json();
+        if (s.status === 'published') {
+          clearInterval(poll);
+          btn.textContent = '✓ Published';
+          const slot = btn.closest('.pc-actions');
+          const link = s.permalink ? ' — <a href="' + s.permalink + '" target="_blank">open ↗</a>' : '';
+          if (slot) slot.innerHTML = '<span class="badge supportive">published</span>' + link;
+        } else if (s.status === 'failed') {
+          clearInterval(poll);
+          alert('Publish failed: ' + (s.error || 'unknown error'));
+          btn.disabled = false; btn.textContent = 'Retry now';
+        }
+      } catch (e) { /* keep polling */ }
+    }, 4000);
+  }
+</script>
+{% endblock %}

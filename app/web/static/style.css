@@ -165,18 +165,23 @@ aside.sidebar {
   gap: 10px;
   padding: 2px 10px 20px;
 }
-.brand .logo {
+.brand .brand-collapse {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  background: linear-gradient(135deg, #2fbf83 0%, #1f8e77 100%);
   display: grid;
   place-items: center;
   flex: none;
-  color: #06281c;
-  box-shadow: 0 0 0 1px rgba(62, 207, 142, 0.25),
-    0 4px 12px -4px rgba(47, 191, 131, 0.55);
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
+.brand .brand-collapse svg { opacity: 0.85; transition: transform 0.18s ease; }
+.brand .brand-collapse:hover { background: var(--panel2); color: var(--text); }
+.brand .brand-collapse:hover svg { opacity: 1; }
+html.nav-collapsed .brand .brand-collapse svg { transform: rotate(180deg); }
 .brand .name {
   font-weight: 700;
   font-size: 14px;
@@ -216,6 +221,22 @@ a.nav {
   transition: background 0.12s ease, color 0.12s ease;
 }
 a.nav svg { width: 17px; height: 17px; flex: none; opacity: 0.75; }
+/* Notification bell: icon wrapper carries a red dot; a count badge sits at the far right. */
+.nav-ic-wrap { position: relative; display: inline-flex; flex: none; }
+.nav-dot {
+  position: absolute; top: -3px; right: -3px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--danger);
+  border: 2px solid var(--bg-raised);
+}
+.nav-badge {
+  margin-left: auto;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; line-height: 1;
+  color: #fff; background: var(--danger); border-radius: 9px;
+}
+html.nav-collapsed a.nav .nav-badge { display: none; }
 a.nav:hover { color: var(--text); background: var(--panel2); }
 a.nav:hover svg { opacity: 1; }
 a.nav.active {
@@ -277,28 +298,6 @@ a.nav.active .count { color: var(--text-dim); background: var(--panel3); }
 }
 
 /* Collapse toggle + collapsed "rail" state */
-.nav-collapse {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  width: calc(100% - 8px);
-  margin: 2px 4px 8px;
-  color: var(--text-dim);
-  background: transparent;
-  border: 1px solid transparent;
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-weight: 500;
-  font-size: 13.5px;
-  font-family: var(--font);
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-.nav-collapse svg { width: 17px; height: 17px; flex: none; opacity: 0.75; transition: transform 0.18s ease; }
-.nav-collapse:hover { color: var(--text); background: var(--panel2); }
-.nav-collapse:hover svg { opacity: 1; }
-
 aside.sidebar { transition: width 0.18s ease; }
 body { transition: padding-left 0.18s ease; }
 
@@ -310,12 +309,9 @@ html.nav-collapsed .nav-section,
 html.nav-collapsed a.nav .label,
 html.nav-collapsed a.nav .count,
 html.nav-collapsed .sidebar .foot,
-html.nav-collapsed .theme-toggle .label,
-html.nav-collapsed .nav-collapse .label { display: none; }
+html.nav-collapsed .theme-toggle .label { display: none; }
 html.nav-collapsed a.nav,
-html.nav-collapsed .theme-toggle,
-html.nav-collapsed .nav-collapse { justify-content: center; padding: 10px; }
-html.nav-collapsed .nav-collapse svg { transform: rotate(180deg); }
+html.nav-collapsed .theme-toggle { justify-content: center; padding: 10px; }
 
 /* ------------------------------------------------------------
    Main layout
@@ -893,6 +889,37 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(
   margin-bottom: 6px;
 }
 .modal-head strong { font-size: 15px; font-weight: 650; }
+.app-dialog .dialog-msg { margin: 4px 0 18px; white-space: pre-line; line-height: 1.5; }
+
+/* --- Style guide: editable rule rows + advisory insight rows --- */
+.rule-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.rule-row:first-child { border-top: none; }
+.rule-row.is-off { opacity: 0.55; }
+.rule-row .rule-text { flex: 1 1 auto; min-width: 0; }
+.rule-row .rule-priority { flex: none; width: auto; }
+.rule-row .icon-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 5px 8px; }
+.rule-row .icon-btn svg { display: block; }
+
+.insight-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+.insight-row:first-child { border-top: none; }
+.insight-arrow { flex: none; font-size: 13px; line-height: 1; }
+.insight-arrow.up { color: var(--success, #16a34a); }
+.insight-arrow.down { color: var(--danger); }
+.insight-body { flex: 1 1 auto; min-width: 0; }
+.insight-label { font-weight: 600; font-size: 13.5px; }
+.insight-actions { flex: none; display: flex; gap: 6px; }
 
 /* New-cut source-video picker (Library → Cuts). */
 .video-picker { max-height: 52vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
@@ -1312,6 +1339,8 @@ canvas#wave {
 .seg-grip:hover { color: var(--text); background: var(--panel3); }
 .seg-grip:active { cursor: grabbing; }
 .seg-row button { padding: 3px 9px; font-size: 12px; }
+.seg-row button.seg-del { display: inline-flex; align-items: center; justify-content: center; padding: 4px 7px; }
+.seg-row button.seg-del svg { display: block; }
 .seg-row input.seg-num {
   width: 78px; padding: 3px 4px 3px 8px;
   font-family: var(--mono); font-size: 12px;
@@ -1753,10 +1782,9 @@ a.cal-event:hover { background: var(--panel3); }
 @media (max-width: 860px) {
   :root { --sidebar-w: 64px; }
   aside.sidebar { padding: 16px 8px; }
-  .brand .name, .nav-section, a.nav .label, a.nav .count, .sidebar .foot,
+  .brand .name, .nav-section, a.nav .label, a.nav .count, a.nav .nav-badge, .sidebar .foot,
   .theme-toggle .label { display: none; }
   a.nav, .theme-toggle { justify-content: center; padding: 10px; }
-  .nav-collapse { display: none; }
   main { padding: 20px 18px 90px; }
   .cal-cell { min-height: 84px; }
   .queue-item { grid-template-columns: 64px minmax(0, 1fr); }
@@ -2100,6 +2128,35 @@ body.cal-committing #cal-layout {
 }
 .stage-actions svg { width: 14px; height: 14px; }
 
+/* Field label with a trailing icon action (e.g. copy), aligned to the right. */
+.field-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.field-label-row label { margin-bottom: 0; }
+.copy-btn {
+  margin-left: auto;
+  display: inline-grid;
+  place-items: center;
+  width: 26px; height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .12s ease, background .12s ease, border-color .12s ease;
+}
+.copy-btn:hover {
+  color: var(--text);
+  background: var(--panel2);
+  border-color: var(--border-strong);
+}
+.copy-btn.is-copied { color: #16a34a; border-color: #16a34a; }
+.copy-btn svg { display: block; width: 14px; height: 14px; }
+
 /* Segmented control (e.g. Captioned / Original preview). */
 .seg-ctl {
   display: inline-flex;
@@ -2127,6 +2184,68 @@ body.cal-committing #cal-layout {
   color: var(--text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
+
+/* --- Subtitle controls: position toggle group + on/off switch --- */
+.subs-controls { display: flex; flex-direction: column; gap: 10px; }
+.subs-line { display: flex; align-items: center; gap: 12px; }
+.subs-lbl {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  min-width: 66px;
+}
+.subs-line.is-disabled { opacity: 0.45; }
+.subs-line.is-disabled .subs-lbl { color: var(--muted); }
+
+.seg-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.seg-toggle button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.seg-toggle button:hover:not(:disabled) { background: var(--panel3); color: var(--text); }
+.seg-toggle button.is-on {
+  background: var(--bg-raised);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+.seg-toggle button:disabled { cursor: default; }
+
+/* iOS-style on/off switch */
+.switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch .switch-track {
+  position: relative;
+  width: 40px; height: 22px;
+  background: var(--panel3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: background 0.18s ease;
+}
+.switch .switch-thumb {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 0.18s ease;
+}
+.switch input:checked + .switch-track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .switch-track .switch-thumb { transform: translateX(18px); }
+.switch input:disabled + .switch-track { opacity: 0.5; }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* --- Workflow sections: numbered, one job each. --- */
 .wf-section {
@@ -2307,10 +2426,15 @@ details.panel > .panel-body { padding: 14px 18px; }
   aspect-ratio: 16 / 9;
   background: var(--panel2);
   border-bottom: 1px solid var(--border);
+  overflow: hidden;
 }
 .media-card .thumb-wrap img {
   width: 100%; height: 100%;
   object-fit: cover; display: block;
+  /* Source stills often carry broadcast letterbox mattes (black bars top and
+     bottom). Zoom in a touch so those bars fall outside the frame, leaving a
+     clean edge-to-edge still. */
+  transform: scale(1.16);
 }
 .media-card .thumb-wrap.is-empty {
   display: grid; place-items: center;
@@ -2379,6 +2503,10 @@ details.panel > .panel-body { padding: 14px 18px; }
   border-radius: var(--radius-lg);
   padding: 13px 16px; margin-bottom: 10px;
   box-shadow: var(--shadow);
+}
+.post-card.is-alert {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  border-left: 3px solid var(--danger);
 }
 .post-card .pc-rank {
   flex: 0 0 auto;

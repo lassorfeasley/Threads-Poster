@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "9"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -74,7 +74,9 @@ _SCHEMA_SENTINELS = (
     "SELECT suggested_caption FROM threads_posts LIMIT 0",
     "SELECT status FROM trait_weights LIMIT 0",
     "SELECT cut_pk FROM threads_posts LIMIT 0",
+    "SELECT attention_dismissed_at FROM threads_posts LIMIT 0",
     "SELECT id FROM cuts LIMIT 0",
+    "SELECT subs_position FROM cuts LIMIT 0",
 )
 
 
@@ -152,6 +154,7 @@ def _ensure_new_columns() -> None:
             "footage_score": "FLOAT",
             "footage_rationale": "TEXT DEFAULT ''",
             "footage_scored_at": "TIMESTAMP WITH TIME ZONE",
+            "attention_dismissed_at": "TIMESTAMP WITH TIME ZONE",
         },
         "trait_weights": {
             "effective_n": "FLOAT",
@@ -162,6 +165,9 @@ def _ensure_new_columns() -> None:
         "channels": {
             "country": "VARCHAR(60) DEFAULT ''",
             "scope": "VARCHAR(20) DEFAULT 'local'",
+        },
+        "cuts": {
+            "subs_position": "VARCHAR(10) DEFAULT 'bottom'",
         },
     }
     added: list[tuple[str, str]] = []

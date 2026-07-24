@@ -22,8 +22,11 @@ from sqlalchemy.orm import selectinload
 
 from .. import spend, threads_api
 from ..analytics import generate_report, snapshot_metrics
-from ..clipper import ClipExportError, clip_duration, export_supercut, get_waveform
-from ..config import load_first_reply, load_keywords, load_settings, save_first_reply, save_keywords
+from ..clipper import ClipExportError, clip_duration, export_supercut, extract_still, get_waveform
+from ..config import (
+    load_caption_rules, load_first_reply, load_keywords, load_settings,
+    render_caption_guide, save_caption_rules, save_first_reply, save_keywords,
+)
 from ..db import (
     SessionLocal,
     active_traits,
@@ -98,6 +101,24 @@ class _StaticVersion:
 
 
 templates.env.globals["static_v"] = _StaticVersion(_STATIC_DIR / "style.css")
+
+
+def _attention_count() -> int:
+    """Number of unacknowledged failed posts. Rendered on every page (the sidebar
+    notification bell), so it must never raise — return 0 on any error."""
+    try:
+        with session_scope() as session:
+            return int(session.execute(
+                select(func.count()).select_from(ThreadsPost).where(
+                    ThreadsPost.status == "failed",
+                    ThreadsPost.attention_dismissed_at.is_(None),
+                )
+            ).scalar_one())
+    except Exception:
+        return 0
+
+
+templates.env.globals["attention_count"] = _attention_count
 
 init_db()
 with session_scope() as _s:
@@ -793,7 +814,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
-         "subs_position": load_settings().get("subtitles.position", "bottom"),
+         "subs_position": (getattr(cut, "subs_position", "") or load_settings().get("subtitles.position", "bottom")),
          "msg": msg, "active": "dashboard"},
     )
 
@@ -873,6 +894,17 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
         return _flash("/", "Upload was empty")
 
     duration = clip_duration(dest)
+
+    # Grab a poster frame so the workflow tile shows a real still instead of the
+    # empty placeholder (discovered clips get one from their source; uploads didn't).
+    thumb_url = None
+    try:
+        thumb_path = dest.with_suffix(".jpg")
+        extract_still(dest, thumb_path)
+        thumb_url = f"/video/upload-thumb/{video_id}.jpg"
+    except Exception as exc:
+        log.warning("Could not extract still for upload %s: %s", video_id, exc)
+
     with session_scope() as session:
         ch = _get_or_create_upload_channel(session)
         c = Candidate(
@@ -883,6 +915,7 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
             published_at=utcnow(),
             duration_seconds=int(duration) if duration else None,
             local_video_path=str(dest),
+            thumbnail_url=thumb_url,
             status=STATUS_APPROVED,
             approved_at=utcnow(),
         )
@@ -891,6 +924,19 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
         cid = c.id
     threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
     return _flash(f"/video/{cid}", "Uploaded — transcribing now")
+
+
+@app.get("/video/upload-thumb/{name}")
+def upload_thumb(name: str):
+    """Serve the poster frame extracted for an uploaded clip."""
+    from ..config import ROOT
+
+    upload_dir = (ROOT / load_settings().get("storage.download_dir", "data/videos") / "uploads").resolve()
+    path = (upload_dir / name).resolve()
+    # Guard against path traversal: the resolved file must stay inside uploads/.
+    if upload_dir not in path.parents or path.suffix.lower() != ".jpg" or not path.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(str(path), media_type="image/jpeg")
 
 
 def _get_or_create_pasted_channel(session) -> Channel:
@@ -1261,6 +1307,7 @@ def generate_subtitles(cut_id: int, position: str = Form("")):
         if cut is not None:
             cut.subtitled_clip_path = str(out)
             cut.use_subtitles = True
+            cut.subs_position = "top" if (position or "").lower() == "top" else "bottom"
             cut.updated_at = utcnow()
     return {"url": f"/media/subtitled/{cut_id}"}
 
@@ -1367,6 +1414,7 @@ def suggest_caption(cut_id: int):
                 settings.get("engagement.draft_model", "claude-sonnet-5"),
                 c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
                 examples=voice["examples"], style_guide=voice["style_guide"],
+                operator_guide=render_caption_guide(),
             )
             cut.draft_caption = caption
             return {"caption": caption, "voice_examples": len(voice["examples"])}
@@ -1398,7 +1446,7 @@ def suggest_clip_title(cut_id: int):
 
 @app.post("/cut/{cut_id}/post")
 def post_to_threads(cut_id: int, caption: str = Form(...),
-                    clip_title: str = Form(""), use_subtitles: str = Form("")):
+                    use_subtitles: str = Form("")):
     """Operator-confirmed publish of the exported clip."""
     caption = caption.strip()
     if not caption:
@@ -1414,7 +1462,6 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
             return _flash(f"/cut/{cut_id}", "Export a clip first")
-        cut.clip_title = clip_title.strip()
         try:
             post = publish_clip(session, cut.candidate,
                                 _chosen_clip_path(cut, use_subtitles), caption, cut=cut)
@@ -1437,7 +1484,7 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
 
 @app.post("/cut/{cut_id}/queue")
 def queue_to_threads(cut_id: int, caption: str = Form(...),
-                     is_breaking: str = Form(""), clip_title: str = Form(""),
+                     is_breaking: str = Form(""),
                      use_subtitles: str = Form("")):
     """Add the exported clip to the adaptive FIFO queue (no immediate post)."""
     caption = caption.strip()
@@ -1448,7 +1495,6 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
             return _flash(f"/cut/{cut_id}", "Export a clip first")
-        cut.clip_title = clip_title.strip()
         clip_path = _chosen_clip_path(cut, use_subtitles)
         try:
             # Reuse an existing not-yet-published post for THIS cut rather than
@@ -1494,7 +1540,7 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
 
 @app.post("/cut/{cut_id}/save-draft")
 def save_draft(cut_id: int, caption: str = Form(...),
-               clip_title: str = Form(""), use_subtitles: str = Form("")):
+               use_subtitles: str = Form("")):
     """Save the exported clip + caption as a draft to publish or queue later."""
     caption = caption.strip()
     if not caption:
@@ -1503,7 +1549,6 @@ def save_draft(cut_id: int, caption: str = Form(...),
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
             return _flash(f"/cut/{cut_id}", "Export a clip first")
-        cut.clip_title = clip_title.strip()
         try:
             record_post(session, cut.candidate, _chosen_clip_path(cut, use_subtitles),
                         caption, status="draft", cut=cut)
@@ -1514,7 +1559,7 @@ def save_draft(cut_id: int, caption: str = Form(...),
 
 
 @app.post("/post/{post_id}/cancel")
-def cancel_queued_post(post_id: int, next: str = Form("/posts")):
+def cancel_queued_post(post_id: int, next: str = Form("/calendar")):
     """Remove a queued or draft (not-yet-published) post."""
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
@@ -1527,7 +1572,7 @@ def cancel_queued_post(post_id: int, next: str = Form("/posts")):
         session.delete(p)
         # Send the operator back to the cut when deleting its only post record,
         # so they don't lose track of a trimmed export.
-        if cut_id and (not next or next in ("/posts", "/")):
+        if cut_id and (not next or next in ("/posts", "/calendar", "/")):
             next = f"/cut/{cut_id}?step=post"
     label = "Queued post" if was == "queued" else "Draft"
     return _flash(next, f"{label} removed — your clip is still here; queue or post again when ready.")
@@ -1535,7 +1580,7 @@ def cancel_queued_post(post_id: int, next: str = Form("/posts")):
 
 @app.post("/post/{post_id}/queue")
 def queue_existing_post(post_id: int, caption: str = Form(""),
-                        is_breaking: str = Form(""), next: str = Form("/posts")):
+                        is_breaking: str = Form(""), next: str = Form("/calendar")):
     """Move a draft/failed post into the adaptive queue (or update a queued one)."""
     breaking = str(is_breaking).lower() in ("1", "true", "on", "yes")
     with session_scope() as session:
@@ -1565,7 +1610,7 @@ def queue_existing_post(post_id: int, caption: str = Form(""),
 
 
 @app.post("/post/{post_id}/toggle-breaking")
-def toggle_breaking(post_id: int, next: str = Form("/posts")):
+def toggle_breaking(post_id: int, next: str = Form("/calendar")):
     """Flip the breaking-news flag on a queued/draft post."""
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
@@ -1623,7 +1668,7 @@ def _publish_in_thread(post_id: int) -> None:
 
 
 @app.post("/post/{post_id}/publish-now")
-def publish_scheduled_now(request: Request, post_id: int, next: str = Form("/posts")):
+def publish_scheduled_now(request: Request, post_id: int, next: str = Form("/calendar")):
     """Publish a queued, draft, or previously failed post immediately.
 
     Publishing a video can take minutes (upload + Threads-side processing), so we
@@ -1685,7 +1730,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             .where(ThreadsPost.id == post_id)
         ).scalar_one_or_none()
         if p is None:
-            return _flash("/posts", "Post not found")
+            return _flash("/calendar", "Post not found")
 
         cand = p.candidate
         cut = p.cut
@@ -1803,7 +1848,7 @@ def _clean_auth_code(raw: str) -> str:
 
 
 @app.post("/threads/connect")
-def threads_connect(code: str = Form(...), next: str = Form("/posts")):
+def threads_connect(code: str = Form(...), next: str = Form("/calendar")):
     try:
         threads_api.exchange_code(_clean_auth_code(code))
         return _flash(next, "Threads connected")
@@ -1899,12 +1944,12 @@ def threads_import_history():
     """Pull the account's own existing Threads posts into the DB, then kick off
     an insights snapshot for them in the background."""
     if not threads_api.is_authenticated():
-        return _flash("/posts", "Connect Threads first")
+        return _flash("/calendar", "Connect Threads first")
     with session_scope() as session:
         try:
             result = import_history(session)
         except Exception as exc:
-            return _flash("/posts", f"Import failed: {exc}")
+            return _flash("/calendar", f"Import failed: {exc}")
 
     def _pull_insights():
         try:
@@ -1915,7 +1960,7 @@ def threads_import_history():
 
     threading.Thread(target=_pull_insights, daemon=True).start()
     return _flash(
-        "/posts",
+        "/calendar",
         f"Imported {result['imported']} posts ({result['skipped']} already known) — "
         f"pulling insights in the background; see Analytics shortly.",
     )
@@ -1950,13 +1995,6 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
         queue_count = session.execute(
             select(func.count()).select_from(ThreadsPost).where(ThreadsPost.status == "queued")
         ).scalar_one()
-        # Failed posts vanish from the calendar grid; surface a banner so the
-        # operator notices a post dropped out instead of silently disappearing.
-        failed_posts = session.execute(
-            select(ThreadsPost).where(ThreadsPost.status == "failed")
-            .order_by(ThreadsPost.created_at.desc()).limit(10)
-        ).scalars().all()
-        failed_count = len(failed_posts)
         status = scheduler_status(session)
         windows_et = list(status.get("windows") or [])
 
@@ -1981,6 +2019,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
 
     prev_y, prev_m = (y - 1, 12) if m == 1 else (y, m - 1)
     next_y, next_m = (y + 1, 1) if m == 12 else (y, m + 1)
+    authenticated = threads_api.is_authenticated()
 
     return templates.TemplateResponse(
         request, "calendar.html",
@@ -1989,49 +2028,49 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
          "prev_y": prev_y, "prev_m": prev_m, "next_y": next_y, "next_m": next_m,
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
          "drafts_count": drafts_count, "queue_count": queue_count,
-         "failed_count": failed_count,
+         "authenticated": authenticated,
+         "auth_url": threads_api.authorize_url() if not authenticated else "",
          "linear": linear, "scheduler": status, "windows_et": windows_et,
          "msg": msg, "active": "calendar"},
     )
 
 
-@app.get("/posts", response_class=HTMLResponse)
-def posts_page(request: Request, msg: str = ""):
-    post_opts = (
-        selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
-        selectinload(ThreadsPost.cut).selectinload(Cut.candidate),
-    )
+@app.get("/posts")
+def posts_page(msg: str = ""):
+    """Retired page. The queue lives on the Calendar, drafts/history in the
+    Library, and Threads connection + scheduler status now live on the Calendar
+    too. Kept as a redirect so old links and bookmarks still resolve."""
+    return RedirectResponse("/calendar" + (f"?msg={msg}" if msg else ""), status_code=307)
+
+
+@app.get("/notifications", response_class=HTMLResponse)
+def notifications_page(request: Request, msg: str = ""):
+    """Operator alerts — currently failed posts that dropped out of the queue and
+    need a decision (retry, re-queue, or dismiss)."""
     with session_scope() as session:
-        # Two queries instead of three: active queue/drafts + recent history.
-        active = session.execute(
-            select(ThreadsPost).options(*post_opts)
-            .where(ThreadsPost.status.in_(["queued", "publishing", "draft"]))
+        failed = session.execute(
+            select(ThreadsPost)
+            .options(selectinload(ThreadsPost.cut).selectinload(Cut.candidate),
+                     selectinload(ThreadsPost.candidate))
+            .where(ThreadsPost.status == "failed",
+                   ThreadsPost.attention_dismissed_at.is_(None))
             .order_by(ThreadsPost.created_at.desc())
         ).scalars().all()
-        queued = sorted(
-            [p for p in active if p.status in ("queued", "publishing")],
-            key=lambda p: p.created_at or utcnow(),
-        )
-        drafts = [p for p in active if p.status == "draft"]
-        posts = session.execute(
-            select(ThreadsPost).options(*post_opts)
-            .where(ThreadsPost.status.notin_(["queued", "publishing", "draft"]))
-            .order_by(ThreadsPost.created_at.desc()).limit(100)
-        ).scalars().all()
-        # Failed posts drop out of the queue/calendar entirely, so surface them
-        # as a distinct "needs attention" list rather than letting them silently
-        # vanish into the history table.
-        failed = [p for p in posts if p.status == "failed"]
-        status = scheduler_status(session)
-    authenticated = threads_api.is_authenticated()
     return templates.TemplateResponse(
-        request, "posts.html",
-        {"posts": posts, "queued": queued, "drafts": drafts, "failed": failed,
-         "scheduler": status,
-         "authenticated": authenticated,
-         "auth_url": threads_api.authorize_url() if not authenticated else "",
-         "msg": msg, "active": "posts"},
+        request, "notifications.html",
+        {"failed": failed, "msg": msg, "active": "notifications"},
     )
+
+
+@app.post("/post/{post_id}/dismiss")
+def dismiss_attention(post_id: int, next: str = Form("/notifications")):
+    """Acknowledge a failed post so it leaves the notifications list (kept in history)."""
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return _flash("/notifications", "Post not found")
+        p.attention_dismissed_at = utcnow()
+    return _flash(next, "Dismissed")
 
 
 # --- Engagement ----------------------------------------------------------------
@@ -2240,6 +2279,43 @@ def first_reply_save(enabled: str = Form(""), text: str = Form("")):
 @app.get("/first-reply")
 def first_reply_redirect():
     return RedirectResponse("/engagement/first-reply", status_code=303)
+
+
+# --- Style guide (caption drafting prompt) -----------------------------------
+
+@app.get("/style-guide", response_class=HTMLResponse)
+def style_guide_page(request: Request, msg: str = ""):
+    from ..caption_insights import compute_insights
+
+    with session_scope() as session:
+        insights = compute_insights(session)
+    return templates.TemplateResponse(
+        request, "style_guide.html",
+        {"rules": load_caption_rules(), "insights": insights,
+         "msg": msg, "active": "style_guide"},
+    )
+
+
+@app.post("/style-guide")
+def style_guide_save(rules_json: str = Form("[]")):
+    try:
+        raw = json.loads(rules_json or "[]")
+        if not isinstance(raw, list):
+            raise ValueError("rules must be a list")
+    except (ValueError, TypeError) as exc:
+        return _flash("/style-guide", f"Could not save rules: {exc}")
+    save_caption_rules(raw)
+    n = len(load_caption_rules())
+    return _flash("/style-guide", f"Saved {n} style rule{'s' if n != 1 else ''}")
+
+
+@app.post("/style-guide/insights/dismiss")
+def style_guide_dismiss_insight(key: str = Form(...)):
+    from ..caption_insights import dismiss_insight
+
+    with session_scope() as session:
+        dismiss_insight(session, key)
+    return JSONResponse({"ok": True})
 
 
 # --- Traits (flat footage vocabulary + post-performance learning) ---------------

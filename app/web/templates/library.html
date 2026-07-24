@@ -18,7 +18,7 @@
     </button>
   </div>
 {% endset %}
-{{ ui.pagebar("Library", filters=lib_filters) }}
+{{ ui.pagebar("Content Library", filters=lib_filters) }}
 
 <div class="list-tabs">{{ lib_tabs }}</div>
 
@@ -27,7 +27,7 @@
 <div id="videos-panel" class="lib-panel">
   {% if not video_rows %}
     <div class="empty"><span class="icon">▤</span><strong>Nothing downloaded yet</strong>
-      Approve videos from the <a href="/">Dashboard</a> to download them.</div>
+      Approve videos from <a href="/">Create content</a> to download them.</div>
   {% else %}
   <div class="card-grid">
     {% for row in video_rows %}
@@ -71,7 +71,7 @@
       <button type="button" class="btn primary"
               onclick="document.getElementById('new-cut-dialog').showModal()">＋ New cut</button>
     {% else %}
-      <span class="meta">Download a video from the <a href="/">Dashboard</a> first, then you can cut from it.</span>
+      <span class="meta">Download a video from <a href="/">Create content</a> first, then you can cut from it.</span>
     {% endif %}
   </div>
   {% if not cut_rows %}

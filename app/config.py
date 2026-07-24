@@ -90,6 +90,68 @@ def save_first_reply(*, enabled: bool, text: str) -> None:
     (CONFIG_DIR / "first_reply.yaml").write_text(FIRST_REPLY_HEADER + body)
 
 
+CAPTION_STYLE_HEADER = """\
+# Operator style guide for AI-drafted post captions — a list of `rules`.
+# Editable via the Style guide page under Configure; no code changes needed.
+#
+# Each rule: { text, enabled, priority }. Enabled rules are injected into the
+# caption-drafting prompt as authoritative style instructions (high-priority
+# ones first). Hard safety rules still apply — the model won't invent facts,
+# always mentions the place, and stays under Threads' character limit — so an
+# aggressive rule can't override those.
+
+"""
+
+_VALID_PRIORITY = ("high", "normal")
+
+
+def _coerce_rule(item: Any) -> dict[str, Any] | None:
+    """Normalize a raw entry (string or dict) into {text, enabled, priority}."""
+    if isinstance(item, str):
+        text = item.strip().lstrip("-*•").strip()
+        return {"text": text, "enabled": True, "priority": "normal"} if text else None
+    if isinstance(item, dict):
+        text = str(item.get("text") or "").strip()
+        if not text:
+            return None
+        priority = str(item.get("priority") or "normal").lower()
+        if priority not in _VALID_PRIORITY:
+            priority = "normal"
+        return {"text": text, "enabled": bool(item.get("enabled", True)), "priority": priority}
+    return None
+
+
+def load_caption_rules() -> list[dict[str, Any]]:
+    """The operator's caption style rules, in order. Back-compatible with the
+    original single ``text:`` blob (split into one rule per line)."""
+    data = _load_yaml(CONFIG_DIR / "caption_style.yaml")
+    raw = data.get("rules")
+    if raw is None:
+        text = data.get("text")
+        if isinstance(text, str) and text.strip():
+            raw = [ln for ln in text.splitlines() if ln.strip()]
+        else:
+            raw = []
+    return [r for r in (_coerce_rule(item) for item in (raw or [])) if r]
+
+
+def save_caption_rules(rules: list[dict[str, Any]]) -> None:
+    cleaned = [r for r in (_coerce_rule(item) for item in (rules or [])) if r]
+    body = yaml.safe_dump({"rules": cleaned}, default_flow_style=False,
+                          allow_unicode=True, width=88, sort_keys=False)
+    (CONFIG_DIR / "caption_style.yaml").write_text(CAPTION_STYLE_HEADER + body)
+
+
+def render_caption_guide() -> str:
+    """Enabled rules as a bullet list for the drafting prompt (high priority
+    first), or an empty string when there are none."""
+    rules = [r for r in load_caption_rules() if r["enabled"]]
+    if not rules:
+        return ""
+    rules.sort(key=lambda r: 0 if r["priority"] == "high" else 1)
+    return "\n".join(f"- {r['text']}" for r in rules)
+
+
 def load_channel_seed() -> list[dict[str, Any]]:
     data = _load_yaml(CONFIG_DIR / "channels.yaml")
     return data.get("channels", [])

@@ -98,7 +98,7 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
       <form class="inline" method="post" action="/channels/{{ ch.id }}/toggle">
         <button class="sm">{{ "Disable" if ch.enabled else "Enable" }}</button></form>
       <form class="inline" method="post" action="/channels/{{ ch.id }}/delete"
-            onsubmit="return confirm('Delete {{ ch.call_sign }}?')">
+            data-confirm="Delete {{ ch.call_sign }}?" data-confirm-ok="Delete" data-confirm-variant="danger">
         <button class="reject sm">Delete</button></form>
     </td>
   </tr>

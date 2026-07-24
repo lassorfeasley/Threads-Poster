@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
-{% set vid_crumbs %}<a href="/">← Dashboard</a>{% endset %}
+{% set vid_crumbs %}<a href="/">← Create content</a>{% endset %}
 {% set vid_sub %}{{ c.channel.call_sign }} · {{ c.channel.market }} ·
   {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
   {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
@@ -10,7 +10,8 @@
 {% set vid_actions %}
   {% if c.status != "rejected" %}
     <form method="post" action="/video/{{ c.id }}/reject"
-          onsubmit="return confirm({{ 'Reject this clip? It was already downloaded — the file stays on disk but the clip leaves your workflow. You can find it later with the Rejected status filter.' | tojson if state.scraped else 'Reject this clip?' | tojson }});">
+          data-confirm="{{ 'Reject this clip? It was already downloaded — the file stays on disk but the clip leaves your workflow. You can find it later with the Rejected status filter.' if state.scraped else 'Reject this clip?' }}"
+          data-confirm-ok="Reject" data-confirm-variant="danger">
       <button class="reject sm" title="Reject this clip and remove it from the workflow">Reject clip</button>
     </form>
   {% else %}
@@ -224,7 +225,8 @@
            href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
           {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Trim →") }}</a>
         <form method="post" action="/cut/{{ row.cut.id }}/delete"
-              onsubmit="return confirm('Delete this cut? Its draft/queued posts are removed; published posts are kept.');">
+              data-confirm="Delete this cut? Its draft/queued posts are removed; published posts are kept."
+              data-confirm-ok="Delete" data-confirm-variant="danger">
           <button class="reject sm" title="Delete this cut">✕</button>
         </form>
       </div>

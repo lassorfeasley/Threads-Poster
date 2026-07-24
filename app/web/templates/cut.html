@@ -1,15 +1,21 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
-{% set cut_crumbs %}<a href="/">Dashboard</a> › <a href="/video/{{ c.id }}?step=cuts">{{ c.title[:70] }}</a> › Cut{% endset %}
 {% set cut_sub %}{{ c.channel.call_sign }} · {{ c.channel.market }} · <a href="{{ c.url }}" target="_blank">YouTube ↗</a> · from <a href="/video/{{ c.id }}?step=cuts">source video</a>{% endset %}
 {% set cut_actions %}
-  <form method="post" action="/cut/{{ cut.id }}/delete"
-        onsubmit="return confirm('Delete this cut? Its draft/queued posts are removed; published posts are kept.');">
-    <button class="reject sm" title="Delete this cut">Delete cut</button>
+  <a id="download-clip-link" class="btn sm"
+     href="/cut/{{ cut.id }}/download-clip?captioned={{ 1 if cut.subtitled_clip_path else 0 }}" download>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+    Download clip</a>
+  <form method="post" action="/cut/{{ cut.id }}/delete" class="inline"
+        data-confirm="Delete this cut? Its draft/queued posts are removed; published posts are kept."
+        data-confirm-ok="Delete" data-confirm-variant="danger">
+    <button class="reject sm icon-btn" title="Delete this cut" aria-label="Delete cut">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6M14 11v6"/></svg>
+    </button>
   </form>
 {% endset %}
-{{ ui.pagebar(cut.clip_title or "Untitled cut", crumbs=cut_crumbs, sub=cut_sub, actions=cut_actions) }}
+{{ ui.pagebar(cut.clip_title or "Untitled cut", sub=cut_sub, actions=cut_actions) }}
 
 {# ---- Cut stepper ---- #}
 <div class="steps">
@@ -151,23 +157,47 @@ function cancelPlayback() { if (playback) { playback = null; } }
 
 function previewSegment(i) { playSegments([{ ...segments[i] }]); }
 
-// Replay the last ~0.5s leading into an out point so the operator can hear the
-// tail and catch any clipped/garbled word. Stops exactly on the out point.
-function auditionEnd(end) {
+// True while an edge is being dragged, so the preview-mode flow below doesn't
+// yank the playhead around mid-edit.
+let editing = false;
+
+// Audition an edited IN point: play from `start`. In preview mode we keep the
+// mode running (just reposition + resume) so the pass continues flowing after;
+// otherwise play from the in point, optionally stopping at `end`. Pass the
+// segment's list index so preview resumes the pass from that segment.
+function auditionStart(start, end, segIndex) {
+  if (previewMode) { if (segIndex != null) setPreviewIdxTo(segIndex); player.currentTime = start; player.play(); return; }
+  cancelPlayback();
+  activeStop = (end != null) ? end : null;
+  player.currentTime = start;
+  player.play();
+}
+// Audition an edited OUT point: replay the ~0.5s leading into it so the operator
+// can catch a clipped/garbled word. In preview mode, reposition and keep the
+// pass flowing afterward; otherwise stop exactly on the out point.
+function auditionEnd(end, segIndex) {
   const from = Math.max(0, end - 0.5);
   if (end - from < 0.05) return;
+  if (previewMode) { if (segIndex != null) setPreviewIdxTo(segIndex); player.currentTime = from; player.play(); return; }
   playSegments([{ start: from, end }]);
 }
 
 // ---- Preview mode ------------------------------------------------------
-// A continuous pass through the segments (in start-time order) that skips the
-// gaps between them. Unlike a one-shot supercut it's a sustained toggle: pause
-// and resume from anywhere and it keeps flowing, and it loops at the end — so
-// you can fine-tune start/end points without ever restarting from the top.
+// A continuous pass through the segments in LIST order (the order they appear in
+// the clip area, which is also the exported supercut order — not sorted by time),
+// skipping the gaps between them. Unlike a one-shot supercut it's a sustained
+// toggle: pause and resume from anywhere and it keeps flowing, and it loops at
+// the end — so you can fine-tune start/end points without restarting from the top.
 let previewMode = false;
+let previewIdx = 0;  // which segment (in list order) the pass is currently on
 
-function orderedSegs() {
-  return segments.filter(s => s.end > s.start).slice().sort((a, b) => a.start - b.start);
+function previewSegs() {
+  return segments.filter(s => s.end > s.start);  // list order, no time sort
+}
+// Point the preview pass at the list segment with the given `segments` index.
+function setPreviewIdxTo(segIndex) {
+  const k = previewSegs().indexOf(segments[segIndex]);
+  if (k >= 0) previewIdx = k;
 }
 function setPreviewMode(on) {
   previewMode = on;
@@ -178,12 +208,14 @@ function setPreviewMode(on) {
   }
   if (!on) return;
   playback = null; activeStop = null;  // preview mode is the authority
-  const segs = orderedSegs();
+  const segs = previewSegs();
   if (!segs.length) { alert('Add at least one segment first.'); setPreviewMode(false); return; }
+  // Resume from whichever list segment the playhead is already inside, else start
+  // at the top of the list.
   const t = player.currentTime;
-  if (!segs.some(s => t >= s.start && t < s.end)) {
-    player.currentTime = (segs.find(s => s.start > t) || segs[0]).start;
-  }
+  let idx = segs.findIndex(s => t >= s.start && t < s.end);
+  if (idx < 0) { idx = 0; player.currentTime = segs[0].start; }
+  previewIdx = idx;
   player.play();
 }
 function togglePreviewMode() { setPreviewMode(!previewMode); }
@@ -208,15 +240,18 @@ function enforceBounds() {
     }
     return;
   }
-  // Preview mode: jump out of any gap to the next segment, or loop to the first.
+  // Preview mode: play the current list segment; when it ends, advance to the
+  // NEXT segment in list order (looping), regardless of time position.
   if (previewMode) {
-    if (dragging) return;
-    const segs = orderedSegs();
+    if (dragging || editing) return;
+    const segs = previewSegs();
     if (!segs.length) return;
+    if (previewIdx >= segs.length) previewIdx = 0;
+    const seg = segs[previewIdx];
     const t = player.currentTime;
-    if (segs.some(s => t >= s.start && t < s.end)) return;  // inside a clip — let it play
-    const next = segs.find(s => s.start >= t);
-    player.currentTime = next ? next.start : segs[0].start;
+    if (t >= seg.start && t < seg.end) return;  // inside the current clip — let it play
+    previewIdx = (previewIdx + 1) % segs.length;  // step to the next clip in the list
+    player.currentTime = segs[previewIdx].start;
     return;
   }
   // Edge-drag scrub: pause exactly at the segment's out point.
@@ -381,6 +416,7 @@ wave.addEventListener('pointerdown', e => {
   if (h) {
     pushUndo();
     dragging = h;
+    if (previewMode) player.pause();  // freeze the pass while dragging an edge
     if (h.kind === 'pending') { pending[h.edge] = t; renderPending(); }
     else { selectedSeg = h.index; setSegEdge(h.index, h.edge, t); }
   } else {
@@ -405,11 +441,11 @@ wave.addEventListener('pointermove', e => {
 wave.addEventListener('pointerup', () => {
   if (dragging) {
     if (dragging.kind === 'pending') {
-      if (dragging.edge === 'start' && pending.start !== null) { player.currentTime = pending.start; player.play(); }
-      else if (dragging.edge === 'end' && pending.end !== null) { auditionEnd(pending.end); }
+      if (dragging.edge === 'start' && pending.start !== null) auditionStart(pending.start);
+      else if (dragging.edge === 'end' && pending.end !== null) auditionEnd(pending.end);
     } else if (dragging.kind === 'seg') {
-      if (dragging.edge === 'start') { player.currentTime = segments[dragging.index].start; player.play(); }
-      else if (dragging.edge === 'end') { auditionEnd(segments[dragging.index].end); }
+      if (dragging.edge === 'start') auditionStart(segments[dragging.index].start, null, dragging.index);
+      else if (dragging.edge === 'end') auditionEnd(segments[dragging.index].end, dragging.index);
       renderSegments();
     }
   }
@@ -466,7 +502,7 @@ function renderSegments() {
       <span class="meta" id="seg-len-${i}">(${(s.end - s.start).toFixed(1)}s)</span>
       <span style="margin-left:auto"></span>
       <button type="button" title="Preview" onclick="previewSegment(${i})">▶</button>
-      <button type="button" class="reject" title="Remove (or select + Delete)" onclick="removeSegment(${i})">✕</button>
+      <button type="button" class="reject seg-del" title="Delete segment (or select + Delete key)" aria-label="Delete segment" onclick="removeSegment(${i})"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
       </div>
       <canvas class="seg-wave" id="seg-wave-${i}" title="Drag the green edges to fine-trim. Click to play from there up to the end line (it stops so you can check the transition). The dim sides are lead-in / lead-out room."></canvas>`;
     box.appendChild(div);
@@ -589,12 +625,14 @@ function initSegWave(i, canvas) {
   let drag = null;
   canvas.addEventListener('pointerdown', ev => {
     cancelPlayback();
+    editing = true;  // hold the preview-mode flow steady while dragging
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic */ }
     if (selectedSeg !== i) { selectedSeg = i; highlightSelectedRow(); }
     const edge = edgeAt(ev.clientX);
     const { t } = winX(ev.clientX);
     if (edge) {
       pushUndo(); drag = edge;
+      if (previewMode) player.pause();  // freeze the pass while dragging an edge
       frozenSegWin = null; frozenSegIdx = null;
       frozenSegWin = segWindow(i); frozenSegIdx = i;
       setSegEdge(i, edge, t); drawSegWave(i);
@@ -613,12 +651,11 @@ function initSegWave(i, canvas) {
     else { setSegEdge(i, drag, t); drawSegWave(i); }
   });
   canvas.addEventListener('pointerup', () => {
+    editing = false;
     if (drag === 'start') {
-      player.currentTime = segments[i].start;
-      activeStop = segments[i].end;
-      player.play();
+      auditionStart(segments[i].start, segments[i].end, i);
     } else if (drag === 'end') {
-      auditionEnd(segments[i].end);  // replay the last 0.5s into the out point
+      auditionEnd(segments[i].end, i);  // replay the last 0.5s into the out point
     }
     const wasEdge = drag && drag !== 'scrub';
     frozenSegWin = null; frozenSegIdx = null;
@@ -649,8 +686,8 @@ function updateSegment(i, key, val) {
   updateTotal();
   drawWave();
   drawSegWave(i);
-  if (key === 'start') { cancelPlayback(); player.currentTime = v; player.play(); }
-  else if (key === 'end') { auditionEnd(segments[i].end); }
+  if (key === 'start') auditionStart(segments[i].start, null, i);
+  else if (key === 'end') auditionEnd(segments[i].end, i);
 }
 
 function updateTotal() {
@@ -678,39 +715,12 @@ renderSegments();
 
   {# ---- Media stage: the clip is the hero (sticky while the rail scrolls) ---- #}
   <div class="media-stage">
-    {% if cut.clip_title %}
-      <div class="stage-title" title="Generated clip title">{{ cut.clip_title }}</div>
-    {% endif %}
     <video id="clip-player"
-           src="{{ '/media/subtitled/' ~ cut.id if cut.subtitled_clip_path else '/media/clip/' ~ cut.id }}"
+           src="{{ '/media/subtitled/' ~ cut.id if (cut.subtitled_clip_path and cut.use_subtitles) else '/media/clip/' ~ cut.id }}"
            controls preload="metadata"></video>
-    {% if cut.subtitled_clip_path %}
-      <div class="seg-ctl" role="group" aria-label="Preview version">
-        <button type="button" id="preview-subs-btn" disabled
-                onclick="swapPreview(true)">Captioned</button>
-        <button type="button" id="preview-orig-btn"
-                onclick="swapPreview(false)">Original</button>
-      </div>
+    {% if clip_transcript_text %}
+    <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
     {% endif %}
-    <div class="stage-actions">
-      <a id="download-clip-link"
-         href="/cut/{{ cut.id }}/download-clip?captioned={{ 1 if cut.subtitled_clip_path else 0 }}" download>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-        Download clip</a>
-      <button type="button" id="copy-caption-btn"
-              data-caption="{{ cut.draft_caption }}" onclick="copyCaption()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-        Copy caption</button>
-      {% if clip_transcript_text %}
-      <button type="button" id="copy-transcript-btn" onclick="copyTranscript(this)">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-        Copy transcript</button>
-      <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
-      {% endif %}
-      <a href="/cut/{{ cut.id }}?step=trim">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg>
-        Re-trim</a>
-    </div>
   </div>
 </div>{# /.post-main #}
 
@@ -718,35 +728,38 @@ renderSegments();
 
   {# ---- 1 · Prepare ---- #}
   <section class="wf-section">
-    <div class="wf-head">
-      <span class="wf-num">1</span>
-      <span class="wf-title">Prepare the clip</span>
-      <span class="meta">Word-by-word captions are burned in automatically after export and posted by default.</span>
-    </div>
     <div class="wf-body">
-      <div class="ctl-strip">
-        <button type="button" class="sm" id="gen-subs-btn" onclick="generateSubtitles()">
-          {{ "Regenerate captions" if cut.subtitled_clip_path else "Generate captions" }}</button>
-        <label class="inline-label" style="margin: 0;" title="Where the captions sit on the frame">
-          Position
-          <select id="subs-position" style="width: auto;">
-            <option value="bottom" {{ "selected" if subs_position != "top" }}>Bottom</option>
-            <option value="top" {{ "selected" if subs_position == "top" }}>Top</option>
-          </select>
-        </label>
-        <span class="meta" id="subs-status">
-          {% if cut.subtitled_clip_path %}Captioned version ready.{% endif %}</span>
+      <div class="subs-controls">
+        <div class="subs-line">
+          <span class="subs-lbl">Captions</span>
+          <label class="switch" title="Burn word-by-word captions into the clip you post">
+            <input type="checkbox" id="subs-enabled" {{ "checked" if cut.use_subtitles }}
+                   onchange="onSubsToggle()">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <div class="subs-line" id="subs-position-line">
+          <span class="subs-lbl">Position</span>
+          <div class="seg-toggle" role="group" aria-label="Caption position">
+            <button type="button" class="{{ 'is-on' if subs_position != 'top' }}"
+                    data-pos="bottom" onclick="setSubsPosition('bottom')">Bottom</button>
+            <button type="button" class="{{ 'is-on' if subs_position == 'top' }}"
+                    data-pos="top" onclick="setSubsPosition('top')">Top</button>
+          </div>
+        </div>
+        <span class="meta" id="subs-status"></span>
       </div>
     </div>
     {% if clip_transcript %}
     <details class="panel" style="margin-top: 10px;">
       <summary>Clip transcript
-        <span class="meta">{{ saved_segments|length }} exported segment{{ "s" if saved_segments|length != 1 }} — click a line to jump</span>
+        <button type="button" class="copy-btn" style="margin-left: auto;"
+                onclick="event.preventDefault(); event.stopPropagation(); copyTranscript(this)"
+                title="Copy transcript" aria-label="Copy transcript">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
       </summary>
       <div class="panel-body">
-        <div class="ctl-strip" style="margin-bottom: 8px;">
-          <button type="button" class="sm" onclick="copyTranscript(this)">Copy transcript</button>
-        </div>
         <div class="transcript-box" style="max-height: 300px; border: none; box-shadow: none; padding: 0;">
           {% for s in clip_transcript %}
             <div class="tline" onclick="clipSeek({{ s.clip_start }})">
@@ -758,38 +771,79 @@ renderSegments();
     {% endif %}
   </section>
   <script>
+    // Whether a burned-in caption file already exists for this cut, and where it sits.
+    let hasSubs = {{ 'true' if cut.subtitled_clip_path else 'false' }};
+    let subsPos = {{ subs_position|tojson }};
+
+    // Swap the hero preview + download link + posted-version flag between the
+    // captioned and the plain export.
     function swapPreview(subs) {
       const p = document.getElementById('clip-player');
-      const t = p.currentTime;
+      const t = p.currentTime, playing = !p.paused;
       p.src = subs ? '/media/subtitled/{{ cut.id }}' : '/media/clip/{{ cut.id }}';
       p.currentTime = t;
-      const sb = document.getElementById('preview-subs-btn');
-      const ob = document.getElementById('preview-orig-btn');
-      if (sb) sb.disabled = subs;
-      if (ob) ob.disabled = !subs;
-      // Keep the download link pointed at whichever version is being previewed.
+      if (playing) p.play();
       const dl = document.getElementById('download-clip-link');
       if (dl) dl.href = '/cut/{{ cut.id }}/download-clip?captioned=' + (subs ? '1' : '0');
+      const field = document.getElementById('use-subtitles-field');
+      if (field) field.value = subs ? '1' : '0';
     }
-    async function generateSubtitles() {
-      const btn = document.getElementById('gen-subs-btn');
+
+    // Reflect enabled/disabled state of the position toggle group.
+    function syncPositionUI() {
+      const line = document.getElementById('subs-position-line');
+      const on = document.getElementById('subs-enabled').checked;
+      line.classList.toggle('is-disabled', !on);
+      line.querySelectorAll('button').forEach(b => {
+        b.disabled = !on;
+        b.classList.toggle('is-on', on && b.dataset.pos === subsPos);
+      });
+    }
+
+    // The on/off switch: post (and preview) captioned vs. plain. Turning it on
+    // with no captions yet kicks off a generate at the current position.
+    function onSubsToggle() {
+      const on = document.getElementById('subs-enabled').checked;
+      if (on && !hasSubs) { generateSubtitles(subsPos); return; }
+      swapPreview(on);
+      syncPositionUI();
+    }
+
+    // Picking a position (re)generates the captions burned in at that spot.
+    function setSubsPosition(pos) {
+      subsPos = pos;
+      syncPositionUI();
+      generateSubtitles(pos);
+    }
+
+    async function generateSubtitles(position) {
       const status = document.getElementById('subs-status');
-      btn.disabled = true;
+      const sw = document.getElementById('subs-enabled');
+      const line = document.getElementById('subs-position-line');
+      if (sw) sw.disabled = true;
+      line.querySelectorAll('button').forEach(b => b.disabled = true);
       status.classList.add('busy');
       status.textContent = 'Transcribing + rendering… this can take a minute.';
       try {
         const fd = new FormData();
-        fd.append('position', document.getElementById('subs-position').value);
+        fd.append('position', position || subsPos || 'bottom');
         const r = await fetch('/cut/{{ cut.id }}/subtitles', { method: 'POST', body: fd });
         const d = await r.json();
         if (d.url) { location.reload(); return; }
         status.textContent = d.error || 'Caption generation failed';
       } catch (e) { status.textContent = 'Caption generation failed: ' + e; }
       status.classList.remove('busy');
-      btn.disabled = false;
+      if (sw) sw.disabled = false;
+      syncPositionUI();
     }
+
+    syncPositionUI();
     {% if not cut.subtitled_clip_path %}
-    if (new URLSearchParams(location.search).get('autosubs') === '1') generateSubtitles();
+    if (new URLSearchParams(location.search).get('autosubs') === '1') {
+      const sw = document.getElementById('subs-enabled');
+      if (sw) sw.checked = true;
+      generateSubtitles(subsPos);
+    }
     {% endif %}
     function clipSeek(t) {
       const p = document.getElementById('clip-player');
@@ -797,27 +851,31 @@ renderSegments();
       p.currentTime = t;
       p.play();
     }
+    // Briefly swap a copy button's contents for a checkmark, then restore —
+    // works for icon-only buttons without wiping the icon permanently.
+    function flashCopied(btn) {
+      if (!btn || btn.dataset.flashing) return;
+      const html = btn.innerHTML;
+      btn.dataset.flashing = '1';
+      btn.classList.add('is-copied');
+      btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+      setTimeout(() => {
+        btn.innerHTML = html;
+        btn.classList.remove('is-copied');
+        delete btn.dataset.flashing;
+      }, 1400);
+    }
     async function copyTranscript(btn) {
       const box = document.getElementById('clip-transcript-plain');
       const text = (box && box.value) || '';
       if (!text.trim()) { alert('No transcript to copy.'); return; }
-      const labelNode = btn && btn.querySelector('svg')
-        ? btn.childNodes[btn.childNodes.length - 1] : null;
       try { await navigator.clipboard.writeText(text); }
       catch (e) {
         box.hidden = false; box.focus(); box.select();
         try { document.execCommand('copy'); } catch (e2) { alert('Copy failed: ' + e); return; }
         finally { box.hidden = true; }
       }
-      if (labelNode) {
-        const original = labelNode.textContent;
-        labelNode.textContent = ' Copied';
-        setTimeout(() => { labelNode.textContent = original; }, 1500);
-      } else if (btn) {
-        const original = btn.textContent;
-        btn.textContent = '✓ Copied';
-        setTimeout(() => { btn.textContent = original; }, 1500);
-      }
+      flashCopied(btn);
     }
   </script>
   {% if not threads_ok %}
@@ -840,45 +898,31 @@ renderSegments();
     <form method="post" action="/cut/{{ cut.id }}/post" id="post-form">
       {# ---- 2 · Write ---- #}
       <section class="wf-section">
-        <div class="wf-head">
-          <span class="wf-num">2</span>
-          <span class="wf-title">Write the post</span>
-          <span class="meta">AI suggestions are drafts — edit freely.</span>
-        </div>
         <div class="wf-body">
-          <div class="field">
-            <label for="clip_title">Clip title</label>
-            <input type="text" name="clip_title" id="clip_title" maxlength="120"
-                   placeholder="{{ c.title }}" value="{{ cut.clip_title }}">
-            <div class="ctl-strip" style="margin-top: 8px;">
-              <button type="button" class="ghost sm" id="suggest-title-btn" onclick="suggestTitle()">
-                {{ "Regenerate" if cut.clip_title else "Suggest" }} title</button>
-              <span class="meta">A concise title generated from this clip's transcript. Saved with the post.</span>
-            </div>
-          </div>
           <div class="field" style="margin-bottom: 0;">
-            <label for="caption">Caption</label>
+            <div class="field-label-row">
+              <label for="caption">Caption</label>
+              <button type="button" id="copy-caption-btn" class="copy-btn"
+                      data-caption="{{ cut.draft_caption }}" onclick="copyCaption()"
+                      title="Copy caption" aria-label="Copy caption">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </div>
             <textarea name="caption" id="caption" required>{{ cut.draft_caption }}</textarea>
             <div class="ctl-strip" style="margin-top: 8px;">
               <button type="button" class="ghost sm" id="suggest-btn" onclick="suggestCaption()">
                 {{ "Regenerate" if cut.draft_caption else "Suggest" }} caption</button>
             </div>
           </div>
-          {% if cut.subtitled_clip_path %}
-            <label class="inline-label" style="margin-top: 12px;">
-              <input type="checkbox" name="use_subtitles" value="1"
-                     {{ "checked" if cut.use_subtitles }}>
-              Post the captioned version (burned-in word-by-word subtitles)
-            </label>
-          {% endif %}
+          <input type="hidden" name="use_subtitles" id="use-subtitles-field"
+                 value="{{ '1' if cut.use_subtitles else '0' }}">
         </div>
       </section>
 
       {# ---- Ship rail: one primary, clear alternatives ---- #}
       <div class="ship-rail">
-        <button class="approve" onclick="return confirm('Post this clip to Threads now?')">Post now</button>
-        <button class="primary" formaction="/cut/{{ cut.id }}/queue" formnovalidate
-                onclick="return validateQueue()">Add to queue</button>
+        <button class="approve" id="btn-post-now">Post now</button>
+        <button class="primary" id="btn-queue" formaction="/cut/{{ cut.id }}/queue" formnovalidate>Add to queue</button>
         <label class="inline-check"
                title="Ignores posting windows; still respects the 90-minute spacing floor">
           <input type="checkbox" name="is_breaking" value="1" id="is_breaking">
@@ -886,8 +930,7 @@ renderSegments();
         </label>
         <div class="rail-end">
           <span class="rail-note">Queue publishes at the next open window (≈10am / 2:30pm / 7pm ET).</span>
-          <button class="ghost" formaction="/cut/{{ cut.id }}/save-draft" formnovalidate
-                  onclick="return validateDraft()">Save as draft</button>
+          <button class="ghost" id="btn-draft" formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
         </div>
       </div>
     </form>
@@ -903,30 +946,33 @@ renderSegments();
         } catch (e) { alert('Suggestion failed: ' + e); }
         btn.disabled = false; btn.textContent = 'Regenerate caption';
       }
-      async function suggestTitle() {
-        const btn = document.getElementById('suggest-title-btn');
-        btn.disabled = true; btn.textContent = 'Thinking…';
-        try {
-          const r = await fetch('/cut/{{ cut.id }}/suggest-title', { method: 'POST' });
-          const d = await r.json();
-          if (d.title) document.getElementById('clip_title').value = d.title;
-          else alert(d.error || 'No title returned');
-        } catch (e) { alert('Suggestion failed: ' + e); }
-        btn.disabled = false; btn.textContent = 'Regenerate title';
-      }
-      function validateQueue() {
+      const postForm = document.getElementById('post-form');
+      function captionOk() {
         const cap = document.getElementById('caption');
-        if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
-        const breaking = document.getElementById('is_breaking')?.checked;
-        return confirm(breaking
-          ? 'Add as breaking news? It will publish as soon as the spacing floor allows.'
-          : 'Add this clip to the posting queue?');
-      }
-      function validateDraft() {
-        const cap = document.getElementById('caption');
-        if (!cap.value.trim()) { alert('Add a caption first.'); return false; }
+        if (!cap.value.trim()) { alertDialog('Add a caption first.'); return false; }
         return true;
       }
+      document.getElementById('btn-post-now').addEventListener('click', async (e) => {
+        e.preventDefault();
+        if (!captionOk()) return;
+        if (await confirmDialog('Post this clip to Threads now?', { okText: 'Post now', okVariant: 'approve' }))
+          postForm.requestSubmit(e.currentTarget);
+      });
+      document.getElementById('btn-queue').addEventListener('click', async (e) => {
+        e.preventDefault();
+        if (!captionOk()) return;
+        const breaking = document.getElementById('is_breaking')?.checked;
+        const msg = breaking
+          ? 'Add as breaking news? It will publish as soon as the spacing floor allows.'
+          : 'Add this clip to the posting queue?';
+        if (await confirmDialog(msg, { okText: 'Add to queue' }))
+          postForm.requestSubmit(e.currentTarget);
+      });
+      document.getElementById('btn-draft').addEventListener('click', (e) => {
+        e.preventDefault();
+        if (!captionOk()) return;
+        postForm.requestSubmit(e.currentTarget);
+      });
     </script>
   {% endif %}
 
@@ -956,11 +1002,11 @@ renderSegments();
             {% if p.status in ("queued", "draft") %}
               <form class="inline" method="post" action="/post/{{ p.id }}/publish-now">
                 <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
-                <button class="sm" onclick="return confirm('Publish to Threads now?')">Post now</button>
+                <button class="sm" data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
               </form>
               <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
                 <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
-                <button class="reject sm" onclick="return confirm('Remove this {{ p.status }} post?')">Delete</button>
+                <button class="reject sm" data-confirm="Remove this {{ p.status }} post?" data-confirm-ok="Remove" data-confirm-variant="danger">Delete</button>
               </form>
             {% endif %}
           </div>
@@ -977,15 +1023,13 @@ renderSegments();
     const box = document.getElementById('caption');
     const text = (box ? box.value : btn.dataset.caption) || '';
     if (!text.trim()) { alert('No caption to copy yet.'); return; }
-    const original = btn.textContent;
     try {
       await navigator.clipboard.writeText(text);
     } catch (e) {
       if (box) { box.focus(); box.select(); document.execCommand('copy'); }
       else { alert('Copy failed: ' + e); return; }
     }
-    btn.textContent = '✓ Copied';
-    setTimeout(() => { btn.textContent = original; }, 1500);
+    flashCopied(btn);
   }
 </script>
 {% endif %}

@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{% set sg_sub %}Rules the AI follows when it drafts a post caption, plus patterns learned from how your posts actually perform. You still review and edit every caption before posting.{% endset %}
+{{ ui.pagebar("Style guide", sub=sg_sub) }}
+
+<form method="post" action="/style-guide" id="rules-form">
+  <input type="hidden" name="rules_json" id="rules-json">
+
+  <div class="card">
+    <div class="card-title" style="margin-bottom: 4px;">Your rules</div>
+    <p class="meta" style="margin: 0 0 14px;">Short instructions on tone, voice, and formatting. Toggle any off to pause it; High-priority rules are emphasized first in the prompt.</p>
+
+    <div id="rules-list"></div>
+
+    <div class="btn-group" style="margin-top: 14px; justify-content: space-between;">
+      <button type="button" class="btn ghost sm" onclick="addRule()">＋ Add rule</button>
+      <button type="submit" class="primary">Save rules</button>
+    </div>
+  </div>
+</form>
+
+<div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Learned from your posts</div>
+  <p class="meta" style="margin: 0 0 14px;">Patterns in how your captions correlate with engagement (likes + replies + reposts per view). Advisory only — engagement is driven mostly by topic and footage, so treat these as hints and promote the ones that ring true.</p>
+
+  <div id="insights-list">
+    {% if insights %}
+      {% for it in insights %}
+      <div class="insight-row" data-key="{{ it.key }}">
+        <span class="insight-arrow {{ it.direction }}" aria-hidden="true">
+          {% if it.direction == "up" %}▲{% else %}▼{% endif %}
+        </span>
+        <div class="insight-body">
+          <div class="insight-label">{{ it.label }}</div>
+          <div class="meta">
+            {{ "+" if it.direction == "up" else "−" }}{{ it.lift_pct }}% engagement · {{ it.n }} post{{ "s" if it.n != 1 }}
+            {% if not it.confident %} · <span class="badge">still learning</span>{% endif %}
+          </div>
+        </div>
+        <div class="insight-actions">
+          <button type="button" class="btn sm" onclick="promoteInsight(this, {{ it.suggested_rule|tojson }})">Add as rule</button>
+          <button type="button" class="btn ghost sm" onclick="dismissInsight(this, {{ it.key|tojson }})">Dismiss</button>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p class="meta insights-empty" style="margin: 0;">Not enough data yet. Once you've published a handful of posts and their metrics come in, patterns will show up here.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 6px;">How this is used</div>
+  <p class="meta" style="margin: 0 0 8px;">Enabled rules are injected into the caption-drafting prompt as authoritative style instructions (High-priority first), on top of the voice the AI already learns from your published captions.</p>
+  <p class="meta" style="margin: 0;">Safety rules always hold regardless of what you write: the AI won't invent facts that aren't in the clip's transcript, it mentions the place, and it stays under the Threads character limit.</p>
+</div>
+
+<p class="meta" style="margin-top: 12px;">Stored in <code>config/caption_style.yaml</code> if you'd rather edit it by hand.</p>
+
+<script>
+  let rules = {{ rules|tojson }};
+  const TRASH_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+
+  function renderRules() {
+    const box = document.getElementById('rules-list');
+    box.textContent = '';
+    if (!rules.length) {
+      const p = document.createElement('p');
+      p.className = 'meta';
+      p.style.margin = '0';
+      p.textContent = 'No rules yet. Add one below, or promote a suggestion from “Learned from your posts”.';
+      box.appendChild(p);
+      return;
+    }
+    rules.forEach((r, i) => {
+      const row = document.createElement('div');
+      row.className = 'rule-row' + (r.enabled ? '' : ' is-off');
+
+      // Enable/disable switch
+      const sw = document.createElement('label');
+      sw.className = 'switch';
+      sw.title = r.enabled ? 'Enabled — click to pause' : 'Paused — click to enable';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!r.enabled;
+      cb.addEventListener('change', () => { rules[i].enabled = cb.checked; renderRules(); });
+      const track = document.createElement('span');
+      track.className = 'switch-track';
+      track.innerHTML = '<span class="switch-thumb"></span>';
+      sw.appendChild(cb); sw.appendChild(track);
+
+      // Rule text
+      const text = document.createElement('input');
+      text.type = 'text';
+      text.className = 'rule-text';
+      text.maxLength = 300;
+      text.placeholder = 'e.g. Lead with the single most striking fact.';
+      text.value = r.text || '';
+      text.addEventListener('input', () => { rules[i].text = text.value; });
+
+      // Priority
+      const pri = document.createElement('select');
+      pri.className = 'rule-priority';
+      pri.innerHTML = '<option value="normal">Normal</option><option value="high">High priority</option>';
+      pri.value = r.priority === 'high' ? 'high' : 'normal';
+      pri.addEventListener('change', () => { rules[i].priority = pri.value; });
+
+      // Delete
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'reject sm icon-btn';
+      del.title = 'Delete rule';
+      del.setAttribute('aria-label', 'Delete rule');
+      del.innerHTML = TRASH_SVG;
+      del.addEventListener('click', () => { rules.splice(i, 1); renderRules(); });
+
+      row.append(sw, text, pri, del);
+      box.appendChild(row);
+    });
+  }
+
+  function addRule(text, priority) {
+    rules.push({ text: text || '', enabled: true, priority: priority || 'normal' });
+    renderRules();
+    const inputs = document.querySelectorAll('#rules-list .rule-text');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  }
+
+  function promoteInsight(btn, text) {
+    addRule(text, 'high');
+    const row = btn.closest('.insight-row');
+    if (row) {
+      // Persist a dismiss so the suggestion doesn't nag now that it's a rule.
+      const key = row.dataset.key;
+      if (key) sendDismiss(key);
+      removeInsightRow(row);
+    }
+    document.getElementById('rules-list').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  async function dismissInsight(btn, key) {
+    if (!(await confirmDialog('Hide this suggestion? It won\'t show up here again.', { okText: 'Dismiss' }))) return;
+    sendDismiss(key);
+    removeInsightRow(btn.closest('.insight-row'));
+  }
+
+  function sendDismiss(key) {
+    const body = new FormData();
+    body.append('key', key);
+    fetch('/style-guide/insights/dismiss', { method: 'POST', body }).catch(() => {});
+  }
+
+  function removeInsightRow(row) {
+    if (!row) return;
+    row.remove();
+    const list = document.getElementById('insights-list');
+    if (list && !list.querySelector('.insight-row')) {
+      const p = document.createElement('p');
+      p.className = 'meta insights-empty';
+      p.style.margin = '0';
+      p.textContent = 'No suggestions right now. Keep posting and check back.';
+      list.appendChild(p);
+    }
+  }
+
+  document.getElementById('rules-form').addEventListener('submit', () => {
+    const cleaned = rules
+      .map(r => ({ text: (r.text || '').trim(), enabled: !!r.enabled, priority: r.priority === 'high' ? 'high' : 'normal' }))
+      .filter(r => r.text);
+    document.getElementById('rules-json').value = JSON.stringify(cleaned);
+  });
+
+  renderRules();
+</script>
+{% endblock %}

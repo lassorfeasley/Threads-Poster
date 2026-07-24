@@ -81,7 +81,8 @@
         <button class="sm" title="{{ 'Disable' if t.enabled else 'Enable' }}">{{ "Disable" if t.enabled else "Enable" }}</button>
       </form>
       <form class="inline" method="post" action="/traits/{{ t.id }}/delete"
-            onsubmit="return confirm('Delete trait {{ t.name }}? Existing tags are left as-is.')">
+            data-confirm="Delete trait {{ t.name }}? Existing tags are left as-is."
+            data-confirm-ok="Delete" data-confirm-variant="danger">
         <button class="reject sm" title="Delete">✕</button>
       </form>
     </div>

@@ -17,15 +17,19 @@
       {% if queue_count %}<span class="seg-count">{{ queue_count }}</span>{% endif %}</button>
   </div>
 {% endset %}
-{% set cal_sub %}Posting windows {% if windows_et %}({{ windows_et|join(' · ') }} ET){% endif %} — drag a queued post onto an open window to pin it there.{% endset %}
-{{ ui.pagebar("Calendar", sub=cal_sub, actions=cal_actions) }}
+{{ ui.pagebar("Calendar", actions=cal_actions) }}
 
-{% if failed_count %}
-<div class="card tight" style="margin-bottom: 14px; border-left: 3px solid var(--danger);">
-  <div class="meta" style="color: var(--danger);">
-    ⚠ {{ failed_count }} post{{ 's' if failed_count != 1 }} failed to publish and dropped out of the calendar.
-    <a href="/posts">Review &amp; re-queue on Posts →</a>
-  </div>
+{% if not authenticated %}
+<div class="card" style="margin-bottom: 14px;">
+  <div class="card-title">Connect your Threads account</div>
+  <p class="meta">1. <a href="{{ auth_url }}" target="_blank">Authorize with Threads ↗</a> using the account you post from.<br>
+     2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
+     Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
+  <form method="post" action="/threads/connect">
+    <input type="hidden" name="next" value="/calendar">
+    <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
+    <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
+  </form>
 </div>
 {% endif %}
 
@@ -42,9 +46,8 @@
       <span><i class="dot pub"></i> Published</span>
       <span><i class="dot sched"></i> Queued</span>
       <span><i class="dot open"></i> Open window</span>
-      {% if queue_count %}<span class="meta" style="margin-left:auto;">{{ queue_count }} in queue · drag to reschedule</span>
-      {% elif drafts_count %}<span class="meta" style="margin-left:auto;">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }} —
-        <a href="/posts">queue from Posts</a></span>{% endif %}
+      {% if not queue_count and drafts_count %}<span class="meta" style="margin-left:auto;">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }} —
+        <a href="/library?section=posts">queue from Library</a></span>{% endif %}
     </div>
 
     <div class="cal-grid cal-head">
@@ -132,6 +135,31 @@
         {{ scheduler.next_window_local.strftime("%a %-I:%M %p %Z") }}
       {% else %}—{% endif %}
       · {{ scheduler.queue_count }} queued
+    </div>
+
+    <details class="cal-scheduler">
+      <summary class="meta">Adaptive scheduler ·
+        {% if scheduler.enabled %}<span class="badge supportive">enabled</span>{% else %}<span class="badge hostile">paused</span>{% endif %}</summary>
+      <div class="meta" style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
+        <span>Windows {{ scheduler.windows|join(', ') }} {{ scheduler.timezone }}</span>
+        <span>Last publish:
+          {% if scheduler.last_publish_at %}{{ scheduler.last_publish_at.astimezone().strftime("%b %-d %-I:%M %p") }}{% else %}—{% endif %}</span>
+        <span>Hot check:
+          {% if scheduler.current_likes_delta is not none %}
+            {% if scheduler.current_hot %}<span class="badge hostile">hot</span>{% else %}<span class="badge supportive">cool</span>{% endif %}
+            · +{{ scheduler.current_likes_delta }} likes / {{ scheduler.hot_window_minutes }}m (threshold {{ scheduler.hot_threshold }})
+          {% else %}no delta yet{% endif %}</span>
+        {% if scheduler.last_action %}<span>Last action: {{ scheduler.last_action }}</span>{% endif %}
+      </div>
+    </details>
+
+    <div class="cal-conn meta">
+      {% if authenticated %}<span class="badge supportive">Threads connected</span>{% else %}<span class="badge hostile">not connected</span>{% endif %}
+      <form method="post" action="/threads/import-history" class="inline"
+            data-confirm="Import your account's existing Threads posts (made outside this app) so analytics can include them? This does not post anything."
+            data-confirm-ok="Import">
+        <button class="sm" title="Fetch posts you made directly on Threads and pull them in for analytics">Import Threads history</button>
+      </form>
     </div>
     {% endif %}
 

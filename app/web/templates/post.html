@@ -3,7 +3,7 @@
 {% import "components/toolbar.html" as ui %}
 {% set post_crumbs %}
 <nav class="crumbs" aria-label="Breadcrumb">
-  <a href="/posts" class="crumb">Posts</a>
+  <a href="/calendar" class="crumb">Calendar</a>
   {% if candidate_id %}
     <span class="crumb-sep" aria-hidden="true">›</span>
     <a href="/video/{{ candidate_id }}?step=cuts" class="crumb" title="Video{% if video_title %}: {{ video_title }}{% endif %}">
@@ -136,7 +136,7 @@
   <div class="ship-rail">
     <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
       <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="approve" onclick="return confirm('Publish to Threads now?')">Post now</button>
+      <button class="approve" data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
     </form>
     {% if status == "queued" %}
     <form class="inline" method="post" action="/post/{{ pid }}/toggle-breaking">
@@ -146,8 +146,8 @@
     {% endif %}
     <div class="rail-end">
       <form class="inline" method="post" action="/post/{{ pid }}/cancel">
-        <input type="hidden" name="next" value="{% if candidate_id %}/video/{{ candidate_id }}?step=post{% else %}/posts{% endif %}">
-        <button class="danger" onclick="return confirm('Delete this {{ status }} post? Your trimmed clip will stay saved.')">Delete</button>
+        <input type="hidden" name="next" value="{% if candidate_id %}/video/{{ candidate_id }}?step=post{% else %}/calendar{% endif %}">
+        <button class="danger" data-confirm="Delete this {{ status }} post? Your trimmed clip will stay saved." data-confirm-ok="Delete" data-confirm-variant="danger">Delete</button>
       </form>
     </div>
   </div>

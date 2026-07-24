@@ -68,7 +68,7 @@
   {% if filtering %}{{ ui.clear("/") }}{% endif %}
 {% endset %}
 
-{{ ui.pagebar("Dashboard", actions=dash_actions,
+{{ ui.pagebar("Create content", actions=dash_actions,
               filters=dash_filters, filter_action="/") }}
 
 <div class="list-tabs">{{ dash_tabs }}</div>
@@ -212,8 +212,8 @@
 <div id="in-progress-section" class="card-grid">
 {% for c, state in in_progress %}
 <div class="media-card is-clickable" tabindex="0" role="link"
-     onclick="location.href='/video/{{ c.id }}'"
-     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
+     onclick="location.href='/video/{{ c.id }}/cut'"
+     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}/cut'}"
      {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
   <div class="thumb-wrap{{ '' if c.thumbnail_url else ' is-empty' }}">
     {% if c.thumbnail_url %}
@@ -228,7 +228,6 @@
       {% if state.post_failed %}<span class="badge hostile">post failed — retry</span>
       {% elif state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
-      {% elif state.current == "trim" %}<span class="badge score-lo">ready to trim</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
     </span>
     {% if c.duration_seconds %}
@@ -242,17 +241,6 @@
     {% if c.clip_title %}<div class="meta clip-title" title="Generated clip title">{{ c.clip_title }}</div>{% endif %}
     <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
       {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
-    <div class="badges">
-      {% if c.relevance_score is not none %}
-        <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
-              title="Climate relevance">{{ "%.2f"|format(c.relevance_score) }}</span>
-      {% endif %}
-      {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
-      {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
-    </div>
-    <div class="mc-actions">
-      <a class="btn sm" href="/video/{{ c.id }}" onclick="event.stopPropagation()">Continue →</a>
-    </div>
   </div>
 </div>
 {% endfor %}
@@ -321,8 +309,7 @@
 <div id="candidates-panel" class="list-panel">
 <div class="panel-head">
   <h2>{{ "Results" if filtering else "New matches" }}
-    ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})
-    <span class="meta" style="font-weight: 400;">· ranked by relevance + visual appeal</span></h2>
+    ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})</h2>
   <div class="monitor-status">
     {% if monitor_running %}
       <span class="badge info"><span class="dot"></span> monitor running</span>
@@ -359,10 +346,6 @@
     </a>
   </div>
 </div>
-{% if date_defaulted %}
-  <div class="meta" style="margin: -6px 0 12px;">Showing today + yesterday by publish date.
-    <a href="/?status=new{{ '&show_hidden=1' if show_hidden else '' }}">Show all dates</a></div>
-{% endif %}
 {% if total_matches > candidates|length %}
   <div class="meta" style="margin: -6px 0 12px;">Showing the top {{ row_cap }} by combined ranking
     (relevance + visual appeal). Narrow with filters above to see the rest.</div>
@@ -453,9 +436,9 @@ function setDashTab(tab) {
 })();
 
 // Remove a clip in place (no full-page reload). Rejected clips can be
-// restored from Archive.
+// restored from Archive. Uses the shared styled confirm from dialogs.js.
 async function deleteRow(cid, btn, confirmMsg) {
-  if (confirmMsg && !confirm(confirmMsg)) return;
+  if (confirmMsg && !(await confirmDialog(confirmMsg, { okText: 'Remove', okVariant: 'danger' }))) return;
   btn.disabled = true;
   try {
     const r = await fetch(`/video/${cid}/reject`, {

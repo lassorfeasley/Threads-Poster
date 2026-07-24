@@ -210,12 +210,14 @@ def score_visuals(model: str, images: list[bytes], desirable_traits: list[str],
 def suggest_post_caption(model: str, title: str, station: str, market: str,
                          excerpt: str, clip_seconds: float | None,
                          examples: list[str] | None = None,
-                         style_guide: str = "") -> str:
+                         style_guide: str = "", operator_guide: str = "") -> str:
     """Recommend Threads post text for the operator's trimmed clip. The operator
     reviews/edits before posting — this is a DRAFT, never auto-posted.
 
     ``examples``/``style_guide`` come from ``app/voice.py``: real captions the
     operator wrote, so the draft matches their voice instead of a generic one.
+    ``operator_guide`` is the hand-written style guide from the Configure page —
+    explicit instructions that take priority over the auto-learned voice.
     """
     system = (
         "You draft a Threads caption for a short local-TV climate news clip. The "
@@ -236,6 +238,12 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
         system += (
             "Style: concrete and human, lead with the most striking fact from the "
             "excerpt, no hype, no emojis unless truly fitting, at most one question."
+        )
+    if operator_guide:
+        system += (
+            "\n\nOPERATOR STYLE GUIDE — follow these instructions closely; they "
+            "take priority over the general style notes above (but never over the "
+            "hard constraints):\n" + operator_guide[:2000]
         )
     system += "\nJSON shape: {\"caption\": \"...\"}"
     user = json.dumps({

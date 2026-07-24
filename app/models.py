@@ -134,6 +134,8 @@ class Cut(Base):
     # ``use_subtitles`` is on.
     subtitled_clip_path: Mapped[str] = mapped_column(Text, default="")
     use_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Where burned-in captions sit on the frame: "bottom" (default) or "top".
+    subs_position: Mapped[str] = mapped_column(String(10), default="bottom")
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -159,6 +161,9 @@ class ThreadsPost(Base):
     status: Mapped[str] = mapped_column(String(20), default="draft")
     source: Mapped[str] = mapped_column(String(20), default="app")  # app | threads (imported history)
     error: Mapped[str] = mapped_column(Text, default="")
+    # When set, a failed post has been acknowledged by the operator and no longer
+    # surfaces in the Notifications "needs attention" list (kept for history).
+    attention_dismissed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Legacy exact-time field; unused by the adaptive window scheduler.
     scheduled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

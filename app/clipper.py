@@ -178,3 +178,34 @@ def clip_duration(path: str | Path) -> float | None:
         return float(proc.stdout.strip())
     except Exception:
         return None
+
+
+def extract_still(source_path: str | Path, dest_path: str | Path,
+                  at_seconds: float | None = None) -> Path:
+    """Grab a single representative frame from ``source_path`` as a JPEG.
+
+    Uploaded clips have no poster image, so the workflow tiles render an empty
+    placeholder. We pull one frame (a little into the clip, to skip black/fade
+    intros) so those cards show a real still like discovered clips do. Raises
+    ClipExportError if the frame can't be extracted.
+    """
+    source = Path(source_path)
+    if not source.exists():
+        raise ClipExportError(f"Clip for still not found: {source}")
+    dest = Path(dest_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if at_seconds is None:
+        dur = clip_duration(source) or 0.0
+        # A short way in avoids fade-ins/blank first frames; clamp for tiny clips.
+        at_seconds = min(1.0, dur / 2) if dur else 0.0
+
+    _run_ffmpeg([
+        "-ss", f"{max(0.0, at_seconds):.3f}", "-i", str(source),
+        "-frames:v", "1", "-q:v", "3",
+        "-vf", "scale='min(640,iw)':-2",
+        str(dest),
+    ])
+    if not dest.exists() or dest.stat().st_size == 0:
+        raise ClipExportError(f"Still extraction produced no image for {source}")
+    return dest
