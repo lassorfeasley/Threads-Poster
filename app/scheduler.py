@@ -37,6 +37,12 @@ log = logging.getLogger("scheduler")
 STATUS_QUEUED = "queued"
 STATUS_PUBLISHING = "publishing"
 
+# Pins can target windows up to this many days out (pin_post_to_window's
+# horizon). Every stale-pin check must scan at least this far ahead, or valid
+# pins get wiped as "stale" — never derive the stale-check set from a shorter
+# UI view range.
+PIN_HORIZON_DAYS = 60
+
 _INTERRUPTED_PUBLISH_MSG = (
     "Publishing was interrupted before it finished — the app restarted or "
     "crashed mid-publish. Check Threads to see if this clip went out; if it "
@@ -206,9 +212,11 @@ def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
     now = utcnow()
     state = _get_state(session)
     day = now.astimezone(tz).date()
-    # Look far enough ahead that reserved pins are visible.
+    # Look far enough ahead that every legal pin is visible (pins can be
+    # created up to PIN_HORIZON_DAYS out); a shorter horizon here would wipe
+    # farther-out pins as "stale".
     upcoming = _upcoming_window_slots(
-        day, day + dt.timedelta(days=21),
+        day, day + dt.timedelta(days=PIN_HORIZON_DAYS),
         now=now, last_window_key=state.last_window_key or "",
     )
     keys = [k for k, _, _ in upcoming]
@@ -234,7 +242,7 @@ def _carry_pin_forward(post: ThreadsPost, window_key: str, now: dt.datetime) -> 
     tz = _tz()
     day = now.astimezone(tz).date()
     upcoming = _upcoming_window_slots(
-        day, day + dt.timedelta(days=21),
+        day, day + dt.timedelta(days=PIN_HORIZON_DAYS),
         now=now, last_window_key=window_key,
     )
     post.pinned_window_key = upcoming[0][0] if upcoming else ""
@@ -264,7 +272,7 @@ def pin_post_to_window(session, post_id: int, window_key: str) -> str:
     state = _get_state(session)
     day = now.astimezone(tz).date()
     upcoming = _upcoming_window_slots(
-        day, day + dt.timedelta(days=60),
+        day, day + dt.timedelta(days=PIN_HORIZON_DAYS),
         now=now, last_window_key=state.last_window_key or "",
     )
     keys = [k for k, _, _ in upcoming]
@@ -720,11 +728,21 @@ def build_window_plan(
             continue
         visible.append((key, win_utc, idx, local))
 
-    keys = [k for k, _, _, _ in visible]
-    _clear_stale_pins(regular, set(k for k, _, _ in upcoming))
-    assignment = assign_posts_to_windows(regular, keys)
+    # Stale-check and assign over the full pin horizon, NOT the requested view
+    # range: a narrow view (e.g. one week) must neither wipe pins that target
+    # windows outside it nor FIFO-fill visible slots with posts that are
+    # actually pinned/projected beyond it.
+    today = now.astimezone(tz).date()
+    full_upcoming = _upcoming_window_slots(
+        today, today + dt.timedelta(days=PIN_HORIZON_DAYS),
+        now=now, last_window_key=state.last_window_key or "",
+    )
+    full_keys = [k for k, _, _ in full_upcoming]
+    _clear_stale_pins(regular, set(full_keys))
+    post_by_key = dict(zip(full_keys, assign_posts_to_windows(regular, full_keys)))
 
-    for (key, _win_utc, idx, local), post in zip(visible, assignment):
+    for key, _win_utc, idx, local in visible:
+        post = post_by_key.get(key)
         if post is None:
             plan.append({
                 "kind": "open",
