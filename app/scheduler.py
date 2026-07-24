@@ -212,16 +212,32 @@ def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
         now=now, last_window_key=state.last_window_key or "",
     )
     keys = [k for k, _, _ in upcoming]
+    # The due window has always already fired by the time the tick evaluates it,
+    # so _upcoming_window_slots excludes it (win <= now). Re-attach it at the
+    # front: pins targeting it must survive _clear_stale_pins, and the
+    # assignment must match the calendar plan as it stood before the window
+    # fired. (Previously this fell back to the raw FIFO head, ignoring pins.)
+    if window_key not in keys:
+        keys.insert(0, window_key)
     posts = _queue_regular(session)
     _clear_stale_pins(posts, set(keys))
-    if window_key not in keys:
-        # Window should still be in upcoming when called from a due tick; fall back.
-        pinned = [p for p in posts if (p.pinned_window_key or "") == window_key]
-        if pinned:
-            return pinned[0]
-        return posts[0] if posts else None
     assignment = assign_posts_to_windows(posts, keys)
     return assignment[keys.index(window_key)]
+
+
+def _carry_pin_forward(post: ThreadsPost, window_key: str, now: dt.datetime) -> None:
+    """When a post pinned to ``window_key`` is deferred/skipped, move its pin to
+    the next upcoming window. Otherwise the pin points at a past window and gets
+    silently cleared as stale, dropping the post to the back of the FIFO queue."""
+    if (post.pinned_window_key or "").strip() != window_key:
+        return
+    tz = _tz()
+    day = now.astimezone(tz).date()
+    upcoming = _upcoming_window_slots(
+        day, day + dt.timedelta(days=21),
+        now=now, last_window_key=window_key,
+    )
+    post.pinned_window_key = upcoming[0][0] if upcoming else ""
 
 
 def _breaking_heads(session) -> list[ThreadsPost]:
@@ -441,6 +457,7 @@ def run_window_tick() -> str | None:
             if has_later_window:
                 head.defer_count = int(head.defer_count or 0) + 1
                 head.last_deferred_at = now
+                _carry_pin_forward(head, key, now)
                 state.last_window_key = key
                 state.last_action = f"defer:{key}:post={head.id}:n={head.defer_count}"
                 state.updated_at = utcnow()
@@ -450,6 +467,7 @@ def run_window_tick() -> str | None:
                 )
                 return state.last_action
             # Last window of the day: skip rather than post into overnight.
+            _carry_pin_forward(head, key, now)
             state.last_window_key = key
             state.last_action = f"skip_day:{key}:post={head.id}"
             state.updated_at = utcnow()
