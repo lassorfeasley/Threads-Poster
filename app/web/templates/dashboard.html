@@ -62,7 +62,6 @@
       </div>
     </details>
   </div>
-  {{ ui.select("status", ["new", "approved", "archived", "rejected", "failed", "all"], selected=status, label="Status") }}
   {{ ui.date("date_from", value=date_from, label="From") }}
   {{ ui.date("date_to", value=date_to, label="To") }}
   {% if filtering %}{{ ui.clear("/") }}{% endif %}
@@ -271,10 +270,6 @@
          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
       <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
     {% endif %}
-    <span class="thumb-badge">
-      {% if state.post_failed %}<span class="badge hostile">post failed — retry</span>
-      {% else %}<span class="badge supportive">ready to schedule</span>{% endif %}
-    </span>
     {% if c.duration_seconds %}
     <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>
     {% endif %}
@@ -286,13 +281,6 @@
     {% if c.clip_title %}<div class="meta clip-title" title="Generated clip title">{{ c.clip_title }}</div>{% endif %}
     <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
       {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
-    <div class="mc-actions">
-      <a class="btn sm" href="/video/{{ c.id }}" onclick="event.stopPropagation()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-        Schedule</a>
-    </div>
   </div>
 </div>
 {% endfor %}
@@ -396,11 +384,6 @@
     <div class="item-title">{{ c.title }}</div>
     <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
       {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
-    <div class="badges mc-foot">
-      {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
-      {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
-      {% if c.status != "new" %}<span class="badge">{{ c.status }}</span>{% endif %}
-    </div>
   </div>
 </div>
 {% endfor %}

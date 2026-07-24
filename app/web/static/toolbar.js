@@ -138,26 +138,111 @@
   }
 
   // ---- Toast flash messages: auto-dismiss + manual close ----
+  var TOAST_ICON_OK =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  var TOAST_ICON_ERR =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg>';
+
+  // Auto-dismiss + manual close for a single toast node (server- or JS-created).
+  function wireToast(toast) {
+    if (toast.__toastInit) return;
+    toast.__toastInit = true;
+    var timer = null;
+    function dismiss() {
+      clearTimeout(timer);
+      toast.classList.add('toast-hide');
+      toast.addEventListener('animationend', function () {
+        var wrap = toast.parentElement;
+        toast.remove();
+        if (wrap && wrap.classList.contains('toast-wrap') && !wrap.children.length) wrap.remove();
+      }, { once: true });
+    }
+    var close = toast.querySelector('.toast-x');
+    if (close) close.addEventListener('click', dismiss);
+    timer = setTimeout(dismiss, 4500);
+    // Pause the auto-dismiss while hovering so it can be read.
+    toast.addEventListener('mouseenter', function () { clearTimeout(timer); });
+    toast.addEventListener('mouseleave', function () { timer = setTimeout(dismiss, 2000); });
+  }
+
   function initToasts() {
-    document.querySelectorAll('.toast').forEach(function (toast) {
-      if (toast.__toastInit) return;
-      toast.__toastInit = true;
-      var timer = null;
-      function dismiss() {
-        clearTimeout(timer);
-        toast.classList.add('toast-hide');
-        toast.addEventListener('animationend', function () {
-          var wrap = toast.parentElement;
-          toast.remove();
-          if (wrap && wrap.classList.contains('toast-wrap') && !wrap.children.length) wrap.remove();
-        }, { once: true });
-      }
-      var close = toast.querySelector('.toast-x');
-      if (close) close.addEventListener('click', dismiss);
-      timer = setTimeout(dismiss, 4500);
-      // Pause the auto-dismiss while hovering so it can be read.
-      toast.addEventListener('mouseenter', function () { clearTimeout(timer); });
-      toast.addEventListener('mouseleave', function () { timer = setTimeout(dismiss, 2000); });
+    document.querySelectorAll('.toast').forEach(wireToast);
+  }
+
+  // Programmatic toast so client-side actions (e.g. optimistic calendar moves)
+  // can confirm success/failure without a full page reload. opts.variant:
+  // 'error' for a red/failure toast; anything else is the default success look.
+  function showToast(message, opts) {
+    opts = opts || {};
+    if (message == null || message === '') return null;
+    var wrap = document.querySelector('.toast-wrap');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.className = 'toast-wrap';
+      wrap.setAttribute('aria-live', 'polite');
+      (document.body || document.documentElement).appendChild(wrap);
+    }
+    var isErr = opts.variant === 'error';
+    var toast = document.createElement('div');
+    toast.className = 'toast' + (isErr ? ' toast-error' : '');
+    toast.setAttribute('role', isErr ? 'alert' : 'status');
+    toast.innerHTML =
+      '<span class="toast-ic">' + (isErr ? TOAST_ICON_ERR : TOAST_ICON_OK) + '</span>' +
+      '<span class="toast-msg"></span>' +
+      '<button type="button" class="toast-x" aria-label="Dismiss">\u2715</button>';
+    toast.querySelector('.toast-msg').textContent = String(message);
+    wrap.appendChild(toast);
+    wireToast(toast);
+    return toast;
+  }
+  window.toast = showToast;
+
+  // ---- Instant feedback: mark the clicked action button busy on submit ----
+  // POST actions round-trip to the server (often a remote DB), so the page can
+  // sit for a beat. Flip the submitter into a spinner state the moment it's
+  // used so the click always feels acknowledged. Disabling on a 0ms timeout
+  // keeps the button's name/value in the submitted payload.
+  var lastSubmitter = null;
+
+  function setButtonBusy(btn, busy) {
+    if (!btn) return;
+    if (busy) {
+      if (btn.classList.contains('is-loading')) return;
+      // Lock the width so swapping the label for a spinner doesn't jump.
+      if (btn.offsetWidth) btn.style.minWidth = btn.offsetWidth + 'px';
+      btn.classList.add('is-loading');
+      btn.setAttribute('aria-busy', 'true');
+      setTimeout(function () { btn.disabled = true; }, 0);
+    } else {
+      btn.classList.remove('is-loading');
+      btn.removeAttribute('aria-busy');
+      btn.disabled = false;
+      btn.style.minWidth = '';
+    }
+  }
+
+  function initSubmitPending() {
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('button, input[type="submit"], input[type="image"]');
+      if (b && (b.form || b.closest('form'))) lastSubmitter = b;
+    }, true);
+
+    document.addEventListener('submit', function (e) {
+      var form = e.target;
+      if (!form || (form.method && form.method.toLowerCase() !== 'post')) return;
+      // These manage their own UX (search auto-submit / bespoke async handlers).
+      if (form.hasAttribute('data-toolbar-form') || form.hasAttribute('data-async')) return;
+      if (form.hasAttribute('data-no-pending')) return;
+      var btn = e.submitter || lastSubmitter;
+      if (btn && (btn.form || btn.closest('form')) !== form) btn = null;
+      if (!btn) btn = form.querySelector('button:not([type="button"]), input[type="submit"]');
+      if (btn && btn.type !== 'button' && !btn.hasAttribute('data-no-pending')) setButtonBusy(btn, true);
+    });
+
+    // Restore buttons if the page is served from the bfcache (back/forward),
+    // otherwise a navigated-away action would come back stuck spinning.
+    window.addEventListener('pageshow', function () {
+      document.querySelectorAll('.is-loading').forEach(function (b) { setButtonBusy(b, false); });
     });
   }
 
@@ -167,6 +252,7 @@
     initClientFilters();
     restoreSearchFocus();
     initToasts();
+    initSubmitPending();
     // Recompute when the layout reflows (resize, or content growing/shrinking
     // enough to add or remove the scrollbar — e.g. client-side filtering).
     window.addEventListener('resize', updateScrollbarWidth);

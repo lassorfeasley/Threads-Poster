@@ -554,11 +554,13 @@ code {
   animation: toast-in 0.22s cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 .toast.toast-hide { animation: toast-out 0.18s ease forwards; }
+.toast-error { border-color: var(--danger-border); }
 .toast-ic {
   flex: none;
   display: inline-flex;
   color: var(--accent);
 }
+.toast-error .toast-ic { color: var(--danger); }
 .toast-msg { flex: 1; min-width: 0; line-height: 1.4; }
 .toast-x {
   flex: none;
@@ -583,6 +585,44 @@ code {
 @media (max-width: 860px) {
   .toast-wrap { left: 16px; right: 16px; bottom: 16px; }
   .toast { max-width: none; }
+}
+
+/* Busy action buttons: the label is hidden and replaced by a centered spinner
+   the instant the button is used, so every POST action feels acknowledged
+   while the server round-trips. Width is locked in JS to avoid a jump. */
+button.is-loading,
+.btn.is-loading,
+input[type="submit"].is-loading {
+  color: transparent !important;
+  position: relative;
+  pointer-events: none;
+  cursor: progress;
+}
+button.is-loading > *,
+.btn.is-loading > * { visibility: hidden; }
+button.is-loading::after,
+.btn.is-loading::after,
+input[type="submit"].is-loading::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+/* On light-background (ghost/outline) buttons a white spinner would vanish. */
+.btn.ghost.is-loading::after,
+.btn.sm.is-loading::after,
+button.ghost.is-loading::after,
+button.sm.is-loading::after,
+.btn.is-loading:not(.primary):not(.approve):not(.danger)::after {
+  border-color: var(--text);
+  border-top-color: transparent;
 }
 
 /* ------------------------------------------------------------
@@ -1972,11 +2012,13 @@ a.cal-event:hover { background: var(--panel3); }
   50% { outline-color: color-mix(in srgb, var(--blue) 35%, transparent); }
 }
 
-/* Soft fade while the move is persisted, just before the reload. */
+/* Gentle busy cue while a move is persisted + re-projected in place. The
+   0.18s transition delay means quick commits fade nothing at all; only a slow
+   server round-trip dims the board, so the common case feels instant. */
 body.cal-committing #cal-layout {
-  opacity: 0.5;
+  opacity: 0.72;
   pointer-events: none;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.2s ease 0.18s;
 }
 
 @media (prefers-reduced-motion: reduce) {

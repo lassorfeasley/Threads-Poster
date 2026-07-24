@@ -313,7 +313,27 @@
     document.querySelectorAll('.cal-drop-over').forEach((n) => n.classList.remove('cal-drop-over'));
   }
 
-  function pinToWindow(postId, windowKey) {
+  // Refresh only the calendar + queue regions in place (no full-page nav) so a
+  // move keeps scroll position, the active view, and never flashes white. Drag
+  // handlers are delegated on `document`, so the swapped-in nodes stay live.
+  async function refreshCalendarRegions() {
+    const res = await fetch(location.href, { headers: { 'X-Requested-With': 'fetch' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+    ['#view-calendar', '#view-queue'].forEach((sel) => {
+      const fresh = doc.querySelector(sel);
+      const cur = document.querySelector(sel);
+      if (fresh && cur) cur.innerHTML = fresh.innerHTML;
+    });
+  }
+
+  // One move at a time: ignore extra drops until the in-flight commit settles.
+  let committing = false;
+
+  function commitMove(postId, windowKey) {
+    if (committing) return;
+    committing = true;
+    document.body.classList.add('cal-committing');
     const body = new FormData();
     body.append('window_key', windowKey);
     body.append('next', location.pathname + location.search);
@@ -322,18 +342,23 @@
     }).then(async (r) => {
       const d = await r.json().catch(() => ({}));
       if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      // Let the rearrange animation settle, fade, then reload for authoritative
-      // (re-projected) times.
-      document.body.classList.add('cal-committing');
-      setTimeout(() => location.reload(), 260);
+      // Re-project the queue in place, then confirm with a toast — the card is
+      // already sitting where it was dropped (optimistic), so no reload/flash.
+      await refreshCalendarRegions();
+      if (window.toast) window.toast(d.message || 'Post moved');
     }).catch((e) => {
+      // The optimistic move may be wrong now — pull authoritative state back in
+      // and tell the user, without a jarring full reload.
+      if (window.toast) window.toast('Could not move post: ' + e.message, { variant: 'error' });
+      return refreshCalendarRegions().catch(() => {});
+    }).finally(() => {
       document.body.classList.remove('cal-committing');
-      alert('Could not move post: ' + e.message);
-      location.reload();
+      committing = false;
     });
   }
 
   document.addEventListener('dragstart', (ev) => {
+    if (committing) { ev.preventDefault(); return; }
     const el = ev.target.closest('.cal-drag');
     if (!el || !el.dataset.postId) return;
     dragEl = el;
@@ -420,7 +445,7 @@
     if (grid && drop && drop.closest('#cal-dnd') && dragEl && drop !== dragEl) {
       flip(grid, () => { drop.before(dragEl); }, dragEl);
     }
-    pinToWindow(postId, windowKey);
+    commitMove(postId, windowKey);
   });
 })();
 </script>
