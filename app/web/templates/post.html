@@ -64,12 +64,6 @@
         <span class="meta">Plain trim — open clip page to add captions</span>
       {% endif %}
     {% endif %}
-    {% if caption %}
-      <button type="button" id="copy-caption-btn"
-              data-caption="{{ caption }}" onclick="copyPostCaption(this)">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-        Copy caption</button>
-    {% endif %}
     {% if clip_transcript_text %}
       <button type="button" id="copy-transcript-btn" onclick="copyPostTranscript(this)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -98,7 +92,13 @@
   <section class="wf-section">
     <div class="wf-head">
       <span class="wf-title">Caption</span>
-      <span class="meta">Edits are saved when you {{ "update the queue entry" if status == "queued" else "add it to the queue" }}.</span>
+      {% if caption %}
+      <button type="button" id="copy-caption-btn" class="copy-btn" style="margin-left: auto;"
+              data-caption="{{ caption }}" onclick="copyPostCaption(this)"
+              title="Copy caption" aria-label="Copy caption">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+      {% endif %}
     </div>
     <div class="wf-body">
       <textarea form="queue-form" name="caption" id="caption">{{ caption }}</textarea>
@@ -111,16 +111,37 @@
       <span class="wf-title">Destination</span>
     </div>
     <div class="wf-body">
-      <div class="meta" style="margin-bottom: 10px;">
-        {% if status == "queued" %}
-          In the adaptive queue{% if is_breaking %} as <strong>breaking</strong>{% endif %}.
-          {% if defer_count %}Deferred {{ defer_count }}× so far
-            {% if last_deferred_at %}(last {{ last_deferred_at.astimezone().strftime("%b %-d %-I:%M %p") }}){% endif %}.
+      {% if status == "queued" and schedule %}
+      <div class="schedule-banner">
+        <span class="schedule-ic" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+        </span>
+        <div>
+          {% if schedule.asap %}
+            <strong>Publishing as soon as possible</strong>
+            <div class="meta">Marked breaking — goes out at the next scheduler tick, once the 90-minute spacing floor allows.</div>
+          {% elif schedule.unknown %}
+            <strong>Queued — no slot in the next 60 days yet</strong>
+            <div class="meta">It'll publish as the posts ahead of it clear the queue.</div>
+          {% else %}
+            <strong>Scheduled for {{ schedule.when.strftime("%A, %b %-d · %-I:%M %p") }}</strong>
+            <div class="meta">
+              {{ "Pinned to this slot" if schedule.pinned else "Projected next open window" }} ·
+              <a href="/calendar">view on calendar</a>
+            </div>
           {% endif %}
-          Publishes at the next open window unless marked breaking.
-        {% elif status == "draft" %}This is a draft — add it to the queue, or post now.
-        {% elif status == "failed" %}Publishing failed. Retry now or re-queue.{% endif %}
+        </div>
       </div>
+      {% endif %}
+      {% if status == "queued" and defer_count %}
+      <div class="meta" style="margin-bottom: 10px;">
+        Deferred {{ defer_count }}× so far{% if last_deferred_at %} (last {{ last_deferred_at.astimezone().strftime("%b %-d %-I:%M %p") }}){% endif %}.
+      </div>
+      {% elif status == "draft" %}
+      <div class="meta" style="margin-bottom: 10px;">This is a draft — add it to the queue, or post now.</div>
+      {% elif status == "failed" %}
+      <div class="meta" style="margin-bottom: 10px;">Publishing failed. Retry now or re-queue.</div>
+      {% endif %}
       <form method="post" action="/post/{{ pid }}/queue" id="queue-form" class="ctl-strip">
         <input type="hidden" name="next" value="/post/{{ pid }}">
         <label class="inline-check" style="margin: 0;">
@@ -161,6 +182,13 @@
         <span class="meta">Published {{ published_at.strftime("%b %-d, %Y at %H:%M UTC") if published_at else "—" }}</span>
       {% else %}
         <span class="meta">Status: {{ status }}</span>
+      {% endif %}
+      {% if caption %}
+      <button type="button" id="copy-caption-btn" class="copy-btn" style="margin-left: auto;"
+              data-caption="{{ caption }}" onclick="copyPostCaption(this)"
+              title="Copy caption" aria-label="Copy caption">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
       {% endif %}
     </div>
     <div class="wf-body" style="white-space: pre-wrap;">{{ caption }}</div>
@@ -267,17 +295,27 @@
 </div>{# /canvas #}
 
 <script>
+  function flashCopied(btn) {
+    if (!btn || btn.dataset.flashing) return;
+    const html = btn.innerHTML;
+    btn.dataset.flashing = '1';
+    btn.classList.add('is-copied');
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+    setTimeout(() => {
+      btn.innerHTML = html;
+      btn.classList.remove('is-copied');
+      delete btn.dataset.flashing;
+    }, 1400);
+  }
   async function copyPostCaption(btn) {
-    const text = btn.dataset.caption || '';
-    if (!text.trim()) { alert('No caption to copy.'); return; }
-    const label = btn.querySelector('svg') ? btn.childNodes[btn.childNodes.length - 1] : null;
+    // Prefer the live (possibly edited) textarea value; fall back to the
+    // rendered caption for read-only posts.
+    const ta = document.getElementById('caption');
+    const text = ((ta && 'value' in ta ? ta.value : '') || btn.dataset.caption || '').trim();
+    if (!text) { alert('No caption to copy.'); return; }
     try { await navigator.clipboard.writeText(text); }
     catch (e) { alert('Copy failed: ' + e); return; }
-    if (label) {
-      const original = label.textContent;
-      label.textContent = ' Copied';
-      setTimeout(() => { label.textContent = original; }, 1500);
-    }
+    flashCopied(btn);
   }
   async function copyPostTranscript(btn) {
     const box = document.getElementById('clip-transcript-plain');

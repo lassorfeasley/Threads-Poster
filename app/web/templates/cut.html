@@ -952,21 +952,27 @@ renderSegments();
         if (!cap.value.trim()) { alertDialog('Add a caption first.'); return false; }
         return true;
       }
+      // NOTE: capture the button BEFORE any await — event.currentTarget is reset
+      // to null once the event finishes dispatching, and submitting with a null
+      // submitter would fall back to the form's default action (/post = post now),
+      // silently publishing a clip you meant to queue.
       document.getElementById('btn-post-now').addEventListener('click', async (e) => {
         e.preventDefault();
+        const btn = e.currentTarget;
         if (!captionOk()) return;
         if (await confirmDialog('Post this clip to Threads now?', { okText: 'Post now', okVariant: 'approve' }))
-          postForm.requestSubmit(e.currentTarget);
+          postForm.requestSubmit(btn);
       });
       document.getElementById('btn-queue').addEventListener('click', async (e) => {
         e.preventDefault();
+        const btn = e.currentTarget;
         if (!captionOk()) return;
         const breaking = document.getElementById('is_breaking')?.checked;
         const msg = breaking
           ? 'Add as breaking news? It will publish as soon as the spacing floor allows.'
           : 'Add this clip to the posting queue?';
         if (await confirmDialog(msg, { okText: 'Add to queue' }))
-          postForm.requestSubmit(e.currentTarget);
+          postForm.requestSubmit(btn);
       });
       document.getElementById('btn-draft').addEventListener('click', (e) => {
         e.preventDefault();

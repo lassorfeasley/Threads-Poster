@@ -1,0 +1,25 @@
+# Operator style guide for AI-drafted post captions — a list of `rules`.
+# Editable via the Style guide page under Configure; no code changes needed.
+#
+# Each rule: { text, enabled, priority }. Enabled rules are injected into the
+# caption-drafting prompt as authoritative style instructions (high-priority
+# ones first). Hard safety rules still apply — the model won't invent facts,
+# always mentions the place, and stays under Threads' character limit — so an
+# aggressive rule can't override those.
+
+rules:
+- text: Open with a punchy quoted line or vivid image before any context, then explain it
+    in the following sentence
+  enabled: true
+  priority: normal
+- text: End with a direct rhetorical question that challenges the reader's assumption
+  enabled: true
+  priority: normal
+- text: Use short, staccato sentences or fragments to build rhythm, especially when listing
+    escalating facts or locations
+  enabled: true
+  priority: high
+- text: When covering denial or deflection claims, state them factually, then immediately
+    pivot to the counter-evidence in the same short paragraph
+  enabled: true
+  priority: high

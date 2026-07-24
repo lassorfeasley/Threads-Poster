@@ -241,9 +241,12 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
         )
     if operator_guide:
         system += (
-            "\n\nOPERATOR STYLE GUIDE — follow these instructions closely; they "
-            "take priority over the general style notes above (but never over the "
-            "hard constraints):\n" + operator_guide[:2000]
+            "\n\nOPERATOR STYLE GUIDE — the operator's preferred way of writing. "
+            "Treat these as guidance, not rigid rules: apply each one when it fits "
+            "this clip's transcript and context, and skip or adapt any that would "
+            "feel forced or don't suit the material. Favor them over the general "
+            "style notes above, but never over the hard constraints. Above all, the "
+            "caption must read naturally for this specific clip:\n" + operator_guide[:2000]
         )
     system += "\nJSON shape: {\"caption\": \"...\"}"
     user = json.dumps({
@@ -272,6 +275,63 @@ def distill_style_guide(model: str, captions: list[str]) -> str:
     user = json.dumps({"captions": [c[:500] for c in captions[:30]]})
     data = _json_chat(model, system, user, max_tokens=1200)
     return str(data.get("style_guide", "")).strip()[:3000]
+
+
+def suggest_caption_rules(model: str, strong_captions: list[str],
+                          weak_captions: list[str] | None = None,
+                          existing_rules: list[str] | None = None) -> list[dict]:
+    """Distill concrete, reusable *editorial/formatting* rules from the operator's
+    own captions — the composition moves that make their strong posts work, phrased
+    as instructions they could apply to every future caption.
+
+    ``strong_captions`` are their higher-performing (or, absent metrics, most
+    recent hand-written) captions; ``weak_captions`` are lower-performing ones for
+    contrast. Advisory only — the operator promotes the ones that ring true.
+    """
+    # Line-based output (not JSON): these rules are about pull quotes and framing,
+    # so the text routinely contains quotation marks and apostrophes that break
+    # strict JSON parsing. One rule per line with a rare ``:::`` delimiter sidesteps
+    # all escaping issues.
+    system = (
+        "You are an editorial coach for someone who posts short local-TV climate "
+        "news clips on Threads. You are shown captions they published; when "
+        "available they're split into higher- and lower-performing sets. Infer a "
+        "short list of CONCRETE, REUSABLE composition rules that capture what makes "
+        "the strong captions work — structural and editorial patterns to apply to "
+        "every future caption.\n\n"
+        "Focus on FORMAT and FRAMING: how to open, how to close, how to use quotes "
+        "or stats, how to frame contested/denial viewpoints, rhythm, and what to "
+        "avoid. Each rule must be ONE imperative instruction, specific and "
+        "actionable. Good examples of the style and specificity wanted:\n"
+        "- Lead with a one-line pull quote from the transcript.\n"
+        "- End with a short, wry question.\n"
+        "- Frame climate-denial perspectives impartially, without editorializing.\n\n"
+        "Avoid vague advice ('be engaging'), do NOT restate hard constraints "
+        "(don't invent facts, mention the place, length limit), and do NOT "
+        "duplicate the operator's existing rules. Base them only on patterns "
+        "actually visible in the captions.\n\n"
+        "OUTPUT FORMAT: 4-6 rules, strongest first, one per line, nothing else. "
+        "Format each line exactly as:\n"
+        "<imperative rule> ::: <short reason>\n"
+        "No numbering, no bullets, no quotes around the line, no preamble, no code fences."
+    )
+    user = json.dumps({
+        "existing_rules": [r[:200] for r in (existing_rules or [])][:40],
+        "higher_performing_captions": [c[:500] for c in (strong_captions or [])][:15],
+        "lower_performing_captions": [c[:500] for c in (weak_captions or [])][:8],
+    })
+    text = _text_chat(model, system, user, max_tokens=1200, temperature=0.4)
+    out: list[dict] = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if not line:
+            continue
+        rule, _, why = line.partition(":::")
+        rule = rule.strip().strip('"').strip("“”").strip()
+        if not rule:
+            continue
+        out.append({"rule": rule[:300], "why": why.strip()[:200]})
+    return out
 
 
 def suggest_title(model: str, source_title: str, transcript_excerpt: str,

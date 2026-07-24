@@ -21,33 +21,14 @@
 </form>
 
 <div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 4px;">Learned from your posts</div>
-  <p class="meta" style="margin: 0 0 14px;">Patterns in how your captions correlate with engagement (likes + replies + reposts per view). Advisory only — engagement is driven mostly by topic and footage, so treat these as hints and promote the ones that ring true.</p>
-
-  <div id="insights-list">
-    {% if insights %}
-      {% for it in insights %}
-      <div class="insight-row" data-key="{{ it.key }}">
-        <span class="insight-arrow {{ it.direction }}" aria-hidden="true">
-          {% if it.direction == "up" %}▲{% else %}▼{% endif %}
-        </span>
-        <div class="insight-body">
-          <div class="insight-label">{{ it.label }}</div>
-          <div class="meta">
-            {{ "+" if it.direction == "up" else "−" }}{{ it.lift_pct }}% engagement · {{ it.n }} post{{ "s" if it.n != 1 }}
-            {% if not it.confident %} · <span class="badge">still learning</span>{% endif %}
-          </div>
-        </div>
-        <div class="insight-actions">
-          <button type="button" class="btn sm" onclick="promoteInsight(this, {{ it.suggested_rule|tojson }})">Add as rule</button>
-          <button type="button" class="btn ghost sm" onclick="dismissInsight(this, {{ it.key|tojson }})">Dismiss</button>
-        </div>
-      </div>
-      {% endfor %}
-    {% else %}
-      <p class="meta insights-empty" style="margin: 0;">Not enough data yet. Once you've published a handful of posts and their metrics come in, patterns will show up here.</p>
-    {% endif %}
+  <div class="sg-learned-head">
+    <div>
+      <div class="card-title" style="margin-bottom: 4px;">Learned from your posts</div>
+      <p class="meta" style="margin: 0;">Editorial &amp; formatting patterns distilled from your own captions — weighted toward your best-performing posts (engagement = likes + replies + reposts per view). Advisory: promote the ones that ring true.</p>
+    </div>
+    <button type="button" class="btn ghost sm" id="refresh-suggestions" onclick="refreshSuggestions()">✨ Suggest rules</button>
   </div>
+  <div id="suggestions-list" style="margin-top: 12px;"></div>
 </div>
 
 <div class="card" style="margin-top: 14px;">
@@ -95,7 +76,7 @@
       text.type = 'text';
       text.className = 'rule-text';
       text.maxLength = 300;
-      text.placeholder = 'e.g. Lead with the single most striking fact.';
+      text.placeholder = 'e.g. Lead with a one-line pull quote from the transcript.';
       text.value = r.text || '';
       text.addEventListener('input', () => { rules[i].text = text.value; });
 
@@ -127,22 +108,72 @@
     if (inputs.length) inputs[inputs.length - 1].focus();
   }
 
-  function promoteInsight(btn, text) {
-    addRule(text, 'high');
-    const row = btn.closest('.insight-row');
-    if (row) {
-      // Persist a dismiss so the suggestion doesn't nag now that it's a rule.
-      const key = row.dataset.key;
-      if (key) sendDismiss(key);
-      removeInsightRow(row);
+  // ---- Learned suggestions (LLM-distilled editorial rules) ----
+  let suggestions = {{ suggestions|tojson }};
+  let hasGenerated = {{ 'true' if has_generated else 'false' }};
+
+  function renderSuggestions() {
+    const box = document.getElementById('suggestions-list');
+    box.textContent = '';
+    if (!suggestions.length) {
+      const p = document.createElement('p');
+      p.className = 'meta';
+      p.style.margin = '0';
+      p.textContent = hasGenerated
+        ? 'No suggestions right now — add more posts (or refresh) to distill new patterns.'
+        : 'Click “Suggest rules” to analyze your posts and propose editorial rules you can promote.';
+      box.appendChild(p);
+      return;
     }
+    suggestions.forEach((s) => {
+      const row = document.createElement('div');
+      row.className = 'insight-row';
+      row.dataset.key = s.key;
+
+      const body = document.createElement('div');
+      body.className = 'insight-body';
+      const label = document.createElement('div');
+      label.className = 'insight-label';
+      label.textContent = s.rule;
+      body.appendChild(label);
+      if (s.why) {
+        const why = document.createElement('div');
+        why.className = 'meta';
+        why.textContent = s.why;
+        body.appendChild(why);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'insight-actions';
+      const add = document.createElement('button');
+      add.type = 'button'; add.className = 'btn sm'; add.textContent = 'Add as rule';
+      add.addEventListener('click', () => promoteSuggestion(s));
+      const dis = document.createElement('button');
+      dis.type = 'button'; dis.className = 'btn ghost sm'; dis.textContent = 'Dismiss';
+      dis.addEventListener('click', () => dismissSuggestion(s));
+      actions.append(add, dis);
+
+      row.append(body, actions);
+      box.appendChild(row);
+    });
+  }
+
+  function removeSuggestion(key) {
+    suggestions = suggestions.filter(s => s.key !== key);
+    renderSuggestions();
+  }
+
+  function promoteSuggestion(s) {
+    addRule(s.rule, 'high');
+    sendDismiss(s.key);            // it's a rule now; don't keep suggesting it
+    removeSuggestion(s.key);
     document.getElementById('rules-list').scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
-  async function dismissInsight(btn, key) {
+  async function dismissSuggestion(s) {
     if (!(await confirmDialog('Hide this suggestion? It won\'t show up here again.', { okText: 'Dismiss' }))) return;
-    sendDismiss(key);
-    removeInsightRow(btn.closest('.insight-row'));
+    sendDismiss(s.key);
+    removeSuggestion(s.key);
   }
 
   function sendDismiss(key) {
@@ -151,17 +182,23 @@
     fetch('/style-guide/insights/dismiss', { method: 'POST', body }).catch(() => {});
   }
 
-  function removeInsightRow(row) {
-    if (!row) return;
-    row.remove();
-    const list = document.getElementById('insights-list');
-    if (list && !list.querySelector('.insight-row')) {
-      const p = document.createElement('p');
-      p.className = 'meta insights-empty';
-      p.style.margin = '0';
-      p.textContent = 'No suggestions right now. Keep posting and check back.';
-      list.appendChild(p);
+  async function refreshSuggestions() {
+    const btn = document.getElementById('refresh-suggestions');
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Analyzing your posts…';
+    try {
+      const r = await fetch('/style-guide/suggestions/refresh', { method: 'POST' });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'Failed');
+      hasGenerated = true;
+      suggestions = d.items || [];
+      renderSuggestions();
+      if (!suggestions.length)
+        alertDialog("No new rules to suggest — either there aren't enough posts yet, or your current rules already cover the patterns.");
+    } catch (e) {
+      alertDialog('Could not generate suggestions: ' + e.message);
     }
+    btn.disabled = false; btn.textContent = label;
   }
 
   document.getElementById('rules-form').addEventListener('submit', () => {
@@ -172,5 +209,6 @@
   });
 
   renderRules();
+  renderSuggestions();
 </script>
 {% endblock %}

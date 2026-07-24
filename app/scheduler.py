@@ -816,6 +816,20 @@ def projected_window_slots(
     ]
 
 
+def projected_slot_for_post(session, post_id: int, horizon_days: int = 60) -> dict | None:
+    """The projected publishing slot for one queued post, using the same plan the
+    calendar shows. Returns the slot dict (with ``sort`` = local publish datetime,
+    ``time``/``date_label`` labels, ``is_breaking``) or ``None`` if the post isn't
+    a queued post that lands within ``horizon_days``."""
+    now_local = utcnow().astimezone()
+    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + dt.timedelta(days=horizon_days + 1)
+    for entry in build_window_plan(session, start, end, horizon_days=horizon_days):
+        if entry.get("post_id") == post_id and entry["kind"] in ("queued", "breaking"):
+            return entry
+    return None
+
+
 def run_tick() -> None:
     """One scheduler loop iteration: recover → metrics → breaking → window."""
     try:

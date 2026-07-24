@@ -218,7 +218,7 @@ scheduler:
   # Daily posting windows (local to timezone above). Tune later against insights.
   windows:
     - "10:00"
-    - "14:30"
+    - "13:00"
     - "19:00"
   # Retry a failed publish this many times (per tick) before marking the post
   # failed, with this delay between attempts. Guards against transient token /

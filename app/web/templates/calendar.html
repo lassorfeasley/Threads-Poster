@@ -75,8 +75,6 @@
           <div class="cal-cell {{ 'today' if day == today }}">
             <div class="cal-cell-head">
               <span class="cal-daynum">{{ day }}</span>
-              {% if ns.extras %}<span class="cal-extra"
-                title="{{ ns.extras|length }} more post{{ 's' if ns.extras|length != 1 }} this day">+{{ ns.extras|length }}</span>{% endif %}
             </div>
             <div class="cal-slots">
               {% for i in range(n_windows) %}
@@ -118,6 +116,33 @@
                 {% endif %}
               {% endfor %}
             </div>
+            {# Posts that don't line up with a current window (e.g. published
+               before the window times changed, or a 4th post in a day). Always
+               shown so history never disappears when windows are retuned. #}
+            {% if ns.extras %}
+            <div class="cal-extras">
+              {% for e in ns.extras %}
+                {% set xcls = 'sched' if e.kind in ('queued', 'breaking') else ('pub' if e.kind == 'published' else 'draft') %}
+                {% set xlabel = e.title or e.caption %}
+                {% if e.post_id %}
+                  <a class="cal-xtra {{ xcls }}" href="/post/{{ e.post_id }}"
+                     title="{{ e.time }} · {{ e.status }} · {{ xlabel }}">
+                    <span class="cal-xtra-dot"></span><b>{{ e.time }}</b>
+                    <span class="cal-xtra-t">{{ (xlabel or '(post)')[:44] }}</span></a>
+                {% elif e.permalink %}
+                  <a class="cal-xtra {{ xcls }}" href="{{ e.permalink }}" target="_blank"
+                     title="{{ e.time }} · {{ e.status }} · {{ xlabel }}">
+                    <span class="cal-xtra-dot"></span><b>{{ e.time }}</b>
+                    <span class="cal-xtra-t">{{ (xlabel or '(post)')[:44] }}</span></a>
+                {% else %}
+                  <span class="cal-xtra {{ xcls }}"
+                        title="{{ e.time }} · {{ e.status }} · {{ xlabel }}">
+                    <span class="cal-xtra-dot"></span><b>{{ e.time }}</b>
+                    <span class="cal-xtra-t">{{ (xlabel or '(post)')[:44] }}</span></span>
+                {% endif %}
+              {% endfor %}
+            </div>
+            {% endif %}
           </div>
           {% endif %}
         {% endfor %}
@@ -244,6 +269,7 @@
   let dragEl = null;        // element currently being dragged
   let dragPostId = null;
   let lastOverKey = null;   // avoid redundant live reflows
+  let dropWindowKey = null; // last hovered target window (survives queue reflow)
   window._calDidDrag = false;
 
   // FLIP: record sibling positions, run `mutate`, then slide each moved
@@ -314,6 +340,7 @@
     dragPostId = el.dataset.postId;
     window._calDidDrag = false;
     lastOverKey = null;
+    dropWindowKey = null;
     ev.dataTransfer.effectAllowed = 'move';
     ev.dataTransfer.setData('text/plain', dragPostId);
     // Add the lifted look after the browser snapshots the drag image.
@@ -323,18 +350,28 @@
   document.addEventListener('dragend', () => {
     if (dragEl) dragEl.classList.remove('dragging');
     clearDropOver();
-    dragEl = null; dragPostId = null; lastOverKey = null;
+    dragEl = null; dragPostId = null; lastOverKey = null; dropWindowKey = null;
   });
 
   document.addEventListener('dragover', (ev) => {
     if (!dragPostId) return;
     const drop = ev.target.closest('.cal-drop');
-    if (!drop || drop === dragEl) return;
-    if (drop.dataset.postId && drop.dataset.postId === dragPostId) return;
+    if (!drop) return;
+    // Hovering the dragged card itself (the queue reflow slides it under the
+    // cursor): keep it a valid drop zone so releasing here still fires `drop`,
+    // but don't reflow or restyle.
+    if (drop === dragEl || (drop.dataset.postId && drop.dataset.postId === dragPostId)) {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+      return;
+    }
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'move';
     clearDropOver();
     drop.classList.add('cal-drop-over');
+    // Remember the hovered target window: the queue reflow below can slide the
+    // dragged element under the cursor, so `drop` isn't reliable at drop time.
+    if (drop.dataset.windowKey) dropWindowKey = drop.dataset.windowKey;
 
     // Live reflow inside the queue list so the other cards slide as you move.
     const list = dragEl && dragEl.closest('#queue-dnd');
@@ -355,20 +392,32 @@
   });
 
   document.addEventListener('drop', (ev) => {
-    const drop = ev.target.closest('.cal-drop');
-    if (!drop || !dragPostId) return;
+    if (!dragPostId) return;
     ev.preventDefault();
     clearDropOver();
     const postId = dragPostId || ev.dataTransfer.getData('text/plain');
-    const windowKey = drop.dataset.windowKey || (dragEl ? nextWindowKey(dragEl) : null);
+
+    // `ev.target` can resolve to the dragged element itself, because the queue
+    // list reflowed it under the cursor during dragover. Only trust `drop` when
+    // it's a *different* post/slot; otherwise fall back to the window we last
+    // hovered, then to the dragged element's new neighbour.
+    let drop = ev.target.closest('.cal-drop');
+    let windowKey = null;
+    if (drop && drop !== dragEl
+        && !(drop.dataset.postId && drop.dataset.postId === postId)) {
+      windowKey = drop.dataset.windowKey || null;
+    } else {
+      drop = null;
+    }
+    if (!windowKey) windowKey = dropWindowKey;
+    if (!windowKey && dragEl) windowKey = nextWindowKey(dragEl);
     if (!postId || !windowKey) return;
-    if (drop.dataset.postId && drop.dataset.postId === postId) return;
     window._calDidDrag = true;
 
     // Animate the moved event into the dropped calendar cell (the queue list
     // already reflowed live during dragover).
     const grid = document.getElementById('cal-dnd');
-    if (grid && drop.closest('#cal-dnd') && dragEl && drop !== dragEl) {
+    if (grid && drop && drop.closest('#cal-dnd') && dragEl && drop !== dragEl) {
       flip(grid, () => { drop.before(dragEl); }, dragEl);
     }
     pinToWindow(postId, windowKey);

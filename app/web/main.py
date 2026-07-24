@@ -71,6 +71,7 @@ from ..ranking import load_trait_weights, order_expr, sort_candidates
 from ..scheduler import (
     build_window_plan,
     pin_post_to_window,
+    projected_slot_for_post,
     scheduler_status,
     spacing_allows_publish,
     start_scheduler_thread,
@@ -1767,6 +1768,18 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
              "commented_at": c.commented_at}
             for c in comments
         ]
+        # Projected publishing slot (same plan the calendar shows), so a queued
+        # post says exactly when it's expected to go out.
+        schedule = None
+        if p.status == "queued":
+            slot = projected_slot_for_post(session, p.id)
+            if slot is None:
+                schedule = {"unknown": True}
+            elif slot.get("is_breaking"):
+                schedule = {"asap": True}
+            else:
+                schedule = {"when": slot.get("sort"), "time": slot.get("time"),
+                            "pinned": bool(slot.get("pinned"))}
         ctx = {
             "pid": p.id, "status": p.status, "caption": p.caption or "",
             "permalink": p.permalink, "source": p.source, "error": p.error,
@@ -1790,6 +1803,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "metrics": metrics, "metrics_captured": snap.captured_at if snap else None,
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
+            "schedule": schedule,
         }
     return templates.TemplateResponse(
         request, "post.html", {**ctx, "msg": msg, "active": "posts"}
@@ -2285,14 +2299,15 @@ def first_reply_redirect():
 
 @app.get("/style-guide", response_class=HTMLResponse)
 def style_guide_page(request: Request, msg: str = ""):
-    from ..caption_insights import compute_insights
+    from ..caption_insights import has_generated, load_suggestions
 
     with session_scope() as session:
-        insights = compute_insights(session)
+        suggestions = load_suggestions(session)
+        generated = has_generated(session)
     return templates.TemplateResponse(
         request, "style_guide.html",
-        {"rules": load_caption_rules(), "insights": insights,
-         "msg": msg, "active": "style_guide"},
+        {"rules": load_caption_rules(), "suggestions": suggestions,
+         "has_generated": generated, "msg": msg, "active": "style_guide"},
     )
 
 
@@ -2316,6 +2331,20 @@ def style_guide_dismiss_insight(key: str = Form(...)):
     with session_scope() as session:
         dismiss_insight(session, key)
     return JSONResponse({"ok": True})
+
+
+@app.post("/style-guide/suggestions/refresh")
+def style_guide_refresh_suggestions():
+    """Distill editorial rule suggestions from the operator's captions (LLM)."""
+    from ..caption_insights import generate_suggestions
+
+    try:
+        with session_scope() as session:
+            items = generate_suggestions(session)
+        return JSONResponse({"ok": True, "items": items})
+    except Exception as exc:
+        log.exception("Caption rule suggestion failed")
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
 # --- Traits (flat footage vocabulary + post-performance learning) ---------------

@@ -1,40 +1,53 @@
-"""Advisory 'what's working' insights for caption style.
+"""Advisory 'learned rules' for caption style.
 
-Correlates the structured caption attributes we already store on every post
-(question / CTA / hashtags / length / tone) against engagement rate, so the
-operator can see which habits move the needle and optionally promote one to a
-style rule.
+Reads the operator's own published captions and, via the LLM, distills concrete
+EDITORIAL / FORMATTING rules — the composition moves that make their strong posts
+work (e.g. "lead with a one-line pull quote", "end with a wry question", "frame
+denial viewpoints impartially"). The operator can promote the ones that ring true
+into their style guide, or dismiss them.
 
-Deliberately ADVISORY only. Engagement is heavily confounded by topic, footage,
-and timing, and a single operator's post volume is modest — so we:
-  * measure lift against the account's recency-weighted MEDIAN (one viral post
-    shouldn't set the bar),
-  * gate on a minimum group size, flagging low-sample findings "still learning",
-  * never auto-apply anything — promotion to a rule is always the operator's call.
+Performance-aware but advisory: engagement rate = (likes + replies + reposts) /
+views (read at a fixed post age) is used to decide WHICH captions to learn from —
+the higher-performing ones — with lower performers passed as contrast. When there
+aren't enough posts with metrics yet, it falls back to the most recent captions so
+suggestions still work early. Nothing is ever auto-applied.
 
-Engagement rate = (likes + replies + reposts) / views, read at a fixed post age
-so young and old posts are comparable (same convention as trait learning).
+Suggestions are cached (the distillation is an LLM call) and only (re)generated on
+explicit request from the Style guide page.
 """
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 
 from sqlalchemy import select
 
-from .analytics import _weighted_median, metrics_at_age_bulk
-from .config import load_settings
+from . import llm
+from .analytics import metrics_at_age_bulk
+from .config import load_caption_rules, load_settings
 from .models import AppToken, ThreadsPost, utcnow
 
 log = logging.getLogger("caption_insights")
 
-_DISMISSED_TOKEN = "caption_insights_dismissed"
-_MIN_GROUP_N = 5          # need at least this many posts in a group to report it
-_MIN_LIFT = 0.10          # ignore patterns that move engagement < 10%
-_CONFIDENT_N = 8          # group size for a "confident" (vs. "still learning") flag
-_CONFIDENT_TOTAL = 20     # account-wide posts for confidence
+_SUGGEST_TOKEN = "caption_rule_suggestions"     # cached LLM output
+_DISMISSED_TOKEN = "caption_insights_dismissed"  # keys the operator hid
+_MIN_CAPTIONS = 4          # need at least this many captions to suggest anything
+_MIN_FOR_PERFORMANCE = 8   # below this, rank by recency instead of engagement
+_STRONG_K = 15
+_WEAK_K = 8
 
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _key_for(text: str) -> str:
+    return hashlib.sha1(_norm(text).encode("utf-8")).hexdigest()[:12]
+
+
+# ---- dismissed keys ---------------------------------------------------------
 
 def _dismissed_keys(session) -> set[str]:
     row = session.get(AppToken, _DISMISSED_TOKEN)
@@ -60,138 +73,118 @@ def dismiss_insight(session, key: str) -> None:
     session.flush()
 
 
-def _length_bucket(n: int | None) -> str | None:
-    if n is None:
-        return None
-    if n < 80:
-        return "short"
-    if n <= 180:
-        return "medium"
-    return "long"
+# ---- caption selection ------------------------------------------------------
 
-
-def compute_insights(session) -> list[dict]:
-    """Ranked advisory insights (strongest lift first). Empty when there isn't
-    enough data yet. Never raises for the caller's sake — logs and returns []."""
-    try:
-        return _compute(session)
-    except Exception as exc:  # advisory only; never break the page
-        log.warning("Caption insight computation failed: %s", exc)
-        return []
-
-
-def _compute(session) -> list[dict]:
+def _select_captions(session) -> dict | None:
+    """Pick which captions to learn from. Returns {strong, weak, n,
+    used_performance} or None when there isn't enough history."""
     settings = load_settings()
     age_hours = int(settings.get("learning.metric_age_hours", 48))
-    halflife_days = float(settings.get("learning.halflife_days", 90))
 
     posts = session.execute(
         select(ThreadsPost).where(
             ThreadsPost.status == "published",
             ThreadsPost.published_at.is_not(None),
+            ThreadsPost.caption != "",
         )
     ).scalars().all()
-    if not posts:
-        return []
+    rows = [{"caption": p.caption.strip(), "post": p, "published_at": p.published_at}
+            for p in posts if (p.caption or "").strip()]
+    if len(rows) < _MIN_CAPTIONS:
+        return None
 
     views = metrics_at_age_bulk(session, posts, "views", age_hours)
     likes = metrics_at_age_bulk(session, posts, "likes", age_hours)
     replies = metrics_at_age_bulk(session, posts, "replies", age_hours)
     reposts = metrics_at_age_bulk(session, posts, "reposts", age_hours)
+    for r in rows:
+        pid = r["post"].id
+        v = views.get(pid)
+        r["eng"] = (
+            (float(likes.get(pid, 0) or 0) + float(replies.get(pid, 0) or 0)
+             + float(reposts.get(pid, 0) or 0)) / float(v)
+        ) if v and v > 0 else None
 
-    now = utcnow()
-    obs: list[dict] = []
-    for p in posts:
-        v = views.get(p.id)
-        if not v or v <= 0:
-            continue
-        eng = (float(likes.get(p.id, 0) or 0)
-               + float(replies.get(p.id, 0) or 0)
-               + float(reposts.get(p.id, 0) or 0)) / float(v)
-        published = p.published_at
-        if published.tzinfo is None:
-            published = published.replace(tzinfo=dt.timezone.utc)
-        age_days = max(0.0, (now - published).total_seconds() / 86400)
-        weight = 0.5 ** (age_days / halflife_days) if halflife_days > 0 else 1.0
-        obs.append({
-            "eng": eng,
-            "weight": weight,
-            "has_question": bool(p.caption_has_question),
-            "has_cta": bool(p.caption_has_cta),
-            "uses_hashtags": (p.caption_hashtag_count or 0) > 0,
-            "length": _length_bucket(p.caption_length),
-            "tone": (p.caption_tone or "").strip().lower() or None,
-        })
+    scored = [r for r in rows if r["eng"] is not None]
+    if len(scored) >= _MIN_FOR_PERFORMANCE:
+        scored.sort(key=lambda r: r["eng"], reverse=True)
+        strong = [r["caption"] for r in scored[:_STRONG_K]]
+        weak = [r["caption"] for r in scored[-_WEAK_K:]] if len(scored) > _STRONG_K else []
+        return {"strong": strong, "weak": weak, "n": len(scored), "used_performance": True}
 
-    total_n = len(obs)
-    if total_n < _MIN_GROUP_N:
-        return []
-    baseline = _weighted_median([(o["eng"], o["weight"]) for o in obs])
-    if not baseline:
-        return []
+    # Not enough metrics yet — learn from the most recent captions instead.
+    rows.sort(key=lambda r: r["published_at"] or dt.datetime.min, reverse=True)
+    return {"strong": [r["caption"] for r in rows[:_STRONG_K]], "weak": [],
+            "n": len(rows), "used_performance": False}
 
+
+# ---- suggestions cache ------------------------------------------------------
+
+def _cached(session) -> dict:
+    row = session.get(AppToken, _SUGGEST_TOKEN)
+    if row and row.value:
+        try:
+            return json.loads(row.value)
+        except ValueError:
+            pass
+    return {}
+
+
+def _visible(items: list[dict], session) -> list[dict]:
+    """Hide dismissed suggestions and any that duplicate an existing rule."""
     dismissed = _dismissed_keys(session)
-    insights: list[dict] = []
+    existing = {_norm(r["text"]) for r in load_caption_rules()}
+    return [it for it in items
+            if it.get("key") not in dismissed and _norm(it.get("rule", "")) not in existing]
 
-    def consider(key, subset, noun, up_rule, down_rule):
-        if key in dismissed:
-            return
-        n = len(subset)
-        if n < _MIN_GROUP_N:
-            return
-        median = _weighted_median([(o["eng"], o["weight"]) for o in subset])
-        if median is None:
-            return
-        lift = (median - baseline) / baseline
-        if abs(lift) < _MIN_LIFT:
-            return
-        up = lift > 0
-        insights.append({
-            "key": key,
-            "label": f"{noun} {'lifts' if up else 'lowers'} engagement",
-            "suggested_rule": up_rule if up else down_rule,
-            "lift": lift,
-            "lift_pct": round(abs(lift) * 100),
-            "direction": "up" if up else "down",
-            "n": n,
-            "confident": n >= _CONFIDENT_N and total_n >= _CONFIDENT_TOTAL,
-        })
 
-    consider("question",
-             [o for o in obs if o["has_question"]],
-             "Opening with a question",
-             "Open with a question when it fits the clip.",
-             "Lead with the striking fact, not a question.")
-    consider("cta",
-             [o for o in obs if o["has_cta"]],
-             "Adding a call to action",
-             "Close with a light call to action.",
-             "Skip the call to action — let the clip stand on its own.")
-    consider("hashtags",
-             [o for o in obs if o["uses_hashtags"]],
-             "Using hashtags",
-             "Add a hashtag or two when relevant.",
-             "Don't use hashtags.")
+def load_suggestions(session) -> list[dict]:
+    """Cached suggestions still worth showing (no LLM call)."""
+    return _visible(_cached(session).get("items", []), session)
 
-    for bucket, noun in (("short", "Short captions (under 80 chars)"),
-                         ("medium", "Medium captions (80–180 chars)"),
-                         ("long", "Long captions (180+ chars)")):
-        consider(f"length:{bucket}",
-                 [o for o in obs if o["length"] == bucket],
-                 noun,
-                 f"Aim for {bucket} captions.",
-                 f"Avoid {bucket} captions.")
 
-    tones: dict[str, list[dict]] = {}
-    for o in obs:
-        if o["tone"]:
-            tones.setdefault(o["tone"], []).append(o)
-    for tone, subset in tones.items():
-        consider(f"tone:{tone}",
-                 subset,
-                 f"A {tone} tone",
-                 f"Lean into a {tone} tone when the story allows.",
-                 f"Ease off the {tone} tone.")
+def has_generated(session) -> bool:
+    return bool(_cached(session))
 
-    insights.sort(key=lambda i: abs(i["lift"]), reverse=True)
-    return insights
+
+def generate_suggestions(session) -> list[dict]:
+    """(Re)distill editorial rules from the operator's captions via the LLM and
+    cache them. Raises on hard failure so the caller can surface it."""
+    picked = _select_captions(session)
+    if not picked:
+        # Cache the empty state so the UI can explain "not enough posts yet".
+        _store(session, [], n=0, used_performance=False)
+        return []
+
+    settings = load_settings()
+    model = settings.get("voice.model", settings.get("engagement.draft_model", "claude-sonnet-5"))
+    existing = [r["text"] for r in load_caption_rules()]
+    raw = llm.suggest_caption_rules(model, picked["strong"], picked["weak"], existing)
+
+    items, seen = [], set()
+    for r in raw:
+        text = (r.get("rule") or "").strip()
+        if not text:
+            continue
+        key = _key_for(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({"key": key, "rule": text, "why": r.get("why", "")})
+
+    _store(session, items, n=picked["n"], used_performance=picked["used_performance"])
+    return _visible(items, session)
+
+
+def _store(session, items: list[dict], *, n: int, used_performance: bool) -> None:
+    payload = json.dumps({
+        "items": items, "built_from_n": n,
+        "used_performance": used_performance, "built_at": utcnow().isoformat(),
+    })
+    row = session.get(AppToken, _SUGGEST_TOKEN)
+    if row is None:
+        session.add(AppToken(name=_SUGGEST_TOKEN, value=payload))
+    else:
+        row.value = payload
+        row.updated_at = utcnow()
+    session.flush()
