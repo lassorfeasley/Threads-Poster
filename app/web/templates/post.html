@@ -28,13 +28,18 @@
 {% endset %}
 {% set post_title_extra %}
   <span class="badge {{ 'supportive' if status == 'published' else ('hostile' if status == 'failed' else ('info' if status == 'queued' else '')) }}">{{ status }}</span>
-  {% if is_breaking and status == "queued" %}<span class="badge hostile">breaking</span>{% endif %}
 {% endset %}
 {% set post_actions %}
   {% if has_clip %}
     <a class="btn sm" href="/post/{{ pid }}/download-clip" download>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
       Download clip</a>
+  {% endif %}
+  {% if status in ("draft", "queued", "failed") %}
+    <form class="inline" method="post" action="/post/{{ pid }}/cancel">
+      <input type="hidden" name="next" value="{% if candidate_id %}/video/{{ candidate_id }}?step=post{% else %}/calendar{% endif %}">
+      <button class="btn sm danger" data-confirm="Delete this {{ status }} post? Your trimmed clip will stay saved." data-confirm-ok="Delete" data-confirm-variant="danger">Delete</button>
+    </form>
   {% endif %}
 {% endset %}
 
@@ -66,6 +71,16 @@
 </div>{# /post-main #}
 
 <div class="post-side">
+{% if candidate_id %}
+{# ---- Programming category (lives on the source video; shared by all its cuts/posts) ---- #}
+{% import "components/category.html" as catui %}
+<section class="wf-section">
+  <div class="wf-body">
+    {{ catui.field(candidate_id, category, "/post/" ~ pid) }}
+  </div>
+</section>
+{% endif %}
+
 {% if error %}
 <div class="card" style="border-color: var(--danger-border);">
   <div class="card-title" style="color: var(--danger);">Last error</div>
@@ -77,7 +92,9 @@
   {# ---- Caption (editable) ---- #}
   <section class="wf-section">
     <div class="wf-head">
+      <span class="wf-num">1</span>
       <span class="wf-title">Caption</span>
+      <span class="meta char-count" id="caption-count" aria-live="polite"></span>
       {% if caption %}
       <button type="button" id="copy-caption-btn" class="copy-btn" style="margin-left: auto;"
               data-caption="{{ caption }}" onclick="copyPostCaption(this)"
@@ -86,27 +103,52 @@
       </button>
       {% endif %}
     </div>
-    <div class="wf-body">
-      <textarea form="queue-form" name="caption" id="caption">{{ caption }}</textarea>
+    <div class="wf-body plain">
+      <textarea form="queue-form" name="caption" id="caption" class="caption-input" maxlength="500"
+                placeholder="Write the caption for this post…">{{ caption }}</textarea>
+      <p class="field-hint">Edits are saved when you {{ "update the queue" if status == "queued" else "add it to the queue" }} below.</p>
     </div>
   </section>
 
-  {# ---- Destination ---- #}
+  {# ---- Burned-in captions ---- #}
+  {% if can_recaption %}
   <section class="wf-section">
     <div class="wf-head">
-      <span class="wf-title">Destination</span>
+      <span class="wf-title">Burned-in captions</span>
+      <span class="meta" id="recap-status" aria-live="polite"></span>
     </div>
     <div class="wf-body">
-      {% if status == "queued" and schedule %}
+      <div class="subs-controls">
+        <div class="subs-line" id="recap-line">
+          <span class="subs-lbl">Position</span>
+          <div class="seg-toggle" role="group" aria-label="Caption position">
+            <button type="button" class="{{ 'is-on' if subs_position != 'top' }}"
+                    data-pos="bottom" onclick="recaption('bottom')">Bottom</button>
+            <button type="button" class="{{ 'is-on' if subs_position == 'top' }}"
+                    data-pos="top" onclick="recaption('top')">Top</button>
+          </div>
+        </div>
+      </div>
+      <p class="field-hint">Re-renders the captions and updates this
+        {{ status }} post's video. Takes up to a minute.</p>
+    </div>
+  </section>
+  {% endif %}
+
+  {# ---- Schedule (read-only status) ---- #}
+  {% if status == "queued" and schedule %}
+  <section class="wf-section">
+    <div class="wf-head">
+      <span class="wf-title">Schedule</span>
+      {% if defer_count %}<span class="meta">deferred {{ defer_count }}×</span>{% endif %}
+    </div>
+    <div class="wf-body plain">
       <div class="schedule-banner">
         <span class="schedule-ic" aria-hidden="true">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
         </span>
         <div>
-          {% if schedule.asap %}
-            <strong>Publishing as soon as possible</strong>
-            <div class="meta">Marked breaking — goes out at the next scheduler tick, once the 90-minute spacing floor allows.</div>
-          {% elif schedule.unknown %}
+          {% if schedule.unknown %}
             <strong>Queued — no slot in the next 60 days yet</strong>
             <div class="meta">It'll publish as the posts ahead of it clear the queue.</div>
           {% else %}
@@ -118,22 +160,51 @@
           {% endif %}
         </div>
       </div>
+      {% if defer_count and last_deferred_at %}
+      <p class="field-hint">Last deferred {{ last_deferred_at.astimezone().strftime("%b %-d %-I:%M %p") }}.</p>
       {% endif %}
-      {% if status == "queued" and defer_count %}
-      <div class="meta" style="margin-bottom: 10px;">
-        Deferred {{ defer_count }}× so far{% if last_deferred_at %} (last {{ last_deferred_at.astimezone().strftime("%b %-d %-I:%M %p") }}){% endif %}.
-      </div>
-      {% elif status == "draft" %}
+    </div>
+  </section>
+  {% endif %}
+
+  {# ---- Destination (controls) ---- #}
+  <section class="wf-section">
+    <div class="wf-head">
+      <span class="wf-num">2</span>
+      <span class="wf-title">Destination</span>
+    </div>
+    <div class="wf-body">
+      {% if status == "draft" %}
       <div class="meta" style="margin-bottom: 10px;">This is a draft — add it to the queue, or post now.</div>
       {% elif status == "failed" %}
       <div class="meta" style="margin-bottom: 10px;">Publishing failed. Retry now or re-queue.</div>
       {% endif %}
+      {% if status == "queued" and available_windows %}
+      <form method="post" action="/post/{{ pid }}/pin-window" class="ctl-strip" style="margin-bottom: 12px;">
+        <input type="hidden" name="next" value="/post/{{ pid }}">
+        <select name="window_key" id="window-key-select" title="Pick a window to move this post to">
+          {% set ns = namespace(day="") %}
+          {% for w in available_windows %}
+            {% if w.date_label != ns.day %}
+              {% if ns.day %}</optgroup>{% endif %}
+              {% set ns.day = w.date_label %}
+              <optgroup label="{{ w.date_label }}">
+            {% endif %}
+            <option value="{{ w.window_key }}"{% if w.is_mine %} selected{% endif %}>
+              {{ w.time }}{% if w.is_mine %} — current{% elif w.occupant_title %} — swap with "{{ w.occupant_title[:28] }}"{% endif %}
+            </option>
+          {% endfor %}
+          {% if ns.day %}</optgroup>{% endif %}
+        </select>
+        <button class="sm">Move</button>
+        {% if pinned_window_key %}
+        <button class="sm" type="submit" formaction="/post/{{ pid }}/unpin" formnovalidate
+                title="Clear the pin — goes back to filling the next open window in order">Unpin</button>
+        {% endif %}
+      </form>
+      {% endif %}
       <form method="post" action="/post/{{ pid }}/queue" id="queue-form" class="ctl-strip">
         <input type="hidden" name="next" value="/post/{{ pid }}">
-        <label class="inline-check" style="margin: 0;">
-          <input type="checkbox" name="is_breaking" value="1" {% if is_breaking %}checked{% endif %}>
-          Breaking — publish ASAP
-        </label>
         <button class="primary">{{ "Update queue" if status == "queued" else "Add to queue" }}</button>
       </form>
     </div>
@@ -145,18 +216,6 @@
       <input type="hidden" name="next" value="/post/{{ pid }}">
       <button class="approve" data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
     </form>
-    {% if status == "queued" %}
-    <form class="inline" method="post" action="/post/{{ pid }}/toggle-breaking">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="primary">{{ "Clear breaking" if is_breaking else "Mark breaking" }}</button>
-    </form>
-    {% endif %}
-    <div class="rail-end">
-      <form class="inline" method="post" action="/post/{{ pid }}/cancel">
-        <input type="hidden" name="next" value="{% if candidate_id %}/video/{{ candidate_id }}?step=post{% else %}/calendar{% endif %}">
-        <button class="danger" data-confirm="Delete this {{ status }} post? Your trimmed clip will stay saved." data-confirm-ok="Delete" data-confirm-variant="danger">Delete</button>
-      </form>
-    </div>
   </div>
 
 {% else %}
@@ -166,8 +225,6 @@
       <span class="wf-title">Caption</span>
       {% if status == "published" %}
         <span class="meta">Published {{ published_at.strftime("%b %-d, %Y at %H:%M UTC") if published_at else "—" }}</span>
-      {% else %}
-        <span class="meta">Status: {{ status }}</span>
       {% endif %}
       {% if caption %}
       <button type="button" id="copy-caption-btn" class="copy-btn" style="margin-left: auto;"
@@ -296,6 +353,55 @@
 </div>{# /canvas #}
 
 <script>
+  (function () {
+    const ta = document.getElementById('caption');
+    if (!ta) return;
+    const count = document.getElementById('caption-count');
+    const MAX = 500;
+    const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+    const render = () => {
+      if (!count) return;
+      const n = ta.value.length;
+      count.textContent = n + ' / ' + MAX;
+      count.classList.toggle('over', n >= MAX);
+    };
+    ta.addEventListener('input', () => { grow(); render(); });
+    grow(); render();
+  })();
+  async function recaption(pos) {
+    const line = document.getElementById('recap-line');
+    const status = document.getElementById('recap-status');
+    const buttons = line ? [...line.querySelectorAll('button')] : [];
+    buttons.forEach(b => b.disabled = true);
+    if (line) line.classList.add('is-disabled');
+    if (status) status.textContent = 'Transcribing + rendering… this can take a minute.';
+    try {
+      const fd = new FormData();
+      fd.append('position', pos);
+      const r = await fetch('/post/{{ pid }}/recaption', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok) {
+        if (status) status.textContent = d.error || 'Caption render failed.';
+        return;
+      }
+      buttons.forEach(b => b.classList.toggle('is-on', b.dataset.pos === d.position));
+      // Cache-bust so the player picks up the freshly rendered file.
+      const v = document.querySelector('.media-stage video');
+      if (v) {
+        const t = v.currentTime;
+        v.src = '/media/post/{{ pid }}?v=' + Date.now();
+        v.addEventListener('loadedmetadata', () => { try { v.currentTime = t; } catch (e) {} },
+                           { once: true });
+        v.load();
+      }
+      if (status) status.textContent = 'Captions re-rendered at ' + d.position + '.';
+    } catch (e) {
+      if (status) status.textContent = 'Caption render failed: ' + e;
+    } finally {
+      buttons.forEach(b => b.disabled = false);
+      if (line) line.classList.remove('is-disabled');
+    }
+  }
   function flashCopied(btn) {
     if (!btn || btn.dataset.flashing) return;
     const html = btn.innerHTML;

@@ -1,6 +1,6 @@
 name: Threads scheduler
 
-# Runs one adaptive-scheduler tick (windows + breaking + metrics) so queued
+# Runs one adaptive-scheduler tick (windows + metrics) so queued
 # posts publish even when the operator's machine is off. The tick is
 # idempotent: SchedulerState in Postgres tracks processed windows, and the
 # publish claim is atomic, so overlapping with a locally running dashboard

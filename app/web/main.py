@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 
 from .. import spend, threads_api, youtube
 from ..analytics import generate_report, snapshot_metrics
+from ..categories import category_by_slug, category_options
 from ..clipper import ClipExportError, clip_duration, export_supercut, extract_still, get_waveform
 from ..config import (
     load_caption_rules, load_first_reply, load_keywords, load_settings,
@@ -38,7 +39,13 @@ from ..db import (
 )
 from ..engagement import PacingLimitError, post_approved_reply, redraft_comment, sync_comments
 from ..history import import_history
-from ..llm import suggest_channel_fields, suggest_post_caption, suggest_title
+from ..llm import (
+    suggest_calendar_name,
+    suggest_channel_fields,
+    suggest_post_caption,
+    suggest_short_title,
+    suggest_title,
+)
 from ..models import (
     STATUS_APPROVED,
     STATUS_ARCHIVED,
@@ -102,6 +109,10 @@ class _StaticVersion:
 
 
 templates.env.globals["static_v"] = _StaticVersion(_STATIC_DIR / "style.css")
+# Programming-category vocabulary, available to every template (badge/picker
+# rendering). Both are cheap: backed by a short in-process cache.
+templates.env.globals["category_options"] = category_options
+templates.env.globals["category_by_slug"] = category_by_slug
 
 
 def _attention_count() -> int:
@@ -120,6 +131,30 @@ def _attention_count() -> int:
 
 
 templates.env.globals["attention_count"] = _attention_count
+
+
+def _nav_scheduler_status() -> dict:
+    """Slim scheduler snapshot for the persistent sidebar widget. Rendered on
+    every page, so it must never raise — return an empty dict on any error."""
+    try:
+        with session_scope() as session:
+            return scheduler_status(session)
+    except Exception:
+        return {}
+
+
+templates.env.globals["nav_scheduler"] = _nav_scheduler_status
+
+
+def _threads_authenticated() -> bool:
+    """Rendered on every page (sidebar nav dot), so it must never raise."""
+    try:
+        return threads_api.is_authenticated()
+    except Exception:
+        return False
+
+
+templates.env.globals["threads_authenticated"] = _threads_authenticated
 
 init_db()
 with session_scope() as _s:
@@ -660,6 +695,26 @@ def video_score_visuals(candidate_id: int):
         return {"traits": result["traits"], "why": result["why"]}
 
 
+@app.post("/video/{candidate_id}/category")
+def set_video_category(candidate_id: int, category: str = Form(""), next: str = Form("")):
+    """Operator sets (or clears) the programming category by hand. The picker
+    lives on the video, cut, and post pages; ``next`` returns to whichever one
+    submitted the form."""
+    dest = next if next.startswith("/") else f"/video/{candidate_id}"
+    category = category.strip().lower()
+    cat = category_by_slug(category)
+    if category and cat is None:
+        return _flash(dest, "Unknown category")
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return _flash("/", "Video not found")
+        c.category = category
+        c.category_rationale = ""  # operator's own choice needs no LLM rationale
+    return _flash(dest,
+                  f"Category set to {cat['emoji']} {cat['label']}" if cat else "Category cleared")
+
+
 # --- Per-video workflow ----------------------------------------------------------
 
 def _cut_state(cut: Cut, posted_cut_pks: set[int]) -> dict:
@@ -755,12 +810,15 @@ def open_cut(candidate_id: int):
         if c.status != STATUS_ARCHIVED:
             return _flash(f"/video/{candidate_id}", "Download the video before cutting it")
         existing = session.execute(
-            select(Cut.id).where(Cut.candidate_pk == c.id).order_by(Cut.created_at.desc())
+            select(Cut).where(Cut.candidate_pk == c.id).order_by(Cut.created_at.desc())
         ).scalars().all()
-        if len(existing) > 1:
+        # Several cuts, or one that's already been exported: show the Cuts list so
+        # the operator deliberately picks "reopen" vs "＋ New cut". Silently
+        # reopening finished work is how a second trim ends up replacing the first.
+        if len(existing) > 1 or any(cu.trimmed_clip_path for cu in existing):
             return RedirectResponse(f"/video/{candidate_id}?step=cuts", status_code=303)
         if len(existing) == 1:
-            return RedirectResponse(f"/cut/{existing[0]}?step=trim", status_code=303)
+            return RedirectResponse(f"/cut/{existing[0].id}?step=trim", status_code=303)
         cut = Cut(candidate_pk=c.id, draft_caption=c.draft_caption or "")
         session.add(cut)
         session.flush()
@@ -788,6 +846,10 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         posted = any(p.status == "published" for p in posts)
         cut_state = {"exported": exported, "posted": posted,
                      "captioned": bool(cut.subtitled_clip_path)}
+        # A not-yet-published post pins the exact clip file it was queued with,
+        # so re-exporting won't change it — warn before the operator assumes it will.
+        pending = next((p for p in posts if p.status in ("queued", "draft", "failed")), None)
+        pending_post_status = pending.status if pending else ""
 
         active_step = step if step in ("trim", "post") else ("post" if exported else "trim")
 
@@ -814,6 +876,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "clip_transcript": clip_transcript,
          "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
+         "pending_post_status": pending_post_status,
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
          "subs_position": (getattr(cut, "subs_position", "") or load_settings().get("subtitles.position", "bottom")),
          "msg": msg, "active": "dashboard"},
@@ -968,6 +1031,8 @@ def upload_url(urls: str = Form(...)):
     if not parts:
         return _flash("/", "Paste at least one YouTube URL")
 
+    settings = load_settings()
+    title_model = settings.get("matching.model", "claude-haiku-4-5")
     queued: list[int] = []
     duplicates = 0
     invalid: list[str] = []
@@ -999,6 +1064,19 @@ def upload_url(urls: str = Form(...)):
         except Exception as exc:
             log.info("Metadata fetch failed for %s: %s", canonical, exc)
 
+        # Give the clip a concise 2-5 word AI title instead of the raw (often
+        # long/clickbait) YouTube title. Best-effort: fall back to the source
+        # title, then the URL. The original title is kept in `description`.
+        source_title = title.strip()
+        display_title = source_title
+        if source_title:
+            try:
+                short = suggest_short_title(title_model, source_title)
+                if short:
+                    display_title = short
+            except Exception as exc:
+                log.info("Short-title generation failed for %s: %s", canonical, exc)
+
         with session_scope() as session:
             existing = session.execute(
                 select(Candidate.id).where(Candidate.video_id == video_id)
@@ -1010,7 +1088,8 @@ def upload_url(urls: str = Form(...)):
             c = Candidate(
                 video_id=video_id,
                 channel_pk=ch.id,
-                title=(title.strip() or canonical)[:300],
+                title=(display_title or canonical)[:300],
+                description=source_title[:2000],
                 url=canonical,
                 published_at=published_at,
                 duration_seconds=duration,
@@ -1235,6 +1314,24 @@ def download_post_clip(post_id: int):
 
 # --- Trim / export ----------------------------------------------------------------
 
+def _delete_if_unreferenced(session, paths: list[str]) -> None:
+    """Remove superseded clip files that no ThreadsPost still points at.
+
+    Exports are versioned per run, so a pending post keeps the exact file it was
+    queued with. We only reclaim the disk space when nothing references the old
+    file any more."""
+    for path in {p for p in paths if p}:
+        referenced = session.execute(
+            select(ThreadsPost.id).where(ThreadsPost.clip_local_path == path).limit(1)
+        ).scalar_one_or_none()
+        if referenced is not None:
+            continue
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("Could not remove superseded clip %s: %s", path, exc)
+
+
 @app.post("/cut/{cut_id}/export")
 def export_clip(cut_id: int, segments_json: str = Form(...)):
     try:
@@ -1250,32 +1347,45 @@ def export_clip(cut_id: int, segments_json: str = Form(...)):
         if c is None or not c.local_video_path:
             return _flash("/", "Video not found or not downloaded")
         try:
-            out = export_supercut(c.local_video_path, segments, f"{c.video_id}_cut{cut.id}")
+            # Version every export. Re-exporting a cut must never overwrite the
+            # file a queued post already points at — that would silently swap the
+            # video under a scheduled post.
+            stamp = utcnow().strftime("%Y%m%dT%H%M%S")
+            previous = [cut.trimmed_clip_path, cut.subtitled_clip_path]
+            out = export_supercut(c.local_video_path, segments,
+                                  f"{c.video_id}_cut{cut.id}_{stamp}")
             cut.trim_segments = json.dumps(segments)
             cut.trimmed_clip_path = str(out)
             cut.updated_at = utcnow()
             # Any previously generated captions no longer match the new cut.
             cut.subtitled_clip_path = ""
             cut.use_subtitles = False
+            _delete_if_unreferenced(session, previous)
             # Auto-title the fresh clip from its own transcript, but only when the
             # operator hasn't already set one (regeneration stays available in the
             # Post step). A titling failure must never block the export.
             if not (cut.clip_title or "").strip():
                 try:
                     settings = load_settings()
+                    model = settings.get("engagement.draft_model", "claude-sonnet-5")
                     excerpt = _transcript_excerpt(c, segments)
-                    title = suggest_title(
-                        settings.get("engagement.draft_model", "claude-sonnet-5"),
-                        c.title, excerpt, cut.draft_caption or None,
-                    )
+                    title = suggest_title(model, c.title, excerpt, cut.draft_caption or None)
                     if title:
                         cut.clip_title = title
+                        cut.calendar_name = suggest_calendar_name(model, title, cut.draft_caption or None)
                 except Exception:
                     pass
             n = len(segments)
+            # A draft caption inherited from the video-level seed was written
+            # against the FULL transcript; now that the clip's own transcript
+            # exists (trim_segments is saved), have the Post step regenerate it
+            # from the clip. Operator-edited captions are left alone.
+            seed = (c.draft_caption or "").strip()
+            current = (cut.draft_caption or "").strip()
+            autocaption = "&autocaption=1" if (not current or current == seed) else ""
             # autosubs=1 makes the Post step kick off caption generation
             # immediately, so the captioned variant is the default.
-            return _flash(f"/cut/{cut_id}?step=post&autosubs=1",
+            return _flash(f"/cut/{cut_id}?step=post&autosubs=1{autocaption}",
                           f"Exported {n} segment{'s' if n > 1 else ''} — generating captions…")
         except ClipExportError as exc:
             return _flash(f"/cut/{cut_id}?step=trim", f"Export failed: {exc}")
@@ -1296,8 +1406,13 @@ def generate_subtitles(cut_id: int, position: str = Form("")):
         if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
             return JSONResponse({"error": "Export a clip first"}, status_code=404)
         clip_path = cut.trimmed_clip_path
+        previous_subs = cut.subtitled_clip_path
+    # Version each render so regenerating captions never overwrites the file a
+    # queued post is already pointing at.
+    stamp = utcnow().strftime("%Y%m%dT%H%M%S")
+    out_path = Path(clip_path).with_name(f"{Path(clip_path).stem}_subs_{stamp}.mp4")
     try:
-        out = create_subtitled_clip(clip_path, position=position or None)
+        out = create_subtitled_clip(clip_path, position=position or None, out_path=out_path)
     except SubtitleError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     except Exception as exc:
@@ -1307,6 +1422,7 @@ def generate_subtitles(cut_id: int, position: str = Form("")):
         cut = session.get(Cut, cut_id)
         if cut is not None:
             cut.subtitled_clip_path = str(out)
+            _delete_if_unreferenced(session, [previous_subs])
             cut.use_subtitles = True
             cut.subs_position = "top" if (position or "").lower() == "top" else "bottom"
             cut.updated_at = utcnow()
@@ -1433,14 +1549,13 @@ def suggest_clip_title(cut_id: int):
         c = cut.candidate
         segments = json.loads(cut.trim_segments) if cut.trim_segments else []
         excerpt = _transcript_excerpt(c, segments)
+        model = settings.get("engagement.draft_model", "claude-sonnet-5")
         try:
-            title = suggest_title(
-                settings.get("engagement.draft_model", "claude-sonnet-5"),
-                c.title, excerpt, cut.draft_caption or None,
-            )
+            title = suggest_title(model, c.title, excerpt, cut.draft_caption or None)
             if title:
                 cut.clip_title = title
-            return {"title": title or cut.clip_title}
+                cut.calendar_name = suggest_calendar_name(model, title, cut.draft_caption or None)
+            return {"title": title or cut.clip_title, "calendar_name": cut.calendar_name}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -1466,6 +1581,8 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
         try:
             post = publish_clip(session, cut.candidate,
                                 _chosen_clip_path(cut, use_subtitles), caption, cut=cut)
+            # Keep the clip's caption in sync with what was actually posted.
+            cut.draft_caption = caption
             state = session.get(SchedulerState, 1)
             if state is None:
                 state = SchedulerState(id=1)
@@ -1485,13 +1602,11 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
 
 @app.post("/cut/{cut_id}/queue")
 def queue_to_threads(cut_id: int, caption: str = Form(...),
-                     is_breaking: str = Form(""),
                      use_subtitles: str = Form("")):
     """Add the exported clip to the adaptive FIFO queue (no immediate post)."""
     caption = caption.strip()
     if not caption:
         return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
-    breaking = str(is_breaking).lower() in ("1", "true", "on", "yes")
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
@@ -1522,7 +1637,6 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                         log.warning("Clip re-upload failed (will retry at publish): %s", exc)
                 keep.status = "queued"
                 keep.scheduled_at = None
-                keep.is_breaking = breaking
                 keep.defer_count = 0
                 keep.last_deferred_at = None
                 keep.pinned_window_key = ""
@@ -1530,13 +1644,14 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                 for extra in existing[1:]:
                     session.delete(extra)
             else:
-                queue_clip(session, cut.candidate, clip_path, caption,
-                           is_breaking=breaking, cut=cut)
+                queue_clip(session, cut.candidate, clip_path, caption, cut=cut)
+            # Persist the queued caption back onto the clip so the clip reflects
+            # what was scheduled, not the original generated draft. (Done after
+            # record_post has frozen the AI draft as suggested_caption.)
+            cut.draft_caption = caption
         except Exception as exc:
             return _flash(f"/cut/{cut_id}?step=post", f"Queue failed: {exc}")
-    note = " (breaking — publishes ASAP)" if breaking else ""
-    return _flash(f"/cut/{cut_id}?step=post",
-                  f"Added to the posting queue{note}")
+    return _flash(f"/cut/{cut_id}?step=post", "Added to the posting queue")
 
 
 @app.post("/cut/{cut_id}/save-draft")
@@ -1553,6 +1668,8 @@ def save_draft(cut_id: int, caption: str = Form(...),
         try:
             record_post(session, cut.candidate, _chosen_clip_path(cut, use_subtitles),
                         caption, status="draft", cut=cut)
+            # Keep the clip's caption in sync with the saved draft.
+            cut.draft_caption = caption
         except Exception as exc:
             return _flash(f"/cut/{cut_id}?step=post", f"Save failed: {exc}")
     return _flash(f"/cut/{cut_id}?step=post",
@@ -1581,20 +1698,23 @@ def cancel_queued_post(post_id: int, next: str = Form("/calendar")):
 
 @app.post("/post/{post_id}/queue")
 def queue_existing_post(post_id: int, caption: str = Form(""),
-                        is_breaking: str = Form(""), next: str = Form("/calendar")):
+                        next: str = Form("/calendar")):
     """Move a draft/failed post into the adaptive queue (or update a queued one)."""
-    breaking = str(is_breaking).lower() in ("1", "true", "on", "yes")
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None or p.status not in ("draft", "failed", "queued"):
             return _flash(next, "Only a draft, failed, or queued post can be (re)queued")
         if caption.strip():
             p.caption = caption.strip()
+            # Mirror the edited caption onto the clip so re-opening the cut shows
+            # what was queued, not the original generated draft. suggested_caption
+            # on the post already froze the AI draft, so voice-learning is intact.
+            if p.cut_pk is not None:
+                cut = session.get(Cut, p.cut_pk)
+                if cut is not None:
+                    cut.draft_caption = caption.strip()
         p.status = "queued"
         p.scheduled_at = None
-        p.is_breaking = breaking
-        if breaking:
-            p.pinned_window_key = ""
         p.error = ""
         if p.cut_pk is not None:
             dupes = session.execute(
@@ -1606,26 +1726,7 @@ def queue_existing_post(post_id: int, caption: str = Form(""),
             ).scalars().all()
             for extra in dupes:
                 session.delete(extra)
-    note = " as breaking" if breaking else ""
-    return _flash(next, f"Added to the posting queue{note}")
-
-
-@app.post("/post/{post_id}/toggle-breaking")
-def toggle_breaking(post_id: int, next: str = Form("/calendar")):
-    """Flip the breaking-news flag on a queued/draft post."""
-    with session_scope() as session:
-        p = session.get(ThreadsPost, post_id)
-        if p is None or p.status not in ("queued", "draft", "failed"):
-            return _flash(next, "Only a queued, draft, or failed post can be marked breaking")
-        p.is_breaking = not bool(p.is_breaking)
-        if p.is_breaking:
-            p.pinned_window_key = ""
-        if p.status in ("draft", "failed"):
-            p.status = "queued"
-            p.scheduled_at = None
-            p.error = ""
-        flag = p.is_breaking
-    return _flash(next, "Marked breaking — will publish ASAP" if flag else "Cleared breaking flag")
+    return _flash(next, "Added to the posting queue")
 
 
 @app.post("/post/{post_id}/pin-window")
@@ -1643,6 +1744,18 @@ def pin_window(request: Request, post_id: int, window_key: str = Form(...),
     if wants_json:
         return JSONResponse({"ok": True, "message": msg, "window_key": window_key})
     return _flash(next, msg)
+
+
+@app.post("/post/{post_id}/unpin")
+def unpin_window(post_id: int, next: str = Form("/calendar")):
+    """Clear a queued post's window pin — it goes back to filling the next
+    open window FIFO, like a post that was never dragged/picked at all."""
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None or p.status != "queued":
+            return _flash(next, "Only a queued post can be unpinned")
+        p.pinned_window_key = ""
+    return _flash(next, "Unpinned — back to the next open window")
 
 
 def _publish_in_thread(post_id: int) -> None:
@@ -1714,6 +1827,65 @@ def post_status(post_id: int):
         })
 
 
+@app.post("/post/{post_id}/recaption")
+def post_recaption(post_id: int, position: str = Form("bottom")):
+    """Re-render burned-in captions at the top or bottom for a not-yet-published
+    post, and move the post onto the fresh file.
+
+    Operators change their mind at the Post step, so this saves a trip back to
+    the trim editor. Renders are versioned, so this is an explicit opt-in to the
+    new file — unlike a passive re-export, which deliberately leaves a queued
+    post on the clip it was queued with.
+    """
+    from ..publishing import _object_key
+    from ..storage_supabase import upload_trimmed_clip
+    from ..subtitles import SubtitleError, create_subtitled_clip
+
+    position = "top" if str(position).strip().lower() == "top" else "bottom"
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if p.status not in ("draft", "queued", "failed"):
+            return JSONResponse(
+                {"error": "Only a post that hasn't published yet can be re-captioned"},
+                status_code=409)
+        cut = p.cut
+        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+            return JSONResponse({"error": "No trimmed clip to caption"}, status_code=404)
+        cut_id = cut.id
+        clip_path = cut.trimmed_clip_path
+        superseded = [p.clip_local_path, cut.subtitled_clip_path]
+
+    stamp = utcnow().strftime("%Y%m%dT%H%M%S")
+    out_path = Path(clip_path).with_name(f"{Path(clip_path).stem}_subs_{stamp}.mp4")
+    try:
+        out = create_subtitled_clip(clip_path, position=position, out_path=out_path)
+    except SubtitleError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    except Exception as exc:
+        log.exception("Re-caption failed for post %s", post_id)
+        return JSONResponse({"error": f"Caption render failed: {exc}"}, status_code=500)
+
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        cut = session.get(Cut, cut_id)
+        if p is None or cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        cut.subtitled_clip_path = str(out)
+        cut.subs_position = position
+        cut.use_subtitles = True
+        cut.updated_at = utcnow()
+        p.clip_local_path = str(out)
+        p.clip_object_path = _object_key(out)
+        try:
+            upload_trimmed_clip(out, p.clip_object_path)
+        except Exception as exc:
+            log.warning("Re-caption upload failed (will retry at publish): %s", exc)
+        _delete_if_unreferenced(session, superseded)
+    return JSONResponse({"ok": True, "position": position})
+
+
 _POST_METRICS = ("views", "likes", "replies", "reposts", "quotes", "shares")
 
 
@@ -1775,25 +1947,48 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             slot = projected_slot_for_post(session, p.id)
             if slot is None:
                 schedule = {"unknown": True}
-            elif slot.get("is_breaking"):
-                schedule = {"asap": True}
             else:
                 schedule = {"when": slot.get("sort"), "time": slot.get("time"),
                             "pinned": bool(slot.get("pinned"))}
+        # Pickable upcoming windows (open, or occupied by another post — picking
+        # one of those swaps pins, same as dragging on the calendar) so a queued
+        # post can be rescheduled right from this page.
+        available_windows: list[dict] = []
+        if p.status == "queued":
+            start = utcnow().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+            plan = build_window_plan(session, start, start + dt.timedelta(days=22), horizon_days=21)
+            for e in plan:
+                if e["kind"] not in ("open", "queued"):
+                    continue
+                is_mine = e.get("post_id") == p.id
+                available_windows.append({
+                    "window_key": e["window_key"],
+                    "date_label": e["date_label"],
+                    "time": e["time"],
+                    "is_mine": is_mine,
+                    "occupant_title": e["title"] if (e["kind"] == "queued" and not is_mine) else "",
+                })
         ctx = {
             "pid": p.id, "status": p.status, "caption": p.caption or "",
             "permalink": p.permalink, "source": p.source, "error": p.error,
             "candidate_id": cand.id if cand else None,
+            "category": cand.category if cand else "",
+            "category_rationale": cand.category_rationale if cand else "",
             "cut_id": cut.id if cut else None,
             "channel_sign": cand.channel.call_sign if (cand and cand.channel) else "",
             "video_title": cand.title if cand else "",
             "clip_title": cut.clip_title if cut else "",
             "has_clip": has_clip,
             "has_burned_captions": has_burned_captions,
+            # Caption position can be re-rendered right here until the post goes out.
+            "can_recaption": bool(
+                cut and cut.trimmed_clip_path and Path(cut.trimmed_clip_path).exists()
+                and p.status in ("draft", "queued", "failed")
+            ),
+            "subs_position": (cut.subs_position or "bottom") if cut else "bottom",
             "clip_transcript_text": clip_transcript_text,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
-            "is_breaking": bool(p.is_breaking),
             "defer_count": int(p.defer_count or 0),
             "last_deferred_at": p.last_deferred_at,
             "first_reply_id": p.first_reply_id or "",
@@ -1804,6 +1999,8 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
             "schedule": schedule,
+            "pinned_window_key": p.pinned_window_key or "",
+            "available_windows": available_windows,
         }
     return templates.TemplateResponse(
         request, "post.html", {**ctx, "msg": msg, "active": "posts"}
@@ -1868,6 +2065,18 @@ def threads_connect(code: str = Form(...), next: str = Form("/calendar")):
         return _flash(next, "Threads connected")
     except Exception as exc:
         return _flash(next, f"Auth failed: {exc}")
+
+
+@app.get("/threads-account", response_class=HTMLResponse)
+def threads_account_page(request: Request, msg: str = ""):
+    """Threads OAuth connection status + account-level actions (Configure area)."""
+    authenticated = threads_api.is_authenticated()
+    return templates.TemplateResponse(
+        request, "threads_account.html",
+        {"authenticated": authenticated,
+         "auth_url": threads_api.authorize_url() if not authenticated else "",
+         "msg": msg, "active": "threads_account"},
+    )
 
 
 # --- Archive -----------------------------------------------------------------
@@ -1954,16 +2163,17 @@ def library_page(request: Request, section: str = "videos", msg: str = ""):
 # --- Posts (history + manual publish + Threads connect) --------------------------
 
 @app.post("/threads/import-history")
-def threads_import_history():
+def threads_import_history(next: str = Form("/calendar")):
     """Pull the account's own existing Threads posts into the DB, then kick off
-    an insights snapshot for them in the background."""
+    an insights snapshot for them in the background. Reachable from the nav bar
+    on any page, so it redirects back to wherever it was submitted from."""
     if not threads_api.is_authenticated():
-        return _flash("/calendar", "Connect Threads first")
+        return _flash(next, "Connect Threads first")
     with session_scope() as session:
         try:
             result = import_history(session)
         except Exception as exc:
-            return _flash("/calendar", f"Import failed: {exc}")
+            return _flash(next, f"Import failed: {exc}")
 
     def _pull_insights():
         try:
@@ -1974,7 +2184,7 @@ def threads_import_history():
 
     threading.Thread(target=_pull_insights, daemon=True).start()
     return _flash(
-        "/calendar",
+        next,
         f"Imported {result['imported']} posts ({result['skipped']} already known) — "
         f"pulling insights in the background; see Analytics shortly.",
     )
@@ -2015,12 +2225,10 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
         plan = build_window_plan(session, first_local, next_first_local)
         for e in plan:
             # Calendar grid: published history + upcoming filled/open windows.
-            if e["kind"] == "breaking":
-                continue  # breaking is ASAP — linear only
             events.setdefault(e["day"], []).append(e)
 
-        # Linear queue: breaking + upcoming windows only (not published history).
-        linear = [e for e in plan if e["kind"] in ("breaking", "queued", "open")]
+        # Linear queue: upcoming windows only (not published history).
+        linear = [e for e in plan if e["kind"] in ("queued", "open")]
         # Cap the linear list to the next ~21 slots so it stays scannable.
         linear = linear[:21]
 
@@ -2033,7 +2241,6 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
 
     prev_y, prev_m = (y - 1, 12) if m == 1 else (y, m - 1)
     next_y, next_m = (y + 1, 1) if m == 12 else (y, m + 1)
-    authenticated = threads_api.is_authenticated()
 
     return templates.TemplateResponse(
         request, "calendar.html",
@@ -2042,9 +2249,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
          "prev_y": prev_y, "prev_m": prev_m, "next_y": next_y, "next_m": next_m,
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
          "drafts_count": drafts_count, "queue_count": queue_count,
-         "authenticated": authenticated,
-         "auth_url": threads_api.authorize_url() if not authenticated else "",
-         "linear": linear, "scheduler": status, "windows_et": windows_et,
+         "linear": linear, "windows_et": windows_et,
          "msg": msg, "active": "calendar"},
     )
 

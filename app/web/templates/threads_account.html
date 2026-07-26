@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{% set ta_sub %}Connect the Threads account this app posts to, and pull in posts you made outside of it.{% endset %}
+{{ ui.pagebar("Threads account", sub=ta_sub) }}
+
+<div class="card">
+  <div class="card-title" style="margin-bottom: 8px;">Connection</div>
+  {% if authenticated %}
+    <p class="meta"><span class="badge supportive">Connected</span> Posts are published to this account.</p>
+  {% else %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
+    <p class="meta">1. <a href="{{ auth_url }}" target="_blank">Authorize with Threads ↗</a> using the account you post from.<br>
+       2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
+       Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
+    <form method="post" action="/threads/connect">
+      <input type="hidden" name="next" value="/threads-account">
+      <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
+      <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
+    </form>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 6px;">Import history</div>
+  <p class="meta" style="margin: 0 0 12px;">Fetch posts you made directly on Threads (outside this app) and pull them in so Analytics can include them. This does not post anything.</p>
+  <form method="post" action="/threads/import-history"
+        data-confirm="Import your account's existing Threads posts (made outside this app) so analytics can include them? This does not post anything."
+        data-confirm-ok="Import">
+    <input type="hidden" name="next" value="/threads-account">
+    <button class="sm">Import Threads history</button>
+  </form>
+</div>
+{% endblock %}

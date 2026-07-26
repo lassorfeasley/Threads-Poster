@@ -4,8 +4,7 @@ Publishes the FIFO ``queued`` list at fixed daily windows (US Eastern by
 default). At each window, if the most recently published post is still "hot"
 (likes gained over the trailing hour exceed a threshold), the queue head is
 deferred to the next window — unless a guardrail forces publish (max
-deferrals) or skip (last window of the day). Breaking-news posts bypass
-windows and publish as soon as the spacing floor allows.
+deferrals) or skip (last window of the day).
 
 Also drives the frequent metrics poller that feeds the hotness check.
 """
@@ -22,6 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from . import threads_api
 from .analytics import is_last_post_hot, poll_recent_metrics
+from .categories import category_by_slug
 from .config import load_settings
 from .db import session_scope
 from .models import Candidate, SchedulerState, ThreadsPost, utcnow
@@ -158,10 +158,10 @@ def _spacing_ok(state: SchedulerState, now: dt.datetime) -> bool:
 
 
 def _queue_regular(session) -> list[ThreadsPost]:
-    """Non-breaking queued posts in FIFO (created_at) order."""
+    """Queued posts in FIFO (created_at) order."""
     return list(session.execute(
         select(ThreadsPost)
-        .where(ThreadsPost.status == STATUS_QUEUED, ThreadsPost.is_breaking.is_(False))
+        .where(ThreadsPost.status == STATUS_QUEUED)
         .order_by(ThreadsPost.created_at.asc())
     ).scalars().all())
 
@@ -248,14 +248,6 @@ def _carry_pin_forward(post: ThreadsPost, window_key: str, now: dt.datetime) -> 
     post.pinned_window_key = upcoming[0][0] if upcoming else ""
 
 
-def _breaking_heads(session) -> list[ThreadsPost]:
-    return list(session.execute(
-        select(ThreadsPost)
-        .where(ThreadsPost.status == STATUS_QUEUED, ThreadsPost.is_breaking.is_(True))
-        .order_by(ThreadsPost.created_at.asc())
-    ).scalars().all())
-
-
 def pin_post_to_window(session, post_id: int, window_key: str) -> str:
     """Pin a queued post to an upcoming window. Returns a short status message.
 
@@ -280,8 +272,8 @@ def pin_post_to_window(session, post_id: int, window_key: str) -> str:
         raise ValueError("That window is no longer available")
 
     post = session.get(ThreadsPost, post_id)
-    if post is None or post.status != STATUS_QUEUED or post.is_breaking:
-        raise ValueError("Only a non-breaking queued post can be pinned")
+    if post is None or post.status != STATUS_QUEUED:
+        raise ValueError("Only a queued post can be pinned")
 
     posts = _queue_regular(session)
     _clear_stale_pins(posts, set(keys))
@@ -370,33 +362,6 @@ def _within_active_hours(now_local: dt.datetime) -> bool:
     end_h, end_m = _parse_hhmm(settings.get("scheduler.active_hours_end", "22:00"))
     mins = now_local.hour * 60 + now_local.minute
     return (start_h * 60 + start_m) <= mins < (end_h * 60 + end_m)
-
-
-def run_breaking_posts() -> int:
-    """Publish queued breaking posts immediately (spacing floor only)."""
-    if not threads_api.is_authenticated():
-        return 0
-
-    published = 0
-    with session_scope() as session:
-        state = _get_state(session)
-        now = utcnow()
-        if not _spacing_ok(state, now):
-            return 0
-        heads = _breaking_heads(session)
-        ids = [p.id for p in heads]
-
-    for pid in ids:
-        with session_scope() as session:
-            state = _get_state(session)
-            if not _spacing_ok(state, utcnow()):
-                break
-        if _claim_and_publish(pid, f"breaking:{pid}"):
-            published += 1
-            log.info("Published breaking post %s", pid)
-        else:
-            break  # spacing or failure — wait for next tick
-    return published
 
 
 def _earliest_due_window(
@@ -498,7 +463,6 @@ def run_window_tick() -> str | None:
             post = session.get(ThreadsPost, post_id)
             if post is not None:
                 post.defer_count = 0
-                post.is_breaking = False
         log.info("Published queue post %s at window %s", post_id, key)
         return action
 
@@ -620,10 +584,25 @@ def _upcoming_window_slots(
 
 
 def _post_display_title(p) -> str:
-    """Best label for a post: its cut's clip title, else the source video title."""
-    if p.cut and (p.cut.clip_title or "").strip():
-        return p.cut.clip_title
-    return p.candidate.title if p.candidate else ""
+    """Best label for a post: its cut's short calendar name (sized to fit the
+    calendar's window slots), else the full clip title, else the source video
+    title, else — for cut-less posts like imported Threads history — the
+    post's own short calendar name condensed from its caption. When the post's
+    source video has a programming category, its emoji (📰/🌿/📼) leads the
+    label so the calendar/queue shows the channel mix at a glance."""
+    title = ""
+    if p.cut and (p.cut.calendar_name or "").strip():
+        title = p.cut.calendar_name
+    elif p.cut and (p.cut.clip_title or "").strip():
+        title = p.cut.clip_title
+    elif p.candidate and p.candidate.title:
+        title = p.candidate.title
+    else:
+        title = p.calendar_name or ""
+    cat = category_by_slug(p.candidate.category if p.candidate else "")
+    if cat and cat["emoji"]:
+        return f"{cat['emoji']} {title}".strip()
+    return title
 
 
 def build_window_plan(
@@ -636,12 +615,12 @@ def build_window_plan(
     """Build a linear plan of posting windows with queue assignments + open placeholders.
 
     Each entry is a slot dict for the calendar/queue UI:
-      kind: open | queued | published | breaking
+      kind: open | queued | published
       window_key, sort (operator-local), time, day, caption, post_id, …
 
     Upcoming windows always appear (empty = ``open``). Published posts in range
     are attached when their publish time falls near a window; otherwise they are
-    listed as standalone published entries. Breaking queued posts prepend as ASAP.
+    listed as standalone published entries.
     """
     tz = _tz()
     now = utcnow()
@@ -668,8 +647,7 @@ def build_window_plan(
         .where(ThreadsPost.status == STATUS_QUEUED)
         .order_by(ThreadsPost.created_at.asc())
     ).scalars().all()
-    breaking = [p for p in queued if p.is_breaking]
-    regular = [p for p in queued if not p.is_breaking]
+    regular = list(queued)
 
     start_utc = start_local.astimezone(dt.timezone.utc)
     end_utc = end_local.astimezone(dt.timezone.utc)
@@ -688,31 +666,6 @@ def build_window_plan(
     ).scalars().all()
 
     plan: list[dict] = []
-
-    for p in breaking:
-        plan.append({
-            "kind": "breaking",
-            "window_key": "",
-            "window_index": None,
-            "sort": now.astimezone(),  # top of the live queue
-            "time": "ASAP",
-            "day": now.astimezone().day,
-            "date_label": "Breaking",
-            "caption": (p.caption or "").strip(),
-            "status": "queued",
-            "post_id": p.id,
-            "video_id": p.candidate.id if p.candidate else None,
-            "channel": (p.candidate.channel.call_sign
-                        if p.candidate and p.candidate.channel else ""),
-            "thumbnail": (p.candidate.thumbnail_url if p.candidate else ""),
-            "title": _post_display_title(p),
-            "permalink": p.permalink,
-            "projected": True,
-            "is_breaking": True,
-            "defer_count": int(p.defer_count or 0),
-            "empty": False,
-            "pinned": False,
-        })
 
     upcoming = _upcoming_window_slots(
         max(start_day, now.astimezone(tz).date()),
@@ -761,7 +714,6 @@ def build_window_plan(
                 "title": "",
                 "permalink": "",
                 "projected": True,
-                "is_breaking": False,
                 "defer_count": 0,
                 "empty": True,
                 "pinned": False,
@@ -785,7 +737,6 @@ def build_window_plan(
             "title": _post_display_title(post),
                 "permalink": post.permalink,
                 "projected": True,
-                "is_breaking": False,
                 "defer_count": int(post.defer_count or 0),
                 "empty": False,
                 "pinned": bool((post.pinned_window_key or "").strip()),
@@ -827,17 +778,13 @@ def build_window_plan(
             "title": _post_display_title(p),
             "permalink": p.permalink,
             "projected": False,
-            "is_breaking": False,
             "defer_count": 0,
             "empty": False,
             "pinned": False,
         })
 
-    # Breaking stays at the top of the linear queue; everything else by time.
-    breaking_rows = [e for e in plan if e["kind"] == "breaking"]
-    rest = [e for e in plan if e["kind"] != "breaking"]
-    rest.sort(key=lambda e: e["sort"])
-    return breaking_rows + rest
+    plan.sort(key=lambda e: e["sort"])
+    return plan
 
 
 def projected_window_slots(
@@ -848,26 +795,26 @@ def projected_window_slots(
     """Backward-compatible alias: non-empty projected/queued/open slots for a range."""
     return [
         e for e in build_window_plan(session, start_local, end_local)
-        if e["kind"] in ("queued", "open", "breaking")
+        if e["kind"] in ("queued", "open")
     ]
 
 
 def projected_slot_for_post(session, post_id: int, horizon_days: int = 60) -> dict | None:
     """The projected publishing slot for one queued post, using the same plan the
     calendar shows. Returns the slot dict (with ``sort`` = local publish datetime,
-    ``time``/``date_label`` labels, ``is_breaking``) or ``None`` if the post isn't
-    a queued post that lands within ``horizon_days``."""
+    ``time``/``date_label`` labels) or ``None`` if the post isn't a queued post
+    that lands within ``horizon_days``."""
     now_local = utcnow().astimezone()
     start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + dt.timedelta(days=horizon_days + 1)
     for entry in build_window_plan(session, start, end, horizon_days=horizon_days):
-        if entry.get("post_id") == post_id and entry["kind"] in ("queued", "breaking"):
+        if entry.get("post_id") == post_id and entry["kind"] == "queued":
             return entry
     return None
 
 
 def run_tick() -> None:
-    """One scheduler loop iteration: recover → metrics → breaking → window."""
+    """One scheduler loop iteration: recover → metrics → window."""
     try:
         with session_scope() as session:
             n = recover_stuck_publishing(session, only_inactive=True)
@@ -882,13 +829,6 @@ def run_tick() -> None:
             log.info("Metrics poll took %d snapshot(s)", n)
     except Exception:
         log.exception("Metrics poll failed")
-
-    try:
-        n = run_breaking_posts()
-        if n:
-            log.info("Published %d breaking post(s)", n)
-    except Exception:
-        log.exception("Breaking publish failed")
 
     try:
         action = run_window_tick()

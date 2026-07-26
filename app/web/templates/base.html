@@ -78,7 +78,40 @@
     {% if _notif %}<span class="nav-badge">{{ _notif }}</span>{% endif %}
   </a>
 
+  {% set nav_sched = nav_scheduler() %}
+  {% if nav_sched %}
+  <div class="nav-status">
+    <div class="nav-status-row">
+      Next
+      {% if nav_sched.next_window_local %}{{ nav_sched.next_window_local.strftime("%a %-I:%M %p") }}{% else %}—{% endif %}
+      &middot; {{ nav_sched.queue_count }} queued
+    </div>
+    {% set _thr = nav_sched.hot_threshold or 100 %}
+    {% set _delta = nav_sched.current_likes_delta or 0 %}
+    {% set _pct = ([(_delta / _thr * 100) if _thr else 0, 100] | min) %}
+    <div class="nav-status-row nav-likes-row">
+      <div class="progressbar nav-likesbar{{ ' is-hot' if nav_sched.current_hot }}"><i style="width: {{ _pct }}%;"></i></div>
+      <span class="nav-likes-count">{{ _delta }}/{{ _thr }}</span>
+      <span class="info-tip" tabindex="0">
+        <span class="info-tip-ic" aria-hidden="true">i</span>
+        <span class="info-tip-bubble">Adaptive scheduler: the next queued post waits if the last one is still gaining likes fast ({{ _thr }}+ within {{ nav_sched.hot_window_minutes }}m), so posts don't compete for attention.</span>
+      </span>
+    </div>
+    <form method="post" action="/threads/import-history" class="nav-status-row">
+      <input type="hidden" name="next" value="{{ request.url.path }}">
+      <button type="submit" class="nav-status-action" data-confirm="Import your account's existing Threads posts (made outside this app) so analytics can include them? This does not post anything." data-confirm-ok="Import">Import Threads history</button>
+    </form>
+  </div>
+  {% endif %}
+
   <div class="nav-section">Configure</div>
+  <a class="nav {{ 'active' if active == 'threads_account' }}" href="/threads-account">
+    <span class="nav-ic-wrap">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M8 9h5M8 15h5"/></svg>
+      {% if not threads_authenticated() %}<span class="nav-dot" aria-hidden="true"></span>{% endif %}
+    </span>
+    <span class="label">Threads account</span>
+  </a>
   <a class="nav {{ 'active' if active == 'channels' }}" href="/channels">
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>
     <span class="label">Channels</span>

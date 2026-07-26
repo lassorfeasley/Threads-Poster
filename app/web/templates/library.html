@@ -31,8 +31,9 @@
   {% else %}
   <div class="card-grid">
     {% for row in video_rows %}
+    {% set cat = category_by_slug(row.c.category) %}
     <a class="media-card" href="/video/{{ row.c.id }}?step=cuts"
-       data-filter-row data-search="{{ (row.c.title ~ ' ' ~ row.c.channel.call_sign ~ ' ' ~ row.c.channel.market) | lower }}">
+       data-filter-row data-search="{{ (row.c.title ~ ' ' ~ row.c.channel.call_sign ~ ' ' ~ row.c.channel.market ~ ' ' ~ (cat.label if cat else '')) | lower }}">
       <div class="thumb-wrap{{ '' if row.c.thumbnail_url else ' is-empty' }}">
         {% if row.c.thumbnail_url %}
         <img src="{{ row.c.thumbnail_url }}" alt="" loading="lazy" onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
@@ -52,6 +53,7 @@
           archived {{ row.c.archived_at.strftime("%b %-d, %Y") if row.c.archived_at else "?" }}
         </div>
         <div class="badges mc-foot">
+          {% if cat %}<span class="badge" title="{{ cat.label }}">{{ cat.emoji }} {{ cat.label }}</span>{% endif %}
           {% if row.state.posted %}<span class="badge supportive">posted</span>
           {% elif row.state.trimmed %}<span class="badge info">has cuts</span>
           {% else %}<span class="badge score-lo">not cut yet</span>{% endif %}

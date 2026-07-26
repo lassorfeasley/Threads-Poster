@@ -1,12 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
 {% macro ev_card(e, label) %}
-  <span class="cal-ev-thumb"{% if e.thumbnail %} style="background-image:url('{{ e.thumbnail }}')"{% endif %}>
-    {% if not e.thumbnail %}<span class="cal-ev-ph">▶</span>{% endif %}
-  </span>
   <span class="cal-ev-body">
     <span class="cal-ev-title">{{ (label or '(post)')[:64] }}</span>
-    <span class="cal-ev-sub"><span class="cal-ev-dot"></span>{{ e.time }}{% if e.pinned %} · pinned{% endif %}</span>
   </span>
 {% endmacro %}
 {% import "components/toolbar.html" as ui %}
@@ -19,20 +15,6 @@
 {% endset %}
 {{ ui.pagebar("Calendar", actions=cal_actions) }}
 
-{% if not authenticated %}
-<div class="card" style="margin-bottom: 14px;">
-  <div class="card-title">Connect your Threads account</div>
-  <p class="meta">1. <a href="{{ auth_url }}" target="_blank">Authorize with Threads ↗</a> using the account you post from.<br>
-     2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
-     Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
-  <form method="post" action="/threads/connect">
-    <input type="hidden" name="next" value="/calendar">
-    <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
-    <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
-  </form>
-</div>
-{% endif %}
-
 <div class="cal-layout" id="cal-layout">
   <section class="cal-month" id="view-calendar">
     <div class="cal-toolbar">
@@ -42,13 +24,12 @@
       <a class="btn" href="/calendar" style="margin-left: auto;">Today</a>
     </div>
 
+    {% if not queue_count and drafts_count %}
     <div class="cal-legend">
-      <span><i class="dot pub"></i> Published</span>
-      <span><i class="dot sched"></i> Queued</span>
-      <span><i class="dot open"></i> Open window</span>
-      {% if not queue_count and drafts_count %}<span class="meta" style="margin-left:auto;">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }} —
-        <a href="/library?section=posts">queue from Library</a></span>{% endif %}
+      <span class="meta">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }} —
+        <a href="/library?section=posts">queue from Library</a></span>
     </div>
+    {% endif %}
 
     <div class="cal-grid cal-head">
       {% for d in dow %}<div class="cal-dow">{{ d }}</div>{% endfor %}
@@ -62,40 +43,35 @@
           {% else %}
           {# Bucket the day's events by their posting-window index so each cell
              renders exactly n_windows equal-height slots. Events with no window
-             (e.g. off-window published posts) are surfaced as a small +N badge. #}
+             (e.g. off-window published posts, or a 4th+ post in a day) are
+             intentionally dropped from this view — only the fixed windows show. #}
           {% set win_map = {} %}
-          {% set ns = namespace(extras=[]) %}
           {% for e in events.get(day, []) %}
             {% if e.window_index is not none and e.window_index < n_windows %}
               {% set _ = win_map.__setitem__(e.window_index, e) %}
-            {% else %}
-              {% set ns.extras = ns.extras + [e] %}
             {% endif %}
           {% endfor %}
           <div class="cal-cell {{ 'today' if day == today }}">
-            <div class="cal-cell-head">
-              <span class="cal-daynum">{{ day }}</span>
-            </div>
             <div class="cal-slots">
               {% for i in range(n_windows) %}
                 {% set e = win_map.get(i) %}
                 {% if e is none %}
                   <div class="cal-slot vacant"
-                       title="{{ windows_et[i] if (windows_et and i < windows_et|length) else '' }} — no post"></div>
+                       title="{{ day }} · {{ windows_et[i] if (windows_et and i < windows_et|length) else '' }} — no post"></div>
                 {% else %}
-                  {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind in ('queued', 'breaking') else ('pub' if e.kind == 'published' else 'draft')) %}
+                  {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind == 'queued' else ('pub' if e.kind == 'published' else 'draft')) %}
                   {% set label = e.title or e.caption %}
                   {% if e.kind == 'open' %}
                     <div class="cal-event cal-slot {{ cls }} empty cal-drop"
                          data-window-key="{{ e.window_key }}"
-                         title="{{ e.time }} · open window — drop a queued post here">
-                      <b>{{ e.time }}</b> <em>open</em></div>
+                         title="{{ e.date_label }} {{ e.time }} · open window — drop a queued post here">
+                      <em>open</em></div>
                   {% elif e.kind == 'queued' and e.post_id %}
                     <div class="cal-event cal-slot {{ cls }} card cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
                          draggable="true"
                          data-post-id="{{ e.post_id }}"
                          data-window-key="{{ e.window_key }}"
-                         title="{{ e.time }} · queued{% if e.pinned %} (pinned){% endif %} · drag to another window · {{ label }}">
+                         title="{{ e.date_label }} {{ e.time }} · queued{% if e.pinned %} (pinned){% endif %} · drag to another window · {{ label }}">
                       <a href="/post/{{ e.post_id }}" class="cal-ev"
                          onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
                         {{ ev_card(e, label) }}
@@ -103,46 +79,19 @@
                     </div>
                   {% elif e.post_id %}
                     <a class="cal-event cal-slot {{ cls }} card" href="/post/{{ e.post_id }}"
-                       title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                       title="{{ e.date_label }} {{ e.time }} · {{ e.status }} · {{ label }}">
                       <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
                   {% elif e.permalink %}
                     <a class="cal-event cal-slot {{ cls }} card" href="{{ e.permalink }}" target="_blank"
-                       title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                       title="{{ e.date_label }} {{ e.time }} · {{ e.status }} · {{ label }}">
                       <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
                   {% else %}
-                    <span class="cal-event cal-slot {{ cls }} card" title="{{ e.time }} · {{ e.status }} · {{ label }}">
+                    <span class="cal-event cal-slot {{ cls }} card" title="{{ e.date_label }} {{ e.time }} · {{ e.status }} · {{ label }}">
                       <span class="cal-ev">{{ ev_card(e, label) }}</span></span>
                   {% endif %}
                 {% endif %}
               {% endfor %}
             </div>
-            {# Posts that don't line up with a current window (e.g. published
-               before the window times changed, or a 4th post in a day). Always
-               shown so history never disappears when windows are retuned. #}
-            {% if ns.extras %}
-            <div class="cal-extras">
-              {% for e in ns.extras %}
-                {% set xcls = 'sched' if e.kind in ('queued', 'breaking') else ('pub' if e.kind == 'published' else 'draft') %}
-                {% set xlabel = e.title or e.caption %}
-                {% if e.post_id %}
-                  <a class="cal-xtra {{ xcls }}" href="/post/{{ e.post_id }}"
-                     title="{{ e.time }} · {{ e.status }} · {{ xlabel }}">
-                    <span class="cal-xtra-dot"></span><b>{{ e.time }}</b>
-                    <span class="cal-xtra-t">{{ (xlabel or '(post)')[:44] }}</span></a>
-                {% elif e.permalink %}
-                  <a class="cal-xtra {{ xcls }}" href="{{ e.permalink }}" target="_blank"
-                     title="{{ e.time }} · {{ e.status }} · {{ xlabel }}">
-                    <span class="cal-xtra-dot"></span><b>{{ e.time }}</b>
-                    <span class="cal-xtra-t">{{ (xlabel or '(post)')[:44] }}</span></a>
-                {% else %}
-                  <span class="cal-xtra {{ xcls }}"
-                        title="{{ e.time }} · {{ e.status }} · {{ xlabel }}">
-                    <span class="cal-xtra-dot"></span><b>{{ e.time }}</b>
-                    <span class="cal-xtra-t">{{ (xlabel or '(post)')[:44] }}</span></span>
-                {% endif %}
-              {% endfor %}
-            </div>
-            {% endif %}
           </div>
           {% endif %}
         {% endfor %}
@@ -152,41 +101,6 @@
 
   <aside class="cal-queue" id="view-queue" hidden>
     <div class="card-title" style="margin-bottom: 8px;">Posting queue</div>
-    {% if scheduler %}
-    <div class="meta cal-queue-meta">
-      {% if scheduler.due_now %}<span class="badge">due now</span>{% endif %}
-      Next:
-      {% if scheduler.next_window_local %}
-        {{ scheduler.next_window_local.strftime("%a %-I:%M %p %Z") }}
-      {% else %}—{% endif %}
-      · {{ scheduler.queue_count }} queued
-    </div>
-
-    <details class="cal-scheduler">
-      <summary class="meta">Adaptive scheduler ·
-        {% if scheduler.enabled %}<span class="badge supportive">enabled</span>{% else %}<span class="badge hostile">paused</span>{% endif %}</summary>
-      <div class="meta" style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
-        <span>Windows {{ scheduler.windows|join(', ') }} {{ scheduler.timezone }}</span>
-        <span>Last publish:
-          {% if scheduler.last_publish_at %}{{ scheduler.last_publish_at.astimezone().strftime("%b %-d %-I:%M %p") }}{% else %}—{% endif %}</span>
-        <span>Hot check:
-          {% if scheduler.current_likes_delta is not none %}
-            {% if scheduler.current_hot %}<span class="badge hostile">hot</span>{% else %}<span class="badge supportive">cool</span>{% endif %}
-            · +{{ scheduler.current_likes_delta }} likes / {{ scheduler.hot_window_minutes }}m (threshold {{ scheduler.hot_threshold }})
-          {% else %}no delta yet{% endif %}</span>
-        {% if scheduler.last_action %}<span>Last action: {{ scheduler.last_action }}</span>{% endif %}
-      </div>
-    </details>
-
-    <div class="cal-conn meta">
-      {% if authenticated %}<span class="badge supportive">Threads connected</span>{% else %}<span class="badge hostile">not connected</span>{% endif %}
-      <form method="post" action="/threads/import-history" class="inline"
-            data-confirm="Import your account's existing Threads posts (made outside this app) so analytics can include them? This does not post anything."
-            data-confirm-ok="Import">
-        <button class="sm" title="Fetch posts you made directly on Threads and pull them in for analytics">Import Threads history</button>
-      </form>
-    </div>
-    {% endif %}
 
     {% if not linear %}
       <div class="empty" style="min-height: 120px; margin-top: 12px;">
@@ -203,13 +117,8 @@
           {% if e.kind in ('open', 'queued') %}data-window-key="{{ e.window_key }}"{% endif %}
           {% if e.kind == 'queued' and e.post_id %}draggable="true" data-post-id="{{ e.post_id }}"{% endif %}>
         <div class="queue-when">
-          {% if e.kind == 'breaking' %}
-            <span class="badge hostile">breaking</span>
-            <span class="meta">ASAP</span>
-          {% else %}
-            <span class="queue-date">{{ e.date_label }}</span>
-            <span class="queue-time">{{ e.time }}</span>
-          {% endif %}
+          <span class="queue-date">{{ e.date_label }}</span>
+          <span class="queue-time">{{ e.time }}</span>
         </div>
         <div class="queue-body">
           {% if e.empty %}
@@ -221,7 +130,7 @@
               {% if e.channel %}{{ e.channel }} · {% endif %}
               {% if e.pinned %}pinned · {% elif e.kind == 'queued' %}projected · {% endif %}
               {% if e.defer_count %}deferred {{ e.defer_count }}× · {% endif %}
-              {% if e.kind == 'queued' %}drag to move{% elif e.kind == 'breaking' %}publishes when spacing allows{% endif %}
+              {% if e.kind == 'queued' %}drag to move{% endif %}
             </div>
           {% endif %}
         </div>

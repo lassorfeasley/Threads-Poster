@@ -75,6 +75,12 @@ class Candidate(Base):
     relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     relevance_rationale: Mapped[str] = mapped_column(Text, default="")
 
+    # Programming category for the channel mix (one slug from settings
+    # ``categories.options``; empty = untagged). The rationale is the LLM's
+    # one-line reason when auto-tagged; cleared when the operator overrides.
+    category: Mapped[str] = mapped_column(String(30), default="")
+    category_rationale: Mapped[str] = mapped_column(Text, default="")
+
     status: Mapped[str] = mapped_column(String(20), default=STATUS_NEW)
     approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -122,6 +128,10 @@ class Cut(Base):
 
     # LLM-generated, human-readable title for this clip (editable).
     clip_title: Mapped[str] = mapped_column(Text, default="")
+    # LLM-condensed 1-4 word label of clip_title, sized to fit the calendar's
+    # window slots. Generated alongside clip_title; falls back to clip_title
+    # wherever it's blank (e.g. rows created before this field existed).
+    calendar_name: Mapped[str] = mapped_column(Text, default="")
     # Per-cut caption draft (seeded from the video's draft_caption, then edited).
     draft_caption: Mapped[str] = mapped_column(Text, default="")
 
@@ -154,6 +164,10 @@ class ThreadsPost(Base):
     threads_media_id: Mapped[str] = mapped_column(String(60), default="")
     permalink: Mapped[str] = mapped_column(String(300), default="")
     caption: Mapped[str] = mapped_column(Text, default="")
+    # Short 2-5 word calendar label, condensed from the caption. Only used when
+    # there's no cut to hang a ``Cut.calendar_name`` off of (e.g. Threads
+    # history imported from outside the app, which has no clip/title concept).
+    calendar_name: Mapped[str] = mapped_column(Text, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase Storage object key
     clip_local_path: Mapped[str] = mapped_column(Text, default="")
     # draft | queued | publishing | published | failed
@@ -168,8 +182,6 @@ class ThreadsPost(Base):
     scheduled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Adaptive queue: breaking posts bypass window/hot deferral (spacing floor still applies).
-    is_breaking: Mapped[bool] = mapped_column(Boolean, default=False)
     # How many times this queued post has been deferred because the last post was hot.
     defer_count: Mapped[int] = mapped_column(Integer, default=0)
     last_deferred_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

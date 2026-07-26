@@ -149,6 +149,41 @@ def suggest_channel_fields(model: str, url: str, title: str = "", description: s
     }
 
 
+def suggest_category(model: str, categories: list[dict], title: str, description: str,
+                     channel: str = "", matched_keywords: list[str] | None = None,
+                     transcript_excerpt: str = "") -> dict:
+    """Recommend ONE programming category for a video. ``categories`` come from
+    settings ``categories.options`` ({slug, label, description}); the channel
+    aims for a roughly equal mix of them, so this is genre/framing, not topic
+    (every video is climate-related). Returns {category: slug or "", rationale};
+    an off-vocabulary answer comes back as "" so the video stays untagged
+    rather than mislabeled.
+    """
+    vocab = "\n".join(
+        f"- {c['slug']}: {c['label']} — {c['description']}" for c in categories
+    )
+    system = (
+        "You assign a programming category to a video for a climate-focused "
+        "social channel. Every video is climate-related; the category captures "
+        "the GENRE and framing of the footage, not the topic. Pick exactly one "
+        "slug from:\n" + vocab + "\n"
+        "Judge from the title, description, channel and transcript excerpt. "
+        "JSON shape: {\"category\": \"slug\", \"rationale\": \"one line\"}"
+    )
+    user = json.dumps({
+        "title": title,
+        "description": (description or "")[:2000],
+        "channel": channel,
+        "matched_keywords": matched_keywords or [],
+        "transcript_excerpt": (transcript_excerpt or "")[:2000],
+    })
+    data = _json_chat(model, system, user)
+    slug = str(data.get("category", "")).strip().lower()
+    if slug not in {c["slug"] for c in categories}:
+        slug = ""
+    return {"category": slug, "rationale": str(data.get("rationale", ""))[:500]}
+
+
 def classify_comment(model: str, categories: list[str], post_caption: str, comment_text: str, username: str) -> dict:
     """Return {category, rationale, risk_flags: [..]}."""
     system = (
@@ -414,6 +449,58 @@ def suggest_title(model: str, source_title: str, transcript_excerpt: str,
     data = _json_chat(model, system, user)
     title = str(data.get("title", "")).strip().strip('"').strip("'").strip()
     return title[:120]
+
+
+def suggest_calendar_name(model: str, clip_title: str, caption: str | None = None) -> str:
+    """Condense a clip's title into a 2-5 word label for the calendar's window
+    slots, which have room for only a short phrase. Runs right after
+    ``suggest_title`` produces (or regenerates) ``clip_title``.
+    """
+    system = (
+        "You condense a video clip's title into a very short label for a small "
+        "calendar tile. Rules: 2 to 5 words, plain text, no surrounding quotes, "
+        "no emojis, no hashtags, no trailing punctuation, title case. Keep the "
+        "single most identifying noun/place/subject from the title — do not "
+        "invent facts or add words not implied by the title. "
+        "JSON shape: {\"name\": \"...\"}"
+    )
+    user = json.dumps({
+        "clip_title": clip_title[:300],
+        "caption": (caption or "")[:400],
+    })
+    data = _json_chat(model, system, user)
+    name = str(data.get("name", "")).strip().strip('"').strip("'").strip()
+    # Defensive cap in case the model ignores the word-count rule.
+    words = name.split()
+    if len(words) > 5:
+        name = " ".join(words[:5])
+    return name[:48]
+
+
+def suggest_short_title(model: str, source_title: str, description: str = "") -> str:
+    """Distill a source video's (often long/clickbait) title into a punchy 2-5
+    word clip title. Used when ingesting a pasted YouTube URL so the clip gets a
+    concise human label instead of the raw YouTube title. Faithful to the
+    source — no invented facts.
+    """
+    system = (
+        "You write a very short title for a news video clip, distilled from its "
+        "original (often long or clickbait) source title. Rules: 2 to 5 words, "
+        "plain text, no surrounding quotes, no emojis, no hashtags, no trailing "
+        "punctuation, title case. Keep the single most identifying subject/place "
+        "from the source — do not invent facts or add words the source doesn't "
+        "imply. JSON shape: {\"title\": \"...\"}"
+    )
+    user = json.dumps({
+        "source_title": source_title[:300],
+        "source_description": (description or "")[:600],
+    })
+    data = _json_chat(model, system, user)
+    title = str(data.get("title", "")).strip().strip('"').strip("'").strip()
+    words = title.split()
+    if len(words) > 5:
+        title = " ".join(words[:5])
+    return title[:80]
 
 
 def caption_attributes(model: str, caption: str) -> dict:

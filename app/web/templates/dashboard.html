@@ -382,7 +382,9 @@
   </div>
   <div class="mc-body">
     <div class="item-title">{{ c.title }}</div>
-    <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
+    <div class="meta">{% set cat = category_by_slug(c.category) -%}
+      {% if cat %}<span title="{{ cat.label }}">{{ cat.emoji }}</span> · {% endif -%}
+      {{ c.channel.call_sign }} · {{ c.channel.market }}
       {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
   </div>
 </div>

@@ -21,6 +21,35 @@ matching:
   # LLM model used for relevance scoring (Anthropic model ID).
   model: claude-haiku-4-5
 
+categories:
+  # Programming categories for the channel mix. Every video gets exactly ONE
+  # category; the goal is a roughly equal distribution of the three across
+  # what gets posted. The LLM auto-tags a recommended category for each new
+  # candidate (operator can override on the video page). All videos are
+  # climate-related — the category captures the genre/framing of the footage.
+  model: claude-haiku-4-5
+  # Tag new candidates during the monitor pass (alongside relevance scoring).
+  tag_at_monitor: true
+  options:
+    - slug: news
+      emoji: "📰"
+      label: News, views & politics
+      description: >-
+        Breaking news, cable news clips, press conferences, political coverage,
+        current-events reporting and commentary.
+    - slug: nature
+      emoji: "🌿"
+      label: Conservation, nature & exploration
+      description: >-
+        Nature documentaries, wildlife and conservation stories, travelogues,
+        exploration and educational science content.
+    - slug: culture
+      emoji: "📼"
+      label: Pop culture, history & media
+      description: >-
+        Throwback clips, archival footage, history segments, climate in fiction,
+        television, film and other media moments.
+
 vision:
   # Optionally tag candidates from YouTube storyboard stills (metadata-only —
   # nothing downloaded). Neutral labels only; no visual "punch" score. Ranking
@@ -212,7 +241,7 @@ scheduler:
   # All window times are interpreted in this zone (DST handled automatically).
   timezone: America/New_York
   # Active hours in the scheduler timezone (24h HH:MM). Outside this range the
-  # scheduler never publishes (breaking override still respects the spacing floor).
+  # scheduler never publishes.
   active_hours_start: "08:00"
   active_hours_end: "22:00"
   # Daily posting windows (local to timezone above). Tune later against insights.

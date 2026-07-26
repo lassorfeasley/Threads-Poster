@@ -7,6 +7,8 @@ Usage:
   python run.py monitor --loop     # poll forever at the configured interval
   python run.py score-visuals      # backfill vision scores for unscored candidates
   python run.py annotate-posts     # backfill footage traits for published posts
+  python run.py backfill-calendar-names  # short calendar labels for old titled cuts
+  python run.py backfill-categories # auto-tag programming categories for untagged videos
   python run.py metrics            # snapshot Threads metrics for published posts
   python run.py comments           # sync + classify comments on own posts
   python run.py digest             # print the analytics digest to stdout
@@ -182,6 +184,159 @@ def cmd_annotate_posts(args) -> None:
           f"Spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today.")
 
 
+def cmd_backfill_calendar_names(args) -> None:
+    """Backfill the short 2-5 word calendar label for everything the calendar
+    can display, in three passes (budget-guarded, like other LLM backfills):
+
+    1. Cuts with a ``clip_title`` but no ``calendar_name`` yet (the common
+       case: titled before the field existed) -> just condense the title.
+    2. Cuts with no ``clip_title`` at all (from before auto-titling existed,
+       or a titling attempt that failed) -> generate a title from the video's
+       own transcript, then condense that into a calendar name.
+    3. Cut-less posts (Threads history imported from outside the app — no
+       clip/title concept, just a caption) -> condense the caption directly
+       into ``ThreadsPost.calendar_name``.
+    """
+    from sqlalchemy import select
+
+    from app import spend
+    from app.config import load_settings
+    from app.db import init_db, session_scope
+    from app.llm import suggest_calendar_name, suggest_title
+    from app.models import Cut, ThreadsPost
+
+    init_db()
+    settings = load_settings()
+    model = settings.get("engagement.draft_model", "claude-sonnet-5")
+    named = skipped = 0
+
+    def _budget_ok() -> bool:
+        if spend.within_budget():
+            return True
+        log.info("Daily budget reached ($%.2f); stopping.", spend.today_spend())
+        return False
+
+    with session_scope() as session:
+        # Pass 1: already-titled cuts, just missing the short name.
+        query = select(Cut).where(Cut.clip_title != "")
+        if not args.force:
+            query = query.where(Cut.calendar_name == "")
+        query = query.order_by(Cut.id.desc())
+        if args.limit:
+            query = query.limit(args.limit)
+        for cut in session.execute(query).scalars().all():
+            if not _budget_ok():
+                break
+            try:
+                name = suggest_calendar_name(model, cut.clip_title, cut.draft_caption or None)
+            except Exception as exc:
+                log.warning("Calendar name failed for cut %s: %s", cut.id, exc)
+                skipped += 1
+                continue
+            if name:
+                cut.calendar_name = name
+                named += 1
+                session.commit()
+            else:
+                skipped += 1
+
+        # Pass 2: cuts that were never auto-titled — title, then name.
+        query = select(Cut).where(Cut.clip_title == "")
+        if args.limit:
+            query = query.limit(args.limit)
+        for cut in session.execute(query).scalars().all():
+            if not _budget_ok():
+                break
+            c = cut.candidate
+            if c is None:
+                skipped += 1
+                continue
+            try:
+                title = suggest_title(model, c.title, c.transcript_text[:3000], cut.draft_caption or None)
+                if not title:
+                    skipped += 1
+                    continue
+                name = suggest_calendar_name(model, title, cut.draft_caption or None)
+            except Exception as exc:
+                log.warning("Title/calendar name failed for cut %s: %s", cut.id, exc)
+                skipped += 1
+                continue
+            cut.clip_title = title
+            if name:
+                cut.calendar_name = name
+                named += 1
+            session.commit()
+
+        # Pass 3: cut-less posts (imported Threads history) — name from caption.
+        query = select(ThreadsPost).where(ThreadsPost.cut_pk.is_(None), ThreadsPost.caption != "")
+        if not args.force:
+            query = query.where(ThreadsPost.calendar_name == "")
+        query = query.order_by(ThreadsPost.id.desc())
+        if args.limit:
+            query = query.limit(args.limit)
+        for post in session.execute(query).scalars().all():
+            if not _budget_ok():
+                break
+            try:
+                name = suggest_calendar_name(model, post.caption)
+            except Exception as exc:
+                log.warning("Calendar name failed for post %s: %s", post.id, exc)
+                skipped += 1
+                continue
+            if name:
+                post.calendar_name = name
+                named += 1
+                session.commit()
+            else:
+                skipped += 1
+
+    print(f"Named {named} item(s), skipped {skipped}. "
+          f"Spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today.")
+
+
+def cmd_backfill_categories(args) -> None:
+    """Auto-tag the programming category (news / nature / culture) for
+    candidates that don't have one yet, newest first. Budget-guarded like the
+    other LLM backfills. Rejected candidates are skipped unless --all."""
+    from sqlalchemy import select
+
+    from app import spend
+    from app.categories import auto_tag_candidate
+    from app.config import load_settings
+    from app.db import init_db, session_scope
+    from app.models import Candidate
+
+    init_db()
+    settings = load_settings()
+    tagged = skipped = 0
+    with session_scope() as session:
+        query = select(Candidate)
+        if not getattr(args, "all", False):
+            query = query.where(Candidate.status != "rejected")
+        if not args.force:
+            query = query.where((Candidate.category == "") | (Candidate.category.is_(None)))
+        query = query.order_by(Candidate.id.desc())
+        if args.limit:
+            query = query.limit(args.limit)
+        for c in session.execute(query).scalars().all():
+            if not spend.within_budget():
+                log.info("Daily budget reached ($%.2f); stopping.", spend.today_spend())
+                break
+            try:
+                result = auto_tag_candidate(c, settings)
+            except Exception as exc:
+                log.warning("Category tagging failed for candidate %s: %s", c.id, exc)
+                skipped += 1
+                continue
+            if result is None:
+                skipped += 1
+            else:
+                tagged += 1
+                session.commit()
+    print(f"Tagged {tagged} video(s), skipped {skipped}. "
+          f"Spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today.")
+
+
 def cmd_metrics(_args) -> None:
     from app.analytics import snapshot_metrics
     from app.db import init_db, session_scope
@@ -299,6 +454,24 @@ def main() -> None:
     p.add_argument("--force", action="store_true",
                    help="re-annotate posts that already have footage traits")
     p.set_defaults(func=cmd_annotate_posts)
+
+    p = sub.add_parser("backfill-calendar-names",
+                       help="generate short 2-5 word calendar labels for cuts titled before that field existed")
+    p.add_argument("--limit", type=int, default=None, metavar="N",
+                   help="name at most N cuts this run")
+    p.add_argument("--force", action="store_true",
+                   help="regenerate cuts that already have a calendar_name")
+    p.set_defaults(func=cmd_backfill_calendar_names)
+
+    p = sub.add_parser("backfill-categories",
+                       help="auto-tag programming categories (news/nature/culture) for untagged videos")
+    p.add_argument("--limit", type=int, default=None, metavar="N",
+                   help="tag at most N videos this run")
+    p.add_argument("--force", action="store_true",
+                   help="re-tag videos that already have a category")
+    p.add_argument("--all", action="store_true",
+                   help="include rejected candidates")
+    p.set_defaults(func=cmd_backfill_categories)
 
     sub.add_parser("metrics", help="snapshot Threads post metrics").set_defaults(func=cmd_metrics)
     sub.add_parser("comments", help="sync and classify comments on own posts").set_defaults(func=cmd_comments)

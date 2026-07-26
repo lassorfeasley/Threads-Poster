@@ -59,7 +59,12 @@ def transcribe_words(clip_path: str | Path) -> list[dict]:
 
     settings = load_settings()
     model = _get_whisper_model(settings)
-    segments, _info = model.transcribe(str(clip_path), word_timestamps=True, vad_filter=True)
+    # language pinned to English: Whisper's auto-detect samples the first ~30s
+    # and infamously misreads noisy/archival British audio as Welsh, then
+    # "transcribes" the whole clip in fluent Welsh. All channel content is
+    # English, so force it.
+    segments, _info = model.transcribe(str(clip_path), language="en",
+                                       word_timestamps=True, vad_filter=True)
     words: list[dict] = []
     for seg in segments:
         for w in seg.words or []:
@@ -168,11 +173,14 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
     return Image.alpha_composite(shadow, img)
 
 
-def create_subtitled_clip(clip_path: str | Path, position: str | None = None) -> Path:
+def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
+                          out_path: str | Path | None = None) -> Path:
     """Generate ``<clip>_subs.mp4`` with burned-in word captions. Returns path.
 
     ``position`` ("top"/"bottom") overrides the ``subtitles.position`` setting
     for this run — the web UI passes the operator's per-clip choice here.
+    ``out_path`` overrides the default output name, letting callers version the
+    file so a regeneration can't overwrite one a queued post already points at.
     """
     clip = Path(clip_path)
     if not clip.exists():
@@ -203,7 +211,7 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None) ->
     font_px = max(18, int(height * font_frac))
     fonts = _load_fonts(font_px, font_name)
 
-    out = CLIPS_DIR / f"{clip.stem}_subs.mp4"
+    out = Path(out_path) if out_path else CLIPS_DIR / f"{clip.stem}_subs.mp4"
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
         blank = tmpdir / "blank.png"

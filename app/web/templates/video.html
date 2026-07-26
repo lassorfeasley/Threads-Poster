@@ -34,6 +34,8 @@
      href="/video/{{ c.id }}?step=cuts"><span class="n">{{ "✓" if state.trimmed else "3" }}</span> Cuts</a>
 </div>
 
+{% import "components/category.html" as catui %}
+
 {# ============ STEP 1: REVIEW ============ #}
 {% if step == "review" %}
 <div class="row">
@@ -55,6 +57,9 @@
     <div style="margin-top: 8px;">
       <button type="button" class="btn ghost sm" id="score-visuals-btn" onclick="scoreVisuals()">
         {{ "Re-tag traits" if c.visual_traits else "Tag traits" }}</button>
+    </div>
+    <div style="margin-top: 10px; max-width: 340px;">
+      {{ catui.field(c.id, c.category, "/video/" ~ c.id ~ "?step=review") }}
     </div>
     <script>
       async function scoreVisuals() {
@@ -190,8 +195,6 @@
 <div class="page-head" style="margin-top: 8px;">
   <div class="titles">
     <h2 style="margin: 0;">Cuts</h2>
-    <div class="sub">Each cut is a separate clip from this video — great for covering two topics
-      from one broadcast. Every cut runs through its own trim → caption → post workflow.</div>
   </div>
   <div class="actions">
     <form method="post" action="/video/{{ c.id }}/cuts">
@@ -245,7 +248,6 @@
       <div class="video-post-main">
         <div class="video-post-meta">
           <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
-          {% if p.is_breaking %}<span class="badge hostile">breaking</span>{% endif %}
           <span class="meta">
             {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
             {% elif p.status == "publishing" %}publishing…

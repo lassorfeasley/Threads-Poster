@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "9"
+SCHEMA_VERSION = "12"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -77,6 +77,9 @@ _SCHEMA_SENTINELS = (
     "SELECT attention_dismissed_at FROM threads_posts LIMIT 0",
     "SELECT id FROM cuts LIMIT 0",
     "SELECT subs_position FROM cuts LIMIT 0",
+    "SELECT calendar_name FROM cuts LIMIT 0",
+    "SELECT calendar_name FROM threads_posts LIMIT 0",
+    "SELECT category FROM candidates LIMIT 0",
 )
 
 
@@ -129,19 +132,19 @@ def _ensure_new_columns() -> None:
     """Lightweight additive migration for columns added after first release."""
     from sqlalchemy import inspect, text
 
-    bool_default = "FALSE" if not _is_sqlite else "0"
     tables = {
         "candidates": {
             "visual_score": "FLOAT",
             "visual_traits": "TEXT DEFAULT ''",
             "visual_rationale": "TEXT DEFAULT ''",
             "visual_scored_at": "TIMESTAMP",
+            "category": "VARCHAR(30) DEFAULT ''",
+            "category_rationale": "TEXT DEFAULT ''",
         },
         "threads_posts": {
             "cut_pk": "INTEGER",
             "source": "VARCHAR(20) DEFAULT 'app'",
             "scheduled_at": "TIMESTAMP WITH TIME ZONE",
-            "is_breaking": f"BOOLEAN DEFAULT {bool_default}",
             "defer_count": "INTEGER DEFAULT 0",
             "last_deferred_at": "TIMESTAMP WITH TIME ZONE",
             "pinned_window_key": "VARCHAR(40) DEFAULT ''",
@@ -155,6 +158,7 @@ def _ensure_new_columns() -> None:
             "footage_rationale": "TEXT DEFAULT ''",
             "footage_scored_at": "TIMESTAMP WITH TIME ZONE",
             "attention_dismissed_at": "TIMESTAMP WITH TIME ZONE",
+            "calendar_name": "TEXT DEFAULT ''",
         },
         "trait_weights": {
             "effective_n": "FLOAT",
@@ -168,6 +172,7 @@ def _ensure_new_columns() -> None:
         },
         "cuts": {
             "subs_position": "VARCHAR(10) DEFAULT 'bottom'",
+            "calendar_name": "TEXT DEFAULT ''",
         },
     }
     added: list[tuple[str, str]] = []

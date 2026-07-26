@@ -1,0 +1,18 @@
+{# Programming-category picker (news / nature / culture). The category lives on
+   the SOURCE VIDEO, so setting it from the video, cut, or post page edits the
+   same value everywhere. New candidates are auto-tagged by the monitor pass;
+   this field is the manual override. ``next_url`` is where the form returns. #}
+{% macro field(candidate_id, category, next_url) %}
+<form method="post" action="/video/{{ candidate_id }}/category">
+  <input type="hidden" name="next" value="{{ next_url }}">
+  <div class="field" style="margin-bottom: 0;">
+    <label for="category-select">Category</label>
+    <select name="category" id="category-select" onchange="this.form.submit()">
+      <option value="">— uncategorized —</option>
+      {% for opt in category_options() %}
+      <option value="{{ opt.slug }}" {{ "selected" if category == opt.slug }}>{{ opt.emoji }} {{ opt.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+</form>
+{% endmacro %}

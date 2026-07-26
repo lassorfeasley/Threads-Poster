@@ -2,8 +2,7 @@
 
 Every post here is created only on explicit operator action (post now or
 add to queue). ``queue_clip`` records a post for the adaptive window scheduler;
-``app/scheduler.py`` calls ``publish_post`` when a window fires (or for
-breaking-news overrides).
+``app/scheduler.py`` calls ``publish_post`` when a window fires.
 """
 from __future__ import annotations
 
@@ -62,8 +61,7 @@ def _object_key(clip: Path) -> str:
 
 
 def record_post(session, candidate: Candidate | None, clip_path: str, caption: str,
-                *, status: str, is_breaking: bool = False,
-                cut: Cut | None = None) -> ThreadsPost:
+                *, status: str, cut: Cut | None = None) -> ThreadsPost:
     """Create a ThreadsPost row without contacting Threads. Used for immediate
     post, draft, and queue paths; publishing happens in ``publish_post``."""
     clip = Path(clip_path).expanduser()
@@ -87,7 +85,6 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         clip_local_path=str(clip),
         clip_object_path=_object_key(clip),
         status=status,
-        is_breaking=is_breaking,
     )
     session.add(post)
     session.flush()
@@ -220,7 +217,6 @@ def publish_clip(session, candidate: Candidate | None, clip_path: str, caption: 
 
 
 def queue_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
-               *, is_breaking: bool = False, cut: Cut | None = None) -> ThreadsPost:
+               *, cut: Cut | None = None) -> ThreadsPost:
     """Add a post to the adaptive FIFO queue. The window scheduler publishes it."""
-    return record_post(session, candidate, clip_path, caption,
-                       status="queued", is_breaking=is_breaking, cut=cut)
+    return record_post(session, candidate, clip_path, caption, status="queued", cut=cut)

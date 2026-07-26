@@ -9,8 +9,10 @@ import datetime as dt
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.orm import object_session
 
 from . import youtube
+from .categories import auto_tag_candidate
 from .config import env, load_keywords, load_settings
 from .db import active_traits, session_scope, sync_channels_from_config, sync_traits_from_config
 from .llm import score_relevance
@@ -31,6 +33,25 @@ def ensure_channel_resolved(channel: Channel) -> bool:
         channel.last_error = f"resolve failed: {exc}"
         log.warning("Could not resolve %s (%s): %s", channel.call_sign, channel.url, exc)
         return False
+    # Two rows can point at the same YouTube channel (e.g. the same handle
+    # added twice with different capitalization). channel_id is unique, so
+    # assigning the duplicate would abort the whole monitor pass on commit.
+    # Flag this row instead and let the operator delete it from the dashboard.
+    session = object_session(channel)
+    if session is not None:
+        owner = session.execute(
+            select(Channel).where(
+                Channel.channel_id == info["channel_id"], Channel.id != channel.id
+            )
+        ).scalar_one_or_none()
+        if owner is not None:
+            channel.last_error = (
+                f"duplicate: resolves to the same YouTube channel as "
+                f"{owner.call_sign} (#{owner.id}, {owner.url}) — delete one of the two entries"
+            )
+            log.warning("Skipping %s (%s): duplicate of %s (%s)",
+                        channel.call_sign, channel.url, owner.call_sign, owner.url)
+            return False
     channel.channel_id = info["channel_id"]
     channel.uploads_playlist_id = info["uploads_playlist_id"]
     channel.channel_title = info["title"]
@@ -126,6 +147,13 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
         except Exception as exc:  # scoring failure shouldn't lose the candidate
             log.warning("LLM scoring failed for %s: %s", up.video_id, exc)
             candidate.relevance_rationale = f"(scoring failed: {exc})"
+
+        # Programming category (news / nature / culture) for the channel mix.
+        if settings.get("categories.tag_at_monitor", True):
+            try:
+                auto_tag_candidate(candidate, settings, channel=channel)
+            except Exception as exc:  # never lose a candidate over tagging
+                log.warning("Category tagging failed for %s: %s", up.video_id, exc)
 
         # Optional storyboard tagging: neutral labels only (no visual score).
         if settings.get("vision.enabled", True) and settings.get("vision.score_at_monitor", True):

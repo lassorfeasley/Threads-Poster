@@ -89,7 +89,9 @@ def transcribe_local(media_path: str | Path, settings) -> list[dict] | None:
     uploads, which have no YouTube captions). Returns [{start, end, text}] or None."""
     try:
         model = _get_whisper_model(settings)
-        segments, _info = model.transcribe(str(media_path), vad_filter=True)
+        # language pinned to English — see transcribe_words in subtitles.py:
+        # auto-detect can misread noisy audio as Welsh and derail the output.
+        segments, _info = model.transcribe(str(media_path), language="en", vad_filter=True)
         out = [
             {"start": float(s.start), "end": float(s.end), "text": (s.text or "").strip()}
             for s in segments

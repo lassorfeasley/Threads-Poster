@@ -26,6 +26,8 @@
      href="/cut/{{ cut.id }}?step=post"><span class="n">{{ "✓" if state.posted else "2" }}</span> Post</a>
 </div>
 
+{% import "components/category.html" as catui %}
+
 {# ============ STEP 1: TRIM ============ #}
 {% if step == "trim" %}
 {# Waveform scrubber sits on top, spanning the full width. #}
@@ -66,12 +68,25 @@
     <form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return prepExport(this)">
       <input type="hidden" name="segments_json" value="">
       <div class="btn-group" style="margin-top: 8px;">
-        <button class="approve">Export {{ "new " if state.exported }}clip →</button>
+        <button class="approve"
+          {% if pending_post_status %}
+          data-confirm-title="Re-export this cut?"
+          data-confirm-ok="Export new clip"
+          data-confirm="This cut has a {{ pending_post_status }} post. That post keeps the clip it was queued with — the new export won't replace its video. To post the new clip, re-queue it from the Post step."
+          {% endif %}>Export {{ "new " if state.exported }}clip →</button>
       </div>
     </form>
-    {% if state.exported %}
+    {% if pending_post_status %}
+      <div class="meta" style="margin-top: 10px;">This cut has a
+        <strong>{{ pending_post_status }}</strong> post. Exporting again won't change that
+        post's video — re-queue from the <a href="/cut/{{ cut.id }}?step=post">Post step</a>
+        to use the new clip. Want both clips? Start a
+        <a href="/video/{{ c.id }}?step=cuts">new cut</a> instead.</div>
+    {% elif state.exported %}
       <div class="meta" style="margin-top: 10px;">A clip was already exported —
-        <a href="/cut/{{ cut.id }}?step=post">continue to Post</a> or export again to replace it.</div>
+        <a href="/cut/{{ cut.id }}?step=post">continue to Post</a> or export again to replace it.
+        To keep this one and make a second clip, start a
+        <a href="/video/{{ c.id }}?step=cuts">new cut</a>.</div>
     {% endif %}
   </div>
 </div>
@@ -715,8 +730,11 @@ renderSegments();
 
   {# ---- Media stage: the clip is the hero (sticky while the rail scrolls) ---- #}
   <div class="media-stage">
+    {# ?v= cache-buster: the media URLs never change, so without it the browser
+       keeps playing its cached copy after a re-export or caption regeneration. #}
+    {% set media_v = (cut.updated_at.timestamp() | int) if cut.updated_at else 0 %}
     <video id="clip-player"
-           src="{{ '/media/subtitled/' ~ cut.id if (cut.subtitled_clip_path and cut.use_subtitles) else '/media/clip/' ~ cut.id }}"
+           src="{{ ('/media/subtitled/' ~ cut.id if (cut.subtitled_clip_path and cut.use_subtitles) else '/media/clip/' ~ cut.id) ~ '?v=' ~ media_v }}"
            controls preload="metadata"></video>
     {% if clip_transcript_text %}
     <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
@@ -725,6 +743,28 @@ renderSegments();
 </div>{# /.post-main #}
 
 <div class="post-side">
+
+  {# ---- Ship rail: primary action on top, alternatives beneath. Buttons live
+     outside form#post-form (it renders further down) but submit it via the
+     form= attribute. ---- #}
+  {% if threads_ok %}
+  <div class="ship-rail">
+    <button class="approve" id="btn-queue" form="post-form"
+            formaction="/cut/{{ cut.id }}/queue" formnovalidate>Add to queue</button>
+    <div class="rail-row">
+      <button id="btn-post-now" form="post-form">Post now</button>
+      <button id="btn-draft" form="post-form"
+              formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
+    </div>
+  </div>
+  {% endif %}
+
+  {# ---- Programming category (lives on the source video) ---- #}
+  <section class="wf-section">
+    <div class="wf-body">
+      {{ catui.field(c.id, c.category, "/cut/" ~ cut.id ~ "?step=post") }}
+    </div>
+  </section>
 
   {# ---- 1 · Prepare ---- #}
   <section class="wf-section">
@@ -747,6 +787,13 @@ renderSegments();
                     data-pos="top" onclick="setSubsPosition('top')">Top</button>
           </div>
         </div>
+        {% if cut.subtitled_clip_path %}
+        <div class="subs-line">
+          <button type="button" class="btn ghost sm" id="subs-regen-btn"
+                  onclick="generateSubtitles(subsPos)"
+                  title="Re-run transcription and burn fresh captions over the current clip (use when captions look wrong or stale)">↻ Regenerate</button>
+        </div>
+        {% endif %}
         <span class="meta" id="subs-status"></span>
       </div>
     </div>
@@ -780,7 +827,7 @@ renderSegments();
     function swapPreview(subs) {
       const p = document.getElementById('clip-player');
       const t = p.currentTime, playing = !p.paused;
-      p.src = subs ? '/media/subtitled/{{ cut.id }}' : '/media/clip/{{ cut.id }}';
+      p.src = (subs ? '/media/subtitled/{{ cut.id }}' : '/media/clip/{{ cut.id }}') + '?v=' + Date.now();
       p.currentTime = t;
       if (playing) p.play();
       const dl = document.getElementById('download-clip-link');
@@ -798,6 +845,8 @@ renderSegments();
         b.disabled = !on;
         b.classList.toggle('is-on', on && b.dataset.pos === subsPos);
       });
+      const regen = document.getElementById('subs-regen-btn');
+      if (regen) regen.disabled = !on;
     }
 
     // The on/off switch: post (and preview) captioned vs. plain. Turning it on
@@ -822,6 +871,8 @@ renderSegments();
       const line = document.getElementById('subs-position-line');
       if (sw) sw.disabled = true;
       line.querySelectorAll('button').forEach(b => b.disabled = true);
+      const regen = document.getElementById('subs-regen-btn');
+      if (regen) regen.disabled = true;
       status.classList.add('busy');
       status.textContent = 'Transcribing + rendering… this can take a minute.';
       try {
@@ -918,34 +969,31 @@ renderSegments();
                  value="{{ '1' if cut.use_subtitles else '0' }}">
         </div>
       </section>
-
-      {# ---- Ship rail: one primary, clear alternatives ---- #}
-      <div class="ship-rail">
-        <button class="approve" id="btn-post-now">Post now</button>
-        <button class="primary" id="btn-queue" formaction="/cut/{{ cut.id }}/queue" formnovalidate>Add to queue</button>
-        <label class="inline-check"
-               title="Ignores posting windows; still respects the 90-minute spacing floor">
-          <input type="checkbox" name="is_breaking" value="1" id="is_breaking">
-          Breaking — publish ASAP
-        </label>
-        <div class="rail-end">
-          <span class="rail-note">Queue publishes at the next open window (≈10am / 2:30pm / 7pm ET).</span>
-          <button class="ghost" id="btn-draft" formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
-        </div>
-      </div>
     </form>
     <script>
-      async function suggestCaption() {
+      async function suggestCaption(silent) {
         const btn = document.getElementById('suggest-btn');
         btn.disabled = true; btn.textContent = 'Thinking…';
         try {
           const r = await fetch('/cut/{{ cut.id }}/suggest-caption', { method: 'POST' });
           const d = await r.json();
           if (d.caption) document.getElementById('caption').value = d.caption;
-          else alert(d.error || 'No caption returned');
-        } catch (e) { alert('Suggestion failed: ' + e); }
+          else if (!silent) alert(d.error || 'No caption returned');
+        } catch (e) { if (!silent) alert('Suggestion failed: ' + e); }
         btn.disabled = false; btn.textContent = 'Regenerate caption';
       }
+      // Fresh export whose caption is still the full-video seed: rewrite it
+      // from the clip's own transcript (compiled from the saved trim windows).
+      // The param is consumed immediately so the reload after subtitle
+      // generation doesn't fire a second suggestion.
+      (function () {
+        const params = new URLSearchParams(location.search);
+        if (params.get('autocaption') !== '1') return;
+        params.delete('autocaption');
+        const qs = params.toString();
+        history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
+        suggestCaption(true);
+      })();
       const postForm = document.getElementById('post-form');
       function captionOk() {
         const cap = document.getElementById('caption');
@@ -967,11 +1015,7 @@ renderSegments();
         e.preventDefault();
         const btn = e.currentTarget;
         if (!captionOk()) return;
-        const breaking = document.getElementById('is_breaking')?.checked;
-        const msg = breaking
-          ? 'Add as breaking news? It will publish as soon as the spacing floor allows.'
-          : 'Add this clip to the posting queue?';
-        if (await confirmDialog(msg, { okText: 'Add to queue' }))
+        if (await confirmDialog('Add this clip to the posting queue?', { okText: 'Add to queue' }))
           postForm.requestSubmit(btn);
       });
       document.getElementById('btn-draft').addEventListener('click', (e) => {
@@ -991,7 +1035,6 @@ renderSegments();
           <div class="video-post-main">
             <div class="video-post-meta">
               <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
-              {% if p.is_breaking %}<span class="badge hostile">breaking</span>{% endif %}
               {% if p.defer_count %}<span class="badge">deferred {{ p.defer_count }}×</span>{% endif %}
               <span class="meta">
                 {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
