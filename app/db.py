@@ -15,24 +15,27 @@ _is_sqlite = _url.startswith("sqlite")
 
 # Bump when additive migrations in ``_ensure_new_columns`` /
 # ``_drop_removed_columns`` / ``_migrate_scheduled_to_queued`` /
-# ``_ensure_indexes`` change.
+# ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "12"
+SCHEMA_VERSION = "13"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
 if _is_sqlite:
     _engine_kwargs["connect_args"] = {"timeout": 30}
 else:
-    # Supabase/Postgres. No pool_pre_ping: it costs a network round trip on
-    # every connection checkout (i.e. every request). Instead, recycle
-    # connections well before Supabase's ~30-minute idle close so we never
-    # hand out a stale one.
+    # Supabase/Postgres. pool_recycle guards against Supabase's ~30-minute
+    # idle close, but it can't catch connections killed by a laptop sleep:
+    # sleep breaks the TCP/NAT state of every pooled connection regardless of
+    # age, and the first post-wake tick then publishes into a transaction that
+    # can never commit (this silently lost a published post's record once).
+    # pool_pre_ping's extra round trip per checkout is cheap next to that.
     _engine_kwargs.update(
         pool_size=10,
         max_overflow=20,
         pool_recycle=900,
+        pool_pre_ping=True,
     )
 
 engine = create_engine(_url, **_engine_kwargs)
@@ -62,7 +65,30 @@ def init_db() -> None:
     _drop_removed_columns()
     _migrate_scheduled_to_queued()
     _ensure_indexes()
+    _ensure_rls()
     _set_schema_version()
+
+
+def _ensure_rls() -> None:
+    """Enable row level security on every public table (Postgres only).
+
+    The app talks to Postgres directly as the table owner, which bypasses
+    RLS — but Supabase also exposes ``public`` tables through its
+    auto-generated REST API with the publishable anon key. With RLS off,
+    that API would let anyone read/write these tables (including the Threads
+    token in ``app_tokens``). Enabling RLS with no policies makes the REST
+    path deny-by-default without affecting the app's own connection."""
+    if _is_sqlite:
+        return
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        tables = conn.execute(text(
+            "SELECT tablename FROM pg_tables "
+            "WHERE schemaname = 'public' AND NOT rowsecurity"
+        )).scalars().all()
+        for t in tables:
+            conn.execute(text(f'ALTER TABLE public."{t}" ENABLE ROW LEVEL SECURITY'))
 
 
 # Cheap probes that must succeed for the schema to really be at SCHEMA_VERSION.

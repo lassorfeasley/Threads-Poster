@@ -1057,6 +1057,7 @@ initSegDnd();
           <div class="field" style="margin-bottom: 0;">
             <div class="field-label-row">
               <label for="caption">Caption</label>
+              <span class="save-state" id="caption-save-state" aria-live="polite"></span>
               <button type="button" id="copy-caption-btn" class="copy-btn"
                       data-caption="{{ cut.draft_caption }}" onclick="copyCaption()"
                       title="Copy caption" aria-label="Copy caption">
@@ -1064,6 +1065,14 @@ initSegDnd();
               </button>
             </div>
             <textarea name="caption" id="caption" required>{{ cut.draft_caption }}</textarea>
+            <div id="caption-proposal" class="caption-proposal" hidden>
+              <div class="caption-proposal-label">Suggested caption — drafted from the trimmed transcript. Review before using.</div>
+              <p class="caption-proposal-text" id="caption-proposal-text"></p>
+              <div class="ctl-strip">
+                <button type="button" class="approve sm" onclick="acceptProposal()">Use this caption</button>
+                <button type="button" class="ghost sm" onclick="dismissProposal()">Dismiss</button>
+              </div>
+            </div>
             <div class="ctl-strip" style="margin-top: 8px;">
               <button type="button" class="ghost sm" id="suggest-btn" onclick="suggestCaption()">
                 {{ "Regenerate" if cut.draft_caption else "Suggest" }} caption</button>
@@ -1075,19 +1084,85 @@ initSegDnd();
       </section>
     </form>
     <script>
+      // The suggestion is only ever a PROPOSAL: it renders in a review card
+      // and touches the caption field/DB only when the operator accepts it.
+      let proposedCaption = '';
       async function suggestCaption(silent) {
         const btn = document.getElementById('suggest-btn');
         btn.disabled = true; btn.textContent = 'Thinking…';
         try {
           const r = await fetch('/cut/{{ cut.id }}/suggest-caption', { method: 'POST' });
           const d = await r.json();
-          if (d.caption) document.getElementById('caption').value = d.caption;
+          if (d.caption) showProposal(d.caption);
           else if (!silent) alert(d.error || 'No caption returned');
         } catch (e) { if (!silent) alert('Suggestion failed: ' + e); }
-        btn.disabled = false; btn.textContent = 'Regenerate caption';
+        btn.disabled = false;
+        btn.textContent = document.getElementById('caption').value.trim()
+          ? 'Regenerate caption' : 'Suggest caption';
       }
-      // Fresh export whose caption is still the full-video seed: rewrite it
-      // from the clip's own transcript (compiled from the saved trim windows).
+      function showProposal(text) {
+        proposedCaption = text;
+        document.getElementById('caption-proposal-text').textContent = text;
+        document.getElementById('caption-proposal').hidden = false;
+      }
+      function dismissProposal() {
+        proposedCaption = '';
+        document.getElementById('caption-proposal').hidden = true;
+      }
+      function acceptProposal() {
+        if (!proposedCaption) return;
+        document.getElementById('caption').value = proposedCaption;
+        dismissProposal();
+        document.getElementById('suggest-btn').textContent = 'Regenerate caption';
+        // Persist the accepted draft so it survives leaving the page (and so
+        // the voice-signal diff records what the AI proposed vs what posted).
+        saveCaptionNow();
+      }
+
+      // ---- Caption autosave with visible state ----
+      // Edits persist ~1s after typing stops (and immediately on blur), and
+      // the label row always says where things stand: Unsaved → Saving → Saved.
+      const captionEl = document.getElementById('caption');
+      const saveStateEl = document.getElementById('caption-save-state');
+      let captionSaveTimer = null;
+      let captionSaveSeq = 0;
+      let lastSavedCaption = captionEl.value;
+
+      function setSaveState(cls, text) {
+        saveStateEl.className = 'save-state' + (cls ? ' ' + cls : '');
+        saveStateEl.textContent = text;
+      }
+      async function saveCaptionNow() {
+        clearTimeout(captionSaveTimer);
+        const value = captionEl.value;
+        if (value === lastSavedCaption) { if (saveStateEl.textContent) setSaveState('saved', 'Saved'); return; }
+        const seq = ++captionSaveSeq;
+        setSaveState('saving', 'Saving…');
+        try {
+          const body = new FormData();
+          body.append('caption', value);
+          const r = await fetch('/cut/{{ cut.id }}/caption', { method: 'POST', body });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          if (seq !== captionSaveSeq) return; // superseded by a newer edit
+          lastSavedCaption = value;
+          setSaveState('saved', 'Saved');
+        } catch (e) {
+          if (seq !== captionSaveSeq) return;
+          setSaveState('error', "Couldn't save — edit to retry");
+        }
+      }
+      captionEl.addEventListener('input', () => {
+        if (captionEl.value === lastSavedCaption) { setSaveState('', ''); clearTimeout(captionSaveTimer); return; }
+        setSaveState('pending', 'Unsaved');
+        clearTimeout(captionSaveTimer);
+        captionSaveTimer = setTimeout(saveCaptionNow, 1000);
+      });
+      captionEl.addEventListener('blur', () => {
+        if (captionEl.value !== lastSavedCaption) saveCaptionNow();
+      });
+      // Fresh export whose caption isn't operator-written yet: draft one from
+      // the clip's own transcript (compiled from the saved trim windows) and
+      // show it as a proposal to review — the field itself is never touched.
       // The param is consumed immediately so the reload after subtitle
       // generation doesn't fire a second suggestion.
       (function () {

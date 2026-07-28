@@ -789,7 +789,10 @@ def create_cut(candidate_id: int):
             return _flash("/", "Video not found")
         if c.status != STATUS_ARCHIVED:
             return _flash(f"/video/{candidate_id}", "Download the video before cutting it")
-        cut = Cut(candidate_pk=c.id, draft_caption=c.draft_caption or "")
+        # No caption seed: the video-level draft was written against the FULL
+        # transcript. The caption is proposed after export, from the trimmed
+        # clip's own transcript, and only adopted when the operator accepts it.
+        cut = Cut(candidate_pk=c.id)
         session.add(cut)
         session.flush()
         cut_id = cut.id
@@ -820,7 +823,9 @@ def open_cut(candidate_id: int):
             return RedirectResponse(f"/video/{candidate_id}?step=cuts", status_code=303)
         if len(existing) == 1:
             return RedirectResponse(f"/cut/{existing[0].id}?step=trim", status_code=303)
-        cut = Cut(candidate_pk=c.id, draft_caption=c.draft_caption or "")
+        # No caption seed — see create_cut: captions are drafted from the
+        # trimmed transcript after export and require operator acceptance.
+        cut = Cut(candidate_pk=c.id)
         session.add(cut)
         session.flush()
         cut_id = cut.id
@@ -1380,10 +1385,12 @@ def export_clip(cut_id: int, segments_json: str = Form(...)):
                 except Exception:
                     pass
             n = len(segments)
-            # A draft caption inherited from the video-level seed was written
-            # against the FULL transcript; now that the clip's own transcript
-            # exists (trim_segments is saved), have the Post step regenerate it
-            # from the clip. Operator-edited captions are left alone.
+            # Now that the clip's own transcript exists (trim_segments is
+            # saved), have the Post step draft a caption from it — shown as a
+            # proposal the operator must accept, never written into the field.
+            # Cuts whose caption was already edited by the operator (or legacy
+            # cuts still carrying the old video-level seed) skip the auto-run
+            # only when the text is genuinely theirs.
             seed = (c.draft_caption or "").strip()
             current = (cut.draft_caption or "").strip()
             autocaption = "&autocaption=1" if (not current or current == seed) else ""
@@ -1521,8 +1528,16 @@ def suggest_caption(cut_id: int):
         if cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         c = cut.candidate
-        segments = json.loads(cut.trim_segments) if cut.trim_segments else []
-        excerpt = _transcript_excerpt(c, segments)
+        # Draft strictly from the trimmed clip's own transcript. No trim, no
+        # caption — falling back to the full video transcript here produced
+        # captions about parts of the broadcast that aren't in the clip.
+        _lines, clip_text = _load_clip_transcript(c, cut.trim_segments or "")
+        if not clip_text.strip():
+            return JSONResponse(
+                {"error": "Trim and export the clip first — the caption is "
+                          "drafted from the trimmed clip's transcript."},
+                status_code=409)
+        excerpt = " ".join(clip_text.split())[:3000]
         seconds = clip_duration(cut.trimmed_clip_path) if cut.trimmed_clip_path else None
         # Voice matching from past captions — never let it break drafting.
         try:
@@ -1537,10 +1552,23 @@ def suggest_caption(cut_id: int):
                 examples=voice["examples"], style_guide=voice["style_guide"],
                 operator_guide=render_caption_guide(),
             )
-            cut.draft_caption = caption
+            # Not persisted: the suggestion is only a proposal until the
+            # operator explicitly accepts it (/cut/{id}/caption).
             return {"caption": caption, "voice_examples": len(voice["examples"])}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/cut/{cut_id}/caption")
+def save_cut_caption(cut_id: int, caption: str = Form("")):
+    """Persist the caption the operator accepted (or edited) on the Post step."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        cut.draft_caption = caption.strip()
+        cut.updated_at = utcnow()
+    return {"ok": True}
 
 
 @app.post("/cut/{cut_id}/suggest-title")

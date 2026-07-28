@@ -132,7 +132,9 @@ class Cut(Base):
     # window slots. Generated alongside clip_title; falls back to clip_title
     # wherever it's blank (e.g. rows created before this field existed).
     calendar_name: Mapped[str] = mapped_column(Text, default="")
-    # Per-cut caption draft (seeded from the video's draft_caption, then edited).
+    # Per-cut caption draft. Written when the operator accepts a suggestion on
+    # the Post step (or edits/queues/posts) — never auto-seeded, so it always
+    # reflects text the operator has seen and approved.
     draft_caption: Mapped[str] = mapped_column(Text, default="")
 
     # Operator-chosen segments (JSON [{start, end}, ...]) and the exported

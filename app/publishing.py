@@ -119,11 +119,51 @@ def _apply_post_attributes(post: ThreadsPost) -> None:
         log.warning("Caption attribute tagging failed: %s", exc)
 
 
+def _persist_publish_result(post_id: int, media_id: str, permalink: str,
+                            when: dt.datetime) -> None:
+    """Record a successful Threads publish in its own session/transaction.
+
+    ``publish_video`` can take minutes, and by the time it returns the
+    caller's session may be sitting on a connection that died in the meantime
+    (laptop sleep, Supabase idle close). The clip is already live at that
+    point, so losing this write strands a published post as ``failed`` —
+    write it through a fresh connection, with one retry, instead of trusting
+    the caller's."""
+    from sqlalchemy import update
+    from sqlalchemy.exc import OperationalError
+
+    from .db import session_scope
+
+    last_exc: Exception | None = None
+    for _ in range(2):
+        try:
+            with session_scope() as s:
+                s.execute(
+                    update(ThreadsPost)
+                    .where(ThreadsPost.id == post_id)
+                    .values(threads_media_id=media_id, permalink=permalink,
+                            status="published", published_at=when, error="")
+                )
+            return
+        except OperationalError as exc:
+            last_exc = exc
+    raise last_exc
+
+
 def publish_post(session, post: ThreadsPost) -> ThreadsPost:
     """Publish the post's clip to Threads. Uses the local file when it exists
     (re-uploading to Supabase for the freshest copy); otherwise falls back to
     the copy uploaded at queue time, so a headless runner can publish without
     this machine's disk. Sets status=failed + error on failure."""
+    if post.threads_media_id:
+        # Already live on Threads — a retry after the *record* of a publish
+        # failed to write. Publishing again would duplicate the post.
+        post.status = "published"
+        post.published_at = post.published_at or utcnow()
+        post.error = ""
+        session.flush()
+        return post
+
     clip = Path(post.clip_local_path).expanduser()
     have_local = clip.exists()
     if not have_local and not post.clip_object_path:
@@ -140,10 +180,16 @@ def publish_post(session, post: ThreadsPost) -> ThreadsPost:
         else:
             signed_url = signed_clip_url(post.clip_object_path)
         result = publish_video(signed_url, post.caption)
+        published_at = utcnow()
+        # The clip is live on Threads from here on: persist that fact before
+        # anything else (annotation, the caller's own session) gets a chance
+        # to fail and roll it back.
+        _persist_publish_result(post.id, result["media_id"], result["permalink"],
+                                published_at)
         post.threads_media_id = result["media_id"]
         post.permalink = result["permalink"]
         post.status = "published"
-        post.published_at = utcnow()
+        post.published_at = published_at
         post.error = ""
     except Exception as exc:
         post.status = "failed"
