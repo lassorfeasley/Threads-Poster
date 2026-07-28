@@ -86,17 +86,6 @@
       {% if nav_sched.next_window_local %}{{ nav_sched.next_window_local.strftime("%a %-I:%M %p") }}{% else %}—{% endif %}
       &middot; {{ nav_sched.queue_count }} queued
     </div>
-    {% set _thr = nav_sched.hot_threshold or 100 %}
-    {% set _delta = nav_sched.current_likes_delta or 0 %}
-    {% set _pct = ([(_delta / _thr * 100) if _thr else 0, 100] | min) %}
-    <div class="nav-status-row nav-likes-row">
-      <div class="progressbar nav-likesbar{{ ' is-hot' if nav_sched.current_hot }}"><i style="width: {{ _pct }}%;"></i></div>
-      <span class="nav-likes-count">{{ _delta }}/{{ _thr }}</span>
-      <span class="info-tip" tabindex="0">
-        <span class="info-tip-ic" aria-hidden="true">i</span>
-        <span class="info-tip-bubble">Adaptive scheduler: the next queued post waits if the last one is still gaining likes fast ({{ _thr }}+ within {{ nav_sched.hot_window_minutes }}m), so posts don't compete for attention.</span>
-      </span>
-    </div>
     <form method="post" action="/threads/import-history" class="nav-status-row">
       <input type="hidden" name="next" value="{{ request.url.path }}">
       <button type="submit" class="nav-status-action" data-confirm="Import your account's existing Threads posts (made outside this app) so analytics can include them? This does not post anything." data-confirm-ok="Import">Import Threads history</button>

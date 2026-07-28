@@ -145,8 +145,6 @@ def _ensure_new_columns() -> None:
             "cut_pk": "INTEGER",
             "source": "VARCHAR(20) DEFAULT 'app'",
             "scheduled_at": "TIMESTAMP WITH TIME ZONE",
-            "defer_count": "INTEGER DEFAULT 0",
-            "last_deferred_at": "TIMESTAMP WITH TIME ZONE",
             "pinned_window_key": "VARCHAR(40) DEFAULT ''",
             "first_reply_id": "VARCHAR(60) DEFAULT ''",
             "first_reply_text": "TEXT DEFAULT ''",

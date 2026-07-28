@@ -41,23 +41,29 @@
           {% if day == 0 %}
             <div class="cal-cell out"></div>
           {% else %}
-          {# Bucket the day's events by their posting-window index so each cell
-             renders exactly n_windows equal-height slots. Events with no window
-             (e.g. off-window published posts, or a 4th+ post in a day) are
-             intentionally dropped from this view — only the fixed windows show. #}
+          {# Bucket the day's events by posting-window index so each cell renders
+             exactly n_windows equal-height slots. build_window_plan gives every
+             post the nearest free slot on its day, so the only leftovers are
+             days that ran more posts than there are windows. Those get counted
+             into a "+N" badge rather than dropped — the calendar must never
+             hide a post that actually went out. #}
           {% set win_map = {} %}
+          {% set extras = [] %}
           {% for e in events.get(day, []) %}
-            {% if e.window_index is not none and e.window_index < n_windows %}
+            {% if e.window_index is not none and e.window_index < n_windows
+                  and win_map.get(e.window_index) is none %}
               {% set _ = win_map.__setitem__(e.window_index, e) %}
+            {% elif e.kind != 'open' %}
+              {% set _ = extras.append(e) %}
             {% endif %}
           {% endfor %}
-          <div class="cal-cell {{ 'today' if day == today }}">
+          <div class="cal-cell {{ 'today' if day == today }}{{ ' has-extra' if extras }}">
             <div class="cal-slots">
               {% for i in range(n_windows) %}
                 {% set e = win_map.get(i) %}
                 {% if e is none %}
                   <div class="cal-slot vacant"
-                       title="{{ day }} · {{ windows_et[i] if (windows_et and i < windows_et|length) else '' }} — no post"></div>
+                       title="{{ day }} · {{ windows_local[i] if (windows_local and i < windows_local|length) else '' }} — no post"></div>
                 {% else %}
                   {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind == 'queued' else ('pub' if e.kind == 'published' else 'draft')) %}
                   {% set label = e.title or e.caption %}
@@ -92,6 +98,14 @@
                 {% endif %}
               {% endfor %}
             </div>
+            {% if extras %}
+              {% set extra_labels = [] %}
+              {% for x in extras %}
+                {% set _ = extra_labels.append(x.time ~ ' · ' ~ (x.title or x.caption or '(post)')[:48]) %}
+              {% endfor %}
+              <span class="cal-extra"
+                    title="{{ extras|length }} more post{{ 's' if extras|length != 1 }} beyond this day's {{ n_windows }} windows — {{ extra_labels|join(' | ') }}">+{{ extras|length }}</span>
+            {% endif %}
           </div>
           {% endif %}
         {% endfor %}
@@ -129,7 +143,6 @@
             <div class="meta">
               {% if e.channel %}{{ e.channel }} · {% endif %}
               {% if e.pinned %}pinned · {% elif e.kind == 'queued' %}projected · {% endif %}
-              {% if e.defer_count %}deferred {{ e.defer_count }}× · {% endif %}
               {% if e.kind == 'queued' %}drag to move{% endif %}
             </div>
           {% endif %}

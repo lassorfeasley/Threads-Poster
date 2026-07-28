@@ -503,6 +503,44 @@ def suggest_short_title(model: str, source_title: str, description: str = "") ->
     return title[:80]
 
 
+def suggest_title_from_transcript(model: str, transcript_text: str,
+                                  source_title: str = "") -> str:
+    """Write a punchy 2-5 word clip title from what the video actually says.
+
+    Preferred over :func:`suggest_short_title` whenever a transcript exists,
+    because a publisher's own title can misdescribe its own footage — a San
+    Diego station uploading a Napa council story under a San Diego headline, for
+    one real case — and titling from the headline alone propagates that error
+    into the clip, the calendar and the caption draft. ``source_title`` is passed
+    only so proper nouns the transcript may have garbled can be spelled right;
+    the transcript decides the facts.
+    """
+    if not (transcript_text or "").strip():
+        return ""
+    system = (
+        "You write a very short title for a news video clip, based on what is "
+        "actually said in its transcript. Rules: 2 to 5 words, plain text, no "
+        "surrounding quotes, no emojis, no hashtags, no trailing punctuation, "
+        "title case. Name the specific subject and place the transcript "
+        "establishes. The transcript is the ONLY authority on the facts: where "
+        "the supplied source_title disagrees with it about who, where or what, "
+        "follow the transcript and ignore the source title. Use source_title "
+        "only to spell proper nouns the transcript may have garbled. Never "
+        "state anything the transcript does not support. "
+        "JSON shape: {\"title\": \"...\"}"
+    )
+    user = json.dumps({
+        "transcript": transcript_text[:6000],
+        "source_title": (source_title or "")[:300],
+    })
+    data = _json_chat(model, system, user)
+    title = str(data.get("title", "")).strip().strip('"').strip("'").strip()
+    words = title.split()
+    if len(words) > 5:
+        title = " ".join(words[:5])
+    return title[:80]
+
+
 def caption_attributes(model: str, caption: str) -> dict:
     """Tag a published caption's attributes for analytics. Returns
     {tone, has_question, has_cta, hashtag_count}."""

@@ -139,10 +139,99 @@ function removeSegment(i) {
   else if (selectedSeg !== null && selectedSeg > i) selectedSeg--;
   renderSegments();
 }
-// ---- Drag-to-reorder (grip handle) ----
+// ---- Drag-to-reorder (grip handle) -------------------------------------
+// Insertion-point model: you drop a clip into the gap BETWEEN two clips, not
+// on top of the one it displaces. While dragging, the rows between the clip's
+// old and new spots slide aside to open an empty slot and a red line marks it,
+// so the result is visible before releasing.
+//
+// Row geometry is measured once at dragstart and never re-read mid-drag. Rows
+// move by transform only, which leaves layout (and so the cached rects) alone;
+// measuring live would feed the shifted positions back into the hit test and
+// make the target oscillate between two slots under a still cursor.
 let dragFrom = null;
+let segDragRects = [];   // per-row {top, height}, viewport coords at dragstart
+let segDragBoxTop = 0;   // #segments top at dragstart, for line placement
+let segDragPitch = 0;    // slot-to-slot distance (row height + margin)
+let segDropAt = null;    // current insertion index, 0..segments.length
+
+function segRowEls() {
+  return Array.from(document.querySelectorAll('#segments .seg-row'));
+}
+
+function segDragBegin(from) {
+  dragFrom = from;
+  segDropAt = null;
+  segDragBoxTop = document.getElementById('segments').getBoundingClientRect().top;
+  segDragRects = segRowEls().map(el => {
+    const r = el.getBoundingClientRect();
+    return { top: r.top, height: r.height };
+  });
+  const n = segDragRects.length;
+  segDragPitch = n > 1
+    ? (segDragRects[n - 1].top - segDragRects[0].top) / (n - 1)
+    : (segDragRects[0] ? segDragRects[0].height : 0);
+}
+
+// Insertion index for a cursor position: before the first row whose midpoint is
+// below the cursor, else past the end of the list.
+function segDropIndexFor(clientY) {
+  for (let i = 0; i < segDragRects.length; i++) {
+    if (clientY < segDragRects[i].top + segDragRects[i].height / 2) return i;
+  }
+  return segDragRects.length;
+}
+
+// The slot left empty once the in-between rows shift — where the clip lands and
+// where the line is drawn. Dropping just above or below its own slot both
+// resolve here to the clip's original slot, i.e. a visible no-op.
+function segEmptySlot(at) { return at > dragFrom ? at - 1 : at; }
+
+function segDropLineEl() {
+  const box = document.getElementById('segments');
+  let line = box.querySelector('.seg-drop-line');
+  if (!line) {
+    line = document.createElement('div');
+    line.className = 'seg-drop-line';
+    box.appendChild(line);
+  }
+  return line;
+}
+
+function segDragPaint(at) {
+  if (dragFrom === null || at === segDropAt) return;
+  segDropAt = at;
+  segRowEls().forEach((el, i) => {
+    let dy = 0;
+    if (i !== dragFrom) {
+      if (at > dragFrom && i > dragFrom && i < at) dy = -segDragPitch;
+      else if (at < dragFrom && i >= at && i < dragFrom) dy = segDragPitch;
+    }
+    el.style.transform = dy ? `translateY(${dy}px)` : '';
+  });
+  const slot = segDragRects[segEmptySlot(at)];
+  if (!slot) return;
+  const line = segDropLineEl();
+  line.style.top = `${slot.top - segDragBoxTop + slot.height / 2}px`;
+  line.classList.add('on');
+}
+
+function segDragClear() {
+  dragFrom = null;
+  segDropAt = null;
+  segDragRects = [];
+  segRowEls().forEach(el => {
+    el.style.transform = '';
+    el.classList.remove('dragging');
+  });
+  const line = document.querySelector('#segments .seg-drop-line');
+  if (line) line.classList.remove('on');
+}
+
 function reorderSegment(from, to) {
-  if (from === null || to === null || from === to) return;
+  // `to` is an insertion index in 0..n, so dropping immediately above or below
+  // the clip's own slot is a no-op rather than a pointless undo entry.
+  if (from === null || to === null || to === from || to === from + 1) return;
   pushUndo();
   const selObj = selectedSeg !== null ? segments[selectedSeg] : null;
   const [moved] = segments.splice(from, 1);
@@ -151,6 +240,32 @@ function reorderSegment(from, to) {
   selectedSeg = selObj ? segments.indexOf(selObj) : null;
   if (selectedSeg === -1) selectedSeg = null;
   renderSegments();
+}
+
+// Bound once on the container, not per row: the cursor spends much of the drag
+// in the margins between rows, where per-row dragover/drop never fire.
+function initSegDnd() {
+  const box = document.getElementById('segments');
+  const over = e => {
+    if (dragFrom === null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    segDragPaint(segDropIndexFor(e.clientY));
+  };
+  box.addEventListener('dragenter', over);
+  box.addEventListener('dragover', over);
+  box.addEventListener('dragleave', e => {
+    // Bubbles from children too, so only react to leaving the list itself.
+    if (dragFrom === null || box.contains(e.relatedTarget)) return;
+    segDragPaint(dragFrom);
+  });
+  box.addEventListener('drop', e => {
+    if (dragFrom === null) return;
+    e.preventDefault();
+    const from = dragFrom, to = segDropIndexFor(e.clientY);
+    segDragClear();
+    reorderSegment(from, to);
+  });
 }
 // ---- Segment playback --------------------------------------------------
 // The <video> serves two playback flavors: a one-shot single-segment preview
@@ -527,28 +642,16 @@ function renderSegments() {
     grip.addEventListener('mousedown', () => { div.draggable = true; });
     grip.addEventListener('mouseup', () => { div.draggable = false; });
     div.addEventListener('dragstart', e => {
-      dragFrom = i;
+      segDragBegin(i);
       e.dataTransfer.effectAllowed = 'move';
       try { e.dataTransfer.setData('text/plain', String(i)); } catch (_) {}
-      div.classList.add('dragging');
+      // Deferred a tick: the browser snapshots the drag image right after this
+      // handler returns, so hiding the row now would drag an invisible ghost.
+      setTimeout(() => div.classList.add('dragging'), 0);
     });
     div.addEventListener('dragend', () => {
       div.draggable = false;
-      dragFrom = null;
-      document.querySelectorAll('#segments .seg-row').forEach(el =>
-        el.classList.remove('dragging', 'drag-over'));
-    });
-    div.addEventListener('dragover', e => {
-      if (dragFrom === null || dragFrom === i) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      div.classList.add('drag-over');
-    });
-    div.addEventListener('dragleave', () => div.classList.remove('drag-over'));
-    div.addEventListener('drop', e => {
-      e.preventDefault();
-      div.classList.remove('drag-over');
-      reorderSegment(dragFrom, i);
+      segDragClear();
     });
     initSegWave(i, div.querySelector(`#seg-wave-${i}`));
   });
@@ -716,6 +819,7 @@ function prepExport(form) {
   return true;
 }
 renderSegments();
+initSegDnd();
 </script>
 {% endif %}
 
@@ -1035,7 +1139,6 @@ renderSegments();
           <div class="video-post-main">
             <div class="video-post-meta">
               <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
-              {% if p.defer_count %}<span class="badge">deferred {{ p.defer_count }}×</span>{% endif %}
               <span class="meta">
                 {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
                 {% elif p.status == "publishing" %}publishing…

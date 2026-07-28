@@ -182,9 +182,6 @@ class ThreadsPost(Base):
     scheduled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # How many times this queued post has been deferred because the last post was hot.
-    defer_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_deferred_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Optional pin to a specific upcoming window key (``YYYY-MM-DD#N`` in scheduler TZ).
     # Lets the operator drag a queued post onto an open calendar slot; unpinned posts
     # fill remaining windows FIFO. Cleared on publish.
@@ -229,11 +226,11 @@ class ThreadsPost(Base):
 
 
 class SchedulerState(Base):
-    """Singleton row tracking adaptive-scheduler progress across restarts.
+    """Singleton row tracking scheduler progress across restarts.
 
     ``last_window_key`` is ``YYYY-MM-DD#N`` (ET date + 0-based window index) so
     each posting window is acted on at most once. ``last_publish_at`` enforces
-    the spacing floor. Hot-check fields power the Posts status panel.
+    the spacing floor.
     """
 
     __tablename__ = "scheduler_state"
@@ -242,9 +239,6 @@ class SchedulerState(Base):
     last_window_key: Mapped[str] = mapped_column(String(40), default="")
     last_publish_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_metrics_poll_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_hot_check_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_hot_result: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    last_hot_likes_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_action: Mapped[str] = mapped_column(String(80), default="")
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

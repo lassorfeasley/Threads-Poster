@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from .config import ROOT, load_settings
-from .llm import suggest_highlight
+from .llm import suggest_highlight, suggest_title_from_transcript
 from .models import STATUS_ARCHIVED, STATUS_FAILED, Candidate, utcnow
 
 log = logging.getLogger("scrape")
@@ -184,6 +184,24 @@ def download_video(candidate: Candidate, video_dir: Path, settings) -> Path:
 
 # --- Orchestration -----------------------------------------------------------
 
+# The synthetic channel that owns every pasted-URL clip (see the web layer's
+# _get_or_create_pasted_channel).
+PASTED_CHANNEL_URL = "youtube://pasted"
+
+
+def _wants_transcript_title(candidate: Candidate) -> bool:
+    """Whether this clip's title should be rewritten from its transcript.
+
+    Only clips the operator brought in by pasting a URL. Discovered clips keep
+    their real YouTube titles: those are the review context on the dashboard and
+    they feed relevance matching, so rewriting them would be destructive. A
+    pasted clip's title is nothing but a label, and the source headline can be
+    wrong about its own footage, so the spoken words are the better source.
+    """
+    channel = candidate.channel
+    return bool(channel and channel.url == PASTED_CHANNEL_URL)
+
+
 def archive_candidate(session, candidate: Candidate, with_highlight: bool = True) -> None:
     """Full post-approval pipeline for one approved candidate.
 
@@ -223,7 +241,24 @@ def archive_candidate(session, candidate: Candidate, with_highlight: bool = True
             log.warning("No captions for %s; archiving without a transcript", candidate.video_id)
         candidate.transcription_method = method
 
-        # 3. Optional LLM highlight suggestion + draft caption (clearly drafts).
+        # 3. Retitle pasted clips from what is actually said. Runs before the
+        # highlight pass so the caption draft is written against the corrected
+        # title. Best-effort: any failure leaves the ingest-time title standing.
+        if segments and _wants_transcript_title(candidate):
+            try:
+                title = suggest_title_from_transcript(
+                    settings.get("matching.model", "claude-haiku-4-5"),
+                    candidate.transcript_text or "",
+                    source_title=candidate.description or "",
+                )
+                if title:
+                    log.info("Retitled %s from transcript: %r -> %r",
+                             candidate.video_id, candidate.title, title)
+                    candidate.title = title[:300]
+            except Exception as exc:
+                log.warning("Transcript title failed for %s: %s", candidate.video_id, exc)
+
+        # 4. Optional LLM highlight suggestion + draft caption (clearly drafts).
         if with_highlight and segments:
             try:
                 hl = suggest_highlight(

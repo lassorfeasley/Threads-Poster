@@ -1,12 +1,11 @@
-"""Adaptive window scheduler for the Threads post queue.
+"""Window scheduler for the Threads post queue.
 
 Publishes the FIFO ``queued`` list at fixed daily windows (US Eastern by
-default). At each window, if the most recently published post is still "hot"
-(likes gained over the trailing hour exceed a threshold), the queue head is
-deferred to the next window — unless a guardrail forces publish (max
-deferrals) or skip (last window of the day).
+default): one post per window, gated only by active hours and the spacing
+floor. Pinned posts claim their window; the rest fill remaining slots in order.
+A window is never given up because of how an earlier post is performing.
 
-Also drives the frequent metrics poller that feeds the hotness check.
+Also drives the frequent metrics poller that feeds analytics.
 """
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from . import threads_api
-from .analytics import is_last_post_hot, poll_recent_metrics
+from .analytics import poll_recent_metrics
 from .categories import category_by_slug
 from .config import load_settings
 from .db import session_scope
@@ -233,21 +232,6 @@ def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
     return assignment[keys.index(window_key)]
 
 
-def _carry_pin_forward(post: ThreadsPost, window_key: str, now: dt.datetime) -> None:
-    """When a post pinned to ``window_key`` is deferred/skipped, move its pin to
-    the next upcoming window. Otherwise the pin points at a past window and gets
-    silently cleared as stale, dropping the post to the back of the FIFO queue."""
-    if (post.pinned_window_key or "").strip() != window_key:
-        return
-    tz = _tz()
-    day = now.astimezone(tz).date()
-    upcoming = _upcoming_window_slots(
-        day, day + dt.timedelta(days=PIN_HORIZON_DAYS),
-        now=now, last_window_key=window_key,
-    )
-    post.pinned_window_key = upcoming[0][0] if upcoming else ""
-
-
 def pin_post_to_window(session, post_id: int, window_key: str) -> str:
     """Pin a queued post to an upcoming window. Returns a short status message.
 
@@ -397,7 +381,6 @@ def run_window_tick() -> str | None:
 
     day = now_local.date()
     windows = _windows_for_day(day, tz)
-    max_deferrals = int(settings.get("scheduler.max_deferrals", 2))
 
     with session_scope() as session:
         state = _get_state(session)
@@ -406,7 +389,6 @@ def run_window_tick() -> str | None:
             return None
 
         key = _window_key(day, due_index)
-        has_later_window = due_index < len(windows) - 1
 
         head = _queue_head_for_window(session, key)
         if head is None:
@@ -421,48 +403,13 @@ def run_window_tick() -> str | None:
             state.updated_at = utcnow()
             return f"spacing_block:{key}"
 
-        hot, delta = is_last_post_hot(session)
-        state.last_hot_check_at = now
-        state.last_hot_result = hot
-        state.last_hot_likes_delta = delta
-
-        if hot and head.defer_count < max_deferrals:
-            if has_later_window:
-                head.defer_count = int(head.defer_count or 0) + 1
-                head.last_deferred_at = now
-                _carry_pin_forward(head, key, now)
-                state.last_window_key = key
-                state.last_action = f"defer:{key}:post={head.id}:n={head.defer_count}"
-                state.updated_at = utcnow()
-                log.info(
-                    "Deferred post %s at window %s (hot delta=%s, defer=%s)",
-                    head.id, key, delta, head.defer_count,
-                )
-                return state.last_action
-            # Last window of the day: skip rather than post into overnight.
-            _carry_pin_forward(head, key, now)
-            state.last_window_key = key
-            state.last_action = f"skip_day:{key}:post={head.id}"
-            state.updated_at = utcnow()
-            log.info(
-                "Skipped post %s at last window %s (still hot, delta=%s); resumes next day",
-                head.id, key, delta,
-            )
-            return state.last_action
-
-        # Publish (not hot, or max deferrals reached).
         post_id = head.id
-        force = bool(hot and head.defer_count >= max_deferrals)
         state.last_window_key = key
         state.updated_at = utcnow()
         session.flush()
 
-    action = f"{'force_' if force else ''}publish:{key}:post={post_id}"
+    action = f"publish:{key}:post={post_id}"
     if _claim_and_publish(post_id, action):
-        with session_scope() as session:
-            post = session.get(ThreadsPost, post_id)
-            if post is not None:
-                post.defer_count = 0
         log.info("Published queue post %s at window %s", post_id, key)
         return action
 
@@ -530,7 +477,6 @@ def scheduler_status(session) -> dict:
     queue_count = session.execute(
         select(func.count(ThreadsPost.id)).where(ThreadsPost.status == STATUS_QUEUED)
     ).scalar_one()
-    hot, delta = is_last_post_hot(session)
 
     return {
         "enabled": bool(settings.get("scheduler.enabled", True)),
@@ -542,15 +488,7 @@ def scheduler_status(session) -> dict:
         "last_window_key": state.last_window_key or "",
         "last_publish_at": state.last_publish_at,
         "last_action": state.last_action or "",
-        "last_hot_check_at": state.last_hot_check_at,
-        "last_hot_result": state.last_hot_result,
-        "last_hot_likes_delta": state.last_hot_likes_delta,
-        "current_hot": hot,
-        "current_likes_delta": delta,
-        "hot_threshold": int(settings.get("scheduler.hot.threshold", 100)),
-        "hot_window_minutes": int(settings.get("scheduler.hot.window_minutes", 60)),
         "spacing_floor_minutes": int(settings.get("scheduler.spacing_floor_minutes", 90)),
-        "max_deferrals": int(settings.get("scheduler.max_deferrals", 2)),
         "queue_count": queue_count,
         "within_active_hours": _within_active_hours(now_local),
     }
@@ -603,6 +541,88 @@ def _post_display_title(p) -> str:
     if cat and cat["emoji"]:
         return f"{cat['emoji']} {title}".strip()
     return title
+
+
+def window_time_labels(day: dt.date | None = None) -> list[str]:
+    """Posting windows as operator-local labels, in window order.
+
+    The calendar times every card in the operator's zone, so its empty slots
+    have to be labelled the same way — falling back to the raw scheduler-zone
+    strings from settings made a vacant slot read as though it were the window
+    the post directly beneath it had published into.
+    """
+    tz = _tz()
+    day = day or utcnow().astimezone(tz).date()
+    return [w.astimezone().strftime("%-I:%M %p") for w in _windows_for_day(day, tz)]
+
+
+def _assign_published_slots(
+    day_posts: list[ThreadsPost],
+    day_windows: list[dt.datetime],
+    taken: set[int],
+) -> dict[int, int]:
+    """Map one day's published posts onto that day's posting-window slots.
+
+    Returns ``{post_id: window_index}``. A post lands in the window it ran
+    closest to, so a day whose 10:00 window failed shows an empty first slot
+    rather than sliding the 13:00 post up into it. Two constraints hold: list
+    order is preserved (an earlier post never occupies a later post's slot), and
+    slots already held by an upcoming open/queued entry are off limits.
+
+    Nothing records which window a post was published from — manual publishes
+    belong to no window at all — so placement is inferred from publish time.
+    Days that ran more posts than there are windows leave the worst-fitting
+    ones unmapped for the caller to surface as an overflow count.
+    """
+    free = [i for i in range(len(day_windows)) if i not in taken]
+    if not day_posts or not free:
+        return {}
+
+    times = []
+    for p in day_posts:
+        when = p.published_at
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=dt.timezone.utc)
+        times.append(when)
+
+    # Order-preserving assignment: fill as many slots as possible, then minimise
+    # total distance between publish time and window time. State is
+    # ``(-matched, cost)`` so plain tuple comparison prefers more matches first.
+    k, n = len(times), len(free)
+    dp: list[list[tuple[int, float]]] = [[(0, 0.0)] * (n + 1) for _ in range(k + 1)]
+    back: list[list[str]] = [[""] * (n + 1) for _ in range(k + 1)]
+    for i in range(k + 1):
+        for j in range(n + 1):
+            if i == 0 and j == 0:
+                continue
+            best: tuple[int, float] | None = None
+            move = ""
+            if i > 0 and (best is None or dp[i - 1][j] < best):
+                best, move = dp[i - 1][j], "skip_post"
+            if j > 0 and (best is None or dp[i][j - 1] < best):
+                best, move = dp[i][j - 1], "skip_slot"
+            if i > 0 and j > 0:
+                matched, cost = dp[i - 1][j - 1]
+                gap = abs((times[i - 1] - day_windows[free[j - 1]]).total_seconds())
+                cand = (matched - 1, cost + gap)
+                if best is None or cand < best:
+                    best, move = cand, "match"
+            dp[i][j] = best or (0, 0.0)
+            back[i][j] = move
+
+    out: dict[int, int] = {}
+    i, j = k, n
+    while i > 0 or j > 0:
+        move = back[i][j]
+        if move == "match":
+            out[day_posts[i - 1].id] = free[j - 1]
+            i -= 1
+            j -= 1
+        elif move == "skip_post":
+            i -= 1
+        else:
+            j -= 1
+    return out
 
 
 def build_window_plan(
@@ -714,7 +734,6 @@ def build_window_plan(
                 "title": "",
                 "permalink": "",
                 "projected": True,
-                "defer_count": 0,
                 "empty": True,
                 "pinned": False,
             })
@@ -737,29 +756,51 @@ def build_window_plan(
             "title": _post_display_title(post),
                 "permalink": post.permalink,
                 "projected": True,
-                "defer_count": int(post.defer_count or 0),
                 "empty": False,
                 "pinned": bool((post.pinned_window_key or "").strip()),
             })
 
-    # Published posts in range (for calendar history).
-    half = dt.timedelta(minutes=45)
+    # Published posts in range (for calendar history). The month grid lays each
+    # day out as its fixed posting windows, so a post needs a window index to be
+    # visible there at all. Matching only near-exact window times meant manual
+    # publishes and posts that ran long matched nothing and vanished from the
+    # calendar despite having gone out. Instead, each day's posts fill that
+    # day's remaining slots in chronological order, so a cell always reads
+    # top-to-bottom in the order things actually published. Slots already held
+    # by an upcoming open/queued entry are never taken; posts beyond the day's
+    # window count get no slot and are surfaced as a "+N" badge by the template.
+    # Slots are keyed by the OPERATOR-LOCAL date, because that is what the grid
+    # buckets cells by (``sort``/``day``). Keying by the scheduler zone instead
+    # would misfile any post published after midnight ET but before midnight
+    # locally: it renders on the previous local day yet would claim a slot on
+    # the next one, pushing that day's real posts out of their cell.
+    claimed: dict[dt.date, set[int]] = {}
+    for e in plan:
+        if e["window_index"] is not None:
+            claimed.setdefault(e["sort"].date(), set()).add(e["window_index"])
+
+    by_day: dict[dt.date, list[ThreadsPost]] = {}
+    for p in published:
+        when = p.published_at
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=dt.timezone.utc)
+        by_day.setdefault(when.astimezone().date(), []).append(p)
+
+    slot_for_post: dict[int, int] = {}
+    for pub_day, day_posts in by_day.items():
+        slot_for_post.update(_assign_published_slots(
+            day_posts, _windows_for_day(pub_day, tz), claimed.get(pub_day, set())
+        ))
+
     for p in published:
         when = p.published_at
         if when.tzinfo is None:
             when = when.replace(tzinfo=dt.timezone.utc)
         local = when.astimezone()
-        # Prefer matching a configured window label when close.
-        day = local.astimezone(tz).date()
-        matched_key = ""
-        matched_idx = None
-        for i, win in enumerate(_windows_for_day(day, tz)):
-            if abs((win - when).total_seconds()) <= half.total_seconds():
-                matched_key = _window_key(day, i)
-                matched_idx = i
-                # Display at the window time for alignment with placeholders.
-                local = win.astimezone()
-                break
+        matched_idx = slot_for_post.get(p.id)
+        matched_key = (
+            _window_key(local.date(), matched_idx) if matched_idx is not None else ""
+        )
         plan.append({
             "kind": "published",
             "window_key": matched_key,
@@ -778,7 +819,6 @@ def build_window_plan(
             "title": _post_display_title(p),
             "permalink": p.permalink,
             "projected": False,
-            "defer_count": 0,
             "empty": False,
             "pinned": False,
         })

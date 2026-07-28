@@ -82,8 +82,9 @@ from ..scheduler import (
     scheduler_status,
     spacing_allows_publish,
     start_scheduler_thread,
+    window_time_labels,
 )
-from ..scrape import archive_candidate, fetch_video_metadata
+from ..scrape import PASTED_CHANNEL_URL, archive_candidate, fetch_video_metadata
 from ..vision import annotate_post_footage, tag_candidate_storyboard
 from ..voice import voice_context
 from ..youtube import YouTubeAPIError, parse_video_url
@@ -1006,12 +1007,12 @@ def upload_thumb(name: str):
 def _get_or_create_pasted_channel(session) -> Channel:
     """A single synthetic channel that owns all pasted-URL YouTube clips."""
     ch = session.execute(
-        select(Channel).where(Channel.url == "youtube://pasted")
+        select(Channel).where(Channel.url == PASTED_CHANNEL_URL)
     ).scalar_one_or_none()
     if ch is None:
         ch = Channel(call_sign="Pasted URLs", network="", market="Pasted YouTube URLs",
                      region="", country="", scope="local",
-                     url="youtube://pasted", enabled=False)
+                     url=PASTED_CHANNEL_URL, enabled=False)
         session.add(ch)
         session.flush()
     return ch
@@ -1067,6 +1068,9 @@ def upload_url(urls: str = Form(...)):
         # Give the clip a concise 2-5 word AI title instead of the raw (often
         # long/clickbait) YouTube title. Best-effort: fall back to the source
         # title, then the URL. The original title is kept in `description`.
+        # This is the label shown while the download runs; once the transcript
+        # lands, archive_candidate rewrites the title from what is actually said,
+        # which is also all we have to go on if the video has no source title.
         source_title = title.strip()
         display_title = source_title
         if source_title:
@@ -1637,8 +1641,6 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                         log.warning("Clip re-upload failed (will retry at publish): %s", exc)
                 keep.status = "queued"
                 keep.scheduled_at = None
-                keep.defer_count = 0
-                keep.last_deferred_at = None
                 keep.pinned_window_key = ""
                 keep.error = ""
                 for extra in existing[1:]:
@@ -1989,8 +1991,6 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "clip_transcript_text": clip_transcript_text,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
-            "defer_count": int(p.defer_count or 0),
-            "last_deferred_at": p.last_deferred_at,
             "first_reply_id": p.first_reply_id or "",
             "first_reply_text": p.first_reply_text or "",
             "first_reply_error": p.first_reply_error or "",
@@ -2250,6 +2250,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
          "drafts_count": drafts_count, "queue_count": queue_count,
          "linear": linear, "windows_et": windows_et,
+         "windows_local": window_time_labels(),
          "msg": msg, "active": "calendar"},
     )
 

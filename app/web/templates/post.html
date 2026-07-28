@@ -140,7 +140,6 @@
   <section class="wf-section">
     <div class="wf-head">
       <span class="wf-title">Schedule</span>
-      {% if defer_count %}<span class="meta">deferred {{ defer_count }}×</span>{% endif %}
     </div>
     <div class="wf-body plain">
       <div class="schedule-banner">
@@ -160,9 +159,6 @@
           {% endif %}
         </div>
       </div>
-      {% if defer_count and last_deferred_at %}
-      <p class="field-hint">Last deferred {{ last_deferred_at.astimezone().strftime("%b %-d %-I:%M %p") }}.</p>
-      {% endif %}
     </div>
   </section>
   {% endif %}

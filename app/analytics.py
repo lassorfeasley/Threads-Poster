@@ -77,11 +77,13 @@ def snapshot_metrics(session) -> int:
 
 
 def poll_recent_metrics(session) -> int:
-    """Frequent insights pull for recently published posts (feeds hotness checks).
+    """Frequent insights pull for recently published posts.
 
     Independent of the long-term ``snapshot_interval_hours`` cadence: only posts
     published within ``scheduler.metrics_poll_recency_hours`` are considered, and
     each is re-snapshotted at most every ``scheduler.metrics_poll_interval_minutes``.
+    The dense early samples are what let analytics compare posts at the same age
+    (``analytics.metric_age_hours``) instead of interpolating across a 12h gap.
     """
     settings = load_settings()
     interval = dt.timedelta(
@@ -134,68 +136,6 @@ def poll_recent_metrics(session) -> int:
         session.flush()
         log.info("Recent metric snapshots taken: %d", taken)
     return taken
-
-
-def likes_delta_trailing(session, post: ThreadsPost, window_minutes: int) -> int | None:
-    """Likes gained by ``post`` over the trailing ``window_minutes``.
-
-    Diffs the latest MetricSnapshot against the newest snapshot at least
-    ``window_minutes`` old (or the oldest available if the post is younger).
-    Returns None when there aren't enough snapshots to compute a delta.
-    """
-    snaps = session.execute(
-        select(MetricSnapshot)
-        .where(MetricSnapshot.post_pk == post.id, MetricSnapshot.likes.is_not(None))
-        .order_by(MetricSnapshot.captured_at.desc())
-    ).scalars().all()
-    if len(snaps) < 2:
-        return None
-
-    latest = snaps[0]
-    latest_at = latest.captured_at
-    if latest_at.tzinfo is None:
-        latest_at = latest_at.replace(tzinfo=dt.timezone.utc)
-    cutoff = latest_at - dt.timedelta(minutes=window_minutes)
-
-    older = None
-    for snap in snaps[1:]:
-        at = snap.captured_at
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=dt.timezone.utc)
-        older = snap
-        if at <= cutoff:
-            break
-
-    if older is None or older.likes is None or latest.likes is None:
-        return None
-    return max(0, int(latest.likes) - int(older.likes))
-
-
-def is_last_post_hot(session) -> tuple[bool, int | None]:
-    """Whether the most recently published post is 'hot' per scheduler settings.
-
-    Returns ``(is_hot, likes_delta)``. When there is no published post or not
-    enough snapshot history, treats as not hot (``False, None``) so the queue
-    can proceed rather than stall forever on missing data.
-    """
-    settings = load_settings()
-    threshold = int(settings.get("scheduler.hot.threshold", 100))
-    window_minutes = int(settings.get("scheduler.hot.window_minutes", 60))
-    # metric is fixed to likes for v1; settings keep the knob for later.
-
-    post = session.execute(
-        select(ThreadsPost).where(
-            ThreadsPost.status == "published",
-            ThreadsPost.published_at.is_not(None),
-        ).order_by(ThreadsPost.published_at.desc()).limit(1)
-    ).scalar_one_or_none()
-    if post is None:
-        return False, None
-
-    delta = likes_delta_trailing(session, post, window_minutes)
-    if delta is None:
-        return False, None
-    return delta > threshold, delta
 
 
 def _latest_metrics_bulk(session, post_ids: list[int]) -> dict[int, dict]:
