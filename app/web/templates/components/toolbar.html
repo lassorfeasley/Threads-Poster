@@ -98,6 +98,20 @@
 </label>
 {% endmacro %}
 
+{# From/To dates joined in one bordered box under a single label. #}
+{% macro daterange(from_name, to_name, from_value='', to_value='', label='Date range', submit=true) %}
+<div class="tb-field tb-daterange">
+  {% if label %}<span class="tb-label">{{ label }}</span>{% endif %}
+  <div class="tb-daterange-box">
+    <input type="date" name="{{ from_name }}" value="{{ from_value }}"
+           aria-label="{{ label or 'Date range' }} — from" {% if submit %}data-submit-on-change{% endif %}>
+    <span class="tb-daterange-sep" aria-hidden="true">–</span>
+    <input type="date" name="{{ to_name }}" value="{{ to_value }}"
+           aria-label="{{ label or 'Date range' }} — to" {% if submit %}data-submit-on-change{% endif %}>
+  </div>
+</div>
+{% endmacro %}
+
 {# Reset link (server model) — render only when filters are active. #}
 {% macro clear(href) %}
 <a class="btn ghost sm tb-clear" href="{{ href }}">Clear</a>

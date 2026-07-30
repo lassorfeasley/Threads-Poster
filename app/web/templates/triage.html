@@ -1,9 +1,18 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
-{% set tri_sub %}<span id="progress"></span><div class="progressbar" id="progbar" style="display: none;"><i></i></div>{% endset %}
-{% set tri_actions %}<a class="btn ghost" href="/">← Back to dashboard</a>{% endset %}
-{{ ui.pagebar("Triage", sub=tri_sub, actions=tri_actions) }}
+{% set tri_crumbs %}
+  <a class="copy-btn" href="/" title="Back to dashboard" aria-label="Back to dashboard">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+  </a>
+{% endset %}
+{% set tri_actions %}
+  <div class="triage-progress">
+    <span id="progress"></span>
+    <div class="progressbar" id="progbar" style="display: none;"><i></i></div>
+  </div>
+{% endset %}
+{{ ui.pagebar("", crumbs=tri_crumbs, actions=tri_actions) }}
 
 <div id="done" class="empty" style="display: none; padding: 56px 20px;">
   <span class="icon">🎉</span>
@@ -20,7 +29,6 @@
     <div style="flex: 1.6; min-width: 480px;">
       <iframe class="yt" id="player" src="" allow="autoplay; encrypted-media; picture-in-picture"
               allowfullscreen></iframe>
-      <div class="meta" style="margin-top: 8px;">Plays with sound. If your browser blocks autoplay, click the video to start.</div>
     </div>
     <div class="grow" style="min-width: 300px;">
       <div id="title" style="font-weight: 650; font-size: 16px; line-height: 1.4;"></div>
@@ -37,10 +45,6 @@
         <button class="reject lg" onclick="act('reject')">Reject&nbsp;<kbd>X</kbd></button>
         <button class="lg" onclick="advance('skipped')">Skip&nbsp;<kbd>S</kbd></button>
         <button class="lg" id="undo-btn" onclick="undo()" disabled>Undo&nbsp;<kbd>U</kbd></button>
-      </div>
-      <div class="meta" style="margin-top: 16px;">
-        <kbd>Z</kbd> approve &amp; next · <kbd>X</kbd> reject &amp; next · <kbd>S</kbd> skip ·
-        <kbd>U</kbd> undo last — approving starts the download + transcript in the background.
       </div>
       <div class="meta" style="margin-top: 8px;" id="counts"></div>
     </div>
@@ -106,7 +110,7 @@ function render() {
   renderBadges(c);
   document.getElementById('rationale').textContent = c.rationale || '';
   renderVisual(c);
-  document.getElementById('progress').textContent = `Reviewing ${idx + 1} of ${queue.length}`;
+  document.getElementById('progress').textContent = `${idx + 1} of ${queue.length}`;
   setProgress(idx, queue.length);
   document.getElementById('counts').textContent =
     `${stats.approved} approved · ${stats.rejected} rejected · ${stats.skipped} skipped`;
@@ -131,8 +135,6 @@ function traitBadge(t) {
 
 function renderBadges(c) {
   const badges = [];
-  if (c.score !== null && c.score !== undefined)
-    badges.push(`<span class="badge score-hi" title="Climate relevance">${c.score.toFixed(2)}</span>`);
   (c.visual_traits || []).forEach(t => badges.push(traitBadge(t)));
   (c.keywords || []).forEach(k => badges.push(`<span class="badge" title="matched keyword">${k}</span>`));
   document.getElementById('badges').innerHTML = badges.join(' ');

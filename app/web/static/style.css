@@ -68,9 +68,11 @@
   --primary-bg-hover: linear-gradient(180deg, #52db9d 0%, #3bcd8d 100%);
   --primary-ink: #06281c;
 
-  /* Canvas colors read by the waveform editor (theme-aware). */
-  --wave-bar: rgba(126, 140, 154, 0.55);
-  --wave-grid: rgba(126, 140, 154, 0.25);
+  /* Waveform editor: white bars on a dark track (same in both themes). */
+  --wave-bg: #14171b;
+  --wave-bar: rgba(255, 255, 255, 0.32);
+  --wave-bar-on: rgba(255, 255, 255, 0.92);
+  --wave-grid: rgba(255, 255, 255, 0.12);
   --row-stripe: rgba(255, 255, 255, 0.015);
   --shimmer: rgba(255, 255, 255, 0.05);
 }
@@ -115,8 +117,6 @@ html[data-theme="light"] {
   --primary-bg-hover: linear-gradient(180deg, #19b56c 0%, #15995c 100%);
   --primary-ink: #ffffff;
 
-  --wave-bar: rgba(88, 102, 116, 0.5);
-  --wave-grid: rgba(88, 102, 116, 0.28);
   --row-stripe: rgba(16, 24, 40, 0.025);
   --shimmer: rgba(16, 24, 40, 0.05);
 }
@@ -448,6 +448,17 @@ main {
   align-items: center;
   min-height: 30px;
 }
+.pagebar-head:has(.pagebar-crumbs.only-child) { align-items: center; }
+.pagebar.is-sticky:has(.pagebar-crumbs.only-child) .pagebar-inner {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.pagebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .pagebar-title h1 {
   margin: 0;
   display: flex;
@@ -472,8 +483,42 @@ main {
   flex-wrap: wrap;
   margin-top: 14px;
 }
+/* Filters rendered below the sticky bar rather than inside it. */
+/* Bottom-align: the stacked-label date fields are taller than the one-line
+   search/combo, so anchoring everything to the input baseline keeps the row tidy. */
+.pagebar-tools.below-bar { margin: 4px 0 18px; align-items: flex-end; }
 .tb-field { display: inline-flex; align-items: center; gap: 7px; margin: 0; }
 .tb-label { color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
+/* Date filters: label sits above the input so the row stays scannable. */
+.tb-field.tb-date {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+/* Date range: both inputs share one bordered box under a single label. */
+.tb-field.tb-daterange {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.tb-daterange-box {
+  display: inline-flex;
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0 2px;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.tb-daterange-box:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+.tb-daterange-box input[type="date"] {
+  width: auto;
+  border: none;
+  background: transparent;
+  padding: 8px 6px;
+}
+.tb-daterange-box input[type="date"]:focus { outline: none; border: none; box-shadow: none; }
+.tb-daterange-sep { color: var(--muted); flex: none; }
 .pagebar-tools .tb-field > input,
 .pagebar-tools .tb-field > select { margin: 0; min-width: 0; }
 
@@ -543,6 +588,17 @@ h2 .meta { text-transform: none; letter-spacing: 0; font-weight: 500; white-spac
 /* Section header row: heading on the left, controls (e.g. view toggle) right. */
 .panel-head { display: flex; align-items: center; gap: 12px; }
 .panel-head h2 { flex: 1; min-width: 0; }
+.panel-head-rule {
+  align-self: stretch;
+  width: 1px;
+  background: var(--border);
+  margin: 2px 2px;
+}
+.panel-head-uploads {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
 
 a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -1420,7 +1476,7 @@ canvas#wave {
   height: 96px;
   display: block;
   border-radius: var(--radius);
-  background: var(--panel2);
+  background: var(--wave-bg);
   border: 1px solid var(--border);
   cursor: crosshair;
   touch-action: none;
@@ -1504,7 +1560,7 @@ canvas#wave {
   height: 46px;
   display: block;
   border-radius: 6px;
-  background: var(--panel);
+  background: var(--wave-bg);
   border: 1px solid var(--border);
   touch-action: none;
 }
@@ -1613,6 +1669,18 @@ kbd {
   background: var(--accent);
   border-radius: 999px;
   transition: width 0.25s ease;
+}
+.triage-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.triage-progress .progressbar {
+  margin-top: 0;
+  width: 140px;
 }
 
 /* Filmstrip */
@@ -2168,6 +2236,50 @@ body.cal-committing #cal-layout {
 }
 .crumbs .crumb-current svg { color: var(--accent); }
 .crumbs .crumb-sep { color: var(--muted); opacity: 0.55; font-size: 13px; }
+/* View-switcher crumbs (dashboard): <button>s dressed as crumbs so pipeline
+   stages read like the Video › Edit › Clip trail but swap panels in place. */
+.crumbs button.crumb {
+  background: none;
+  border: 1px solid transparent;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.crumbs button.crumb:hover { color: var(--text); background: var(--panel2); }
+.crumbs button.crumb-current {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+.crumbs .crumb-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--panel2);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.crumbs .crumb-current .crumb-count { background: var(--accent-border); color: var(--text); }
+.crumbs .crumb.is-locked {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* Video page: title + source meta live under the workflow crumbs. */
+.video-ident { margin: 0 0 var(--sp-4); }
+.video-ident-title {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  line-height: 1.35;
+}
 
 /* --- Post page: video hero in a wide left column, workflow in a right rail. --- */
 .post-layout {

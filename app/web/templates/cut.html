@@ -440,14 +440,16 @@ const xOf = t => (t / duration()) * wave.width;
 function drawWave() {
   if (!wf) return;
   const W = wave.width, H = wave.height, mid = H / 2;
+  const dpr = window.devicePixelRatio || 1;
   const css = getComputedStyle(document.documentElement);
-  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(126,140,154,0.55)';
-  const gridColor = css.getPropertyValue('--wave-grid').trim() || 'rgba(126,140,154,0.25)';
+  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(255,255,255,0.32)';
+  const barOn = css.getPropertyValue('--wave-bar-on').trim() || 'rgba(255,255,255,0.92)';
+  const gridColor = css.getPropertyValue('--wave-grid').trim() || 'rgba(255,255,255,0.12)';
   wctx.clearRect(0, 0, W, H);
 
   segments.forEach((s, i) => {
     const x0 = xOf(s.start), x1 = xOf(s.end);
-    wctx.fillStyle = i === selectedSeg ? 'rgba(62,207,142,0.32)' : 'rgba(62,207,142,0.18)';
+    wctx.fillStyle = i === selectedSeg ? 'rgba(62,207,142,0.28)' : 'rgba(62,207,142,0.14)';
     wctx.fillRect(x0, 0, x1 - x0, H);
     if (i === selectedSeg) {
       wctx.strokeStyle = 'rgba(62,207,142,0.95)';
@@ -457,27 +459,31 @@ function drawWave() {
   });
 
   if (pending.start !== null && pending.end !== null && pending.end > pending.start) {
-    wctx.fillStyle = 'rgba(239,112,112,0.15)';
+    wctx.fillStyle = 'rgba(239,112,112,0.18)';
     wctx.fillRect(xOf(pending.start), 0, xOf(pending.end) - xOf(pending.start), H);
   }
 
-  const n = wf.peaks.length, barW = W / n;
-  for (let i = 0; i < n; i++) {
-    const t = (i / n) * duration();
+  // Stepped bars (same approach as the segment waves) — denser peak arrays
+  // used to paint one hairline per sample and read as grey mush; sampling by
+  // pixel step keeps each bar readable against the dark track.
+  const n = wf.peaks.length, total = duration(), step = Math.max(2, Math.round(2 * dpr));
+  for (let x = 0; x < W; x += step) {
+    const t = (x / W) * total;
+    const k = Math.min(n - 1, Math.max(0, Math.floor((t / total) * n)));
     const inSeg = segments.some(s => t >= s.start && t <= s.end);
-    wctx.fillStyle = inSeg ? 'rgba(62,207,142,0.85)' : barColor;
-    const h = Math.max(1, wf.peaks[i] * (H * 0.86));
-    wctx.fillRect(i * barW, mid - h / 2, Math.max(1, barW * 0.7), h);
+    wctx.fillStyle = inSeg ? barOn : barColor;
+    const h = Math.max(1, wf.peaks[k] * (H * 0.82));
+    wctx.fillRect(x, mid - h / 2, Math.max(1, step * 0.65), h);
   }
 
   wctx.fillStyle = gridColor;
-  wctx.font = `${10 * (window.devicePixelRatio || 1)}px sans-serif`;
+  wctx.font = `${10 * dpr}px sans-serif`;
   for (let t = 30; t < duration(); t += 30) {
     wctx.fillRect(xOf(t), 0, 1, H);
     wctx.fillText(`${t}s`, xOf(t) + 3, H - 4);
   }
 
-  wctx.fillStyle = 'rgba(40,150,100,0.95)';
+  wctx.fillStyle = 'rgba(62,207,142,0.95)';
   for (const s of segments) {
     wctx.fillRect(xOf(s.start) - 1, 0, 2, H);
     wctx.fillRect(xOf(s.end) - 1, 0, 2, H);
@@ -700,7 +706,8 @@ function drawSegWave(i) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height, mid = H / 2;
   const css = getComputedStyle(document.documentElement);
-  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(126,140,154,0.55)';
+  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(255,255,255,0.32)';
+  const barOn = css.getPropertyValue('--wave-bar-on').trim() || 'rgba(255,255,255,0.92)';
   ctx.clearRect(0, 0, W, H);
 
   const s = segments[i], win = segWindow(i), span = (win.b - win.a) || 1;
@@ -710,22 +717,22 @@ function drawSegWave(i) {
   ctx.fillRect(xOfT(s.start), 0, xOfT(s.end) - xOfT(s.start), H);
 
   if (wf && wf.peaks && wf.peaks.length) {
-    const n = wf.peaks.length, total = duration(), step = 2 * dpr;
+    const n = wf.peaks.length, total = duration(), step = Math.max(2, Math.round(2 * dpr));
     for (let x = 0; x < W; x += step) {
       const t = win.a + (x / W) * span;
       if (t < 0 || t > total) continue;
       const k = Math.min(n - 1, Math.max(0, Math.floor((t / total) * n)));
       const inSeg = t >= s.start && t <= s.end;
       const h = Math.max(1, wf.peaks[k] * (H * 0.8));
-      ctx.fillStyle = inSeg ? 'rgba(62,207,142,0.9)' : barColor;
-      ctx.fillRect(x, mid - h / 2, Math.max(1, step * 0.7), h);
+      ctx.fillStyle = inSeg ? barOn : barColor;
+      ctx.fillRect(x, mid - h / 2, Math.max(1, step * 0.65), h);
     }
   } else {
     ctx.fillStyle = barColor;
     ctx.fillRect(0, mid - 1, W, 2);
   }
 
-  ctx.fillStyle = 'rgba(40,150,100,0.95)';
+  ctx.fillStyle = 'rgba(62,207,142,0.95)';
   ctx.fillRect(xOfT(s.start) - 1, 0, 2, H);
   ctx.fillRect(xOfT(s.end) - 1, 0, 2, H);
 
