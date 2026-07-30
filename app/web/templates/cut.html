@@ -1,30 +1,42 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
-{% set cut_sub %}{{ c.channel.call_sign }} · {{ c.channel.market }} · <a href="{{ c.url }}" target="_blank">YouTube ↗</a> · from <a href="/video/{{ c.id }}?step=cuts">source video</a>{% endset %}
+{% set cut_crumbs %}
+<nav class="crumbs" aria-label="Breadcrumb">
+  <a href="/video/{{ c.id }}?step=cuts" class="crumb"
+     title="Video{% if c.title %}: {{ c.title }}{% endif %}">Video</a>
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  {% if step == "trim" %}
+  <span class="crumb crumb-current" aria-current="page"
+        title="Trim and edit: {{ cut.clip_title or 'Untitled clip' }}">Edit</span>
+  {% if state.exported %}
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  <a href="/cut/{{ cut.id }}?step=post" class="crumb"
+     title="Back to the clip without re-exporting">Clip</a>
+  {% endif %}
+  {% else %}
+  <a href="/cut/{{ cut.id }}?step=trim" class="crumb"
+     title="Trim and edit this clip">Edit</a>
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  <span class="crumb crumb-current" aria-current="page"
+        title="{{ cut.clip_title or 'Untitled clip' }}">Clip</span>
+  {% endif %}
+</nav>
+{% endset %}
 {% set cut_actions %}
-  <a id="download-clip-link" class="btn sm"
-     href="/cut/{{ cut.id }}/download-clip?captioned={{ 1 if cut.subtitled_clip_path else 0 }}" download>
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-    Download clip</a>
+  <a id="download-clip-link" class="copy-btn"
+     href="/cut/{{ cut.id }}/download-clip?captioned={{ 1 if cut.subtitled_clip_path else 0 }}" download
+     title="Download clip" aria-label="Download clip">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg></a>
   <form method="post" action="/cut/{{ cut.id }}/delete" class="inline"
-        data-confirm="Delete this cut? Its draft/queued posts are removed; published posts are kept."
+        data-confirm="Delete this clip? Its draft/queued posts are removed; published posts are kept."
         data-confirm-ok="Delete" data-confirm-variant="danger">
-    <button class="reject sm icon-btn" title="Delete this cut" aria-label="Delete cut">
+    <button class="btn sm danger icon-btn" title="Delete this clip" aria-label="Delete clip">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6M14 11v6"/></svg>
     </button>
   </form>
 {% endset %}
-{{ ui.pagebar(cut.clip_title or "Untitled cut", sub=cut_sub, actions=cut_actions) }}
-
-{# ---- Cut stepper ---- #}
-<div class="steps">
-  <a class="step {{ 'done' if state.exported }} {{ 'current' if step == 'trim' }}"
-     href="/cut/{{ cut.id }}?step=trim"><span class="n">{{ "✓" if state.exported else "1" }}</span> Trim</a>
-  <span class="sep">›</span>
-  <a class="step {{ 'done' if state.posted }} {{ 'current' if step == 'post' }} {{ 'locked' if not state.exported }}"
-     href="/cut/{{ cut.id }}?step=post"><span class="n">{{ "✓" if state.posted else "2" }}</span> Post</a>
-</div>
+{{ ui.pagebar("", crumbs=cut_crumbs, actions=cut_actions) }}
 
 {% import "components/category.html" as catui %}
 
@@ -70,23 +82,27 @@
       <div class="btn-group" style="margin-top: 8px;">
         <button class="approve"
           {% if pending_post_status %}
-          data-confirm-title="Re-export this cut?"
+          data-confirm-title="Re-export this clip?"
           data-confirm-ok="Export new clip"
-          data-confirm="This cut has a {{ pending_post_status }} post. That post keeps the clip it was queued with — the new export won't replace its video. To post the new clip, re-queue it from the Post step."
+          data-confirm="This clip has a {{ pending_post_status }} post. That post keeps the video it was queued with — the new export won't replace it. To post the new video, re-queue it from the clip page."
+          {% elif state.exported %}
+          data-confirm-title="Re-export this clip?"
+          data-confirm-ok="Replace clip"
+          data-confirm="Exporting again replaces this clip's current video (and its burned-in captions). Made no changes? Use the Clip breadcrumb to go back without re-exporting."
           {% endif %}>Export {{ "new " if state.exported }}clip →</button>
       </div>
     </form>
     {% if pending_post_status %}
-      <div class="meta" style="margin-top: 10px;">This cut has a
+      <div class="meta" style="margin-top: 10px;">This clip has a
         <strong>{{ pending_post_status }}</strong> post. Exporting again won't change that
-        post's video — re-queue from the <a href="/cut/{{ cut.id }}?step=post">Post step</a>
-        to use the new clip. Want both clips? Start a
-        <a href="/video/{{ c.id }}?step=cuts">new cut</a> instead.</div>
+        post's video — re-queue from the <a href="/cut/{{ cut.id }}?step=post">clip page</a>
+        to use the new export. Want both versions? Start a
+        <a href="/video/{{ c.id }}?step=cuts">new clip</a> instead.</div>
     {% elif state.exported %}
-      <div class="meta" style="margin-top: 10px;">A clip was already exported —
-        <a href="/cut/{{ cut.id }}?step=post">continue to Post</a> or export again to replace it.
-        To keep this one and make a second clip, start a
-        <a href="/video/{{ c.id }}?step=cuts">new cut</a>.</div>
+      <div class="meta" style="margin-top: 10px;">This clip is already exported —
+        <a href="/cut/{{ cut.id }}?step=post">back to the clip</a> if nothing changed, or export
+        again to replace it. To keep this one and make a second clip, start a
+        <a href="/video/{{ c.id }}?step=cuts">new clip</a>.</div>
     {% endif %}
   </div>
 </div>
@@ -827,100 +843,156 @@ initSegDnd();
 {% if step == "post" %}
 {% if not state.exported %}
   <div class="empty"><strong>No exported clip yet</strong>
-    Do the <a href="/cut/{{ cut.id }}?step=trim">Trim</a> step first.</div>
+    <a href="/cut/{{ cut.id }}?step=trim">Edit and export</a> the clip first.</div>
 {% else %}
-<div class="post-layout">
+{# The cut's Post step mirrors the post page: one thread-preview card that
+   reads exactly like the Threads post it will become. #}
+{% set handle = account_name or "you" %}
+<div class="post-layout no-side">
 <div class="post-main">
+<div class="post-preview">
+<div class="thread-preview">
 
-  {# ---- Media stage: the clip is the hero (sticky while the rail scrolls) ---- #}
-  <div class="media-stage">
-    {# ?v= cache-buster: the media URLs never change, so without it the browser
-       keeps playing its cached copy after a re-export or caption regeneration. #}
-    {% set media_v = (cut.updated_at.timestamp() | int) if cut.updated_at else 0 %}
-    <video id="clip-player"
-           src="{{ ('/media/subtitled/' ~ cut.id if (cut.subtitled_clip_path and cut.use_subtitles) else '/media/clip/' ~ cut.id) ~ '?v=' ~ media_v }}"
-           controls preload="metadata"></video>
-    {% if clip_transcript_text %}
-    <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
-    {% endif %}
+  {# ---- Programming category (lives on the source video) ---- #}
+  <div class="preview-topbar">
+    {{ catui.field(c.id, c.category, "/cut/" ~ cut.id ~ "?step=post", show_label=false) }}
   </div>
-</div>{# /.post-main #}
 
-<div class="post-side">
-
-  {# ---- Ship rail: primary action on top, alternatives beneath. Buttons live
-     outside form#post-form (it renders further down) but submit it via the
-     form= attribute. ---- #}
-  {% if threads_ok %}
-  <div class="ship-rail">
-    <button class="approve" id="btn-queue" form="post-form"
-            formaction="/cut/{{ cut.id }}/queue" formnovalidate>Add to queue</button>
-    <div class="rail-row">
-      <button id="btn-post-now" form="post-form">Post now</button>
-      <button id="btn-draft" form="post-form"
-              formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
+  {# ---- The post: caption edited in place above the clip. ---- #}
+  <article class="thread-item">
+    <div class="ti-gutter" aria-hidden="true">
+      <span class="ti-avatar">{{ handle[0]|upper }}</span>
+      <span class="ti-line"></span>
     </div>
+    <div class="ti-main">
+      <div class="ti-head">
+        <span class="ti-name">{{ handle }}</span>
+        <span class="ti-type">caption</span>
+        <span class="ti-tools">
+          <span class="save-state" id="caption-save-state" aria-live="polite"></span>
+          <details class="ti-menu">
+            <summary aria-label="Caption actions" title="Caption actions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+            </summary>
+            <div class="ti-menu-pop">
+              <button type="button" id="copy-caption-btn" data-caption="{{ cut.draft_caption }}"
+                      onclick="copyCaption()">Copy caption</button>
+            </div>
+          </details>
+        </span>
+      </div>
+      <textarea form="post-form" name="caption" id="caption" class="ti-text" required
+                placeholder="Write the caption for this post…">{{ cut.draft_caption }}</textarea>
+      <div id="caption-proposal" class="caption-proposal" hidden>
+        <div class="caption-proposal-label">Suggested caption — drafted from the trimmed transcript. Review before using.</div>
+        <p class="caption-proposal-text" id="caption-proposal-text"></p>
+        <div class="ctl-strip">
+          <button type="button" class="approve sm" onclick="acceptProposal()">Use this caption</button>
+          <button type="button" class="ghost sm" onclick="dismissProposal()">Dismiss</button>
+        </div>
+      </div>
+      <button type="button" class="suggest-btn" id="suggest-btn" onclick="suggestCaption()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+        <span class="lbl">{{ "Regenerate caption" if cut.draft_caption else "Suggest caption" }}</span>
+      </button>
+      <div class="ti-media">
+        {# ?v= cache-buster: the media URLs never change, so without it the browser
+           keeps playing its cached copy after a re-export or caption regeneration. #}
+        {% set media_v = (cut.updated_at.timestamp() | int) if cut.updated_at else 0 %}
+        <video id="clip-player"
+               src="{{ ('/media/subtitled/' ~ cut.id if (cut.subtitled_clip_path and cut.use_subtitles) else '/media/clip/' ~ cut.id) ~ '?v=' ~ media_v }}"
+               controls preload="metadata"></video>
+      </div>
+      {# Clip controls where Threads shows engagement: burned-in caption
+         position + one-click transcript copy. #}
+      <div class="ti-clip-tools">
+        <div class="seg-toggle cat-toggle" id="subs-line" role="group" aria-label="Burned-in captions">
+          <button type="button" class="{{ 'is-on' if not cut.use_subtitles }}"
+                  data-pos="none" onclick="setSubsMode('none')">No captions</button>
+          <button type="button" class="{{ 'is-on' if cut.use_subtitles and subs_position != 'top' }}"
+                  data-pos="bottom" onclick="setSubsMode('bottom')">Bottom</button>
+          <button type="button" class="{{ 'is-on' if cut.use_subtitles and subs_position == 'top' }}"
+                  data-pos="top" onclick="setSubsMode('top')">Top</button>
+        </div>
+        {% if clip_transcript_text %}
+        <button type="button" class="ghost-line-btn" onclick="copyTranscript(this)"
+                title="Copy the clip's transcript">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          Copy transcript
+        </button>
+        {% endif %}
+      </div>
+      <div class="meta" id="subs-status" aria-live="polite"></div>
+    </div>
+  </article>
+
+  {# ---- The first comment (attribution) — configured here, saved onto the
+       post when it's queued/drafted/published. ---- #}
+  <article class="thread-item is-reply">
+    <div class="ti-gutter" aria-hidden="true">
+      <span class="ti-avatar">{{ handle[0]|upper }}</span>
+    </div>
+    <div class="ti-main">
+      <div class="ti-head">
+        <span class="ti-name">{{ handle }}</span>
+        <span class="ti-type">first reply · attribution</span>
+        <span class="ti-tools">
+          <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
+          <details class="ti-menu">
+            <summary aria-label="Attribution actions" title="Attribution actions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+            </summary>
+            <div class="ti-menu-pop">
+              <button type="button" id="attribution-regen"
+                      onclick="suggestAttribution(this)">{{ "Regenerate draft" if attribution_text else "Suggest draft" }}</button>
+              <a href="/engagement/first-reply">Reply settings</a>
+            </div>
+          </details>
+        </span>
+      </div>
+      <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
+                placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to auto-draft at queue time.">{{ attribution_text }}</textarea>
+      {# Visible way into the LLM draft while the comment is empty; the kebab
+         keeps "Regenerate draft" once there's text. #}
+      <button type="button" id="attribution-suggest" class="suggest-btn"
+              {% if attribution_text %}hidden{% endif %} onclick="suggestAttribution(this)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+        <span class="lbl">Suggest a draft</span>
+      </button>
+      {% if not attribution_enabled %}
+      <p class="field-hint">Attribution comments are off under
+        <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
+      {% endif %}
+    </div>
+  </article>
+
+  {% if threads_ok %}
+  {# ---- Ship: buttons submit form#post-form via the form= attribute; JS
+       confirms + validates the caption before anything fires. ---- #}
+  <div class="thread-actions">
+    <form method="post" action="/cut/{{ cut.id }}/post" id="post-form">
+      <input type="hidden" name="use_subtitles" id="use-subtitles-field"
+             value="{{ '1' if cut.use_subtitles else '0' }}">
+    </form>
+    {% if pending_post_status %}
+    <span class="ta-note">Edits the clip's
+      <a href="/post/{{ pending_post_id }}">{{ pending_post_status }} post</a></span>
+    {% endif %}
+    <button id="btn-draft" form="post-form"
+            formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
+    <button id="btn-post-now" form="post-form">Post now</button>
+    <button id="btn-queue" form="post-form" class="approve"
+            formaction="/cut/{{ cut.id }}/queue" formnovalidate>{{ "Update queue" if pending_post_status == "queued" else "Add to queue" }}</button>
   </div>
   {% endif %}
 
-  {# ---- Programming category (lives on the source video) ---- #}
-  <section class="wf-section">
-    <div class="wf-body">
-      {{ catui.field(c.id, c.category, "/cut/" ~ cut.id ~ "?step=post") }}
-    </div>
-  </section>
+  {% if clip_transcript_text %}
+  {# Clipboard source for the copy-transcript button (never displayed). #}
+  <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
+  {% endif %}
 
-  {# ---- 1 · Prepare ---- #}
-  <section class="wf-section">
-    <div class="wf-body">
-      <div class="subs-controls">
-        <div class="subs-line">
-          <span class="subs-lbl">Captions</span>
-          <label class="switch" title="Burn word-by-word captions into the clip you post">
-            <input type="checkbox" id="subs-enabled" {{ "checked" if cut.use_subtitles }}
-                   onchange="onSubsToggle()">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-        <div class="subs-line" id="subs-position-line">
-          <span class="subs-lbl">Position</span>
-          <div class="seg-toggle" role="group" aria-label="Caption position">
-            <button type="button" class="{{ 'is-on' if subs_position != 'top' }}"
-                    data-pos="bottom" onclick="setSubsPosition('bottom')">Bottom</button>
-            <button type="button" class="{{ 'is-on' if subs_position == 'top' }}"
-                    data-pos="top" onclick="setSubsPosition('top')">Top</button>
-          </div>
-        </div>
-        {% if cut.subtitled_clip_path %}
-        <div class="subs-line">
-          <button type="button" class="btn ghost sm" id="subs-regen-btn"
-                  onclick="generateSubtitles(subsPos)"
-                  title="Re-run transcription and burn fresh captions over the current clip (use when captions look wrong or stale)">↻ Regenerate</button>
-        </div>
-        {% endif %}
-        <span class="meta" id="subs-status"></span>
-      </div>
-    </div>
-    {% if clip_transcript %}
-    <details class="panel" style="margin-top: 10px;">
-      <summary>Clip transcript
-        <button type="button" class="copy-btn" style="margin-left: auto;"
-                onclick="event.preventDefault(); event.stopPropagation(); copyTranscript(this)"
-                title="Copy transcript" aria-label="Copy transcript">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-        </button>
-      </summary>
-      <div class="panel-body">
-        <div class="transcript-box" style="max-height: 300px; border: none; box-shadow: none; padding: 0;">
-          {% for s in clip_transcript %}
-            <div class="tline" onclick="clipSeek({{ s.clip_start }})">
-              <span class="ts">{{ "%d:%02d"|format(s.clip_start // 60, s.clip_start % 60) }}</span>{{ s.text }}</div>
-          {% endfor %}
-        </div>
-      </div>
-    </details>
-    {% endif %}
-  </section>
+</div>{# /thread-preview #}
+</div>{# /post-preview #}
   <script>
     // Whether a burned-in caption file already exists for this cut, and where it sits.
     let hasSubs = {{ 'true' if cut.subtitled_clip_path else 'false' }};
@@ -940,43 +1012,26 @@ initSegDnd();
       if (field) field.value = subs ? '1' : '0';
     }
 
-    // Reflect enabled/disabled state of the position toggle group.
-    function syncPositionUI() {
-      const line = document.getElementById('subs-position-line');
-      const on = document.getElementById('subs-enabled').checked;
-      line.classList.toggle('is-disabled', !on);
-      line.querySelectorAll('button').forEach(b => {
-        b.disabled = !on;
-        b.classList.toggle('is-on', on && b.dataset.pos === subsPos);
-      });
-      const regen = document.getElementById('subs-regen-btn');
-      if (regen) regen.disabled = !on;
+    function markSubsMode(mode) {
+      document.querySelectorAll('#subs-line button').forEach(b =>
+        b.classList.toggle('is-on', b.dataset.pos === mode));
     }
 
-    // The on/off switch: post (and preview) captioned vs. plain. Turning it on
-    // with no captions yet kicks off a generate at the current position.
-    function onSubsToggle() {
-      const on = document.getElementById('subs-enabled').checked;
-      if (on && !hasSubs) { generateSubtitles(subsPos); return; }
-      swapPreview(on);
-      syncPositionUI();
-    }
-
-    // Picking a position (re)generates the captions burned in at that spot.
-    function setSubsPosition(pos) {
-      subsPos = pos;
-      syncPositionUI();
-      generateSubtitles(pos);
+    // Three-state toggle: plain clip, or captions burned in at bottom/top.
+    // Reuses an already-rendered captioned file when the position matches;
+    // otherwise kicks off a (re)generate at that spot.
+    function setSubsMode(mode) {
+      if (mode === 'none') { markSubsMode('none'); swapPreview(false); return; }
+      if (hasSubs && subsPos === mode) { markSubsMode(mode); swapPreview(true); return; }
+      markSubsMode(mode);
+      generateSubtitles(mode);
     }
 
     async function generateSubtitles(position) {
       const status = document.getElementById('subs-status');
-      const sw = document.getElementById('subs-enabled');
-      const line = document.getElementById('subs-position-line');
-      if (sw) sw.disabled = true;
+      const line = document.getElementById('subs-line');
       line.querySelectorAll('button').forEach(b => b.disabled = true);
-      const regen = document.getElementById('subs-regen-btn');
-      if (regen) regen.disabled = true;
+      line.classList.add('is-disabled');
       status.classList.add('busy');
       status.textContent = 'Transcribing + rendering… this can take a minute.';
       try {
@@ -988,24 +1043,18 @@ initSegDnd();
         status.textContent = d.error || 'Caption generation failed';
       } catch (e) { status.textContent = 'Caption generation failed: ' + e; }
       status.classList.remove('busy');
-      if (sw) sw.disabled = false;
-      syncPositionUI();
+      line.querySelectorAll('button').forEach(b => b.disabled = false);
+      line.classList.remove('is-disabled');
+      // Nothing rendered — snap the toggle back to what's actually in effect.
+      const field = document.getElementById('use-subtitles-field');
+      markSubsMode(field && field.value === '1' ? subsPos : 'none');
     }
 
-    syncPositionUI();
     {% if not cut.subtitled_clip_path %}
     if (new URLSearchParams(location.search).get('autosubs') === '1') {
-      const sw = document.getElementById('subs-enabled');
-      if (sw) sw.checked = true;
       generateSubtitles(subsPos);
     }
     {% endif %}
-    function clipSeek(t) {
-      const p = document.getElementById('clip-player');
-      if (!p) return;
-      p.currentTime = t;
-      p.play();
-    }
     // Briefly swap a copy button's contents for a checkmark, then restore —
     // works for icon-only buttons without wiping the icon permanently.
     function flashCopied(btn) {
@@ -1013,7 +1062,8 @@ initSegDnd();
       const html = btn.innerHTML;
       btn.dataset.flashing = '1';
       btn.classList.add('is-copied');
-      btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+      btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>'
+        + (btn.classList.contains('ghost-line-btn') ? ' Copied' : '');
       setTimeout(() => {
         btn.innerHTML = html;
         btn.classList.remove('is-copied');
@@ -1034,9 +1084,8 @@ initSegDnd();
     }
   </script>
   {% if not threads_ok %}
-    <section class="wf-section">
+    <section class="wf-section" style="max-width: 100%;">
       <div class="wf-head">
-        <span class="wf-num">2</span>
         <span class="wf-title">Connect Threads</span>
       </div>
       <div class="wf-body">
@@ -1049,47 +1098,83 @@ initSegDnd();
         </form>
       </div>
     </section>
-  {% else %}
-    <form method="post" action="/cut/{{ cut.id }}/post" id="post-form">
-      {# ---- 2 · Write ---- #}
-      <section class="wf-section">
-        <div class="wf-body">
-          <div class="field" style="margin-bottom: 0;">
-            <div class="field-label-row">
-              <label for="caption">Caption</label>
-              <span class="save-state" id="caption-save-state" aria-live="polite"></span>
-              <button type="button" id="copy-caption-btn" class="copy-btn"
-                      data-caption="{{ cut.draft_caption }}" onclick="copyCaption()"
-                      title="Copy caption" aria-label="Copy caption">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              </button>
-            </div>
-            <textarea name="caption" id="caption" required>{{ cut.draft_caption }}</textarea>
-            <div id="caption-proposal" class="caption-proposal" hidden>
-              <div class="caption-proposal-label">Suggested caption — drafted from the trimmed transcript. Review before using.</div>
-              <p class="caption-proposal-text" id="caption-proposal-text"></p>
-              <div class="ctl-strip">
-                <button type="button" class="approve sm" onclick="acceptProposal()">Use this caption</button>
-                <button type="button" class="ghost sm" onclick="dismissProposal()">Dismiss</button>
-              </div>
-            </div>
-            <div class="ctl-strip" style="margin-top: 8px;">
-              <button type="button" class="ghost sm" id="suggest-btn" onclick="suggestCaption()">
-                {{ "Regenerate" if cut.draft_caption else "Suggest" }} caption</button>
-            </div>
-          </div>
-          <input type="hidden" name="use_subtitles" id="use-subtitles-field"
-                 value="{{ '1' if cut.use_subtitles else '0' }}">
-        </div>
-      </section>
-    </form>
+  {% endif %}
     <script>
+      // In-place text fields grow with content like real post text; the
+      // attribution also shows a character budget while focused.
+      (function () {
+        const MAX = 500;
+        for (const [taId, countId] of [['caption', null],
+                                       ['attribution', 'attribution-count']]) {
+          const ta = document.getElementById(taId);
+          if (!ta) continue;
+          const count = countId && document.getElementById(countId);
+          const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+          const render = () => {
+            if (!count) return;
+            const n = ta.value.length;
+            count.textContent = n + ' / ' + MAX;
+            count.classList.toggle('over', n >= MAX);
+          };
+          ta.addEventListener('input', () => { grow(); render(); });
+          grow(); render();
+        }
+      })();
+      // The inline "Suggest a draft" pill only makes sense while the comment is
+      // empty; it comes back if the operator clears the text again.
+      (function () {
+        const ta = document.getElementById('attribution');
+        const btn = document.getElementById('attribution-suggest');
+        if (!ta || !btn) return;
+        ta.addEventListener('input', () => { btn.hidden = ta.value.trim().length > 0; });
+      })();
+      // Kebab menus: close when clicking anywhere outside the open menu.
+      document.addEventListener('click', (e) => {
+        document.querySelectorAll('details.ti-menu[open]').forEach((d) => {
+          if (!d.contains(e.target)) d.removeAttribute('open');
+        });
+      });
+      function closeMenu(el) {
+        const menu = el && el.closest ? el.closest('details.ti-menu') : null;
+        if (menu) menu.removeAttribute('open');
+      }
+      async function suggestAttribution(btn) {
+        const ta = document.getElementById('attribution');
+        if (!ta) return;
+        // The inline pill keeps its icon by labelling through a child span; the
+        // kebab item is plain text, so fall back to the button itself.
+        const lbl = btn.querySelector('.lbl') || btn;
+        const old = lbl.textContent;
+        btn.disabled = true;
+        lbl.textContent = 'Drafting…';
+        try {
+          const r = await fetch('/cut/{{ cut.id }}/suggest-attribution', { method: 'POST' });
+          const d = await r.json();
+          if (!r.ok) { alert(d.error || 'Attribution draft failed.'); return; }
+          ta.value = d.text;
+          ta.dispatchEvent(new Event('input'));
+          const regen = document.getElementById('attribution-regen');
+          if (regen) regen.textContent = 'Regenerate draft';
+          closeMenu(btn);
+          ta.focus();
+          return;
+        } catch (e) {
+          alert('Attribution draft failed: ' + e);
+        } finally {
+          btn.disabled = false;
+          if (lbl.textContent === 'Drafting…') lbl.textContent = old;
+        }
+      }
       // The suggestion is only ever a PROPOSAL: it renders in a review card
       // and touches the caption field/DB only when the operator accepts it.
       let proposedCaption = '';
+      function suggestLabel(text) {
+        const btn = document.getElementById('suggest-btn');
+        (btn.querySelector('.lbl') || btn).textContent = text;
+      }
       async function suggestCaption(silent) {
         const btn = document.getElementById('suggest-btn');
-        btn.disabled = true; btn.textContent = 'Thinking…';
+        btn.disabled = true; suggestLabel('Thinking…');
         try {
           const r = await fetch('/cut/{{ cut.id }}/suggest-caption', { method: 'POST' });
           const d = await r.json();
@@ -1097,8 +1182,8 @@ initSegDnd();
           else if (!silent) alert(d.error || 'No caption returned');
         } catch (e) { if (!silent) alert('Suggestion failed: ' + e); }
         btn.disabled = false;
-        btn.textContent = document.getElementById('caption').value.trim()
-          ? 'Regenerate caption' : 'Suggest caption';
+        suggestLabel(document.getElementById('caption').value.trim()
+          ? 'Regenerate caption' : 'Suggest caption');
       }
       function showProposal(text) {
         proposedCaption = text;
@@ -1111,9 +1196,11 @@ initSegDnd();
       }
       function acceptProposal() {
         if (!proposedCaption) return;
-        document.getElementById('caption').value = proposedCaption;
+        const ta = document.getElementById('caption');
+        ta.value = proposedCaption;
+        ta.dispatchEvent(new Event('input')); // re-grow to the new text
         dismissProposal();
-        document.getElementById('suggest-btn').textContent = 'Regenerate caption';
+        suggestLabel('Regenerate caption');
         // Persist the accepted draft so it survives leaving the page (and so
         // the voice-signal diff records what the AI proposed vs what posted).
         saveCaptionNow();
@@ -1175,6 +1262,7 @@ initSegDnd();
       })();
       const postForm = document.getElementById('post-form');
       function captionOk() {
+        if (!postForm) return false;
         const cap = document.getElementById('caption');
         if (!cap.value.trim()) { alertDialog('Add a caption first.'); return false; }
         return true;
@@ -1183,31 +1271,36 @@ initSegDnd();
       // to null once the event finishes dispatching, and submitting with a null
       // submitter would fall back to the form's default action (/post = post now),
       // silently publishing a clip you meant to queue.
-      document.getElementById('btn-post-now').addEventListener('click', async (e) => {
-        e.preventDefault();
-        const btn = e.currentTarget;
-        if (!captionOk()) return;
-        if (await confirmDialog('Post this clip to Threads now?', { okText: 'Post now', okVariant: 'approve' }))
-          postForm.requestSubmit(btn);
-      });
-      document.getElementById('btn-queue').addEventListener('click', async (e) => {
-        e.preventDefault();
-        const btn = e.currentTarget;
-        if (!captionOk()) return;
-        if (await confirmDialog('Add this clip to the posting queue?', { okText: 'Add to queue' }))
-          postForm.requestSubmit(btn);
-      });
-      document.getElementById('btn-draft').addEventListener('click', (e) => {
-        e.preventDefault();
-        if (!captionOk()) return;
-        postForm.requestSubmit(e.currentTarget);
-      });
+      if (postForm) {
+        document.getElementById('btn-post-now').addEventListener('click', async (e) => {
+          e.preventDefault();
+          const btn = e.currentTarget;
+          if (!captionOk()) return;
+          if (await confirmDialog('Post this clip to Threads now?', { okText: 'Post now', okVariant: 'approve' }))
+            postForm.requestSubmit(btn);
+        });
+        document.getElementById('btn-queue').addEventListener('click', async (e) => {
+          e.preventDefault();
+          const btn = e.currentTarget;
+          if (!captionOk()) return;
+          {% if pending_post_status == "queued" %}
+          if (await confirmDialog('Update the queued post with this caption, clip and attribution?', { okText: 'Update queue' }))
+          {% else %}
+          if (await confirmDialog('Add this clip to the posting queue?', { okText: 'Add to queue' }))
+          {% endif %}
+            postForm.requestSubmit(btn);
+        });
+        document.getElementById('btn-draft').addEventListener('click', (e) => {
+          e.preventDefault();
+          if (!captionOk()) return;
+          postForm.requestSubmit(e.currentTarget);
+        });
+      }
     </script>
-  {% endif %}
 
   {% if posts %}
     <section class="wf-section">
-      <h2>Posts from this cut</h2>
+      <h2>Posts from this clip</h2>
       <div class="video-posts">
         {% for p in posts %}
         <div class="video-post">
@@ -1242,7 +1335,7 @@ initSegDnd();
       </div>
     </section>
   {% endif %}
-</div>{# /.post-side #}
+</div>{# /.post-main #}
 </div>{# /.post-layout #}
 <script>
   async function copyCaption() {

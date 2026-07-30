@@ -11,7 +11,7 @@
       Videos <span class="seg-count">{{ counts.videos }}</span>
     </button>
     <button type="button" class="seg-btn" role="tab" data-tab="cuts" onclick="setLibTab('cuts')">
-      Cuts <span class="seg-count">{{ counts.cuts }}</span>
+      Clips <span class="seg-count">{{ counts.cuts }}</span>
     </button>
     <button type="button" class="seg-btn" role="tab" data-tab="posts" onclick="setLibTab('posts')">
       Posts <span class="seg-count">{{ counts.posts }}</span>
@@ -55,9 +55,9 @@
         <div class="badges mc-foot">
           {% if cat %}<span class="badge" title="{{ cat.label }}">{{ cat.emoji }} {{ cat.label }}</span>{% endif %}
           {% if row.state.posted %}<span class="badge supportive">posted</span>
-          {% elif row.state.trimmed %}<span class="badge info">has cuts</span>
-          {% else %}<span class="badge score-lo">not cut yet</span>{% endif %}
-          {% if row.cut_count %}<span class="badge">{{ row.cut_count }} cut{{ "s" if row.cut_count != 1 }}</span>{% endif %}
+          {% elif row.state.trimmed %}<span class="badge info">has clips</span>
+          {% else %}<span class="badge score-lo">no clips yet</span>{% endif %}
+          {% if row.cut_count %}<span class="badge">{{ row.cut_count }} clip{{ "s" if row.cut_count != 1 }}</span>{% endif %}
         </div>
       </div>
     </a>
@@ -71,14 +71,14 @@
   <div class="lib-toolbar">
     {% if video_rows %}
       <button type="button" class="btn primary"
-              onclick="document.getElementById('new-cut-dialog').showModal()">＋ New cut</button>
+              onclick="document.getElementById('new-cut-dialog').showModal()">＋ New clip</button>
     {% else %}
-      <span class="meta">Download a video from <a href="/">Create content</a> first, then you can cut from it.</span>
+      <span class="meta">Download a video from <a href="/">Create content</a> first, then you can clip from it.</span>
     {% endif %}
   </div>
   {% if not cut_rows %}
-    <div class="empty"><span class="icon">✂</span><strong>No cuts yet</strong>
-      Use <strong>＋ New cut</strong> above (or open a video) to pick the segments you want to post.</div>
+    <div class="empty"><span class="icon">✂</span><strong>No clips yet</strong>
+      Use <strong>＋ New clip</strong> above (or open a video) to pick the segments you want to post.</div>
   {% else %}
   <div class="card-grid">
     {% for row in cut_rows %}
@@ -94,7 +94,7 @@
         {% endif %}
       </div>
       <div class="mc-body">
-        <div class="item-title">{{ row.cut.clip_title or "Untitled cut" }}</div>
+        <div class="item-title">{{ row.cut.clip_title or "Untitled clip" }}</div>
         <div class="meta">
           {% if row.cut.candidate %}from {{ row.cut.candidate.title[:60] }}<br>{% endif %}
           created {{ row.cut.created_at.strftime("%b %-d, %Y") if row.cut.created_at else "?" }}
@@ -114,21 +114,21 @@
 
 <dialog id="new-cut-dialog" class="modal">
   <div class="modal-head">
-    <strong>New cut — pick a source video</strong>
+    <strong>New clip — pick a source video</strong>
     <button type="button" class="btn ghost sm" aria-label="Close"
             onclick="document.getElementById('new-cut-dialog').close()">✕</button>
   </div>
-  <p class="meta" style="margin: 0 0 14px;">A cut is one clip from a downloaded video.
-    Choose which video to cut from — you'll land straight in its trim editor.</p>
+  <p class="meta" style="margin: 0 0 14px;">A clip is one trimmed excerpt from a downloaded
+    video. Choose which video to clip from — you'll land straight in its editor.</p>
   <div class="video-picker">
     {% for row in video_rows %}
     <form method="post" action="/video/{{ row.c.id }}/cuts" class="picker-row">
       <div class="grow">
         <div class="item-title">{{ row.c.title[:90] }}</div>
         <div class="meta">{{ row.c.channel.call_sign }} · {{ row.c.channel.market }}
-          {%- if row.cut_count %} · {{ row.cut_count }} cut{{ "s" if row.cut_count != 1 }} already{% endif %}</div>
+          {%- if row.cut_count %} · {{ row.cut_count }} clip{{ "s" if row.cut_count != 1 }} already{% endif %}</div>
       </div>
-      <button class="btn primary sm">Cut this →</button>
+      <button class="btn primary sm">Clip this →</button>
     </form>
     {% endfor %}
   </div>
@@ -138,7 +138,7 @@
 <div id="posts-panel" class="lib-panel" hidden>
   {% if not posts %}
     <div class="empty"><span class="icon">✦</span><strong>No posts yet</strong>
-      Post a cut to Threads and it'll show up here.</div>
+      Post a clip to Threads and it'll show up here.</div>
   {% else %}
   <div class="table-wrap">
   <table>
@@ -150,7 +150,7 @@
       <td><a href="/post/{{ p.id }}">{{ p.caption[:100] or "(open post)" }}</a>
         {% if p.cut and p.cut.clip_title %}<div class="meta" title="Clip title">{{ p.cut.clip_title }}</div>{% endif %}</td>
       <td class="meta">
-        {% if p.cut %}<a href="/cut/{{ p.cut.id }}?step=post">cut</a>
+        {% if p.cut %}<a href="/cut/{{ p.cut.id }}?step=post">clip</a>
         {% elif p.candidate %}<a href="/video/{{ p.candidate.id }}?step=cuts">{{ p.candidate.channel.call_sign }}</a>
         {% elif p.source == "threads" %}<span class="badge">Threads history</span>
         {% else %}—{% endif %}

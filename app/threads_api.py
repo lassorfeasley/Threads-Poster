@@ -208,6 +208,25 @@ def _me(access_token: str) -> dict:
     return resp.json()
 
 
+def account_username() -> str:
+    """The authenticated account's handle (e.g. "renewables_org"), cached in the
+    stored token payload after the first lookup so page renders never wait on
+    the network. Empty string when unavailable (offline / not connected)."""
+    try:
+        token = _peek_token()
+        if not token:
+            return ""
+        if token.get("username"):
+            return str(token["username"])
+        me = _me(token["access_token"])
+        token["username"] = me.get("username", "")
+        token["user_id"] = token.get("user_id") or me.get("id")
+        _save_token(token)
+        return str(token.get("username") or "")
+    except Exception:
+        return ""
+
+
 def _api(method: str, path: str, **params) -> dict:
     access_token, user_id = _auth()
     params["access_token"] = access_token

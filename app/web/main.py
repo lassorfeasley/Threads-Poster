@@ -67,6 +67,7 @@ from ..models import (
 from ..monitor import run_monitor_once
 from ..publishing import (
     clear_publishing,
+    generate_attribution,
     mark_publishing,
     maybe_post_first_reply,
     publish_clip,
@@ -788,7 +789,7 @@ def create_cut(candidate_id: int):
         if c is None:
             return _flash("/", "Video not found")
         if c.status != STATUS_ARCHIVED:
-            return _flash(f"/video/{candidate_id}", "Download the video before cutting it")
+            return _flash(f"/video/{candidate_id}", "Download the video before clipping it")
         # No caption seed: the video-level draft was written against the FULL
         # transcript. The caption is proposed after export, from the trimmed
         # clip's own transcript, and only adopted when the operator accepts it.
@@ -796,7 +797,7 @@ def create_cut(candidate_id: int):
         session.add(cut)
         session.flush()
         cut_id = cut.id
-    return _flash(f"/cut/{cut_id}?step=trim", "New cut — pick your segments")
+    return _flash(f"/cut/{cut_id}?step=trim", "New clip — pick your segments")
 
 
 @app.get("/video/{candidate_id}/cut")
@@ -812,7 +813,7 @@ def open_cut(candidate_id: int):
         if c is None:
             return _flash("/", "Video not found")
         if c.status != STATUS_ARCHIVED:
-            return _flash(f"/video/{candidate_id}", "Download the video before cutting it")
+            return _flash(f"/video/{candidate_id}", "Download the video before clipping it")
         existing = session.execute(
             select(Cut).where(Cut.candidate_pk == c.id).order_by(Cut.created_at.desc())
         ).scalars().all()
@@ -829,7 +830,7 @@ def open_cut(candidate_id: int):
         session.add(cut)
         session.flush()
         cut_id = cut.id
-    return _flash(f"/cut/{cut_id}?step=trim", "New cut — pick your segments")
+    return _flash(f"/cut/{cut_id}?step=trim", "New clip — pick your segments")
 
 
 @app.get("/cut/{cut_id}", response_class=HTMLResponse)
@@ -841,7 +842,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
             .where(Cut.id == cut_id)
         ).scalar_one_or_none()
         if cut is None:
-            return _flash("/", "Cut not found")
+            return _flash("/", "Clip not found")
         c = cut.candidate
 
         exported = bool(cut.trimmed_clip_path) and Path(cut.trimmed_clip_path).exists()
@@ -856,6 +857,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         # so re-exporting won't change it — warn before the operator assumes it will.
         pending = next((p for p in posts if p.status in ("queued", "draft", "failed")), None)
         pending_post_status = pending.status if pending else ""
+        pending_post_id = pending.id if pending else None
 
         active_step = step if step in ("trim", "post") else ("post" if exported else "trim")
 
@@ -882,7 +884,13 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "clip_transcript": clip_transcript,
          "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
+         "account_name": threads_api.account_username(),
          "pending_post_status": pending_post_status,
+         "pending_post_id": pending_post_id,
+         # Attribution first-comment, editable before the post even exists:
+         # prefill from the pending post so requeueing round-trips cleanly.
+         "attribution_text": (pending.attribution_text or "") if pending else "",
+         "attribution_enabled": bool(load_first_reply().get("attribution_enabled")),
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
          "subs_position": (getattr(cut, "subs_position", "") or load_settings().get("subtitles.position", "bottom")),
          "msg": msg, "active": "dashboard"},
@@ -896,7 +904,7 @@ def delete_cut(cut_id: int):
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None:
-            return _flash("/", "Cut not found")
+            return _flash("/", "Clip not found")
         candidate_id = cut.candidate_pk
         posts = session.execute(
             select(ThreadsPost).where(ThreadsPost.cut_pk == cut.id)
@@ -907,7 +915,7 @@ def delete_cut(cut_id: int):
             else:
                 p.cut_pk = None  # keep published history, drop the link
         session.delete(cut)
-    return _flash(f"/video/{candidate_id}?step=cuts", "Cut deleted")
+    return _flash(f"/video/{candidate_id}?step=cuts", "Clip deleted")
 
 
 
@@ -1351,7 +1359,7 @@ def export_clip(cut_id: int, segments_json: str = Form(...)):
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None:
-            return _flash("/", "Cut not found")
+            return _flash("/", "Clip not found")
         c = cut.candidate
         if c is None or not c.local_video_path:
             return _flash("/", "Video not found or not downloaded")
@@ -1594,7 +1602,7 @@ def suggest_clip_title(cut_id: int):
 
 @app.post("/cut/{cut_id}/post")
 def post_to_threads(cut_id: int, caption: str = Form(...),
-                    use_subtitles: str = Form("")):
+                    use_subtitles: str = Form(""), attribution: str = Form("")):
     """Operator-confirmed publish of the exported clip."""
     caption = caption.strip()
     if not caption:
@@ -1612,7 +1620,8 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
             return _flash(f"/cut/{cut_id}", "Export a clip first")
         try:
             post = publish_clip(session, cut.candidate,
-                                _chosen_clip_path(cut, use_subtitles), caption, cut=cut)
+                                _chosen_clip_path(cut, use_subtitles), caption, cut=cut,
+                                attribution=attribution)
             # Keep the clip's caption in sync with what was actually posted.
             cut.draft_caption = caption
             state = session.get(SchedulerState, 1)
@@ -1634,7 +1643,7 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
 
 @app.post("/cut/{cut_id}/queue")
 def queue_to_threads(cut_id: int, caption: str = Form(...),
-                     use_subtitles: str = Form("")):
+                     use_subtitles: str = Form(""), attribution: str = Form("")):
     """Add the exported clip to the adaptive FIFO queue (no immediate post)."""
     caption = caption.strip()
     if not caption:
@@ -1656,6 +1665,9 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
             if existing:
                 keep = existing[0]
                 keep.caption = caption
+                # The cut page pre-fills this field from the pending post, so
+                # whatever came back (edited or cleared) is the operator's call.
+                keep.attribution_text = attribution.strip()
                 if keep.clip_local_path != clip_path:
                     # Captions were toggled since this post was created — point
                     # at the chosen file and refresh the cloud copy.
@@ -1674,19 +1686,22 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                 for extra in existing[1:]:
                     session.delete(extra)
             else:
-                queue_clip(session, cut.candidate, clip_path, caption, cut=cut)
+                queue_clip(session, cut.candidate, clip_path, caption, cut=cut,
+                           attribution=attribution)
             # Persist the queued caption back onto the clip so the clip reflects
             # what was scheduled, not the original generated draft. (Done after
             # record_post has frozen the AI draft as suggested_caption.)
             cut.draft_caption = caption
+            updated = bool(existing)
         except Exception as exc:
             return _flash(f"/cut/{cut_id}?step=post", f"Queue failed: {exc}")
-    return _flash(f"/cut/{cut_id}?step=post", "Added to the posting queue")
+    return _flash(f"/cut/{cut_id}?step=post",
+                  "Queued post updated" if updated else "Added to the posting queue")
 
 
 @app.post("/cut/{cut_id}/save-draft")
 def save_draft(cut_id: int, caption: str = Form(...),
-               use_subtitles: str = Form("")):
+               use_subtitles: str = Form(""), attribution: str = Form("")):
     """Save the exported clip + caption as a draft to publish or queue later."""
     caption = caption.strip()
     if not caption:
@@ -1697,13 +1712,35 @@ def save_draft(cut_id: int, caption: str = Form(...),
             return _flash(f"/cut/{cut_id}", "Export a clip first")
         try:
             record_post(session, cut.candidate, _chosen_clip_path(cut, use_subtitles),
-                        caption, status="draft", cut=cut)
+                        caption, status="draft", cut=cut, attribution=attribution)
             # Keep the clip's caption in sync with the saved draft.
             cut.draft_caption = caption
         except Exception as exc:
             return _flash(f"/cut/{cut_id}?step=post", f"Save failed: {exc}")
     return _flash(f"/cut/{cut_id}?step=post",
                   "Saved as draft — publish or queue it any time from Posts")
+
+
+@app.post("/cut/{cut_id}/suggest-attribution")
+def suggest_cut_attribution(cut_id: int):
+    """(Re)draft the attribution first-comment while still on the cut page.
+    Returns the suggestion only — it rides along with queue/post/draft."""
+    with session_scope() as session:
+        cut = session.execute(
+            select(Cut)
+            .options(selectinload(Cut.candidate).selectinload(Candidate.channel))
+            .where(Cut.id == cut_id)
+        ).scalar_one_or_none()
+        if cut is None or cut.candidate is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            text = generate_attribution(cut.candidate)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+    if not text:
+        return JSONResponse({"error": "The model returned an empty attribution — try again."},
+                            status_code=500)
+    return {"text": text}
 
 
 @app.post("/post/{post_id}/cancel")
@@ -1728,12 +1765,17 @@ def cancel_queued_post(post_id: int, next: str = Form("/calendar")):
 
 @app.post("/post/{post_id}/queue")
 def queue_existing_post(post_id: int, caption: str = Form(""),
+                        attribution: str | None = Form(None),
                         next: str = Form("/calendar")):
     """Move a draft/failed post into the adaptive queue (or update a queued one)."""
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None or p.status not in ("draft", "failed", "queued"):
             return _flash(next, "Only a draft, failed, or queued post can be (re)queued")
+        # None = the form had no attribution field (e.g. requeue from
+        # Notifications); an empty string is a deliberate clear (skip the comment).
+        if attribution is not None:
+            p.attribution_text = attribution.strip()
         if caption.strip():
             p.caption = caption.strip()
             # Mirror the edited caption onto the clip so re-opening the cut shows
@@ -1859,19 +1901,27 @@ def post_status(post_id: int):
 
 @app.post("/post/{post_id}/recaption")
 def post_recaption(post_id: int, position: str = Form("bottom")):
-    """Re-render burned-in captions at the top or bottom for a not-yet-published
-    post, and move the post onto the fresh file.
+    """Switch a not-yet-published post between no burned-in captions and
+    captions at the top or bottom.
 
-    Operators change their mind at the Post step, so this saves a trip back to
-    the trim editor. Renders are versioned, so this is an explicit opt-in to the
-    new file — unlike a passive re-export, which deliberately leaves a queued
-    post on the clip it was queued with.
+    ``position=none`` points the post at the plain trimmed clip (and flips
+    ``use_subtitles`` off). ``top`` / ``bottom`` re-renders captions onto a
+    fresh file and moves the post onto it. Renders are versioned, so this is
+    an explicit opt-in — unlike a passive re-export, which deliberately leaves
+    a queued post on the clip it was queued with.
     """
     from ..publishing import _object_key
     from ..storage_supabase import upload_trimmed_clip
     from ..subtitles import SubtitleError, create_subtitled_clip
 
-    position = "top" if str(position).strip().lower() == "top" else "bottom"
+    raw = str(position).strip().lower()
+    if raw in ("none", "off", "plain"):
+        mode = "none"
+    elif raw == "top":
+        mode = "top"
+    else:
+        mode = "bottom"
+
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None:
@@ -1884,13 +1934,31 @@ def post_recaption(post_id: int, position: str = Form("bottom")):
         if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
             return JSONResponse({"error": "No trimmed clip to caption"}, status_code=404)
         cut_id = cut.id
-        clip_path = cut.trimmed_clip_path
-        superseded = [p.clip_local_path, cut.subtitled_clip_path]
+        plain_path = cut.trimmed_clip_path
+        superseded = [p.clip_local_path]
+
+        if mode == "none":
+            # Drop burned-in captions: post the plain trim. Leave any existing
+            # subtitled file on the cut so the operator can flip back without a
+            # full re-render (they'll re-render if they change position).
+            cut.use_subtitles = False
+            cut.updated_at = utcnow()
+            out = Path(plain_path)
+            p.clip_local_path = str(out)
+            p.clip_object_path = _object_key(out)
+            try:
+                upload_trimmed_clip(out, p.clip_object_path)
+            except Exception as exc:
+                log.warning("Plain-clip upload failed (will retry at publish): %s", exc)
+            _delete_if_unreferenced(session, [s for s in superseded if s and s != str(out)])
+            return JSONResponse({"ok": True, "position": "none"})
+
+        superseded.append(cut.subtitled_clip_path)
 
     stamp = utcnow().strftime("%Y%m%dT%H%M%S")
-    out_path = Path(clip_path).with_name(f"{Path(clip_path).stem}_subs_{stamp}.mp4")
+    out_path = Path(plain_path).with_name(f"{Path(plain_path).stem}_subs_{stamp}.mp4")
     try:
-        out = create_subtitled_clip(clip_path, position=position, out_path=out_path)
+        out = create_subtitled_clip(plain_path, position=mode, out_path=out_path)
     except SubtitleError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     except Exception as exc:
@@ -1903,7 +1971,7 @@ def post_recaption(post_id: int, position: str = Form("bottom")):
         if p is None or cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         cut.subtitled_clip_path = str(out)
-        cut.subs_position = position
+        cut.subs_position = mode
         cut.use_subtitles = True
         cut.updated_at = utcnow()
         p.clip_local_path = str(out)
@@ -1913,7 +1981,7 @@ def post_recaption(post_id: int, position: str = Form("bottom")):
         except Exception as exc:
             log.warning("Re-caption upload failed (will retry at publish): %s", exc)
         _delete_if_unreferenced(session, superseded)
-    return JSONResponse({"ok": True, "position": position})
+    return JSONResponse({"ok": True, "position": mode})
 
 
 _POST_METRICS = ("views", "likes", "replies", "reposts", "quotes", "shares")
@@ -1971,7 +2039,8 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             for c in comments
         ]
         # Projected publishing slot (same plan the calendar shows), so a queued
-        # post says exactly when it's expected to go out.
+        # post says exactly when it's expected to go out. Reschedule from the
+        # calendar — no move/unpin controls here.
         schedule = None
         if p.status == "queued":
             slot = projected_slot_for_post(session, p.id)
@@ -1979,27 +2048,11 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
                 schedule = {"unknown": True}
             else:
                 schedule = {"when": slot.get("sort"), "time": slot.get("time"),
+                            "window_index": slot.get("window_index"),
                             "pinned": bool(slot.get("pinned"))}
-        # Pickable upcoming windows (open, or occupied by another post — picking
-        # one of those swaps pins, same as dragging on the calendar) so a queued
-        # post can be rescheduled right from this page.
-        available_windows: list[dict] = []
-        if p.status == "queued":
-            start = utcnow().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-            plan = build_window_plan(session, start, start + dt.timedelta(days=22), horizon_days=21)
-            for e in plan:
-                if e["kind"] not in ("open", "queued"):
-                    continue
-                is_mine = e.get("post_id") == p.id
-                available_windows.append({
-                    "window_key": e["window_key"],
-                    "date_label": e["date_label"],
-                    "time": e["time"],
-                    "is_mine": is_mine,
-                    "occupant_title": e["title"] if (e["kind"] == "queued" and not is_mine) else "",
-                })
         ctx = {
             "pid": p.id, "status": p.status, "caption": p.caption or "",
+            "account_name": threads_api.account_username(),
             "permalink": p.permalink, "source": p.source, "error": p.error,
             "candidate_id": cand.id if cand else None,
             "category": cand.category if cand else "",
@@ -2015,10 +2068,17 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
                 cut and cut.trimmed_clip_path and Path(cut.trimmed_clip_path).exists()
                 and p.status in ("draft", "queued", "failed")
             ),
-            "subs_position": (cut.subs_position or "bottom") if cut else "bottom",
+            # none | bottom | top — reflects what this post's clip actually has.
+            "subs_mode": (
+                ((cut.subs_position or "bottom") if cut else "bottom")
+                if has_burned_captions else "none"
+            ),
             "clip_transcript_text": clip_transcript_text,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
+            "attribution_text": p.attribution_text or "",
+            "attribution_enabled": load_first_reply().get("attribution_enabled", True),
+            "can_suggest_attribution": bool(cand),
             "first_reply_id": p.first_reply_id or "",
             "first_reply_text": p.first_reply_text or "",
             "first_reply_error": p.first_reply_error or "",
@@ -2027,8 +2087,6 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
             "schedule": schedule,
-            "pinned_window_key": p.pinned_window_key or "",
-            "available_windows": available_windows,
         }
     return templates.TemplateResponse(
         request, "post.html", {**ctx, "msg": msg, "active": "posts"}
@@ -2460,6 +2518,34 @@ def retry_first_reply(post_id: int, next: str = Form("")):
         return _flash(dest, err)
 
 
+@app.post("/post/{post_id}/suggest-attribution")
+def suggest_post_attribution(post_id: int):
+    """(Re)draft the attribution first-comment for a post. Returns the suggestion
+    only — it is saved when the operator updates the queue, so nothing changes
+    until they've seen it."""
+    with session_scope() as session:
+        p = session.execute(
+            select(ThreadsPost)
+            .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
+            .where(ThreadsPost.id == post_id)
+        ).scalar_one_or_none()
+        if p is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if p.candidate is None:
+            return JSONResponse(
+                {"error": "No source video on record for this post, so there's "
+                          "nothing to attribute from."},
+                status_code=409)
+        try:
+            text = generate_attribution(p.candidate)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+    if not text:
+        return JSONResponse({"error": "The model returned an empty attribution — try again."},
+                            status_code=500)
+    return {"text": text}
+
+
 # --- Keywords ----------------------------------------------------------------
 
 @app.get("/keywords", response_class=HTMLResponse)
@@ -2507,21 +2593,27 @@ def first_reply_page(request: Request, msg: str = ""):
     cfg = load_first_reply()
     return templates.TemplateResponse(
         request, "first_reply.html",
-        {"enabled": cfg["enabled"], "text": cfg["text"], "msg": msg, "active": "engagement"},
+        {"enabled": cfg["enabled"], "text": cfg["text"],
+         "attribution_enabled": cfg["attribution_enabled"],
+         "msg": msg, "active": "engagement"},
     )
 
 
 @app.post("/engagement/first-reply")
-def first_reply_save(enabled: str = Form(""), text: str = Form("")):
+def first_reply_save(enabled: str = Form(""), text: str = Form(""),
+                     attribution_enabled: str = Form("")):
     text = (text or "").strip()
     on = str(enabled).lower() in ("1", "true", "on", "yes")
+    attribution_on = str(attribution_enabled).lower() in ("1", "true", "on", "yes")
     if on and not text:
         return _flash("/engagement/first-reply", "Add reply text before enabling")
     if len(text) > 500:
         return _flash("/engagement/first-reply", f"Reply is {len(text)} characters — Threads limit is 500")
-    save_first_reply(enabled=on, text=text)
+    save_first_reply(enabled=on, text=text, attribution_enabled=attribution_on)
     state = "enabled" if on else "disabled"
-    return _flash("/engagement/first-reply", f"Saved — auto first reply is {state}")
+    attr_state = "on" if attribution_on else "off"
+    return _flash("/engagement/first-reply",
+                  f"Saved — attribution comments {attr_state}, static reply {state}")
 
 
 @app.get("/first-reply")

@@ -29,8 +29,11 @@
   <div class="pagebar-inner">
     <div class="pagebar-head">
       <div class="pagebar-title">
-        {% if crumbs %}<div class="pagebar-crumbs">{{ crumbs|safe }}</div>{% endif %}
+        {% if crumbs %}<div class="pagebar-crumbs{{ ' only-child' if not title }}">{{ crumbs|safe }}</div>{% endif %}
+        {# No title -> compact one-row bar: just crumbs + actions. #}
+        {% if title %}
         <h1>{{ title }}{% if count is not none %} <span class="pagebar-count">{{ count }}</span>{% endif %}{% if title_extra %} {{ title_extra|safe }}{% endif %}</h1>
+        {% endif %}
         {% if sub %}<div class="sub">{{ sub }}</div>{% endif %}
       </div>
       {% if actions %}<div class="pagebar-actions">{{ actions|safe }}</div>{% endif %}

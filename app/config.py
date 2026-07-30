@@ -66,26 +66,40 @@ FIRST_REPLY_HEADER = """\
 # Auto first-reply posted under every Threads post this app publishes.
 # Editable via the cog on the Replies page; no code changes needed.
 #
-# When enabled is true and text is non-empty, the reply is published
-# immediately after the main post succeeds. A reply failure never rolls
-# back the post — check the post page and retry there if needed.
+# attribution_enabled: when true, an AI-drafted attribution comment (crediting
+# the source station/publisher) is generated per post and published as the
+# first comment after the post goes live. The operator previews/edits/clears
+# it on each post's page before it publishes.
+#
+# When enabled is true and text is non-empty, that static text is the reply
+# instead — used as the fallback for posts without an attribution. A reply
+# failure never rolls back the post — check the post page and retry there.
 
 """
 
 
 def load_first_reply() -> dict[str, Any]:
-    """Return ``{enabled: bool, text: str}`` for the auto first-reply."""
+    """Return ``{enabled: bool, text: str, attribution_enabled: bool}`` for the
+    auto first-reply."""
     data = _load_yaml(CONFIG_DIR / "first_reply.yaml")
     text = data.get("text") or ""
     if isinstance(text, str):
         text = text.strip()
     else:
         text = str(text).strip()
-    return {"enabled": bool(data.get("enabled", False)), "text": text}
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        "text": text,
+        "attribution_enabled": bool(data.get("attribution_enabled", True)),
+    }
 
 
-def save_first_reply(*, enabled: bool, text: str) -> None:
-    payload = {"enabled": bool(enabled), "text": (text or "").strip()}
+def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = True) -> None:
+    payload = {
+        "enabled": bool(enabled),
+        "attribution_enabled": bool(attribution_enabled),
+        "text": (text or "").strip(),
+    }
     body = yaml.safe_dump(payload, default_flow_style=False, allow_unicode=True, width=88)
     (CONFIG_DIR / "first_reply.yaml").write_text(FIRST_REPLY_HEADER + body)
 

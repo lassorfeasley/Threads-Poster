@@ -1,17 +1,27 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
-{% set fr_sub %}<a href="/engagement">← Back to Replies</a> · Text automatically posted under every post this app publishes. Failures never undo the main post — retry from the post page.{% endset %}
+{% set fr_sub %}<a href="/engagement">← Back to Replies</a> · The comment automatically posted under every post this app publishes. Failures never undo the main post — retry from the post page.{% endset %}
 {{ ui.pagebar("First reply", sub=fr_sub) }}
 
 <div class="card">
   <form method="post" action="/engagement/first-reply">
+    <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 6px;">
+      <input type="checkbox" name="attribution_enabled" value="1" {% if attribution_enabled %}checked{% endif %}>
+      Post an AI-drafted attribution comment crediting each clip's source
+    </label>
+    <p class="meta" style="margin: 0 0 14px 26px;">
+      Drafted per post from the station and video info (never @-tags anyone), e.g.
+      “Courtesy of KXYZ (ABC) in Springfield.” Preview, edit, or clear it on each
+      post's page before it publishes. Posts with an attribution skip the static text below.
+    </p>
+
     <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 14px;">
       <input type="checkbox" name="enabled" value="1" {% if enabled %}checked{% endif %}>
-      Automatically post this reply after each publish
+      Post this static reply after each publish (fallback when a post has no attribution)
     </label>
 
-    <label for="reply-text" class="card-title" style="display:block; margin-bottom: 8px;">Reply text</label>
+    <label for="reply-text" class="card-title" style="display:block; margin-bottom: 8px;">Static reply text</label>
     <textarea name="text" id="reply-text" maxlength="500" rows="8"
               placeholder="e.g. pitch Renewables.org under every clip…">{{ text }}</textarea>
     <div class="meta" style="margin-top: 6px; display:flex; justify-content:space-between; gap:12px;">

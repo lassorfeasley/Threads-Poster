@@ -1,388 +1,439 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
+{% import "components/category.html" as catui %}
 {% set post_crumbs %}
 <nav class="crumbs" aria-label="Breadcrumb">
-  <a href="/calendar" class="crumb">Calendar</a>
   {% if candidate_id %}
-    <span class="crumb-sep" aria-hidden="true">›</span>
-    <a href="/video/{{ candidate_id }}?step=cuts" class="crumb" title="Video{% if video_title %}: {{ video_title }}{% endif %}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-      {{ channel_sign or "Video" }}{% if video_title %} · {{ video_title[:40] }}{% endif %}
-    </a>
+    <a href="/video/{{ candidate_id }}?step=cuts" class="crumb"
+       title="Video{% if video_title %}: {{ video_title }}{% endif %}">Video</a>
   {% endif %}
   {% if cut_id %}
-    <span class="crumb-sep" aria-hidden="true">›</span>
-    <a href="/cut/{{ cut_id }}?step=post" class="crumb" title="Cut{% if clip_title %}: {{ clip_title }}{% endif %}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/></svg>
-      {{ clip_title[:44] if clip_title else "Cut" }}
-    </a>
+    {% if candidate_id %}<span class="crumb-sep" aria-hidden="true">›</span>{% endif %}
+    <a href="/cut/{{ cut_id }}?step=post" class="crumb"
+       title="Clip{% if clip_title %}: {{ clip_title }}{% endif %}">Clip</a>
   {% endif %}
-  <span class="crumb-sep" aria-hidden="true">›</span>
-  <span class="crumb crumb-current" aria-current="page">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
-    Post
-  </span>
+  {% if candidate_id or cut_id %}<span class="crumb-sep" aria-hidden="true">›</span>{% endif %}
+  <span class="crumb crumb-current" aria-current="page">Post</span>
   {% if source == "threads" %}<span class="badge">Threads history</span>{% endif %}
 </nav>
 {% endset %}
-{% set post_title_extra %}
-  <span class="badge {{ 'supportive' if status == 'published' else ('hostile' if status == 'failed' else ('info' if status == 'queued' else '')) }}">{{ status }}</span>
-{% endset %}
 {% set post_actions %}
   {% if has_clip %}
-    <a class="btn sm" href="/post/{{ pid }}/download-clip" download>
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-      Download clip</a>
+    <a class="copy-btn" href="/post/{{ pid }}/download-clip" download
+       title="Download clip" aria-label="Download clip">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+    </a>
   {% endif %}
   {% if status in ("draft", "queued", "failed") %}
     <form class="inline" method="post" action="/post/{{ pid }}/cancel">
       <input type="hidden" name="next" value="{% if candidate_id %}/video/{{ candidate_id }}?step=post{% else %}/calendar{% endif %}">
-      <button class="btn sm danger" data-confirm="Delete this {{ status }} post? Your trimmed clip will stay saved." data-confirm-ok="Delete" data-confirm-variant="danger">Delete</button>
+      <button class="btn sm danger icon-btn" title="Delete this {{ status }} post" aria-label="Delete post"
+              data-confirm="Delete this {{ status }} post? Your trimmed clip will stay saved."
+              data-confirm-ok="Delete" data-confirm-variant="danger">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6M14 11v6"/></svg>
+      </button>
     </form>
   {% endif %}
 {% endset %}
 
 <div class="canvas canvas-wide">
-{{ ui.pagebar("Post", crumbs=post_crumbs, title_extra=post_title_extra, actions=post_actions) }}
+{{ ui.pagebar("", crumbs=post_crumbs, actions=post_actions) }}
 
-<div class="post-layout">
+{# Everything lives on the preview itself now — stats in the engagement row,
+   replies threaded under the first comment. The rail only returns for errors. #}
+{% set has_side = error %}
+<div class="post-layout{{ ' no-side' if not has_side }}">
 <div class="post-main">
-{# ---- Media stage ---- #}
-<div class="media-stage">
-  {% if has_clip %}
-    {# Play the post's attached file (often *_subs.mp4), not the plain trim. #}
-    <video src="/media/post/{{ pid }}" controls preload="metadata"></video>
-  {% else %}
-    <div class="empty" style="min-height: 160px; width: 100%;">
-      <span class="icon">▷</span>
-      <strong>No local clip</strong>
-      {% if source == "threads" %}This post was made outside the app.{% else %}The clip file isn't on disk.{% endif %}
-    </div>
+{# The main column replicates the post as it will appear on Threads: one
+   surface, caption + video as the post, the attribution as the first comment.
+   Text is edited in place; actions hide behind each item's "…" menu. #}
+{% set editable = status in ("draft", "queued", "failed") %}
+{% set handle = account_name or "you" %}
+<div class="post-preview">
+<div class="thread-preview">
+
+  {% if candidate_id %}
+  {# ---- Programming category (lives on the source video; shared by all its
+       cuts/posts) — a quiet strip above the post itself. ---- #}
+  <div class="preview-topbar">
+    {{ catui.field(candidate_id, category, "/post/" ~ pid, show_label=false) }}
+  </div>
   {% endif %}
-  <div class="stage-actions">
-    {% if permalink %}
-      <a href="{{ permalink }}" target="_blank">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
-        Open on Threads</a>
+
+  {# ---- The post ---- #}
+  <article class="thread-item">
+    <div class="ti-gutter" aria-hidden="true">
+      <span class="ti-avatar">{{ handle[0]|upper }}</span>
+      <span class="ti-line"></span>
+    </div>
+    <div class="ti-main">
+      <div class="ti-head">
+        <span class="ti-name">{{ handle }}</span>
+        <span class="ti-type">caption</span>
+        <span class="ti-tools">
+          {% if editable %}<span class="meta char-count" id="caption-count" aria-live="polite"></span>{% endif %}
+          <details class="ti-menu">
+            <summary aria-label="Caption actions" title="Caption actions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+            </summary>
+            <div class="ti-menu-pop">
+              <button type="button" id="copy-caption-btn" data-caption="{{ caption }}"
+                      onclick="copyPostCaption(this)">Copy caption</button>
+              {% if clip_transcript_text and not editable %}
+              <button type="button" onclick="copyPostTranscript(this)">Copy transcript</button>
+              {% endif %}
+              {% if permalink %}
+              <a href="{{ permalink }}" target="_blank">Open on Threads</a>
+              {% endif %}
+            </div>
+          </details>
+        </span>
+      </div>
+      {% if editable %}
+      <textarea form="queue-form" name="caption" id="caption" class="ti-text" maxlength="500"
+                placeholder="Write the caption for this post…">{{ caption }}</textarea>
+      {% else %}
+      <div class="ti-text-static">{{ caption }}</div>
+      {% endif %}
+      <div class="ti-media">
+        {% if has_clip %}
+          {# Play the post's attached file (often *_subs.mp4), not the plain trim. #}
+          <video src="/media/post/{{ pid }}" controls preload="metadata"></video>
+        {% else %}
+          <div class="empty" style="min-height: 160px; width: 100%;">
+            <span class="icon">▷</span>
+            <strong>No local clip</strong>
+            {% if source == "threads" %}This post was made outside the app.{% else %}The clip file isn't on disk.{% endif %}
+          </div>
+        {% endif %}
+      </div>
+      {% if editable and (can_recaption or clip_transcript_text) %}
+      {# Where Threads shows engagement icons, an unposted clip shows its
+         controls: burned-in caption position + one-click transcript copy. #}
+      <div class="ti-clip-tools">
+        {% if can_recaption %}
+        <div class="seg-toggle cat-toggle" id="recap-line" role="group" aria-label="Burned-in captions">
+          <button type="button" class="{{ 'is-on' if subs_mode == 'none' }}"
+                  data-pos="none" onclick="recaption('none')">No captions</button>
+          <button type="button" class="{{ 'is-on' if subs_mode == 'bottom' }}"
+                  data-pos="bottom" onclick="recaption('bottom')">Bottom</button>
+          <button type="button" class="{{ 'is-on' if subs_mode == 'top' }}"
+                  data-pos="top" onclick="recaption('top')">Top</button>
+        </div>
+        {% endif %}
+        {% if clip_transcript_text %}
+        <button type="button" id="copy-transcript-btn" class="ghost-line-btn"
+                onclick="copyPostTranscript(this)" title="Copy the clip's transcript">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          Copy transcript
+        </button>
+        {% endif %}
+      </div>
+      <div class="meta" id="recap-status" aria-live="polite"></div>
+      {% else %}
+      {# Published: this row IS the performance panel — real counts straight
+         from the latest snapshot, refreshed in place. #}
+      <div class="ti-engage{{ ' is-idle' if status != 'published' }}"{% if status != "published" %} aria-hidden="true"{% endif %}>
+        <span title="Likes"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>{{ "{:,}".format(metrics.likes) if metrics and metrics.likes is not none else "" }}</span>
+        <span title="Replies"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>{{ "{:,}".format(metrics.replies) if metrics and metrics.replies is not none else "" }}</span>
+        <span title="Reposts"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>{{ "{:,}".format(metrics.reposts) if metrics and metrics.reposts is not none else "" }}</span>
+        {% if status == "published" and metrics and metrics.quotes is not none %}
+        <span title="Quotes"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 6H3"/><path d="M21 12H8"/><path d="M21 18H8"/><path d="M3 12v6"/></svg>{{ "{:,}".format(metrics.quotes) }}</span>
+        {% endif %}
+        <span title="Shares"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>{{ "{:,}".format(metrics.shares) if metrics and metrics.shares is not none else "" }}</span>
+        {% if status == "published" and metrics and metrics.views is not none %}
+        <span title="Views"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>{{ "{:,}".format(metrics.views) }}</span>
+        {% endif %}
+        {% if status == "published" %}
+        <form class="inline" method="post" action="/post/{{ pid }}/refresh-stats" style="margin-left: auto;">
+          <input type="hidden" name="next" value="/post/{{ pid }}">
+          <button class="ghost-line-btn"
+                  title="{% if metrics_captured %}Last captured {{ metrics_captured.strftime('%b %-d, %H:%M UTC') }} · {{ snapshot_count }} snapshot{{ 's' if snapshot_count != 1 }}{% else %}No metrics yet — pull the latest insights from Threads{% endif %}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+            Refresh
+          </button>
+        </form>
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
+  </article>
+
+  {# ---- The first comment (attribution) ---- #}
+  <article class="thread-item is-reply">
+    <div class="ti-gutter" aria-hidden="true">
+      <span class="ti-avatar">{{ handle[0]|upper }}</span>
+    </div>
+    <div class="ti-main">
+      <div class="ti-head">
+        <span class="ti-name">{{ handle }}</span>
+        {% if editable %}
+        <span class="ti-type">first reply · attribution</span>
+        <span class="ti-tools">
+          <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
+          <details class="ti-menu">
+            <summary aria-label="Attribution actions" title="Attribution actions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+            </summary>
+            <div class="ti-menu-pop">
+              {% if can_suggest_attribution %}
+              <button type="button" id="attribution-regen"
+                      onclick="suggestAttribution(this)">{{ "Regenerate draft" if attribution_text else "Suggest draft" }}</button>
+              {% endif %}
+              <a href="/engagement/first-reply">Reply settings</a>
+            </div>
+          </details>
+        </span>
+        {% else %}
+        <span class="ti-type">first reply
+          {%- if first_reply_error %} · failed
+          {%- elif not first_reply_id and attribution_text %} · pending{% endif %}</span>
+        <span class="ti-tools">
+          <details class="ti-menu">
+            <summary aria-label="First reply actions" title="First reply actions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+            </summary>
+            <div class="ti-menu-pop">
+              {% if status == "published" and not first_reply_id %}
+              <form method="post" action="/post/{{ pid }}/first-reply">
+                <input type="hidden" name="next" value="/post/{{ pid }}">
+                <button>{{ "Retry first reply" if first_reply_error else "Post first reply now" }}</button>
+              </form>
+              {% endif %}
+              <a href="/engagement/first-reply">Reply settings</a>
+            </div>
+          </details>
+        </span>
+        {% endif %}
+      </div>
+      {% if editable %}
+      <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
+                placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to skip.">{{ attribution_text }}</textarea>
+      {% if can_suggest_attribution %}
+      {# Visible way into the LLM draft while the comment is empty; the kebab
+         keeps "Regenerate draft" once there's text. Hidden as soon as typing
+         or a draft fills the box (the input listener below toggles it). #}
+      <button type="button" id="attribution-suggest" class="suggest-btn"
+              {% if attribution_text %}hidden{% endif %} onclick="suggestAttribution(this)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+        <span class="lbl">Suggest a draft</span>
+      </button>
+      {% endif %}
+      {% if not attribution_enabled %}
+      <p class="field-hint">Attribution comments are off under
+        <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
+      {% endif %}
+      {% else %}
+        {% if first_reply_id %}
+        <div class="ti-text-static">{{ first_reply_text }}</div>
+        {% elif first_reply_error %}
+        <div class="meta" style="color: var(--danger); margin-top: 2px;">{{ first_reply_error }}</div>
+        {% if attribution_text %}
+        <div class="ti-text-static is-pending">{{ attribution_text }}</div>
+        {% endif %}
+        {% elif attribution_text %}
+        <div class="ti-text-static is-pending">{{ attribution_text }}</div>
+        {% else %}
+        <div class="meta" style="margin-top: 2px;">No first reply.</div>
+        {% endif %}
+      {% endif %}
+    </div>
+  </article>
+
+  {% if status == "published" %}
+  {# ---- Audience replies, threaded right where they happen on Threads. ---- #}
+  {% for cm in comments %}
+  <article class="thread-item is-reply">
+    <div class="ti-gutter" aria-hidden="true">
+      <span class="ti-avatar is-other">{{ (cm.username or "?")[0]|upper }}</span>
+    </div>
+    <div class="ti-main">
+      <div class="ti-head">
+        <span class="ti-name">{{ cm.username or "unknown" }}</span>
+        <span class="ti-type">
+          {{- cm.commented_at.strftime("%b %-d") if cm.commented_at else "reply" -}}
+          {%- if cm.classification %} · {{ cm.classification }}{% endif -%}
+        </span>
+      </div>
+      <div class="ti-text-static">{{ cm.text }}</div>
+      {% if cm.reply_status == "posted" and cm.reply_text %}
+      <div class="meta" style="margin-top: 4px;">You replied: {{ cm.reply_text }}</div>
+      {% endif %}
+    </div>
+  </article>
+  {% endfor %}
+  {# Footer: sync + a route to the moderation queue where drafts get approved. #}
+  <div class="thread-actions">
+    <span class="ta-note">
+      {{ comments|length }} repl{{ "y" if comments|length == 1 else "ies" }} pulled ·
+      <a href="/engagement">approve drafts in Replies</a>
+    </span>
+    <form class="inline" method="post" action="/post/{{ pid }}/sync-replies">
+      <input type="hidden" name="next" value="/post/{{ pid }}">
+      <button class="ghost sm">Sync replies</button>
+    </form>
+  </div>
+  {% endif %}
+
+  {% if editable %}
+  {# ---- Save/publish: lives where the edits happen. The projected slot sits
+       left; Update is ghost-quiet until caption/attribution change. ---- #}
+  <div class="thread-actions">
+    <form method="post" action="/post/{{ pid }}/queue" id="queue-form">
+      <input type="hidden" name="next" value="/post/{{ pid }}">
+    </form>
+    {% if status == "queued" and schedule %}
+    <div class="ta-schedule">
+      <span class="schedule-ic" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      </span>
+      <span>{% if schedule.unknown %}No slot yet{% else %}{{ schedule.when.strftime("%b %-d · %-I:%M %p %Z") }}{% endif %}</span>
+    </div>
+    {% endif %}
+    {% if status == "queued" %}
+    <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
+      <input type="hidden" name="next" value="/post/{{ pid }}">
+      <button data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
+    </form>
+    <button type="submit" form="queue-form" id="update-btn" class="approve"
+            disabled title="No changes to save">Update</button>
+    {% else %}
+    <button type="submit" form="queue-form" id="update-btn" class="approve">Add to queue</button>
+    <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
+      <input type="hidden" name="next" value="/post/{{ pid }}">
+      <button data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
+    </form>
     {% endif %}
   </div>
-</div>
+  {% endif %}
+
+  {% if clip_transcript_text %}
+  {# Clipboard source for the copy-transcript buttons (never displayed). #}
+  <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
+  {% endif %}
+
+</div>{# /thread-preview #}
+</div>{# /post-preview #}
 </div>{# /post-main #}
 
+{% if has_side %}
 <div class="post-side">
-{% if candidate_id %}
-{# ---- Programming category (lives on the source video; shared by all its cuts/posts) ---- #}
-{% import "components/category.html" as catui %}
-<section class="wf-section">
-  <div class="wf-body">
-    {{ catui.field(candidate_id, category, "/post/" ~ pid) }}
-  </div>
-</section>
-{% endif %}
-
 {% if error %}
 <div class="card" style="border-color: var(--danger-border);">
   <div class="card-title" style="color: var(--danger);">Last error</div>
   <div class="meta">{{ error }}</div>
 </div>
 {% endif %}
-
-{% if status in ("draft", "queued", "failed") %}
-  {# ---- Caption (editable) ---- #}
-  <section class="wf-section">
-    <div class="wf-head">
-      <span class="wf-num">1</span>
-      <span class="wf-title">Caption</span>
-      <span class="meta char-count" id="caption-count" aria-live="polite"></span>
-      {% if caption %}
-      <button type="button" id="copy-caption-btn" class="copy-btn" style="margin-left: auto;"
-              data-caption="{{ caption }}" onclick="copyPostCaption(this)"
-              title="Copy caption" aria-label="Copy caption">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-      </button>
-      {% endif %}
-    </div>
-    <div class="wf-body plain">
-      <textarea form="queue-form" name="caption" id="caption" class="caption-input" maxlength="500"
-                placeholder="Write the caption for this post…">{{ caption }}</textarea>
-      <p class="field-hint">Edits are saved when you {{ "update the queue" if status == "queued" else "add it to the queue" }} below.</p>
-    </div>
-  </section>
-
-  {# ---- Burned-in captions ---- #}
-  {% if can_recaption %}
-  <section class="wf-section">
-    <div class="wf-head">
-      <span class="wf-title">Burned-in captions</span>
-      <span class="meta" id="recap-status" aria-live="polite"></span>
-    </div>
-    <div class="wf-body">
-      <div class="subs-controls">
-        <div class="subs-line" id="recap-line">
-          <span class="subs-lbl">Position</span>
-          <div class="seg-toggle" role="group" aria-label="Caption position">
-            <button type="button" class="{{ 'is-on' if subs_position != 'top' }}"
-                    data-pos="bottom" onclick="recaption('bottom')">Bottom</button>
-            <button type="button" class="{{ 'is-on' if subs_position == 'top' }}"
-                    data-pos="top" onclick="recaption('top')">Top</button>
-          </div>
-        </div>
-      </div>
-      <p class="field-hint">Re-renders the captions and updates this
-        {{ status }} post's video. Takes up to a minute.</p>
-    </div>
-  </section>
-  {% endif %}
-
-  {# ---- Schedule (read-only status) ---- #}
-  {% if status == "queued" and schedule %}
-  <section class="wf-section">
-    <div class="wf-head">
-      <span class="wf-title">Schedule</span>
-    </div>
-    <div class="wf-body plain">
-      <div class="schedule-banner">
-        <span class="schedule-ic" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-        </span>
-        <div>
-          {% if schedule.unknown %}
-            <strong>Queued — no slot in the next 60 days yet</strong>
-            <div class="meta">It'll publish as the posts ahead of it clear the queue.</div>
-          {% else %}
-            <strong>Scheduled for {{ schedule.when.strftime("%A, %b %-d · %-I:%M %p") }}</strong>
-            <div class="meta">
-              {{ "Pinned to this slot" if schedule.pinned else "Projected next open window" }} ·
-              <a href="/calendar">view on calendar</a>
-            </div>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-  </section>
-  {% endif %}
-
-  {# ---- Destination (controls) ---- #}
-  <section class="wf-section">
-    <div class="wf-head">
-      <span class="wf-num">2</span>
-      <span class="wf-title">Destination</span>
-    </div>
-    <div class="wf-body">
-      {% if status == "draft" %}
-      <div class="meta" style="margin-bottom: 10px;">This is a draft — add it to the queue, or post now.</div>
-      {% elif status == "failed" %}
-      <div class="meta" style="margin-bottom: 10px;">Publishing failed. Retry now or re-queue.</div>
-      {% endif %}
-      {% if status == "queued" and available_windows %}
-      <form method="post" action="/post/{{ pid }}/pin-window" class="ctl-strip" style="margin-bottom: 12px;">
-        <input type="hidden" name="next" value="/post/{{ pid }}">
-        <select name="window_key" id="window-key-select" title="Pick a window to move this post to">
-          {% set ns = namespace(day="") %}
-          {% for w in available_windows %}
-            {% if w.date_label != ns.day %}
-              {% if ns.day %}</optgroup>{% endif %}
-              {% set ns.day = w.date_label %}
-              <optgroup label="{{ w.date_label }}">
-            {% endif %}
-            <option value="{{ w.window_key }}"{% if w.is_mine %} selected{% endif %}>
-              {{ w.time }}{% if w.is_mine %} — current{% elif w.occupant_title %} — swap with "{{ w.occupant_title[:28] }}"{% endif %}
-            </option>
-          {% endfor %}
-          {% if ns.day %}</optgroup>{% endif %}
-        </select>
-        <button class="sm">Move</button>
-        {% if pinned_window_key %}
-        <button class="sm" type="submit" formaction="/post/{{ pid }}/unpin" formnovalidate
-                title="Clear the pin — goes back to filling the next open window in order">Unpin</button>
-        {% endif %}
-      </form>
-      {% endif %}
-      <form method="post" action="/post/{{ pid }}/queue" id="queue-form" class="ctl-strip">
-        <input type="hidden" name="next" value="/post/{{ pid }}">
-        <button class="primary">{{ "Update queue" if status == "queued" else "Add to queue" }}</button>
-      </form>
-    </div>
-  </section>
-
-  {# ---- Ship rail ---- #}
-  <div class="ship-rail">
-    <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="approve" data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
-    </form>
-  </div>
-
-{% else %}
-  {# ---- Caption (read-only) ---- #}
-  <section class="wf-section">
-    <div class="wf-head">
-      <span class="wf-title">Caption</span>
-      {% if status == "published" %}
-        <span class="meta">Published {{ published_at.strftime("%b %-d, %Y at %H:%M UTC") if published_at else "—" }}</span>
-      {% endif %}
-      {% if caption %}
-      <button type="button" id="copy-caption-btn" class="copy-btn" style="margin-left: auto;"
-              data-caption="{{ caption }}" onclick="copyPostCaption(this)"
-              title="Copy caption" aria-label="Copy caption">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-      </button>
-      {% endif %}
-    </div>
-    <div class="wf-body" style="white-space: pre-wrap;">{{ caption }}</div>
-  </section>
-{% endif %}
-
-{# ---- Transcript ---- #}
-{% if clip_transcript_text %}
-<section class="wf-section">
-  <div class="wf-head">
-    <span class="wf-title">Transcript</span>
-    <button type="button" id="copy-transcript-btn" class="copy-btn" style="margin-left: auto;"
-            onclick="copyPostTranscript(this)" title="Copy transcript" aria-label="Copy transcript">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-    </button>
-  </div>
-  <div class="wf-body" style="white-space: pre-wrap;">{{ clip_transcript_text }}</div>
-  <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
-</section>
-{% endif %}
-
-{# ---- Performance ---- #}
-{% if status == "published" %}
-<section class="wf-section">
-  <div class="wf-head">
-    <span class="wf-title">Performance</span>
-    <form class="inline" method="post" action="/post/{{ pid }}/refresh-stats" style="margin-left: auto;">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="ghost sm">Refresh</button>
-    </form>
-  </div>
-  {% if metrics %}
-    <div class="kpi-grid" style="margin: 0 0 8px;">
-      {% for label, key in [("Views","views"),("Likes","likes"),("Replies","replies"),("Reposts","reposts"),("Quotes","quotes"),("Shares","shares")] %}
-      <div class="kpi"><div class="kpi-label">{{ label }}</div>
-        <div class="kpi-value">{{ "{:,}".format(metrics[key]) if metrics[key] is not none else "—" }}</div></div>
-      {% endfor %}
-    </div>
-    <div class="meta">
-      Last captured {{ metrics_captured.strftime("%b %-d, %H:%M UTC") if metrics_captured else "—" }}
-      · {{ snapshot_count }} snapshot{{ "s" if snapshot_count != 1 else "" }} on record.</div>
-  {% else %}
-    <div class="wf-body"><div class="meta">No metrics yet. Hit Refresh to pull the latest insights from Threads.</div></div>
-  {% endif %}
-</section>
-{% endif %}
-
-{# ---- First reply ---- #}
-{% if status == "published" %}
-<section class="wf-section">
-  <div class="wf-head">
-    <span class="wf-title">First reply</span>
-    {% if not first_reply_id %}
-    <form class="inline" method="post" action="/post/{{ pid }}/first-reply" style="margin-left: auto;">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="ghost sm">{{ "Retry" if first_reply_error else "Post now" }}</button>
-    </form>
-    {% endif %}
-  </div>
-  <div class="wf-body">
-    {% if first_reply_id %}
-      <div class="meta" style="margin-bottom: 6px;">
-        <span class="badge supportive">posted</span>
-        {% if first_reply_at %} {{ first_reply_at.strftime("%b %-d, %H:%M UTC") }}{% endif %}
-      </div>
-      <div style="white-space: pre-wrap;">{{ first_reply_text }}</div>
-    {% elif first_reply_error %}
-      <div class="meta" style="color: var(--danger); margin-bottom: 6px;">{{ first_reply_error }}</div>
-      <div class="meta">Edit the text under <a href="/engagement/first-reply">Replies settings</a>, then retry.</div>
-    {% else %}
-      <div class="meta">No first reply yet. Enable auto-post under
-        <a href="/engagement/first-reply">Replies settings</a>, or post one now.</div>
-    {% endif %}
-  </div>
-</section>
-{% endif %}
-
-{# ---- Replies ---- #}
-{% if status == "published" or comments %}
-<section class="wf-section">
-  <div class="wf-head">
-    <span class="wf-title">Replies</span>
-    <span class="meta">{{ comments|length }}</span>
-    {% if status == "published" %}
-    <form class="inline" method="post" action="/post/{{ pid }}/sync-replies" style="margin-left: auto;">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="ghost sm">Sync replies</button>
-    </form>
-    {% endif %}
-  </div>
-  {% if comments %}
-  <div class="table-wrap">
-  <table>
-    <tr><th>When</th><th>From</th><th>Comment</th><th>Type</th><th>Your reply</th></tr>
-    {% for cm in comments %}
-    <tr>
-      <td class="meta" style="white-space: nowrap;">{{ cm.commented_at.strftime("%b %-d %H:%M") if cm.commented_at else "—" }}</td>
-      <td class="meta">{{ cm.username or "—" }}</td>
-      <td>{{ cm.text }}</td>
-      <td>{% if cm.classification %}<span class="badge">{{ cm.classification }}</span>{% endif %}</td>
-      <td>
-        {% if cm.reply_status == "posted" %}<span class="badge supportive">replied</span>
-          {% if cm.reply_text %}<div class="meta">{{ cm.reply_text }}</div>{% endif %}
-        {% else %}<span class="badge">{{ cm.reply_status }}</span>{% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
-  </div>
-  <div class="meta" style="margin-top: 8px;">Approve or edit drafted replies from the
-    <a href="/engagement">Replies</a> queue.</div>
-  {% else %}
-    <div class="wf-body"><div class="meta">No replies pulled yet. Use Sync replies to check for new ones.</div></div>
-  {% endif %}
-</section>
-{% endif %}
 </div>{# /post-side #}
+{% endif %}{# /has_side #}
 </div>{# /post-layout #}
 </div>{# /canvas #}
 
 <script>
   (function () {
-    const ta = document.getElementById('caption');
-    if (!ta) return;
-    const count = document.getElementById('caption-count');
     const MAX = 500;
-    const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
-    const render = () => {
-      if (!count) return;
-      const n = ta.value.length;
-      count.textContent = n + ' / ' + MAX;
-      count.classList.toggle('over', n >= MAX);
-    };
-    ta.addEventListener('input', () => { grow(); render(); });
-    grow(); render();
+    for (const [taId, countId] of [['caption', 'caption-count'],
+                                   ['attribution', 'attribution-count']]) {
+      const ta = document.getElementById(taId);
+      if (!ta) continue;
+      const count = document.getElementById(countId);
+      const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+      const render = () => {
+        if (!count) return;
+        const n = ta.value.length;
+        count.textContent = n + ' / ' + MAX;
+        count.classList.toggle('over', n >= MAX);
+      };
+      ta.addEventListener('input', () => { grow(); render(); });
+      grow(); render();
+    }
   })();
+  // Update stays dead until caption or attribution actually diverge from the
+  // saved values (queued posts only — Add to queue is always live).
+  (function () {
+    const btn = document.getElementById('update-btn');
+    if (!btn || !btn.disabled) return;
+    const fields = ['caption', 'attribution']
+      .map(id => document.getElementById(id))
+      .filter(Boolean);
+    if (!fields.length) return;
+    const baseline = Object.fromEntries(fields.map(el => [el.id, el.value]));
+    const sync = () => {
+      const dirty = fields.some(el => el.value !== baseline[el.id]);
+      btn.disabled = !dirty;
+      btn.title = dirty ? 'Save caption and attribution changes' : 'No changes to save';
+    };
+    fields.forEach(el => el.addEventListener('input', sync));
+  })();
+  // The inline "Suggest a draft" pill only makes sense while the comment is
+  // empty; it comes back if the operator clears the text again.
+  (function () {
+    const ta = document.getElementById('attribution');
+    const btn = document.getElementById('attribution-suggest');
+    if (!ta || !btn) return;
+    ta.addEventListener('input', () => { btn.hidden = ta.value.trim().length > 0; });
+  })();
+  // Kebab menus: close when clicking anywhere outside the open menu.
+  document.addEventListener('click', (e) => {
+    document.querySelectorAll('details.ti-menu[open]').forEach((d) => {
+      if (!d.contains(e.target)) d.removeAttribute('open');
+    });
+  });
+  function closeMenu(el) {
+    const menu = el && el.closest ? el.closest('details.ti-menu') : null;
+    if (menu) menu.removeAttribute('open');
+  }
+  async function suggestAttribution(btn) {
+    const ta = document.getElementById('attribution');
+    if (!ta) return;
+    // The inline pill keeps its icon by labelling through a child span; the
+    // kebab item is plain text, so fall back to the button itself.
+    const lbl = btn.querySelector('.lbl') || btn;
+    const old = lbl.textContent;
+    btn.disabled = true;
+    lbl.textContent = 'Drafting…';
+    try {
+      const r = await fetch('/post/{{ pid }}/suggest-attribution', { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) { alert(d.error || 'Attribution draft failed.'); return; }
+      ta.value = d.text;
+      ta.dispatchEvent(new Event('input'));
+      const regen = document.getElementById('attribution-regen');
+      if (regen) regen.textContent = 'Regenerate draft';
+      closeMenu(btn);
+      ta.focus();
+      return;
+    } catch (e) {
+      alert('Attribution draft failed: ' + e);
+    } finally {
+      btn.disabled = false;
+      if (lbl.textContent === 'Drafting…') lbl.textContent = old;
+    }
+  }
   async function recaption(pos) {
     const line = document.getElementById('recap-line');
     const status = document.getElementById('recap-status');
     const buttons = line ? [...line.querySelectorAll('button')] : [];
     buttons.forEach(b => b.disabled = true);
     if (line) line.classList.add('is-disabled');
-    if (status) status.textContent = 'Transcribing + rendering… this can take a minute.';
+    if (status) {
+      status.textContent = pos === 'none'
+        ? 'Switching to plain clip…'
+        : 'Transcribing + rendering… this can take a minute.';
+    }
     try {
       const fd = new FormData();
       fd.append('position', pos);
       const r = await fetch('/post/{{ pid }}/recaption', { method: 'POST', body: fd });
       const d = await r.json();
       if (!r.ok) {
-        if (status) status.textContent = d.error || 'Caption render failed.';
+        if (status) status.textContent = d.error || 'Caption update failed.';
         return;
       }
       buttons.forEach(b => b.classList.toggle('is-on', b.dataset.pos === d.position));
-      // Cache-bust so the player picks up the freshly rendered file.
-      const v = document.querySelector('.media-stage video');
+      // Cache-bust so the player picks up the freshly chosen file.
+      const v = document.querySelector('.ti-media video');
       if (v) {
         const t = v.currentTime;
         v.src = '/media/post/{{ pid }}?v=' + Date.now();
@@ -390,9 +441,13 @@
                            { once: true });
         v.load();
       }
-      if (status) status.textContent = 'Captions re-rendered at ' + d.position + '.';
+      if (status) {
+        status.textContent = d.position === 'none'
+          ? 'Captions off — posting the plain clip.'
+          : 'Captions re-rendered at ' + d.position + '.';
+      }
     } catch (e) {
-      if (status) status.textContent = 'Caption render failed: ' + e;
+      if (status) status.textContent = 'Caption update failed: ' + e;
     } finally {
       buttons.forEach(b => b.disabled = false);
       if (line) line.classList.remove('is-disabled');
@@ -403,7 +458,8 @@
     const html = btn.innerHTML;
     btn.dataset.flashing = '1';
     btn.classList.add('is-copied');
-    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>'
+      + (btn.classList.contains('ghost-line-btn') ? ' Copied' : '');
     setTimeout(() => {
       btn.innerHTML = html;
       btn.classList.remove('is-copied');
@@ -418,7 +474,7 @@
     if (!text) { alert('No caption to copy.'); return; }
     try { await navigator.clipboard.writeText(text); }
     catch (e) { alert('Copy failed: ' + e); return; }
-    flashCopied(btn);
+    closeMenu(btn);
   }
   async function copyPostTranscript(btn) {
     const box = document.getElementById('clip-transcript-plain');

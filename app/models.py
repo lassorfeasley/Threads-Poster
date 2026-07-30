@@ -212,6 +212,13 @@ class ThreadsPost(Base):
     post_day_of_week: Mapped[str] = mapped_column(String(10), default="")
     post_hour_local: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # LLM-drafted attribution for the first comment (publisher/source credit,
+    # e.g. "Courtesy of KXYZ (ABC) in Springfield…"). Drafted when the post is
+    # created; the operator previews/edits/clears it on the post page before it
+    # publishes. Empty = skip (the static config/first_reply.yaml text, when
+    # enabled, is the fallback). What actually got posted lands in first_reply_*.
+    attribution_text: Mapped[str] = mapped_column(Text, default="")
+
     # Auto first-reply (text reply under the published post). Set after publish
     # when config/first_reply.yaml is enabled; failure does not fail the post.
     first_reply_id: Mapped[str] = mapped_column(String(60), default="")

@@ -350,6 +350,45 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     return str(data.get("caption", "")).strip()[:500]
 
 
+def suggest_attribution(model: str, channel: dict, video_title: str,
+                        description: str = "", transcript_excerpt: str = "") -> str:
+    """Draft a short attribution line for the first comment under a post,
+    crediting the publisher and (when identifiable) the program/journalists —
+    e.g. "Courtesy of CNN, from Wolf Blitzer's prime time coverage." DRAFT
+    ONLY: the operator previews/edits it on the post page before it publishes.
+
+    ``channel`` carries the station metadata (call_sign, network, market,
+    region, country, channel_title). Names of shows/anchors come only from the
+    provided title/description/transcript — never invented, never @-tagged.
+    """
+    system = (
+        "You write a one-or-two-sentence courtesy/attribution note that will be "
+        "posted as the first comment under a short news clip on Threads, crediting "
+        "the original publisher. Hard rules:\n"
+        "- NEVER tag or mention any account: no @handles of any kind.\n"
+        "- No hashtags, no URLs, no emojis.\n"
+        "- Credit the station/publisher by name (and its network and market when "
+        "known), e.g. 'Courtesy of KXYZ (ABC) in Springfield, Illinois'.\n"
+        "- Mention the specific program, segment, or journalist ONLY when the "
+        "title, description, or transcript clearly establishes it — never guess "
+        "or invent names. When unsure, credit just the station.\n"
+        "- Plain, gracious, factual tone; under 280 characters; one line.\n"
+        "JSON shape: {\"attribution\": \"...\"}"
+    )
+    user = json.dumps({
+        "channel": {k: str(channel.get(k, "")) for k in
+                    ("call_sign", "network", "market", "region", "country", "channel_title")},
+        "video_title": (video_title or "")[:300],
+        "video_description": (description or "")[:1500],
+        "transcript_excerpt": (transcript_excerpt or "")[:2500],
+    })
+    data = _json_chat(model, system, user)
+    text = str(data.get("attribution", "")).strip()
+    # Belt-and-braces: strip any @handle the model slipped in despite the rule.
+    text = re.sub(r"@[\w.]+", "", text).strip()
+    return " ".join(text.split())[:480]
+
+
 def distill_style_guide(model: str, captions: list[str]) -> str:
     """Distill the operator's caption-writing voice into a short reusable style
     guide (plain text bullets). Rebuilt occasionally as history grows."""

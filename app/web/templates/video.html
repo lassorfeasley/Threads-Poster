@@ -31,7 +31,7 @@
      href="/video/{{ c.id }}?step=scrape"><span class="n">{{ "✓" if state.scraped else "2" }}</span> Scrape &amp; Transcribe</a>
   <span class="sep">›</span>
   <a class="step {{ 'done' if state.trimmed }} {{ 'current' if step == 'cuts' }} {{ 'locked' if not state.scraped }}"
-     href="/video/{{ c.id }}?step=cuts"><span class="n">{{ "✓" if state.trimmed else "3" }}</span> Cuts</a>
+     href="/video/{{ c.id }}?step=cuts"><span class="n">{{ "✓" if state.trimmed else "3" }}</span> Clips</a>
 </div>
 
 {% import "components/category.html" as catui %}
@@ -190,22 +190,22 @@
 {# ============ STEP 3: CUTS ============ #}
 {% if step == "cuts" %}
 {% if not state.scraped %}
-  <div class="empty"><strong>Nothing to cut yet</strong>The video hasn't been downloaded.</div>
+  <div class="empty"><strong>Nothing to clip yet</strong>The video hasn't been downloaded.</div>
 {% else %}
 <div class="page-head" style="margin-top: 8px;">
   <div class="titles">
-    <h2 style="margin: 0;">Cuts</h2>
+    <h2 style="margin: 0;">Clips</h2>
   </div>
   <div class="actions">
     <form method="post" action="/video/{{ c.id }}/cuts">
-      <button class="approve">＋ New cut</button>
+      <button class="approve">＋ New clip</button>
     </form>
   </div>
 </div>
 
 {% if not cut_rows %}
-  <div class="empty"><span class="icon">✂</span><strong>No cuts yet</strong>
-    Make your first cut to pick the segments you want to post.</div>
+  <div class="empty"><span class="icon">✂</span><strong>No clips yet</strong>
+    Make your first clip to pick the segments you want to post.</div>
 {% else %}
 <div class="cut-list">
   {% for row in cut_rows %}
@@ -213,24 +213,24 @@
     <div class="row center">
       <div class="grow stack-sm">
         <a class="item-title" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
-          {{ row.cut.clip_title or "Untitled cut #" ~ loop.index }}</a>
+          {{ row.cut.clip_title or "Untitled clip #" ~ loop.index }}</a>
         <div class="badges">
           {% if row.state.posted %}<span class="badge supportive">posted</span>
           {% elif row.state.exported %}<span class="badge info">clip exported — not posted</span>
           {% else %}<span class="badge score-lo">not trimmed yet</span>{% endif %}
           {% if row.state.captioned %}<span class="badge">captioned</span>{% endif %}
-          {% if row.post_count %}<span class="badge" title="Posts from this cut">{{ row.post_count }} post{{ "s" if row.post_count != 1 }}</span>{% endif %}
+          {% if row.post_count %}<span class="badge" title="Posts from this clip">{{ row.post_count }} post{{ "s" if row.post_count != 1 }}</span>{% endif %}
           <span class="meta">created {{ row.cut.created_at.strftime("%b %-d %H:%M") if row.cut.created_at else "?" }}</span>
         </div>
       </div>
       <div class="btn-group" style="align-items: center;">
         <a class="btn {{ '' if row.state.posted else 'primary' }}"
            href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
-          {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Trim →") }}</a>
+          {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Edit →") }}</a>
         <form method="post" action="/cut/{{ row.cut.id }}/delete"
-              data-confirm="Delete this cut? Its draft/queued posts are removed; published posts are kept."
+              data-confirm="Delete this clip? Its draft/queued posts are removed; published posts are kept."
               data-confirm-ok="Delete" data-confirm-variant="danger">
-          <button class="reject sm" title="Delete this cut">✕</button>
+          <button class="reject sm" title="Delete this clip">✕</button>
         </form>
       </div>
     </div>
@@ -259,7 +259,7 @@
       </div>
       <div class="video-post-actions">
         <a class="sm" href="/post/{{ p.id }}">Details</a>
-        {% if p.cut_pk %}<a class="sm" href="/cut/{{ p.cut_pk }}?step=post">Cut</a>{% endif %}
+        {% if p.cut_pk %}<a class="sm" href="/cut/{{ p.cut_pk }}?step=post">Clip</a>{% endif %}
         {% if p.permalink %}<a class="sm" href="{{ p.permalink }}" target="_blank">Open ↗</a>{% endif %}
       </div>
     </div>

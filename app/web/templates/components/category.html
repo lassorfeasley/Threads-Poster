@@ -1,18 +1,21 @@
 {# Programming-category picker (news / nature / culture). The category lives on
    the SOURCE VIDEO, so setting it from the video, cut, or post page edits the
    same value everywhere. New candidates are auto-tagged by the monitor pass;
-   this field is the manual override. ``next_url`` is where the form returns. #}
-{% macro field(candidate_id, category, next_url) %}
-<form method="post" action="/video/{{ candidate_id }}/category">
+   this field is the manual override. ``next_url`` is where the form returns.
+
+   Renders as a segmented toggle (emoji + short slug label) rather than a
+   dropdown — three options fit a narrow rail, and the full label is in the
+   button title. #}
+{% macro field(candidate_id, category, next_url, show_label=true) %}
+<form method="post" action="/video/{{ candidate_id }}/category" class="cat-toggle-form">
   <input type="hidden" name="next" value="{{ next_url }}">
-  <div class="field" style="margin-bottom: 0;">
-    <label for="category-select">Category</label>
-    <select name="category" id="category-select" onchange="this.form.submit()">
-      <option value="">— uncategorized —</option>
-      {% for opt in category_options() %}
-      <option value="{{ opt.slug }}" {{ "selected" if category == opt.slug }}>{{ opt.emoji }} {{ opt.label }}</option>
-      {% endfor %}
-    </select>
+  {% if show_label %}<span class="subs-lbl">Category</span>{% endif %}
+  <div class="seg-toggle cat-toggle" role="group" aria-label="Category">
+    {% for opt in category_options() %}
+    <button type="submit" name="category" value="{{ opt.slug }}"
+            class="{{ 'is-on' if category == opt.slug }}"
+            title="{{ opt.label }}">{{ opt.emoji }} {{ opt.slug|capitalize }}</button>
+    {% endfor %}
   </div>
 </form>
 {% endmacro %}

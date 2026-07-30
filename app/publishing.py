@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 
 from .config import load_first_reply, load_settings
-from .llm import caption_attributes
+from .llm import caption_attributes, suggest_attribution
 from .models import Candidate, Cut, ThreadsPost, utcnow
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import publish_text_reply, publish_video
@@ -61,7 +61,8 @@ def _object_key(clip: Path) -> str:
 
 
 def record_post(session, candidate: Candidate | None, clip_path: str, caption: str,
-                *, status: str, cut: Cut | None = None) -> ThreadsPost:
+                *, status: str, cut: Cut | None = None,
+                attribution: str = "") -> ThreadsPost:
     """Create a ThreadsPost row without contacting Threads. Used for immediate
     post, draft, and queue paths; publishing happens in ``publish_post``."""
     clip = Path(clip_path).expanduser()
@@ -88,6 +89,18 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
     )
     session.add(post)
     session.flush()
+    # Attribution first-comment: an operator-reviewed text (from the cut page's
+    # first-reply module) wins outright. Otherwise draft one now (not at publish
+    # time), so it can be previewed/edited on the post page before it goes out —
+    # and so a headless scheduler can publish without an LLM call. Best-effort:
+    # a drafting hiccup must never block queueing (Suggest on the post page retries).
+    if attribution.strip():
+        post.attribution_text = attribution.strip()
+    elif candidate is not None and load_first_reply().get("attribution_enabled"):
+        try:
+            post.attribution_text = generate_attribution(candidate)
+        except Exception as exc:
+            log.warning("Attribution draft failed for post %s: %s", post.id, exc)
     # Upload now, while the file is guaranteed to be on this machine, so a
     # headless scheduler (GitHub Actions / cron) can publish later without this
     # disk. Best-effort: publish_post re-uploads from local when it can.
@@ -96,6 +109,28 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
     except Exception as exc:
         log.warning("Queue-time clip upload failed (will retry at publish): %s", exc)
     return post
+
+
+def generate_attribution(candidate: Candidate) -> str:
+    """LLM-drafted courtesy line crediting the source station/publisher (and the
+    program/journalists when the video's own metadata establishes them). DRAFT
+    ONLY — the operator reviews it on the post page before it publishes."""
+    channel = candidate.channel
+    settings = load_settings()
+    return suggest_attribution(
+        settings.get("engagement.draft_model", "claude-sonnet-5"),
+        channel={
+            "call_sign": channel.call_sign if channel else "",
+            "network": channel.network if channel else "",
+            "market": channel.market if channel else "",
+            "region": channel.region if channel else "",
+            "country": channel.country if channel else "",
+            "channel_title": channel.channel_title if channel else "",
+        },
+        video_title=candidate.title or "",
+        description=candidate.description or "",
+        transcript_excerpt=candidate.transcript_text or "",
+    )
 
 
 def _apply_post_attributes(post: ThreadsPost) -> None:
@@ -219,7 +254,8 @@ def _annotate_footage(session, post: ThreadsPost) -> None:
 
 
 def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:
-    """Post the configured first reply under a published post.
+    """Post the first reply under a published post: the post's own attribution
+    comment when it has one, else the static configured text.
 
     Returns True if a reply was posted. Skips when disabled / empty / already
     posted (unless ``force``). Never raises — stores ``first_reply_error`` instead
@@ -231,12 +267,18 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
         return False
 
     cfg = load_first_reply()
-    text = (cfg.get("text") or "").strip()
-    if not force and (not cfg.get("enabled") or not text):
-        return False
-    if force and not text:
-        post.first_reply_error = "First reply text is empty — set it under Replies settings"
-        session.flush()
+    attribution = (post.attribution_text or "").strip()
+    static_text = (cfg.get("text") or "").strip()
+    text = ""
+    if attribution and (cfg.get("attribution_enabled") or force):
+        text = attribution
+    elif static_text and (cfg.get("enabled") or force):
+        text = static_text
+    if not text:
+        if force:
+            post.first_reply_error = ("Nothing to post — this post has no attribution "
+                                      "comment and no reply text is set under Replies settings")
+            session.flush()
         return False
 
     try:
@@ -256,13 +298,15 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
 
 
 def publish_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
-                 *, cut: Cut | None = None) -> ThreadsPost:
+                 *, cut: Cut | None = None, attribution: str = "") -> ThreadsPost:
     """Immediate publish: record the post, then post it to Threads right away."""
-    post = record_post(session, candidate, clip_path, caption, status="draft", cut=cut)
+    post = record_post(session, candidate, clip_path, caption, status="draft", cut=cut,
+                       attribution=attribution)
     return publish_post(session, post)
 
 
 def queue_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
-               *, cut: Cut | None = None) -> ThreadsPost:
+               *, cut: Cut | None = None, attribution: str = "") -> ThreadsPost:
     """Add a post to the adaptive FIFO queue. The window scheduler publishes it."""
-    return record_post(session, candidate, clip_path, caption, status="queued", cut=cut)
+    return record_post(session, candidate, clip_path, caption, status="queued", cut=cut,
+                       attribution=attribution)
