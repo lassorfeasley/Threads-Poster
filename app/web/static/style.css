@@ -405,7 +405,7 @@ main {
 .page-head h1 { margin: 0; }
 .page-head .sub { color: var(--muted); font-size: 13.5px; margin-top: 5px; max-width: 68ch; }
 .page-head .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.monitor-status { display: inline-flex; align-items: center; gap: 8px; margin-right: 4px; }
+.monitor-status { display: inline-flex; align-items: center; gap: 6px; }
 
 /* ------------------------------------------------------------
    Pagebar — unified page toolbar (title + actions + tabs + tools)
@@ -586,19 +586,28 @@ h2:first-child { margin-top: 0; }
 h2 .meta { text-transform: none; letter-spacing: 0; font-weight: 500; white-space: normal; }
 
 /* Section header row: heading on the left, controls (e.g. view toggle) right. */
-.panel-head { display: flex; align-items: center; gap: 12px; }
-.panel-head h2 { flex: 1; min-width: 0; }
+.panel-head { display: flex; align-items: center; gap: 16px; }
+.panel-head h2 { flex: 1; min-width: 0; margin: 0; }
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
 .panel-head-rule {
-  align-self: stretch;
+  flex: none;
+  align-self: center;
   width: 1px;
+  height: 22px;
   background: var(--border);
-  margin: 2px 2px;
 }
 .panel-head-uploads {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
 }
+.panel-head-actions .copy-btn { margin-left: 0; }
+.panel-head-actions .monitor-status .meta { font-size: 12.5px; }
 
 a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -2011,35 +2020,37 @@ a.cal-event:hover { background: var(--panel3); }
    ------------------------------------------------------------ */
 .view-toggle {
   display: inline-flex;
-  align-items: stretch;
+  align-items: center;
   padding: 2px;
   gap: 2px;
-  background: var(--panel3);
+  background: var(--panel2);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 8px;
 }
 .view-toggle .view-seg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 6px 10px;
-  border: 1px solid transparent;
-  border-radius: 7px;
+  width: 32px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
   color: var(--muted);
   background: transparent;
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 .view-toggle .view-seg svg { display: block; }
 .view-toggle .view-seg:hover {
   color: var(--text);
-  background: var(--panel2);
+  background: var(--panel3);
   text-decoration: none;
 }
 .view-toggle .view-seg.is-active {
-  color: var(--blue);
-  background: var(--panel2);
-  border-color: var(--blue-border);
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
 .view-toggle .view-seg:focus-visible {
   outline: 2px solid var(--blue);

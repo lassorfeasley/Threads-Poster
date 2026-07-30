@@ -78,21 +78,6 @@
     {% if _notif %}<span class="nav-badge">{{ _notif }}</span>{% endif %}
   </a>
 
-  {% set nav_sched = nav_scheduler() %}
-  {% if nav_sched %}
-  <div class="nav-status">
-    <div class="nav-status-row">
-      Next
-      {% if nav_sched.next_window_local %}{{ nav_sched.next_window_local.strftime("%a %-I:%M %p") }}{% else %}—{% endif %}
-      &middot; {{ nav_sched.queue_count }} queued
-    </div>
-    <form method="post" action="/threads/import-history" class="nav-status-row">
-      <input type="hidden" name="next" value="{{ request.url.path }}">
-      <button type="submit" class="nav-status-action" data-confirm="Import your account's existing Threads posts (made outside this app) so analytics can include them? This does not post anything." data-confirm-ok="Import">Import Threads history</button>
-    </form>
-  </div>
-  {% endif %}
-
   <div class="nav-section">Configure</div>
   <a class="nav {{ 'active' if active == 'threads_account' }}" href="/threads-account">
     <span class="nav-ic-wrap">

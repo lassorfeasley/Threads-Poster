@@ -279,59 +279,60 @@
 <div class="panel-head">
   <h2>{{ "Results" if filtering else "New matches" }}
     ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})</h2>
-  <div class="monitor-status">
-    {% if monitor_running %}
-      <span class="badge info"><span class="dot"></span> monitor running</span>
-      <script>setTimeout(() => location.reload(), 10000);</script>
-    {% else %}
-      <span class="meta" title="{{ monitor_result }}">Monitor {{ 'never run' if monitor_last_refreshed == 'never' else 'last refreshed ' + monitor_last_refreshed }}</span>
-      <form method="post" action="/monitor/run">
-        <button type="submit" class="btn ghost icon-btn" title="Refresh monitor"
-                aria-label="Refresh monitor">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M23 4v6h-6"/>
-            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-          </svg>
-        </button>
-      </form>
-    {% endif %}
-  </div>
-  <div class="view-toggle" role="group" aria-label="Switch view">
-    <a class="view-seg is-active" aria-current="page" title="Table view" aria-label="Table view"
-       href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="4" width="18" height="16" rx="1.5"/>
-        <path d="M3 9h18M3 14h18M9 9v11"/>
-      </svg>
-    </a>
-    <a class="view-seg" title="Triage view" aria-label="Triage view"
-       href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M5 4v16M9 5.5v13a1 1 0 0 0 1.5.86l9-6.5a1 1 0 0 0 0-1.72l-9-6.5A1 1 0 0 0 9 5.5z"/>
-      </svg>
-    </a>
-  </div>
-  <span class="panel-head-rule" aria-hidden="true"></span>
-  <div class="panel-head-uploads" role="group" aria-label="Manual upload">
-    <button type="button" class="copy-btn" title="Paste a YouTube URL"
-            aria-label="Paste a YouTube URL" onclick="document.getElementById('url-dialog').showModal()">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-        <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-      </svg>
-    </button>
-    <button type="button" class="copy-btn" title="Upload your own clip"
-            aria-label="Upload your own clip" onclick="document.getElementById('upload-dialog').showModal()">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 15V4M8 8l4-4 4 4"/>
-        <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
-      </svg>
-    </button>
+  <div class="panel-head-actions">
+    <div class="monitor-status">
+      {% if monitor_running %}
+        <span class="badge info"><span class="dot"></span> monitor running</span>
+        <script>setTimeout(() => location.reload(), 10000);</script>
+      {% else %}
+        <span class="meta" title="{{ monitor_result }}">Monitor {{ 'never run' if monitor_last_refreshed == 'never' else 'last refreshed ' + monitor_last_refreshed }}</span>
+        <form method="post" action="/monitor/run">
+          <button type="submit" class="copy-btn" title="Refresh monitor" aria-label="Refresh monitor">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 4v6h-6"/>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+          </button>
+        </form>
+      {% endif %}
+    </div>
+    <div class="view-toggle" role="group" aria-label="Switch view">
+      <a class="view-seg is-active" aria-current="page" title="Table view" aria-label="Table view"
+         href="/?status={{ status }}&q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="1.5"/>
+          <path d="M3 9h18M3 14h18M9 9v11"/>
+        </svg>
+      </a>
+      <a class="view-seg" title="Triage view" aria-label="Triage view"
+         href="/triage?q={{ q }}&channel_id={{ channel_id }}{% for k in keyword %}&keyword={{ k }}{% endfor %}&region={{ region }}&country={{ country }}&scope={{ scope }}&date_from={{ date_from }}&date_to={{ date_to }}&show_hidden={{ show_hidden }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 4v16M9 5.5v13a1 1 0 0 0 1.5.86l9-6.5a1 1 0 0 0 0-1.72l-9-6.5A1 1 0 0 0 9 5.5z"/>
+        </svg>
+      </a>
+    </div>
+    <span class="panel-head-rule" aria-hidden="true"></span>
+    <div class="panel-head-uploads" role="group" aria-label="Manual upload">
+      <button type="button" class="copy-btn" title="Paste a YouTube URL"
+              aria-label="Paste a YouTube URL" onclick="document.getElementById('url-dialog').showModal()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+        </svg>
+      </button>
+      <button type="button" class="copy-btn" title="Upload your own clip"
+              aria-label="Upload your own clip" onclick="document.getElementById('upload-dialog').showModal()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 15V4M8 8l4-4 4 4"/>
+          <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
+        </svg>
+      </button>
+    </div>
   </div>
 </div>
 {% if total_matches > candidates|length %}
