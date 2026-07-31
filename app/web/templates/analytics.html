@@ -121,7 +121,7 @@
   <table>
     <tr><th>Published</th><th>Caption</th><th>Keywords</th><th>Region</th><th>Len (s)</th>
         <th>Tone</th><th>Q?</th><th>Views</th><th>Likes</th><th>Replies</th><th>Reposts</th>
-        <th>Supportive</th><th>Hostile</th><th>Promo replies</th></tr>
+        <th>Our replies</th></tr>
     {% for r in rows %}
     <tr>
       <td class="meta" style="white-space: nowrap;">{{ r.published_at[:10] if r.published_at else "—" }} {{ r.day_of_week }} {{ r.hour_local }}h</td>
@@ -135,9 +135,7 @@
       <td>{{ r.likes if r.likes is not none else "—" }}</td>
       <td>{{ r.replies if r.replies is not none else "—" }}</td>
       <td>{{ r.reposts if r.reposts is not none else "—" }}</td>
-      <td>{{ r.supportive_comments }}</td>
-      <td>{{ r.hostile_comments }}</td>
-      <td>{{ r.renewables_replies_posted }}</td>
+      <td>{{ r.replies_posted }}</td>
     </tr>
     {% endfor %}
   </table>

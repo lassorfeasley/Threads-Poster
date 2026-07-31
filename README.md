@@ -4,8 +4,8 @@ A personal, locally-run tool that watches ~190 local TV news YouTube channels fo
 climate-related segments, presents matches in a review dashboard, and — only after
 you manually approve a video — downloads it and stores the file plus its transcript
 and metadata. It then assists with publishing your own trimmed/captioned clips to
-Threads, drafting Renewables.org replies to supportive commenters (each approved
-before posting), and analyzing what's performing and why.
+Threads, composing replies on your own posts (each approved before posting),
+and analyzing what's performing and why.
 
 **Hard rule throughout: you approve every outbound action.** Nothing downloads,
 posts, or replies automatically.
@@ -20,10 +20,8 @@ posts, or replies automatically.
 - Only clips **you trimmed and captioned yourself** get published; the tool does
   not redistribute raw footage. Full segments stay on your local disk.
 - Threads publishing and replies are all operator-approved; the tool posts nothing
-  on its own. Engagement is limited to your own posts and to supportive,
-  good-faith commenters. Pacing caps keep reply volume human. The tool respects
-  Threads/Meta platform policies and errs toward skipping when a reply might look
-  spammy or tone-deaf.
+  on its own. Engagement is limited to your own posts. Pacing caps keep reply
+  volume human. The tool respects Threads/Meta platform policies.
 
 ## Setup
 
@@ -52,7 +50,8 @@ Optional extras:
 | Variable | What it is |
 |---|---|
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key. Create at [console.cloud.google.com](https://console.cloud.google.com) → enable "YouTube Data API v3" → Credentials → API key. Used for discovery only. |
-| `ANTHROPIC_API_KEY` | Claude API key ([console.anthropic.com](https://console.anthropic.com)) for relevance scoring, comment classification, drafts, digest. |
+| `ANTHROPIC_API_KEY` | Claude API key ([console.anthropic.com](https://console.anthropic.com)) for relevance scoring, caption drafts, digest. |
+| `GIPHY_API_KEY` | Optional. Free Giphy key ([developers.giphy.com](https://developers.giphy.com/)) so you can attach GIFs when replying on a post page. |
 | `DATABASE_URL` | Optional. Empty = local SQLite at `data/app.db` (fast for local UI work). For Supabase Postgres use the connection string from Project Settings → Database. Keep Storage (`SUPABASE_*`) even when using SQLite. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Supabase project (Settings → API). Used for the trimmed-clip bucket only. Create a **private** Storage bucket named `trimmed-clips` (or change `storage.trimmed_clip_bucket` in settings). |
 | `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_REDIRECT_URI` | Meta app for the Threads API (below). |
@@ -82,7 +81,7 @@ python run.py monitor --loop   # keep polling at the configured interval
 python run.py score-visuals    # backfill vision scores for unscored candidates
 python run.py annotate-posts   # backfill footage traits for published posts (from posted clips)
 python run.py backfill-post-times  # restate post weekday/hour in the scheduler timezone
-python run.py comments         # pull + classify comments on your own posts
+python run.py comments         # pull comments on your own posts
 python run.py metrics          # snapshot Threads metrics (time series)
 python run.py digest           # print the analytics digest
 python run.py cleanup          # apply retention (only if you set it; default keeps everything)
@@ -178,12 +177,9 @@ Channels / Keywords / Traits) guides each video through four breadcrumbed steps:
    confirmation, and is retained as the canonical record linked to the post ID.
    At publish, the posted clip's frames are tagged with **ground-truth footage
    traits** (works for uploads too — no YouTube storyboard needed).
-6. **Engagement**: "Sync comments" reads replies on your own posts only. An LLM
-   classifies each (supportive / genuine question / neutral / hostile / bait /
-   spam / off-topic) plus risk flags (duplicate text, political bait, sus).
-   Only supportive + genuine questions get a drafted Renewables.org reply; you
-   edit and approve each one. Hourly/daily caps and a per-post reply-fraction cap
-   are enforced in code. Filtered comments are visible in a low-priority view.
+6. **Engagement**: "Sync replies" on a published post pulls comments on your own
+   posts. Compose and post replies inline from that post page. Hourly/daily
+   pacing caps are enforced in code.
 7. **Analytics**: metric snapshots over time, per-post attribute tagging (topic,
    region, clip length, caption traits, day/time, **footage traits**), slice
    tables, and an LLM digest with clearly-labeled correlational hypotheses and
@@ -227,7 +223,7 @@ Everything lives in `config/` — no code changes needed:
   Traits are observations only; performance verdicts come from published clips.
 - `config/settings.yaml` — poll interval, score threshold, storage paths,
   retention (defaults to keep-everything), politeness delays,
-  engagement categories + reply-eligibility + pacing caps + reply guidance,
+  engagement pacing caps,
   analytics cadence, **vision scoring** (`vision.*`: enable, model, traits,
   per-run cap), **ranking** (`ranking.*`: relevance/visual blend weights and how
   strongly learned trait weights nudge results), and the **LLM budget +

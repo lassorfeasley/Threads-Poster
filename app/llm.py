@@ -1,5 +1,5 @@
-"""LLM helpers: relevance scoring, comment classification, reply drafting,
-highlight suggestion, analytics digest. All calls go through Anthropic's API.
+"""LLM helpers: relevance scoring, highlight suggestion, analytics digest.
+All calls go through Anthropic's API.
 """
 from __future__ import annotations
 
@@ -182,42 +182,6 @@ def suggest_category(model: str, categories: list[dict], title: str, description
     if slug not in {c["slug"] for c in categories}:
         slug = ""
     return {"category": slug, "rationale": str(data.get("rationale", ""))[:500]}
-
-
-def classify_comment(model: str, categories: list[str], post_caption: str, comment_text: str, username: str) -> dict:
-    """Return {category, rationale, risk_flags: [..]}."""
-    system = (
-        "You classify comments on the operator's own Threads posts about climate news "
-        f"clips. Pick exactly one category from: {', '.join(categories)}. "
-        "Also list risk flags from: low_history_account_suspected, duplicate_or_coordinated_text, "
-        "political_bait, sarcasm_suspected, inauthentic_or_sus, none. "
-        "Be conservative: when uncertain whether a comment is genuinely supportive or a "
-        "good-faith question, prefer a non-eligible category — a promotional reply to the "
-        "wrong comment looks tone-deaf. JSON shape: "
-        "{\"category\": \"...\", \"rationale\": \"one line\", \"risk_flags\": [\"...\"]}"
-    )
-    user = json.dumps({"post_caption": post_caption[:800], "comment": comment_text[:1000], "username": username})
-    data = _json_chat(model, system, user)
-    category = str(data.get("category", "off_topic"))
-    if category not in categories:
-        category = "off_topic"
-    flags = [f for f in data.get("risk_flags", []) if f and f != "none"]
-    return {"category": category, "rationale": str(data.get("rationale", ""))[:500], "risk_flags": flags}
-
-
-def draft_reply(model: str, guidance: str, post_caption: str, comment_text: str, username: str, recent_replies: list[str]) -> str:
-    """Draft one context-aware reply. `recent_replies` are the operator's recent
-    posted replies, provided so wording does not repeat."""
-    system = (
-        "You draft a reply for the operator to review and edit before posting — it will "
-        "never be posted automatically. Follow this guidance:\n" + guidance + "\n"
-        "Avoid any wording similar to these recent replies (vary structure and phrasing):\n"
-        + "\n".join(f"- {r[:200]}" for r in recent_replies[-8:])
-        + "\nJSON shape: {\"reply\": \"...\"}"
-    )
-    user = json.dumps({"post_caption": post_caption[:800], "comment": comment_text[:1000], "username": username})
-    data = _json_chat(model, system, user)
-    return str(data.get("reply", "")).strip()[:700]
 
 
 def suggest_highlight(model: str, title: str, transcript_segments: list[dict]) -> dict:

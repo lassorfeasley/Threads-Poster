@@ -186,53 +186,13 @@ engagement:
   # posts. This flag exists but is HIGH-RISK and should stay false: enabling it
   # is documented as against the design intent and platform-risk posture.
   allow_other_users_posts: false
-  # Comment classification categories (LLM must pick exactly one).
-  categories:
-    - supportive
-    - genuine_question
-    - neutral
-    - hostile_or_argumentative
-    - bait_or_trolling
-    - spam_or_bot
-    - off_topic
-  # Only these categories become reply candidates. Everything else is logged
-  # but never gets a drafted promo reply.
-  reply_eligible_categories:
-    - supportive
-    - genuine_question
-  # Pacing guardrails for approved replies (enforced at post time).
+  # Pacing guardrails for replies (enforced at post time).
   # Note: these are OUR caps, not Threads'. Threads/Meta enforce their own
   # separate API rate limits (~250 posts+replies per 24h per user).
   max_replies_per_hour: 100
   max_replies_per_day: 250
-  # Don't draft replies for more than this fraction of eligible comments on a
-  # single post (avoid replying to literally everyone).
-  max_reply_fraction_per_post: 0.5
-  # LLM models (Anthropic model IDs).
-  classify_model: claude-haiku-4-5
+  # Shared default LLM model id (captions, attribution drafts, etc.).
   draft_model: claude-sonnet-5
-  # Context the LLM uses when drafting replies. Edit to taste.
-  reply_guidance: >
-    Write the reply in TWO parts, separated by a blank line.
-
-    PART 1 - Respond to the commenter first: one short, warm, genuine sentence
-    that speaks to their specific point (agree, empathize, or answer their
-    question). Vary this opener every time so replies never look copy-pasted;
-    for a brief affirming comment a single word like "Agreed." or "Seconded."
-    is fine.
-
-    PART 2 - Then pitch Renewables.org using this text, kept essentially intact
-    (you may lightly trim to fit, but keep every fact: the $25 minimum, Global
-    South solar, getting paid back, earning no interest rate, and creating 550%
-    more carbon avoidance than the Global North):
-    "Nonprofit Renewables.org allows anyone to invest as little as $25 in Global
-    South solar and get paid back as they generate and sell clean electricity to
-    the grid. You don't earn an interest rate, but dollar-for-dollar, you'll
-    create 550% more carbon avoidance than you would have investing in the
-    Global North."
-
-    Always include the word "Renewables.org" verbatim so it links. Never be
-    pushy or argumentative. Keep the whole reply under 500 characters.
 
 scheduler:
   # Publish the FIFO queue at the fixed ET windows below, one post per window.

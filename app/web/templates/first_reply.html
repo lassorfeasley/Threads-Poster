@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
-{% set fr_sub %}<a href="/engagement">← Back to Replies</a> · The comment automatically posted under every post this app publishes. Failures never undo the main post — retry from the post page.{% endset %}
+{% set fr_sub %}The comment automatically posted under every post this app publishes. Failures never undo the main post — retry from the post page.{% endset %}
 {{ ui.pagebar("First reply", sub=fr_sub) }}
 
 <div class="card">

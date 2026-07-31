@@ -11,7 +11,7 @@ Usage:
   python run.py backfill-calendar-names  # short calendar labels for old titled cuts
   python run.py backfill-categories # auto-tag programming categories for untagged videos
   python run.py metrics            # snapshot Threads metrics for published posts
-  python run.py comments           # sync + classify comments on own posts
+  python run.py comments           # sync comments on own posts
   python run.py digest             # print the analytics digest to stdout
   python run.py cleanup            # apply the retention setting (never automatic)
   python run.py scheduler          # one adaptive-scheduler tick (windows + metrics)
@@ -412,7 +412,7 @@ def cmd_comments(_args) -> None:
     init_db()
     with session_scope() as session:
         result = sync_comments(session)
-    print(f"New comments: {result['new_comments']}, drafts: {result['drafts']}")
+    print(f"New comments: {result['new_comments']}")
 
 
 def cmd_digest(_args) -> None:
@@ -551,7 +551,7 @@ def main() -> None:
     p.set_defaults(func=cmd_backfill_categories)
 
     sub.add_parser("metrics", help="snapshot Threads post metrics").set_defaults(func=cmd_metrics)
-    sub.add_parser("comments", help="sync and classify comments on own posts").set_defaults(func=cmd_comments)
+    sub.add_parser("comments", help="sync comments on own posts").set_defaults(func=cmd_comments)
     sub.add_parser("digest", help="print the analytics digest").set_defaults(func=cmd_digest)
     sub.add_parser("cleanup", help="apply retention setting to downloaded segments").set_defaults(func=cmd_cleanup)
 

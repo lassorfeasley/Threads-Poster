@@ -244,32 +244,74 @@
   </article>
 
   {% if status == "published" %}
-  {# ---- Audience replies, threaded right where they happen on Threads. ---- #}
+  {# ---- Audience replies: flat Threads-style rows with hairline separators. ---- #}
   {% for cm in comments %}
-  <article class="thread-item is-reply">
+  <article class="thread-item is-audience" {% if cm.id %}id="comment-{{ cm.id }}"{% endif %}>
     <div class="ti-gutter" aria-hidden="true">
       <span class="ti-avatar is-other">{{ (cm.username or "?")[0]|upper }}</span>
     </div>
     <div class="ti-main">
       <div class="ti-head">
         <span class="ti-name">{{ cm.username or "unknown" }}</span>
-        <span class="ti-type">
-          {{- cm.commented_at.strftime("%b %-d") if cm.commented_at else "reply" -}}
-          {%- if cm.classification %} · {{ cm.classification }}{% endif -%}
-        </span>
+        {% if cm.commented_at %}
+        <span class="ti-type">{{ cm.commented_at.strftime("%b %-d") }}</span>
+        {% endif %}
       </div>
       <div class="ti-text-static">{{ cm.text }}</div>
+
       {% if cm.reply_status == "posted" and cm.reply_text %}
-      <div class="meta" style="margin-top: 4px;">You replied: {{ cm.reply_text }}</div>
+      <div class="ti-your-reply">
+        <span class="meta">You replied</span>
+        {% if cm.reply_text == "[GIF]" %}
+        <div class="meta">GIF</div>
+        {% else %}
+        <div class="ti-text-static">{{ cm.reply_text }}</div>
+        {% endif %}
+      </div>
+      {% elif cm.reply_status != "posted" %}
+      <div class="ti-action-row">
+        <button type="button" class="ti-action-btn" aria-label="Reply"
+                aria-expanded="false" aria-controls="reply-compose-{{ cm.id }}"
+                onclick="toggleAudienceReply(this)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
+        </button>
+      </div>
+      <form class="ti-reply-form" id="reply-compose-{{ cm.id }}" hidden
+            method="post" action="/engagement/{{ cm.id }}/post">
+        <input type="hidden" name="next" value="/post/{{ pid }}">
+        <input type="hidden" name="gif_id" value="">
+        <textarea name="reply_text" id="reply-{{ cm.id }}" rows="3"
+                  maxlength="500" aria-label="Your reply"
+                  placeholder="Reply to @{{ cm.username or 'them' }}…"></textarea>
+        <div class="ti-gif-picked" hidden>
+          <img alt="" width="120" height="90">
+          <button type="button" class="ghost sm" onclick="clearGif(this)">Remove GIF</button>
+        </div>
+        {% if giphy_enabled %}
+        <div class="ti-gif-picker" hidden>
+          <div class="ti-gif-search">
+            <input type="search" placeholder="Search Giphy…" autocomplete="off"
+                   aria-label="Search Giphy" oninput="searchGifs(this)">
+            <a class="ti-gif-powered" href="https://giphy.com/" target="_blank" rel="noopener">Powered by GIPHY</a>
+          </div>
+          <div class="ti-gif-grid" role="listbox" aria-label="GIF results"></div>
+        </div>
+        {% endif %}
+        <div class="ti-reply-actions">
+          {% if giphy_enabled %}
+          <button type="button" class="ghost sm" onclick="toggleGifPicker(this)"
+                  title="Attach a GIF" aria-label="Attach a GIF">GIF</button>
+          {% endif %}
+          <button class="approve sm" type="submit">Post reply</button>
+        </div>
+      </form>
       {% endif %}
     </div>
   </article>
   {% endfor %}
-  {# Footer: sync + a route to the moderation queue where drafts get approved. #}
   <div class="thread-actions">
     <span class="ta-note">
-      {{ comments|length }} repl{{ "y" if comments|length == 1 else "ies" }} pulled ·
-      <a href="/engagement">approve drafts in Replies</a>
+      {{ comments|length }} repl{{ "y" if comments|length == 1 else "ies" }} pulled
     </span>
     <form class="inline" method="post" action="/post/{{ pid }}/sync-replies">
       <input type="hidden" name="next" value="/post/{{ pid }}">
@@ -386,6 +428,101 @@
     const menu = el && el.closest ? el.closest('details.ti-menu') : null;
     if (menu) menu.removeAttribute('open');
   }
+  function toggleAudienceReply(el, forceClose) {
+    const item = el.closest('.thread-item');
+    if (!item) return;
+    const form = item.querySelector('.ti-reply-form');
+    const btn = item.querySelector('.ti-action-btn');
+    if (!form) return;
+    const open = forceClose ? false : form.hidden;
+    form.hidden = !open;
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+      const ta = form.querySelector('textarea');
+      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    } else {
+      const picker = form.querySelector('.ti-gif-picker');
+      if (picker) picker.hidden = true;
+    }
+  }
+  {% if giphy_enabled %}
+  function toggleGifPicker(btn) {
+    const form = btn.closest('.ti-reply-form');
+    if (!form) return;
+    const picker = form.querySelector('.ti-gif-picker');
+    if (!picker) return;
+    picker.hidden = !picker.hidden;
+    if (!picker.hidden) {
+      const input = picker.querySelector('input[type="search"]');
+      if (input) { input.focus(); searchGifs(input); }
+    }
+  }
+  function clearGif(btn) {
+    const form = btn.closest('.ti-reply-form');
+    if (!form) return;
+    const hid = form.querySelector('input[name="gif_id"]');
+    if (hid) hid.value = '';
+    const picked = form.querySelector('.ti-gif-picked');
+    if (picked) {
+      picked.hidden = true;
+      const img = picked.querySelector('img');
+      if (img) { img.removeAttribute('src'); img.alt = ''; }
+    }
+  }
+  function pickGif(btn, id, url, title) {
+    const form = btn.closest('.ti-reply-form');
+    if (!form) return;
+    const hid = form.querySelector('input[name="gif_id"]');
+    if (hid) hid.value = id;
+    const picked = form.querySelector('.ti-gif-picked');
+    if (picked) {
+      const img = picked.querySelector('img');
+      if (img) { img.src = url; img.alt = title || 'Selected GIF'; }
+      picked.hidden = false;
+    }
+    const picker = form.querySelector('.ti-gif-picker');
+    if (picker) picker.hidden = true;
+  }
+  let _gifTimer = null;
+  function searchGifs(input) {
+    const form = input.closest('.ti-reply-form');
+    if (!form) return;
+    const grid = form.querySelector('.ti-gif-grid');
+    if (!grid) return;
+    clearTimeout(_gifTimer);
+    const q = (input.value || '').trim();
+    _gifTimer = setTimeout(async () => {
+      grid.innerHTML = '<div class="meta ti-gif-status">Searching…</div>';
+      try {
+        const r = await fetch('/giphy/search?q=' + encodeURIComponent(q) + '&limit=24');
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        const gifs = d.gifs || [];
+        if (!gifs.length) {
+          grid.innerHTML = '<div class="meta ti-gif-status">No GIFs found</div>';
+          return;
+        }
+        grid.innerHTML = '';
+        for (const g of gifs) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'ti-gif-cell';
+          b.title = g.title || '';
+          b.setAttribute('role', 'option');
+          b.onclick = () => pickGif(b, g.id, g.url, g.title || '');
+          const img = document.createElement('img');
+          img.src = g.preview_url || g.url;
+          img.alt = g.title || '';
+          img.loading = 'lazy';
+          b.appendChild(img);
+          grid.appendChild(b);
+        }
+      } catch (e) {
+        grid.innerHTML = '<div class="meta ti-gif-status">' + (e.message || 'Search failed') + '</div>';
+      }
+    }, 280);
+  }
+  {% endif %}
   async function suggestAttribution(btn) {
     const ta = document.getElementById('attribution');
     if (!ta) return;

@@ -163,15 +163,9 @@ def _latest_metrics_bulk(session, post_ids: list[int]) -> dict[int, dict]:
 
 
 def _comment_outcomes_bulk(session, post_ids: list[int]) -> dict[int, dict]:
-    """post_pk -> comment-outcome counts, from two grouped queries total."""
+    """post_pk -> count of replies we've posted under that post."""
     if not post_ids:
         return {}
-    class_rows = session.execute(
-        select(ThreadsComment.post_pk, ThreadsComment.classification,
-               func.count(ThreadsComment.id))
-        .where(ThreadsComment.post_pk.in_(post_ids))
-        .group_by(ThreadsComment.post_pk, ThreadsComment.classification)
-    ).all()
     posted_rows = session.execute(
         select(ThreadsComment.post_pk, func.count(ThreadsComment.id))
         .where(ThreadsComment.post_pk.in_(post_ids),
@@ -179,24 +173,11 @@ def _comment_outcomes_bulk(session, post_ids: list[int]) -> dict[int, dict]:
         .group_by(ThreadsComment.post_pk)
     ).all()
     posted = {pk: n for pk, n in posted_rows}
-
-    by_post: dict[int, dict[str, int]] = defaultdict(dict)
-    for pk, classification, n in class_rows:
-        by_post[pk][classification] = n
-    out: dict[int, dict] = {}
-    for pk in post_ids:
-        by_class = by_post.get(pk, {})
-        out[pk] = {
-            "supportive_comments": by_class.get("supportive", 0) + by_class.get("genuine_question", 0),
-            "hostile_comments": by_class.get("hostile_or_argumentative", 0) + by_class.get("bait_or_trolling", 0),
-            "renewables_replies_posted": posted.get(pk, 0),
-        }
-    return out
+    return {pk: {"replies_posted": posted.get(pk, 0)} for pk in post_ids}
 
 
 _EMPTY_METRICS = {m: None for m in METRICS}
-_EMPTY_OUTCOMES = {"supportive_comments": 0, "hostile_comments": 0,
-                   "renewables_replies_posted": 0}
+_EMPTY_OUTCOMES = {"replies_posted": 0}
 
 
 def build_post_rows(session) -> list[dict]:

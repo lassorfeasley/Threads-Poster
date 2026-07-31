@@ -280,9 +280,23 @@ def publish_video(video_url: str, caption: str, reply_to_id: str | None = None,
     return {"media_id": media_id, "permalink": info.get("permalink", "")}
 
 
-def publish_text_reply(text: str, reply_to_id: str) -> dict:
-    """Publish a text reply to a post or comment (``reply_to_id`` is either)."""
-    container = _api("POST", "{user_id}/threads", media_type="TEXT", text=text, reply_to_id=reply_to_id)
+def publish_text_reply(text: str, reply_to_id: str, *, gif_id: str | None = None) -> dict:
+    """Publish a text (and optional Giphy GIF) reply to a post or comment.
+
+    ``reply_to_id`` is either a Threads post or comment id. ``gif_id`` is the
+    Giphy GIF id; Threads only accepts provider ``GIPHY`` today.
+    """
+    params: dict = {"media_type": "TEXT", "reply_to_id": reply_to_id}
+    text = (text or "").strip()
+    if text:
+        params["text"] = text
+    gif_id = (gif_id or "").strip()
+    if gif_id:
+        # Meta expects a JSON-encoded object in the form body.
+        params["gif_attachment"] = json.dumps({"gif_id": gif_id, "provider": "GIPHY"})
+    if "text" not in params and "gif_attachment" not in params:
+        raise ThreadsError("Reply needs text or a GIF")
+    container = _api("POST", "{user_id}/threads", **params)
     published = _api("POST", "{user_id}/threads_publish", creation_id=container["id"])
     return {"media_id": published["id"]}
 

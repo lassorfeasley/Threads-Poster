@@ -270,13 +270,13 @@ class ThreadsComment(Base):
     text: Mapped[str] = mapped_column(Text, default="")
     commented_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    classification: Mapped[str] = mapped_column(String(40), default="")  # one of settings categories
-    classification_rationale: Mapped[str] = mapped_column(Text, default="")
-    risk_flags: Mapped[str] = mapped_column(Text, default="")  # comma-separated, e.g. duplicate_text
-    eligible_for_reply: Mapped[bool] = mapped_column(Boolean, default=False)
+    classification: Mapped[str] = mapped_column(String(40), default="")  # legacy; unused
+    classification_rationale: Mapped[str] = mapped_column(Text, default="")  # legacy; unused
+    risk_flags: Mapped[str] = mapped_column(Text, default="")  # legacy; unused
+    eligible_for_reply: Mapped[bool] = mapped_column(Boolean, default=False)  # legacy; unused
 
-    draft_reply: Mapped[str] = mapped_column(Text, default="")
-    # queue statuses: pending (awaiting operator), posted, skipped, filtered
+    draft_reply: Mapped[str] = mapped_column(Text, default="")  # legacy; unused
+    # statuses: pending (unreplied), posted, skipped
     reply_status: Mapped[str] = mapped_column(String(20), default="pending")
     reply_text_posted: Mapped[str] = mapped_column(Text, default="")
     reply_id: Mapped[str] = mapped_column(String(60), default="")

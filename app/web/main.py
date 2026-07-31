@@ -37,7 +37,8 @@ from ..db import (
     sync_channels_from_config,
     sync_traits_from_config,
 )
-from ..engagement import PacingLimitError, post_approved_reply, redraft_comment, sync_comments
+from ..engagement import PacingLimitError, post_approved_reply, sync_comments
+from ..giphy import is_configured as giphy_configured
 from ..history import import_history
 from ..llm import (
     suggest_calendar_name,
@@ -2063,8 +2064,8 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             .order_by(ThreadsComment.created_at.desc())
         ).scalars().all()
         comment_rows = [
-            {"username": c.username, "text": c.text,
-             "classification": c.classification, "reply_status": c.reply_status,
+            {"id": c.id, "username": c.username, "text": c.text,
+             "reply_status": c.reply_status,
              "reply_text": c.reply_text_posted,
              "commented_at": c.commented_at}
             for c in comments
@@ -2118,6 +2119,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
             "schedule": schedule,
+            "giphy_enabled": giphy_configured(),
         }
     return templates.TemplateResponse(
         request, "post.html", {**ctx, "msg": msg, "active": "posts"}
@@ -2149,13 +2151,12 @@ def refresh_post_stats(post_id: int, next: str = Form("")):
 
 @app.post("/post/{post_id}/sync-replies")
 def sync_post_replies(post_id: int, next: str = Form("")):
-    """Pull and classify the replies on this (and other) published posts."""
+    """Pull the replies on this (and other) published posts."""
     dest = next or f"/post/{post_id}"
     with session_scope() as session:
         try:
             result = sync_comments(session)
-            return _flash(dest, f"Synced: {result['new_comments']} new replies, "
-                                f"{result['drafts']} drafts")
+            return _flash(dest, f"Synced: {result['new_comments']} new replies")
         except Exception as exc:
             return _flash(dest, f"Reply sync failed: {exc}")
 
@@ -2435,94 +2436,69 @@ def dismiss_attention(post_id: int, next: str = Form("/notifications")):
 
 # --- Engagement ----------------------------------------------------------------
 
-@app.get("/engagement", response_class=HTMLResponse)
-def engagement_page(request: Request, view: str = "queue", msg: str = ""):
-    with session_scope() as session:
-        # Eager-load the related post in one round-trip. Without this, the template
-        # lazy-loads c.post per row (N+1), which is painfully slow against remote Postgres.
-        base = select(ThreadsComment).options(selectinload(ThreadsComment.post))
-        if view == "filtered":
-            comments = session.execute(
-                base.where(ThreadsComment.reply_status.in_(["filtered", "skipped"]))
-                .order_by(ThreadsComment.created_at.desc()).limit(200)
-            ).scalars().all()
-        elif view == "posted":
-            comments = session.execute(
-                base.where(ThreadsComment.reply_status == "posted")
-                .order_by(ThreadsComment.replied_at.desc()).limit(200)
-            ).scalars().all()
-        else:
-            comments = session.execute(
-                base.where(
-                    ThreadsComment.reply_status == "pending", ThreadsComment.eligible_for_reply
-                ).order_by(ThreadsComment.created_at.desc()).limit(200)
-            ).scalars().all()
-    return templates.TemplateResponse(
-        request, "engagement.html", {"comments": comments, "view": view, "msg": msg, "active": "engagement"}
-    )
+@app.get("/engagement")
+def engagement_page():
+    """Replies are reviewed on each post page now — keep this URL as a redirect."""
+    return RedirectResponse("/calendar", status_code=303)
 
 
 @app.post("/engagement/sync")
-def engagement_sync():
+def engagement_sync(next: str = Form("")):
+    dest = next or "/calendar"
     with session_scope() as session:
         try:
             result = sync_comments(session)
-            return _flash("/engagement", f"Synced: {result['new_comments']} new comments, {result['drafts']} drafts")
+            return _flash(dest, f"Synced: {result['new_comments']} new comments")
         except Exception as exc:
-            return _flash("/engagement", f"Sync failed: {exc}")
+            return _flash(dest, f"Sync failed: {exc}")
 
 
 @app.post("/engagement/{comment_id}/post")
-def engagement_post(request: Request, comment_id: int, reply_text: str = Form(...)):
+def engagement_post(request: Request, comment_id: int,
+                    reply_text: str = Form(""), gif_id: str = Form(""),
+                    next: str = Form("")):
     wants_json = "application/json" in request.headers.get("accept", "")
+    dest = next or "/calendar"
     text = reply_text.strip()
-    if not text:
-        return (JSONResponse({"error": "Reply text is empty"}, status_code=400)
-                if wants_json else _flash("/engagement", "Reply text is empty"))
-    with session_scope() as session:
-        comment = session.get(ThreadsComment, comment_id)
-        if comment is None or not comment.eligible_for_reply or comment.reply_status != "pending":
-            msg = "Comment is not eligible or already handled"
-            return (JSONResponse({"error": msg}, status_code=409)
-                    if wants_json else _flash("/engagement", msg))
-        try:
-            post_approved_reply(session, comment, text)
-            return (JSONResponse({"ok": True}) if wants_json
-                    else _flash("/engagement", "Reply posted"))
-        except PacingLimitError as exc:
-            return (JSONResponse({"error": str(exc)}, status_code=429)
-                    if wants_json else _flash("/engagement", str(exc)))
-        except Exception as exc:
-            return (JSONResponse({"error": f"Post failed: {exc}"}, status_code=500)
-                    if wants_json else _flash("/engagement", f"Post failed: {exc}"))
-
-
-@app.post("/engagement/{comment_id}/redraft")
-def engagement_redraft(request: Request, comment_id: int):
-    """Regenerate a queued comment's draft reply with the latest reply guidance."""
-    wants_json = "application/json" in request.headers.get("accept", "")
+    gif = gif_id.strip()
+    if not text and not gif:
+        return (JSONResponse({"error": "Reply needs text or a GIF"}, status_code=400)
+                if wants_json else _flash(dest, "Reply needs text or a GIF"))
     with session_scope() as session:
         comment = session.get(ThreadsComment, comment_id)
         if comment is None:
-            return (JSONResponse({"error": "Comment not found"}, status_code=404)
-                    if wants_json else _flash("/engagement", "Comment not found"))
+            msg = "Comment not found"
+            return (JSONResponse({"error": msg}, status_code=404)
+                    if wants_json else _flash(dest, msg))
+        if comment.reply_status == "posted":
+            msg = "Already replied to this comment"
+            return (JSONResponse({"error": msg}, status_code=409)
+                    if wants_json else _flash(dest, msg))
         try:
-            new_draft = redraft_comment(session, comment)
-            return (JSONResponse({"ok": True, "draft": new_draft or ""})
-                    if wants_json else _flash("/engagement", "Draft regenerated"))
+            post_approved_reply(session, comment, text, gif_id=gif or None)
+            return (JSONResponse({"ok": True}) if wants_json
+                    else _flash(dest, "Reply posted"))
+        except PacingLimitError as exc:
+            return (JSONResponse({"error": str(exc)}, status_code=429)
+                    if wants_json else _flash(dest, str(exc)))
         except Exception as exc:
-            return (JSONResponse({"error": f"Redraft failed: {exc}"}, status_code=500)
-                    if wants_json else _flash("/engagement", f"Redraft failed: {exc}"))
+            return (JSONResponse({"error": f"Post failed: {exc}"}, status_code=500)
+                    if wants_json else _flash(dest, f"Post failed: {exc}"))
 
 
-@app.post("/engagement/{comment_id}/skip")
-def engagement_skip(request: Request, comment_id: int):
-    wants_json = "application/json" in request.headers.get("accept", "")
-    with session_scope() as session:
-        comment = session.get(ThreadsComment, comment_id)
-        if comment:
-            comment.reply_status = "skipped"
-    return (JSONResponse({"ok": True}) if wants_json else _flash("/engagement", "Skipped"))
+@app.get("/giphy/search")
+def giphy_search(q: str = "", limit: int = 24):
+    """Proxy Giphy search/trending so the API key stays server-side."""
+    from ..giphy import GiphyError, is_configured, search as giphy_search_fn
+    if not is_configured():
+        return JSONResponse({"error": "GIPHY_API_KEY not set"}, status_code=503)
+    try:
+        items = giphy_search_fn(q, limit=limit)
+        return JSONResponse({"gifs": items})
+    except GiphyError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    except Exception as exc:
+        return JSONResponse({"error": f"Giphy failed: {exc}"}, status_code=500)
 
 
 # --- Analytics -----------------------------------------------------------------
