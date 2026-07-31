@@ -46,6 +46,7 @@ from ..llm import (
     suggest_short_title,
     suggest_title,
 )
+from ..logging_setup import setup_logging
 from ..models import (
     STATUS_APPROVED,
     STATUS_ARCHIVED,
@@ -174,6 +175,9 @@ with session_scope() as _s:
             _run.result = "Interrupted — the server restarted while the pass was running."
 
 # Adaptive window scheduler (queue + hotness + metrics poll) while the dashboard runs.
+# Configure logging first: this module is the uvicorn worker's entry point, so
+# without it the scheduler's own log output has nowhere to go.
+setup_logging()
 start_scheduler_thread()
 
 

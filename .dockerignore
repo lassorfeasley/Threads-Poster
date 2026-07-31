@@ -1,0 +1,25 @@
+# data/ holds downloaded videos, clips and waveforms — multiple GB, and the
+# scheduler reads none of it (clips come from Supabase signed URLs).
+data/
+
+# Secrets reach the container through `fly secrets set`, never the image.
+.env
+.env.example
+
+# Not needed for a headless tick: the dashboard/scrape/transcribe dependency set,
+# the web assets, and local tooling.
+requirements.txt
+assets/
+.venv/
+venv/
+
+.git/
+.github/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+README.md

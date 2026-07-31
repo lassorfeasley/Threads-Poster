@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 from dotenv import load_dotenv
@@ -37,6 +38,15 @@ class Settings:
 
 def load_settings() -> Settings:
     return Settings(raw=_load_yaml(CONFIG_DIR / "settings.yaml"))
+
+
+def scheduler_timezone() -> ZoneInfo:
+    """The zone posting windows are defined in (``scheduler.timezone``).
+
+    Also the zone each post's weekday/hour analytics are recorded in, so those
+    numbers mean the same thing no matter which machine did the publishing.
+    """
+    return ZoneInfo(str(load_settings().get("scheduler.timezone", "America/New_York")))
 
 
 def load_keywords() -> list[str]:

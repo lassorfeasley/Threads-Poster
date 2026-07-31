@@ -21,7 +21,7 @@ from sqlalchemy.orm import selectinload
 from . import threads_api
 from .analytics import poll_recent_metrics
 from .categories import category_by_slug
-from .config import load_settings
+from .config import load_settings, scheduler_timezone
 from .db import session_scope
 from .models import Candidate, SchedulerState, ThreadsPost, utcnow
 from .publishing import (
@@ -86,8 +86,7 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
 
 
 def _tz() -> ZoneInfo:
-    settings = load_settings()
-    return ZoneInfo(settings.get("scheduler.timezone", "America/New_York"))
+    return scheduler_timezone()
 
 
 def _windows_for_day(day: dt.date, tz: ZoneInfo) -> list[dt.datetime]:
@@ -284,8 +283,8 @@ def pin_post_to_window(session, post_id: int, window_key: str) -> str:
     return f"Moved to {window_key}"
 
 
-def _claim_and_publish(post_id: int, state_action: str) -> bool:
-    """Flip post to publishing, publish it, update SchedulerState.last_publish_at."""
+def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool:
+    """Claim ``window_key`` for the post, publish it, record ``last_publish_at``."""
     with session_scope() as session:
         # Atomic claim: only one scheduler (local dashboard vs headless runner)
         # can win when both tick at the same time.
@@ -296,6 +295,19 @@ def _claim_and_publish(post_id: int, state_action: str) -> bool:
         ).rowcount
         if claimed != 1:
             return False
+        # Consume the window in the SAME transaction that claims the post, so the
+        # two can never disagree: either this window is spent and a post owns it,
+        # or neither happened and the next tick retries cleanly.
+        #
+        # Marking the window spent *before* the claim (as this used to) meant any
+        # failure in between silently cost a whole slot: the window was gone, yet
+        # the post was still ``queued``, so it just slid to the next window and
+        # nothing anywhere recorded a skip. A laptop waking from sleep hits this
+        # every time — the first post-wake tick runs the claim on a pooled
+        # connection whose TCP state died during sleep.
+        state = _get_state(session)
+        state.last_window_key = window_key
+        state.updated_at = utcnow()
 
     settings = load_settings()
     retries = max(0, int(settings.get("scheduler.publish_retries", 1)))
@@ -404,12 +416,12 @@ def run_window_tick() -> str | None:
             return f"spacing_block:{key}"
 
         post_id = head.id
-        state.last_window_key = key
-        state.updated_at = utcnow()
-        session.flush()
 
+    # ``_claim_and_publish`` marks the window spent as part of claiming the post.
+    # Nothing is recorded here, so a failure below leaves the window due and the
+    # next tick picks it up again instead of dropping the slot.
     action = f"publish:{key}:post={post_id}"
-    if _claim_and_publish(post_id, action):
+    if _claim_and_publish(post_id, key, action):
         log.info("Published queue post %s at window %s", post_id, key)
         return action
 
@@ -823,8 +835,69 @@ def build_window_plan(
             "pinned": False,
         })
 
+    plan.extend(_missed_window_slots(plan, state, now, start_local, end_local))
+
     plan.sort(key=lambda e: e["sort"])
     return plan
+
+
+def _missed_window_slots(
+    plan: list[dict],
+    state: SchedulerState,
+    now: dt.datetime,
+    start_local: dt.datetime,
+    end_local: dt.datetime,
+) -> list[dict]:
+    """Entries for today's windows that the scheduler spent without publishing.
+
+    A window that came and went with nothing live behind it leaves no post for
+    the calendar to draw, so the grid rendered it as an anonymous vacant slot —
+    identical to a day that simply had nothing queued. That made a lost slot
+    (empty queue, spacing block, or a publish that failed outright) invisible.
+
+    Only today: ``SchedulerState`` keeps a single ``last_window_key``, so there
+    is no record of which windows older days actually spent. A window that has
+    fired but is not spent yet is left alone — it is still due, and the next
+    tick will publish into it.
+    """
+    tz = _tz()
+    today_local = now.astimezone().date()
+    filled = {
+        e["window_index"] for e in plan
+        if e["window_index"] is not None and e["sort"].date() == today_local
+    }
+    scheduler_day = now.astimezone(tz).date()
+    last_key = state.last_window_key or ""
+    out: list[dict] = []
+    for idx, win_utc in enumerate(_windows_for_day(scheduler_day, tz)):
+        key = _window_key(scheduler_day, idx)
+        spent = last_key.startswith(scheduler_day.isoformat()) and last_key >= key
+        if not spent or win_utc > now or idx in filled:
+            continue
+        local = win_utc.astimezone()
+        if local.date() != today_local or local < start_local or local >= end_local:
+            continue
+        out.append({
+            "kind": "missed",
+            "window_key": key,
+            "window_index": idx,
+            "sort": local,
+            "time": local.strftime("%-I:%M %p"),
+            "day": local.day,
+            "date_label": local.strftime("%a %-d"),
+            "caption": "",
+            "status": "missed",
+            "post_id": None,
+            "video_id": None,
+            "channel": "",
+            "thumbnail": "",
+            "title": "",
+            "permalink": "",
+            "projected": False,
+            "empty": True,
+            "pinned": False,
+        })
+    return out
 
 
 def projected_window_slots(

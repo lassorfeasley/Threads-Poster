@@ -81,6 +81,7 @@ python run.py monitor          # one discovery pass (or use the dashboard button
 python run.py monitor --loop   # keep polling at the configured interval
 python run.py score-visuals    # backfill vision scores for unscored candidates
 python run.py annotate-posts   # backfill footage traits for published posts (from posted clips)
+python run.py backfill-post-times  # restate post weekday/hour in the scheduler timezone
 python run.py comments         # pull + classify comments on your own posts
 python run.py metrics          # snapshot Threads metrics (time series)
 python run.py digest           # print the analytics digest
@@ -91,6 +92,54 @@ Typical always-on setup on a Mac mini / Pi: run `python run.py monitor --loop` a
 `python run.py dashboard` (e.g. under `launchd`/`systemd`/`tmux`), and cron
 `comments` + `metrics` a few times a day if you want those refreshed automatically
 (they still never post anything).
+
+## Publishing on time (the always-on scheduler)
+
+Queued posts publish at the windows in `config/settings.yaml`. Three things can
+run that clock, and they are safe to run at once — the window claim is atomic,
+so exactly one of them wins each window:
+
+| Runner | Reliability |
+| --- | --- |
+| The dashboard's own scheduler thread | Only while your machine is awake |
+| `.github/workflows/scheduler.yml` | GitHub delivers roughly a third of the scheduled cron ticks |
+| Fly.io worker (`fly.toml`) | Always on — the dependable one |
+
+A laptop asleep through a window plus a dropped Actions tick is enough to skip a
+post entirely, which is what the Fly worker exists to prevent.
+
+### Deploying the Fly worker
+
+`Dockerfile` builds the headless dependency set only (no dashboard, scraping or
+transcription) and runs `python run.py scheduler --loop`. It needs no volume:
+a queued clip is uploaded to Supabase from your machine and pulled from a signed
+URL at publish time.
+
+```bash
+fly launch --no-deploy        # first time only; keeps the committed fly.toml
+fly secrets set \
+  DATABASE_URL="..." \
+  SUPABASE_URL="..." \
+  SUPABASE_SERVICE_KEY="..." \
+  ANTHROPIC_API_KEY="..."
+fly deploy
+fly logs                      # confirm "Scheduler database backend: postgresql..."
+```
+
+Those four are all it needs. `THREADS_APP_ID` / `THREADS_APP_SECRET` /
+`THREADS_REDIRECT_URI` are only for the OAuth connect flow in the dashboard, and
+the worker refreshes the Threads token on its own (`th_refresh_token` takes no
+client secret) writing it back to the shared `app_tokens` table.
+
+If `DATABASE_URL` is missing the worker logs a warning and falls back to an empty
+local SQLite file rather than publishing anything — check `fly logs` after the
+first deploy.
+
+### What still needs your machine
+
+Footage-trait annotation reads the posted clip off local disk, so posts published
+by Fly or Actions come back untagged. They stay eligible for backfill; run
+`python run.py annotate-posts` (or the dashboard button) when convenient.
 
 ## Workflow
 

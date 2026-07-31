@@ -7,7 +7,8 @@ name: Threads scheduler
 # scheduler is safe.
 #
 # Schedule notes:
-# - GitHub cron is UTC only; posting windows are ET (10:00 / 14:30 / 19:00).
+# - GitHub cron is UTC only; posting windows are ET (see scheduler.windows in
+#   config/settings.yaml — currently 10:00 / 13:00 / 19:00).
 #   The hour range below covers active hours (08:00-22:00 ET) in both EDT
 #   (UTC-4) and EST (UTC-5). Off-hours ticks exit in seconds.
 # - GitHub may delay scheduled runs by 5-15 minutes; the window logic

@@ -7,6 +7,7 @@ Usage:
   python run.py monitor --loop     # poll forever at the configured interval
   python run.py score-visuals      # backfill vision scores for unscored candidates
   python run.py annotate-posts     # backfill footage traits for published posts
+  python run.py backfill-post-times # restate post weekday/hour in the scheduler timezone
   python run.py backfill-calendar-names  # short calendar labels for old titled cuts
   python run.py backfill-categories # auto-tag programming categories for untagged videos
   python run.py metrics            # snapshot Threads metrics for published posts
@@ -23,8 +24,11 @@ import argparse
 import datetime as dt
 import logging
 import time
+from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+from app.logging_setup import setup_logging
+
+setup_logging(logging.INFO)
 log = logging.getLogger("run")
 
 
@@ -182,6 +186,60 @@ def cmd_annotate_posts(args) -> None:
     print(f"Annotated {annotated} post(s), skipped {skipped} (missing clip/budget). "
           f"Verdicts: {len(verdicts)} trait(s) seen, {active_n} active. "
           f"Spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today.")
+
+
+def cmd_backfill_post_times(args) -> None:
+    """Recompute each published post's weekday/hour in the scheduler timezone.
+
+    These two fields used to be read off the publishing machine's clock, so rows
+    written by a CI runner or any non-local publisher landed in UTC while the
+    operator's own posts landed in their laptop's zone — a silent mix feeding the
+    analytics that tune the posting windows. ``published_at`` is stored as UTC,
+    so every row can be restated exactly. Free (no LLM calls) and idempotent.
+
+    Also fills ``clip_length_seconds`` for posts that published headlessly and
+    never got measured, where the clip file is still on local disk.
+    """
+    from sqlalchemy import select
+
+    from app.db import init_db, session_scope
+    from app.models import ThreadsPost
+    from app.publishing import _clip_duration_seconds, post_time_attributes
+
+    init_db()
+    retimed = relengthed = 0
+    with session_scope() as session:
+        posts = session.execute(
+            select(ThreadsPost).where(
+                ThreadsPost.status == "published",
+                ThreadsPost.published_at.is_not(None),
+            ).order_by(ThreadsPost.published_at.asc())
+        ).scalars().all()
+        for post in posts:
+            dow, hour = post_time_attributes(post.published_at)
+            if (post.post_day_of_week, post.post_hour_local) != (dow, hour):
+                if args.dry_run:
+                    log.info("post %s: %s h%s -> %s h%s", post.id,
+                             post.post_day_of_week or "-", post.post_hour_local, dow, hour)
+                else:
+                    post.post_day_of_week, post.post_hour_local = dow, hour
+                retimed += 1
+            if post.clip_length_seconds is None and post.clip_local_path:
+                if Path(post.clip_local_path).exists():
+                    seconds = _clip_duration_seconds(Path(post.clip_local_path))
+                    if seconds is not None:
+                        if not args.dry_run:
+                            post.clip_length_seconds = seconds
+                        relengthed += 1
+        if args.dry_run:
+            session.rollback()
+
+    if args.dry_run:
+        print(f"Would restate {retimed} of {len(posts)} published post(s) into the "
+              f"scheduler timezone and fill {relengthed} missing clip length(s).")
+    else:
+        print(f"Restated {retimed} of {len(posts)} published post(s) into the scheduler "
+              f"timezone; filled {relengthed} missing clip length(s).")
 
 
 def cmd_backfill_calendar_names(args) -> None:
@@ -370,8 +428,21 @@ def cmd_digest(_args) -> None:
 def cmd_scheduler(args) -> None:
     """Run the adaptive window scheduler. One tick, or loop when --loop is set.
     The dashboard runs this automatically; use this for headless operation."""
+    from app.config import database_url, env
     from app.db import init_db
     from app.scheduler import run_tick, start_scheduler_thread
+
+    # Say which database this tick is talking to. With no DATABASE_URL the app
+    # falls back to a local SQLite file, so a headless runner missing that secret
+    # would tick happily forever against an empty queue and publish nothing —
+    # exactly the kind of silent no-op that's invisible from outside.
+    backend = database_url().split("://", 1)[0]
+    if backend.startswith("sqlite"):
+        log.warning("Scheduler is on local SQLite%s — a headless runner almost "
+                    "certainly wants the shared Postgres via DATABASE_URL.",
+                    "" if env("DATABASE_URL") else " (DATABASE_URL is unset)")
+    else:
+        log.info("Scheduler database backend: %s", backend)
 
     init_db()
     if not args.loop:
@@ -454,6 +525,12 @@ def main() -> None:
     p.add_argument("--force", action="store_true",
                    help="re-annotate posts that already have footage traits")
     p.set_defaults(func=cmd_annotate_posts)
+
+    p = sub.add_parser("backfill-post-times",
+                       help="restate published posts' weekday/hour in the scheduler timezone")
+    p.add_argument("--dry-run", action="store_true",
+                   help="report what would change without writing")
+    p.set_defaults(func=cmd_backfill_post_times)
 
     p = sub.add_parser("backfill-calendar-names",
                        help="generate short 2-5 word calendar labels for cuts titled before that field existed")

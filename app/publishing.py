@@ -12,7 +12,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from .config import load_first_reply, load_settings
+from .config import load_first_reply, load_settings, scheduler_timezone
 from .llm import caption_attributes, suggest_attribution
 from .models import Candidate, Cut, ThreadsPost, utcnow
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
@@ -86,6 +86,11 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         clip_local_path=str(clip),
         clip_object_path=_object_key(clip),
         status=status,
+        # Measure now, while the file is certainly on this machine. Doing it at
+        # publish time meant any headless publisher (CI, always-on container)
+        # ffprobed a path that only exists on the operator's disk and silently
+        # recorded no duration at all.
+        clip_length_seconds=_clip_duration_seconds(clip),
     )
     session.add(post)
     session.flush()
@@ -133,16 +138,38 @@ def generate_attribution(candidate: Candidate) -> str:
     )
 
 
+def post_time_attributes(when: dt.datetime) -> tuple[str, int]:
+    """``(weekday, hour)`` for a publish time, in the scheduler's posting zone.
+
+    Pinned to ``scheduler.timezone`` rather than read off the publishing
+    machine's clock, because these two fields drive the analytics that tune the
+    posting windows: an hour has to mean the same thing whether the post went
+    out from the operator's laptop, a CI runner, or an always-on container.
+    Reading the local clock silently broke that — posts published from GitHub
+    Actions recorded the UTC hour, filing a 10:00 ET post under hour 17.
+
+    Bonus: in the scheduler zone an hour now lines up with the window that
+    produced it, so "hour 10" is literally the 10:00 window.
+    """
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    local = when.astimezone(scheduler_timezone())
+    return local.strftime("%a"), local.hour
+
+
 def _apply_post_attributes(post: ThreadsPost) -> None:
     """Fill analytics attributes at publish time (day/hour reflect actual post)."""
     settings = load_settings()
     caption = post.caption
-    local_time = dt.datetime.now()
     post.caption_length = len(caption)
     post.caption_hashtag_count = caption.count("#")
-    post.post_day_of_week = local_time.strftime("%a")
-    post.post_hour_local = local_time.hour
-    if post.clip_local_path:
+    post.post_day_of_week, post.post_hour_local = post_time_attributes(
+        post.published_at or utcnow()
+    )
+    # Normally measured at queue time, while the clip is still on the operator's
+    # disk. This covers posts queued before that and any path that skipped it —
+    # and does nothing on a headless publisher, where the file isn't present.
+    if post.clip_length_seconds is None and post.clip_local_path:
         post.clip_length_seconds = _clip_duration_seconds(Path(post.clip_local_path))
     try:
         attrs = caption_attributes(settings.get("matching.model", "claude-haiku-4-5"), caption)

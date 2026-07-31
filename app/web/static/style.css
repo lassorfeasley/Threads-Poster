@@ -1911,6 +1911,14 @@ a.cal-event:hover { background: var(--panel3); }
   color: var(--muted);
 }
 .cal-event.empty em { font-style: normal; opacity: 0.75; }
+/* A window the scheduler spent without publishing. Warn-tinted rather than
+   dashed, so it reads as "this slot is gone" instead of "drop a post here". */
+.cal-event.missed {
+  border: 1px solid var(--warn-border);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.cal-event.missed em { font-style: normal; opacity: 0.85; }
 .cal-event.cal-drag {
   cursor: grab;
   user-select: none;

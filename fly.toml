@@ -1,0 +1,29 @@
+# Fly.io deployment for the always-on posting scheduler.
+#
+# Intentionally has no [http_service]: this is a worker, not a server. That also
+# means no autostop/autostart — the machine stays up, which is the entire point
+# (GitHub Actions cron only delivered about a third of its scheduled ticks, and
+# a sleeping laptop delivers none).
+#
+# Secrets are set out of band and are NOT in this file:
+#   fly secrets set DATABASE_URL=... SUPABASE_URL=... \
+#                   SUPABASE_SERVICE_KEY=... ANTHROPIC_API_KEY=...
+#
+# Run exactly one machine. Concurrent schedulers are safe by design (the window
+# claim is atomic), so this is about cost, not correctness.
+
+app = "threads-poster-scheduler"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+[processes]
+  app = "python run.py scheduler --loop"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  processes = ["app"]

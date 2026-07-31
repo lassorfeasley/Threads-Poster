@@ -65,13 +65,17 @@
                   <div class="cal-slot vacant"
                        title="{{ day }} · {{ windows_local[i] if (windows_local and i < windows_local|length) else '' }} — no post"></div>
                 {% else %}
-                  {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind == 'queued' else ('pub' if e.kind == 'published' else 'draft')) %}
+                  {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind == 'queued' else ('pub' if e.kind == 'published' else ('missed' if e.kind == 'missed' else 'draft'))) %}
                   {% set label = e.title or e.caption %}
                   {% if e.kind == 'open' %}
                     <div class="cal-event cal-slot {{ cls }} empty cal-drop"
                          data-window-key="{{ e.window_key }}"
                          title="{{ e.date_label }} {{ e.time }} · open window — drop a queued post here">
                       <em>open</em></div>
+                  {% elif e.kind == 'missed' %}
+                    <div class="cal-event cal-slot {{ cls }}"
+                         title="{{ e.date_label }} {{ e.time }} · this window passed without publishing — the queue was empty, the spacing floor blocked it, or the publish failed. Check the scheduler panel and Notifications.">
+                      <em>missed</em></div>
                   {% elif e.kind == 'queued' and e.post_id %}
                     <div class="cal-event cal-slot {{ cls }} card cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
                          draggable="true"

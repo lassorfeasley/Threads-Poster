@@ -14,6 +14,7 @@ from sqlalchemy import select
 from .config import load_settings
 from .llm import caption_attributes
 from .models import ThreadsPost
+from .publishing import post_time_attributes
 from .threads_api import fetch_user_posts
 
 log = logging.getLogger("history")
@@ -66,9 +67,7 @@ def import_history(session, limit: int = 200, tag_captions: bool = False) -> dic
             caption_hashtag_count=caption.count("#"),
         )
         if published is not None:
-            local = published.astimezone()
-            post.post_day_of_week = local.strftime("%a")
-            post.post_hour_local = local.hour
+            post.post_day_of_week, post.post_hour_local = post_time_attributes(published)
         if tag_captions and caption.strip():
             try:
                 attrs = caption_attributes(settings.get("matching.model", "claude-haiku-4-5"), caption)
