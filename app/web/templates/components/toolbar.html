@@ -23,8 +23,11 @@
   markup stays presentational and each page keeps its own server/client model.
 #}
 
+{# `count_key` makes the headline count live: client-side filtering rewrites it
+   to the number of matching rows in the [data-filter-section] of that name. #}
 {% macro pagebar(title, count=none, sub=none, actions='', tabs='', filters='',
-                 filter_action=none, sticky=true, crumbs='', title_extra='') %}
+                 filter_action=none, sticky=true, crumbs='', title_extra='',
+                 count_key=none) %}
 <div class="pagebar{{ ' is-sticky' if sticky }}">
   <div class="pagebar-inner">
     <div class="pagebar-head">
@@ -32,7 +35,7 @@
         {% if crumbs %}<div class="pagebar-crumbs{{ ' only-child' if not title }}">{{ crumbs|safe }}</div>{% endif %}
         {# No title -> compact one-row bar: just crumbs + actions. #}
         {% if title %}
-        <h1>{{ title }}{% if count is not none %} <span class="pagebar-count">{{ count }}</span>{% endif %}{% if title_extra %} {{ title_extra|safe }}{% endif %}</h1>
+        <h1>{{ title }}{% if count is not none %} <span class="pagebar-count"{% if count_key %} data-filter-count="{{ count_key }}"{% endif %}>{{ count }}</span>{% endif %}{% if title_extra %} {{ title_extra|safe }}{% endif %}</h1>
         {% endif %}
         {% if sub %}<div class="sub">{{ sub }}</div>{% endif %}
       </div>
@@ -64,10 +67,41 @@
   <svg class="tb-search-ic" width="15" height="15" viewBox="0 0 24 24" fill="none"
        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-  <input type="text" name="{{ name }}" value="{{ value }}" autocomplete="off"
+  <input type="text" class="tb-search-input" name="{{ name }}" value="{{ value }}" autocomplete="off"
          placeholder="{{ placeholder }}"
          {% if debounce %}data-toolbar-search{% endif %}
          {% if filter_target %}data-filter-input data-filter-target="{{ filter_target }}"{% endif %}>
+</div>
+{% endmacro %}
+
+{# Multi-select dropdown (native <details>). `options` is a list of values or
+   (value, label) pairs. Inside a server form the checkboxes post under `name`
+   and apply on close; with filter_target they match data-<key> on rows any-of. #}
+{% macro combo(name, options, selected=[], label=none, all_label=none,
+               filter_target=none, filter_key=none) %}
+<div class="tb-field tb-combo">
+  {% if label %}<span class="tb-label">{{ label }}</span>{% endif %}
+  <details class="combo"
+           {% if filter_target %}data-filter-input data-filter-target="{{ filter_target }}"
+           data-filter-key="{{ filter_key or name }}"{% endif %}>
+    <summary class="combo-summary">
+      <span data-combo-label data-combo-empty="{{ all_label or ('All ' ~ name) }}">{{ all_label or ('All ' ~ name) }}</span>
+      <svg class="combo-caret" width="10" height="6" viewBox="0 0 10 6" fill="none"
+           stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 1l4 4 4-4"/></svg>
+    </summary>
+    <div class="combo-panel">
+      {% for opt in options %}
+        {% set val = opt if opt is string else opt[0] %}
+        {% set text = opt if opt is string else opt[1] %}
+        <label class="combo-opt">
+          <input type="checkbox" name="{{ name }}" value="{{ val }}"
+                 data-combo-text="{{ text }}" {{ "checked" if val in selected }}> {{ text }}
+        </label>
+      {% else %}
+        <span class="combo-none">Nothing to filter by yet</span>
+      {% endfor %}
+    </div>
+  </details>
 </div>
 {% endmacro %}
 
@@ -98,21 +132,58 @@
 </label>
 {% endmacro %}
 
-{# From/To dates joined in one bordered box under a single label. #}
-{% macro daterange(from_name, to_name, from_value='', to_value='', label='Date range', submit=true) %}
+{# From/To dates joined in one bordered box under a single label. For client-side
+   filtering pass filter_target + filter_key; rows compare on their data-<key>. #}
+{% macro daterange(from_name, to_name, from_value='', to_value='', label='Date range',
+                   submit=true, filter_target=none, filter_key=none) %}
+{% set fattrs %}{% if filter_target %}data-filter-input data-filter-target="{{ filter_target }}" data-filter-key="{{ filter_key or 'date' }}"{% endif %}{% endset %}
 <div class="tb-field tb-daterange">
   {% if label %}<span class="tb-label">{{ label }}</span>{% endif %}
   <div class="tb-daterange-box">
     <input type="date" name="{{ from_name }}" value="{{ from_value }}"
-           aria-label="{{ label or 'Date range' }} — from" {% if submit %}data-submit-on-change{% endif %}>
+           aria-label="{{ label or 'Date range' }} — from" {% if submit %}data-submit-on-change{% endif %}
+           {{ fattrs|safe }} data-filter-op="gte">
     <span class="tb-daterange-sep" aria-hidden="true">–</span>
     <input type="date" name="{{ to_name }}" value="{{ to_value }}"
-           aria-label="{{ label or 'Date range' }} — to" {% if submit %}data-submit-on-change{% endif %}>
+           aria-label="{{ label or 'Date range' }} — to" {% if submit %}data-submit-on-change{% endif %}
+           {{ fattrs|safe }} data-filter-op="lte">
   </div>
 </div>
+{% endmacro %}
+
+{# Reorder [data-filter-row] rows client-side. Option values are "<key>-asc" or
+   "<key>-desc" and read data-sort-<key> off each row. #}
+{% macro sort(target, options, label='Sort') %}
+<label class="tb-field tb-select tb-sort">
+  {% if label %}<span class="tb-label">{{ label }}</span>{% endif %}
+  <select data-sort-target="{{ target }}">
+    {% for value, text in options %}<option value="{{ value }}">{{ text }}</option>{% endfor %}
+  </select>
+</label>
 {% endmacro %}
 
 {# Reset link (server model) — render only when filters are active. #}
 {% macro clear(href) %}
 <a class="btn ghost sm tb-clear" href="{{ href }}">Clear</a>
+{% endmacro %}
+
+{# Placeholder shown when client-side filters hide every row of a section that
+   does have content. Put it inside the [data-filter-section] element. #}
+{% macro no_matches(noun='items') %}
+<div class="empty tb-hidden" data-filter-empty>
+  <span class="icon">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="7"/><path d="m20 20-4.3-4.3"/></svg>
+  </span>
+  <strong>No {{ noun }} match these filters</strong>
+  Try a broader search, or clear the filters above.
+</div>
+{% endmacro %}
+
+{# Reset button (client model) — hides itself while no filter is applied. #}
+{% macro clear_filters(target) %}
+<button type="button" class="btn ghost sm tb-clear tb-hidden" data-filter-clear="{{ target }}">
+  Clear <span class="tb-clear-count" data-filter-active>0</span>
+</button>
 {% endmacro %}

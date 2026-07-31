@@ -219,6 +219,13 @@ class ThreadsPost(Base):
     # enabled, is the fallback). What actually got posted lands in first_reply_*.
     attribution_text: Mapped[str] = mapped_column(Text, default="")
 
+    # Set when the operator clears the attribution on a post that already has one,
+    # which is the only way to say "this post gets no first comment". Without it,
+    # a deliberate clear and a post that never had a draft are both just an empty
+    # ``attribution_text``, and publishing (which drafts one when it finds none)
+    # would talk over the operator's decision.
+    attribution_skipped: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Auto first-reply (text reply under the published post). Set after publish
     # when config/first_reply.yaml is enabled; failure does not fail the post.
     first_reply_id: Mapped[str] = mapped_column(String(60), default="")

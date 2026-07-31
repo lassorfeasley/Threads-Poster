@@ -280,13 +280,52 @@ def _annotate_footage(session, post: ThreadsPost) -> None:
         log.warning("Footage annotation failed for post %s: %s", post.id, exc)
 
 
+def _draft_attribution_now(session, post: ThreadsPost) -> tuple[str, str]:
+    """``(attribution, error)`` for a post that reached publish without one.
+
+    Attribution is normally drafted at queue time so the operator can review it,
+    but a post can still arrive here empty: it was queued before attribution
+    comments existed, or its queue-time draft raised (best-effort, so queueing
+    went ahead anyway). Drafting now means such a post still credits its source
+    instead of publishing bare. A cleared attribution never reaches this — see
+    ``ThreadsPost.attribution_skipped``.
+    """
+    if post.candidate is None:
+        return "", ("No first comment: there's no source video on record to credit, "
+                    "and no static reply text is enabled under Replies settings.")
+    try:
+        text = generate_attribution(post.candidate)
+    except Exception as exc:
+        log.warning("Publish-time attribution draft failed for post %s: %s", post.id, exc)
+        return "", f"Could not draft an attribution comment: {exc}"[:1000]
+    if not text:
+        return "", "The model returned an empty attribution comment."
+    post.attribution_text = text
+    session.flush()
+    return text, ""
+
+
+def _no_first_comment_reason(post: ThreadsPost, cfg: dict) -> str:
+    """Plain-language reason a published post carries no first comment, stored on
+    the post so it shows up on the post page instead of looking untouched."""
+    if post.attribution_skipped:
+        return ("No first comment: the attribution was cleared for this post, and "
+                "no static reply text is enabled under Replies settings.")
+    if not cfg.get("attribution_enabled") and not cfg.get("enabled"):
+        return ("No first comment: attribution comments and the static reply are "
+                "both switched off under Replies settings.")
+    return ("No first comment: this post has no attribution text, and no static "
+            "reply text is enabled under Replies settings.")
+
+
 def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:
     """Post the first reply under a published post: the post's own attribution
-    comment when it has one, else the static configured text.
+    comment when it has one, else the static configured text. A post that arrives
+    with no attribution gets one drafted here rather than publishing bare.
 
-    Returns True if a reply was posted. Skips when disabled / empty / already
-    posted (unless ``force``). Never raises — stores ``first_reply_error`` instead
-    so a reply hiccup cannot undo a successful publish.
+    Returns True if a reply was posted. Skips when disabled / already posted
+    (unless ``force``), recording why on the post either way. Never raises —
+    stores ``first_reply_error`` so a reply hiccup cannot undo a publish.
     """
     if post.status != "published" or not post.threads_media_id:
         return False
@@ -295,6 +334,9 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
 
     cfg = load_first_reply()
     attribution = (post.attribution_text or "").strip()
+    draft_error = ""
+    if not attribution and cfg.get("attribution_enabled") and not post.attribution_skipped:
+        attribution, draft_error = _draft_attribution_now(session, post)
     static_text = (cfg.get("text") or "").strip()
     text = ""
     if attribution and (cfg.get("attribution_enabled") or force):
@@ -302,10 +344,13 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
     elif static_text and (cfg.get("enabled") or force):
         text = static_text
     if not text:
-        if force:
-            post.first_reply_error = ("Nothing to post — this post has no attribution "
-                                      "comment and no reply text is set under Replies settings")
-            session.flush()
+        # Record why, always — not just on ``force``. Publishing with no first
+        # comment used to write nothing anywhere, so four posts in a row went out
+        # bare and the post page showed a clean slate for each of them.
+        post.first_reply_error = draft_error or _no_first_comment_reason(post, cfg)
+        session.flush()
+        log.warning("Post %s published without a first comment: %s",
+                    post.id, post.first_reply_error)
         return False
 
     try:

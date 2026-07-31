@@ -2,24 +2,52 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 
+{% set LIB = "#lib-panels" %}
+{# Everything here filters client-side: the whole library is already on the
+   page, so narrowing it is instant and needs no round trip. Filters that only
+   make sense for one tab live in a .tb-slot that setLibTab() shows or hides —
+   a hidden slot's controls sit out of the match entirely. #}
 {% set lib_filters %}
-  {{ ui.search(name="q", placeholder="title, channel, caption…", debounce=false, filter_target="#lib-panels") }}
+  {{ ui.search(name="q", placeholder="title, channel, caption…", debounce=false, filter_target=LIB) }}
+  {{ ui.combo("channel", channel_choices, all_label="All channels",
+              filter_target=LIB, filter_key="channel") }}
+  <span class="tb-slot" data-lib-tab="videos">
+    {{ ui.combo("category", category_choices, all_label="All categories",
+                filter_target=LIB, filter_key="category") }}
+    {{ ui.select("video_status", [("posted", "Posted"), ("clips", "Has clips"), ("none", "No clips yet")],
+                 submit=false, filter_target=LIB, filter_key="status", all_label="Any status") }}
+  </span>
+  <span class="tb-slot" data-lib-tab="cuts">
+    {{ ui.select("cut_status", [("posted", "Posted"), ("exported", "Exported, not posted"), ("untrimmed", "Not trimmed yet")],
+                 submit=false, filter_target=LIB, filter_key="status", all_label="Any status") }}
+    {{ ui.select("captioned", [("yes", "Captioned"), ("no", "No captions")],
+                 submit=false, filter_target=LIB, filter_key="captioned", all_label="Captions: any") }}
+  </span>
+  <span class="tb-slot" data-lib-tab="posts">
+    {{ ui.select("post_status", post_status_choices, submit=false,
+                 filter_target=LIB, filter_key="status", all_label="Any status") }}
+  </span>
+  {{ ui.daterange("date_from", "date_to", label="Date", submit=false,
+                  filter_target=LIB, filter_key="date") }}
+  {{ ui.sort(LIB, [("date-desc", "Newest first"), ("date-asc", "Oldest first"),
+                   ("title-asc", "Title A–Z"), ("title-desc", "Title Z–A")]) }}
+  {{ ui.clear_filters(LIB) }}
 {% endset %}
 {% set lib_crumbs %}
   <div class="crumbs dash-views" role="tablist" aria-label="Switch library view">
     <button type="button" class="crumb crumb-current" role="tab" aria-selected="true"
             data-tab="videos" onclick="setLibTab('videos')">
-      Videos <span class="crumb-count">{{ counts.videos }}</span>
+      Videos <span class="crumb-count" data-filter-count="videos">{{ counts.videos }}</span>
     </button>
     <span class="crumb-sep" aria-hidden="true">›</span>
     <button type="button" class="crumb" role="tab" aria-selected="false"
             data-tab="cuts" onclick="setLibTab('cuts')">
-      Clips <span class="crumb-count">{{ counts.cuts }}</span>
+      Clips <span class="crumb-count" data-filter-count="cuts">{{ counts.cuts }}</span>
     </button>
     <span class="crumb-sep" aria-hidden="true">›</span>
     <button type="button" class="crumb" role="tab" aria-selected="false"
             data-tab="posts" onclick="setLibTab('posts')">
-      Posts <span class="crumb-count">{{ counts.posts }}</span>
+      Posts <span class="crumb-count" data-filter-count="posts">{{ counts.posts }}</span>
     </button>
   </div>
 {% endset %}
@@ -31,19 +59,25 @@
 
 <div id="lib-panels">
 {# ============ VIDEOS ============ #}
-<div id="videos-panel" class="lib-panel">
+<div id="videos-panel" class="lib-panel" data-filter-section="videos">
   {% if not video_rows %}
     <div class="empty"><span class="icon">▤</span><strong>Nothing downloaded yet</strong>
       Approve videos from <a href="/">Create content</a> to download them.</div>
   {% else %}
+  {{ ui.no_matches("videos") }}
   <div class="card-grid">
     {% for row in video_rows %}
     {% set cat = category_by_slug(row.c.category) %}
+    {% set archived = row.c.archived_at.strftime("%Y-%m-%d") if row.c.archived_at else "" %}
     <a class="media-card" href="/video/{{ row.c.id }}?step=cuts"
-       data-filter-row data-search="{{ (row.c.title ~ ' ' ~ row.c.channel.call_sign ~ ' ' ~ row.c.channel.market ~ ' ' ~ (cat.label if cat else '')) | lower }}">
-      <div class="thumb-wrap{{ '' if row.c.thumbnail_url else ' is-empty' }}">
-        {% if row.c.thumbnail_url %}
-        <img src="{{ row.c.thumbnail_url }}" alt="" loading="lazy" onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
+       data-filter-row data-search="{{ (row.c.title ~ ' ' ~ row.c.channel.call_sign ~ ' ' ~ row.c.channel.market ~ ' ' ~ (cat.label if cat else '')) | lower }}"
+       data-channel="{{ row.c.channel.call_sign }}" data-category="{{ row.c.category or '' }}"
+       data-status="{{ 'posted' if row.state.posted else ('clips' if row.state.trimmed else 'none') }}"
+       data-date="{{ archived }}" data-sort-date="{{ archived }}" data-sort-title="{{ row.c.title }}">
+      {% set thumb = thumb_for(row.c) %}
+      <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
+        {% if thumb %}
+        <img src="{{ thumb }}" alt="" loading="lazy" onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
         {% else %}
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -55,17 +89,6 @@
       </div>
       <div class="mc-body">
         <div class="item-title">{{ row.c.title }}</div>
-        <div class="meta">
-          {{ row.c.channel.call_sign }} · {{ row.c.channel.market }}<br>
-          archived {{ row.c.archived_at.strftime("%b %-d, %Y") if row.c.archived_at else "?" }}
-        </div>
-        <div class="badges mc-foot">
-          {% if cat %}<span class="badge" title="{{ cat.label }}">{{ cat.emoji }} {{ cat.label }}</span>{% endif %}
-          {% if row.state.posted %}<span class="badge supportive">posted</span>
-          {% elif row.state.trimmed %}<span class="badge info">has clips</span>
-          {% else %}<span class="badge score-lo">no clips yet</span>{% endif %}
-          {% if row.cut_count %}<span class="badge">{{ row.cut_count }} clip{{ "s" if row.cut_count != 1 }}</span>{% endif %}
-        </div>
       </div>
     </a>
     {% endfor %}
@@ -74,7 +97,7 @@
 </div>
 
 {# ============ CUTS ============ #}
-<div id="cuts-panel" class="lib-panel" hidden>
+<div id="cuts-panel" class="lib-panel" data-filter-section="cuts" hidden>
   <div class="lib-toolbar">
     {% if video_rows %}
       <button type="button" class="btn primary"
@@ -87,13 +110,22 @@
     <div class="empty"><span class="icon">✂</span><strong>No clips yet</strong>
       Use <strong>＋ New clip</strong> above (or open a video) to pick the segments you want to post.</div>
   {% else %}
+  {{ ui.no_matches("clips") }}
   <div class="card-grid">
     {% for row in cut_rows %}
+    {% set cut_channel = row.cut.candidate.channel.call_sign if (row.cut.candidate and row.cut.candidate.channel) else "" %}
+    {% set created = row.cut.created_at.strftime("%Y-%m-%d") if row.cut.created_at else "" %}
     <a class="media-card" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.exported else 'trim' }}"
-       data-filter-row data-search="{{ ((row.cut.clip_title or '') ~ ' ' ~ (row.cut.candidate.title if row.cut.candidate else '')) | lower }}">
-      <div class="thumb-wrap{{ '' if (row.cut.candidate and row.cut.candidate.thumbnail_url) else ' is-empty' }}">
-        {% if row.cut.candidate and row.cut.candidate.thumbnail_url %}
-        <img src="{{ row.cut.candidate.thumbnail_url }}" alt="" loading="lazy" onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
+       data-filter-row data-search="{{ ((row.cut.clip_title or '') ~ ' ' ~ (row.cut.candidate.title if row.cut.candidate else '') ~ ' ' ~ cut_channel) | lower }}"
+       data-channel="{{ cut_channel }}"
+       data-status="{{ 'posted' if row.posted else ('exported' if row.exported else 'untrimmed') }}"
+       data-captioned="{{ 'yes' if row.captioned else 'no' }}"
+       data-date="{{ created }}" data-sort-date="{{ created }}"
+       data-sort-title="{{ row.cut.clip_title or '' }}">
+      {% set thumb = thumb_for(row.cut.candidate) %}
+      <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
+        {% if thumb %}
+        <img src="{{ thumb }}" alt="" loading="lazy" onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
         {% else %}
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -142,19 +174,26 @@
 </dialog>
 
 {# ============ POSTS ============ #}
-<div id="posts-panel" class="lib-panel" hidden>
+<div id="posts-panel" class="lib-panel" data-filter-section="posts" hidden>
   {% if not posts %}
     <div class="empty"><span class="icon">✦</span><strong>No posts yet</strong>
       Post a clip to Threads and it'll show up here.</div>
   {% else %}
+  {{ ui.no_matches("posts") }}
   <div class="card-grid">
     {% for p in posts %}
     {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
+    {% set thumb = thumb_for(cand) %}
+    {% set post_channel = cand.channel.call_sign if (cand and cand.channel) else "" %}
+    {% set posted_on = p.created_at.strftime("%Y-%m-%d") if p.created_at else "" %}
     <a class="media-card" href="/post/{{ p.id }}"
-       data-filter-row data-search="{{ ((p.caption or '') ~ ' ' ~ (p.cut.clip_title if (p.cut and p.cut.clip_title) else '') ~ ' ' ~ (cand.channel.call_sign if cand else '') ~ ' ' ~ p.status) | lower }}">
-      <div class="thumb-wrap{{ '' if (cand and cand.thumbnail_url) else ' is-empty' }}">
-        {% if cand and cand.thumbnail_url %}
-        <img src="{{ cand.thumbnail_url }}" alt="" loading="lazy"
+       data-filter-row data-search="{{ ((p.caption or '') ~ ' ' ~ (p.cut.clip_title if (p.cut and p.cut.clip_title) else '') ~ ' ' ~ post_channel ~ ' ' ~ p.status) | lower }}"
+       data-channel="{{ post_channel }}" data-status="{{ p.status }}"
+       data-date="{{ posted_on }}" data-sort-date="{{ posted_on }}"
+       data-sort-title="{{ p.caption or '' }}">
+      <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
+        {% if thumb %}
+        <img src="{{ thumb }}" alt="" loading="lazy"
              onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
         {% else %}
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -190,6 +229,12 @@ function setLibTab(tab) {
     btn.classList.toggle('crumb-current', active);
     btn.setAttribute('aria-selected', active ? 'true' : 'false');
   });
+  // Swap in this tab's filters. Each tab keeps whatever it had selected, but
+  // only the visible controls take part in the match.
+  document.querySelectorAll('[data-lib-tab]').forEach(slot => {
+    slot.classList.toggle('tb-hidden', slot.dataset.libTab !== tab);
+  });
+  if (window.refreshToolbarFilters) window.refreshToolbarFilters();
   try { localStorage.setItem('libTab', tab); } catch (e) {}
 }
 (function restoreLibTab() {

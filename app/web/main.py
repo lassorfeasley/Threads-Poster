@@ -23,7 +23,7 @@ from sqlalchemy.orm import selectinload
 from .. import spend, threads_api, youtube
 from ..analytics import generate_report, snapshot_metrics
 from ..categories import category_by_slug, category_options
-from ..clipper import ClipExportError, clip_duration, export_supercut, extract_still, get_waveform
+from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
 from ..config import (
     load_caption_rules, load_first_reply, load_keywords, load_settings,
     render_caption_guide, save_caption_rules, save_first_reply, save_keywords,
@@ -116,6 +116,24 @@ templates.env.globals["static_v"] = _StaticVersion(_STATIC_DIR / "style.css")
 # rendering). Both are cheap: backed by a short in-process cache.
 templates.env.globals["category_options"] = category_options
 templates.env.globals["category_by_slug"] = category_by_slug
+
+
+def _thumb_for(candidate) -> str:
+    """Poster image for a candidate, or "" when there is nothing to show.
+
+    Prefers the source thumbnail (a remote YouTube still, free to serve) and
+    falls back to a frame cut out of the local file, which is all uploads and
+    pasted URLs have. Callers pass possibly-None candidates — a post can hang
+    off a cut whose candidate was pruned — so None is a normal input here.
+    """
+    if candidate is None:
+        return ""
+    if candidate.thumbnail_url:
+        return candidate.thumbnail_url
+    return f"/media/thumb/{candidate.id}" if candidate.local_video_path else ""
+
+
+templates.env.globals["thumb_for"] = _thumb_for
 
 
 def _attention_count() -> int:
@@ -977,16 +995,8 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
 
     duration = clip_duration(dest)
 
-    # Grab a poster frame so the workflow tile shows a real still instead of the
-    # empty placeholder (discovered clips get one from their source; uploads didn't).
-    thumb_url = None
-    try:
-        thumb_path = dest.with_suffix(".jpg")
-        extract_still(dest, thumb_path)
-        thumb_url = f"/video/upload-thumb/{video_id}.jpg"
-    except Exception as exc:
-        log.warning("Could not extract still for upload %s: %s", video_id, exc)
-
+    # No thumbnail_url: an upload has no remote poster image, so the cards fall
+    # back to /media/thumb, which pulls a frame out of the file we just wrote.
     with session_scope() as session:
         ch = _get_or_create_upload_channel(session)
         c = Candidate(
@@ -997,7 +1007,6 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
             published_at=utcnow(),
             duration_seconds=int(duration) if duration else None,
             local_video_path=str(dest),
-            thumbnail_url=thumb_url,
             status=STATUS_APPROVED,
             approved_at=utcnow(),
         )
@@ -1006,19 +1015,6 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
         cid = c.id
     threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
     return _flash(f"/video/{cid}", "Uploaded — transcribing now")
-
-
-@app.get("/video/upload-thumb/{name}")
-def upload_thumb(name: str):
-    """Serve the poster frame extracted for an uploaded clip."""
-    from ..config import ROOT
-
-    upload_dir = (ROOT / load_settings().get("storage.download_dir", "data/videos") / "uploads").resolve()
-    path = (upload_dir / name).resolve()
-    # Guard against path traversal: the resolved file must stay inside uploads/.
-    if upload_dir not in path.parents or path.suffix.lower() != ".jpg" or not path.exists():
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(str(path), media_type="image/jpeg")
 
 
 def _get_or_create_pasted_channel(session) -> Channel:
@@ -1112,6 +1108,9 @@ def upload_url(urls: str = Form(...)):
                 title=(display_title or canonical)[:300],
                 description=source_title[:2000],
                 url=canonical,
+                # Same poster URL the Data API hands back for discovered clips.
+                # Metadata-only, so the card has a still while the download runs.
+                thumbnail_url=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
                 published_at=published_at,
                 duration_seconds=duration,
                 status=STATUS_APPROVED,
@@ -1254,6 +1253,30 @@ def media_source(candidate_id: int):
         if c is None or not c.local_video_path or not Path(c.local_video_path).exists():
             return JSONResponse({"error": "no local video"}, status_code=404)
         return FileResponse(c.local_video_path, media_type="video/mp4")
+
+
+@app.get("/media/thumb/{candidate_id}")
+def media_thumb(candidate_id: int):
+    """Poster frame pulled from a candidate's downloaded file.
+
+    Only clips discovered through the YouTube Data API arrive with a
+    ``thumbnail_url``; operator uploads and pasted URLs that fail metadata
+    lookup have none, and their cards rendered as empty placeholders. Extracting
+    lazily (and caching) covers those without a migration, and keeps working if
+    ffmpeg happens to fail at ingest time.
+    """
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None or not c.local_video_path:
+            return JSONResponse({"error": "no local video"}, status_code=404)
+        source = c.local_video_path
+    try:
+        path = cached_still(source, str(candidate_id))
+    except Exception as exc:
+        log.info("No still for candidate %s: %s", candidate_id, exc)
+        return JSONResponse({"error": "no still"}, status_code=404)
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/media/clip/{cut_id}")
@@ -1639,7 +1662,7 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
             if post.first_reply_id:
                 msg += " · first reply posted"
             elif post.first_reply_error:
-                msg += f" · first reply failed: {post.first_reply_error[:120]}"
+                msg += f" · no first reply: {post.first_reply_error[:120]}"
             return _flash(f"/cut/{cut_id}?step=post", msg)
         except Exception as exc:
             return _flash(f"/cut/{cut_id}?step=post", f"Publish failed: {exc}")
@@ -1670,8 +1693,11 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                 keep = existing[0]
                 keep.caption = caption
                 # The cut page pre-fills this field from the pending post, so
-                # whatever came back (edited or cleared) is the operator's call.
+                # whatever came back (edited or cleared) is the operator's call —
+                # a clear has to survive publishing, which otherwise drafts a
+                # replacement for any post it finds without one.
                 keep.attribution_text = attribution.strip()
+                keep.attribution_skipped = not attribution.strip()
                 if keep.clip_local_path != clip_path:
                     # Captions were toggled since this post was created — point
                     # at the chosen file and refresh the cloud copy.
@@ -1780,6 +1806,7 @@ def queue_existing_post(post_id: int, caption: str = Form(""),
         # Notifications); an empty string is a deliberate clear (skip the comment).
         if attribution is not None:
             p.attribution_text = attribution.strip()
+            p.attribution_skipped = not attribution.strip()
         if caption.strip():
             p.caption = caption.strip()
             # Mirror the edited caption onto the clip so re-opening the cut shows
@@ -2236,16 +2263,39 @@ def library_page(request: Request, section: str = "videos", msg: str = ""):
             select(ThreadsPost)
             .options(
                 selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
-                selectinload(ThreadsPost.cut),
+                selectinload(ThreadsPost.cut)
+                .selectinload(Cut.candidate).selectinload(Candidate.channel),
             )
             .order_by(ThreadsPost.created_at.desc()).limit(100)
         ).scalars().all()
+
+        # --- Filter vocabularies, drawn from what's actually on the page so the
+        # dropdowns never offer a choice that matches nothing. ---
+        def _call_sign(candidate) -> str:
+            ch = getattr(candidate, "channel", None) if candidate is not None else None
+            return (ch.call_sign or "") if ch is not None else ""
+
+        call_signs = {_call_sign(r["c"]) for r in video_rows}
+        call_signs |= {_call_sign(r["cut"].candidate) for r in cut_rows}
+        call_signs |= {
+            _call_sign(p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate)
+            for p in posts
+        }
+        used_categories = {r["c"].category for r in video_rows if r["c"].category}
+        category_choices = [
+            (opt["slug"], f"{opt['emoji']} {opt['label']}".strip())
+            for opt in category_options() if opt["slug"] in used_categories
+        ]
+        post_statuses = sorted({p.status for p in posts if p.status})
 
     return templates.TemplateResponse(
         request, "library.html",
         {"video_rows": video_rows, "cut_rows": cut_rows, "posts": posts,
          "section": section,
          "counts": {"videos": len(video_rows), "cuts": len(cut_rows), "posts": len(posts)},
+         "channel_choices": sorted(cs for cs in call_signs if cs),
+         "category_choices": category_choices,
+         "post_status_choices": post_statuses,
          "msg": msg, "active": "library"},
     )
 

@@ -26,22 +26,7 @@
 
 {% set dash_filters %}
   {{ ui.search(name="q", value=q, placeholder="title, description, keywords…") }}
-  <div class="tb-field">
-    <details class="combo" id="keyword-combo">
-      <summary class="combo-summary">
-        <span id="keyword-summary">{{ (keyword|length ~ " selected") if keyword else "All keywords" }}</span>
-        <svg class="combo-caret" width="10" height="6" viewBox="0 0 10 6" fill="none"
-             stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 1l4 4 4-4"/></svg>
-      </summary>
-      <div class="combo-panel">
-        {% for k in keywords_options %}
-        <label class="combo-opt">
-          <input type="checkbox" name="keyword" value="{{ k }}" {{ "checked" if k in keyword }}> {{ k }}
-        </label>
-        {% endfor %}
-      </div>
-    </details>
-  </div>
+  {{ ui.combo("keyword", keywords_options, selected=keyword, all_label="All keywords") }}
   {{ ui.daterange("date_from", "date_to", from_value=date_from, to_value=date_to, label="") }}
   {% if filtering %}{{ ui.clear("/") }}{% endif %}
 {% endset %}
@@ -195,9 +180,10 @@
      onclick="location.href='/video/{{ c.id }}/cut'"
      onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}/cut'}"
      {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
-  <div class="thumb-wrap{{ '' if c.thumbnail_url else ' is-empty' }}">
-    {% if c.thumbnail_url %}
-    <img src="{{ c.thumbnail_url }}" alt="" loading="lazy"
+  {% set thumb = thumb_for(c) %}
+  <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
+    {% if thumb %}
+    <img src="{{ thumb }}" alt="" loading="lazy"
          onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
     {% else %}
     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -242,9 +228,10 @@
      onclick="location.href='/video/{{ c.id }}'"
      onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
      {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
-  <div class="thumb-wrap{{ '' if c.thumbnail_url else ' is-empty' }}">
-    {% if c.thumbnail_url %}
-    <img src="{{ c.thumbnail_url }}" alt="" loading="lazy"
+  {% set thumb = thumb_for(c) %}
+  <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
+    {% if thumb %}
+    <img src="{{ thumb }}" alt="" loading="lazy"
          onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
     {% else %}
     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -358,9 +345,10 @@
      onclick="location.href='/video/{{ c.id }}'"
      onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
      {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
-  <div class="thumb-wrap{{ '' if c.thumbnail_url else ' is-empty' }}">
-    {% if c.thumbnail_url %}
-    <img src="{{ c.thumbnail_url }}" alt="" loading="lazy"
+  {% set thumb = thumb_for(c) %}
+  <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
+    {% if thumb %}
+    <img src="{{ thumb }}" alt="" loading="lazy"
          onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
     {% else %}
     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"

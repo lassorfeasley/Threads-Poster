@@ -9,9 +9,11 @@
  *       <select data-submit-on-change>       submit on change
  *       <details class="combo">              multi-select; submit on close if changed
  *
- *   Client model (filter rows in place):
- *     <input  data-filter-input data-filter-target="#list">   (searches data-search)
- *     <select data-filter-input data-filter-target="#list" data-filter-key="country">
+ *   Client model (filter + sort rows in place — see initClientFilters below):
+ *     <input   data-filter-input data-filter-target="#list">   (searches data-search)
+ *     <select  data-filter-input data-filter-target="#list" data-filter-key="country">
+ *     <details class="combo" data-filter-input …>              (any-of match)
+ *     <select  data-sort-target="#list">                       (reorder rows)
  *     <ul id="list"> <li data-filter-row data-search="…" data-country="…">
  */
 (function () {
@@ -19,6 +21,10 @@
 
   var SEARCH_DEBOUNCE_MS = 400;
   var FOCUS_FLAG = 'toolbarFocusSearch';
+  // Rows are hidden with a class, not the `hidden` attribute: card/table/flex
+  // display rules outrank the attribute's UA style and would leave "hidden"
+  // rows on screen.
+  var HIDE = 'tb-hidden';
 
   function ready(fn) {
     if (document.readyState !== 'loading') fn();
@@ -60,20 +66,63 @@
         el.addEventListener('change', function () { form.requestSubmit(); });
       });
 
-      // Multi-select combo dropdowns: apply once on close (so several options can
-      // be toggled in one go), and close when clicking outside.
+      // Multi-select combo dropdowns: apply once on close, so several options
+      // can be toggled in one go before the page reloads.
       form.querySelectorAll('details.combo').forEach(function (combo) {
         var dirty = false;
-        combo.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
-          cb.addEventListener('change', function () { dirty = true; });
-        });
+        combo.addEventListener('change', function () { dirty = true; });
         combo.addEventListener('toggle', function () {
           if (!combo.open && dirty) { dirty = false; form.requestSubmit(); }
         });
-        document.addEventListener('click', function (e) {
-          if (combo.open && !combo.contains(e.target)) combo.open = false;
-        });
       });
+    });
+  }
+
+  // ---- Multi-select combos: live summary label + close on outside click ----
+  function comboChecked(combo) {
+    var checked = [];
+    combo.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      if (cb.checked) checked.push(cb);
+    });
+    return checked;
+  }
+
+  function updateComboLabel(combo) {
+    var checked = comboChecked(combo);
+    combo.classList.toggle('is-set', checked.length > 0);
+    var out = combo.querySelector('[data-combo-label]');
+    if (!out) return;
+    if (!checked.length) out.textContent = out.getAttribute('data-combo-empty') || 'All';
+    else if (checked.length === 1) out.textContent = checked[0].getAttribute('data-combo-text') || checked[0].value;
+    else out.textContent = checked.length + ' selected';
+  }
+
+  // The panel hangs off the left edge of its summary by default; flip it to the
+  // right edge when that would push it past the viewport.
+  function positionComboPanel(combo) {
+    var panel = combo.querySelector('.combo-panel');
+    if (!panel) return;
+    combo.classList.remove('combo-flip');
+    if (panel.getBoundingClientRect().right > document.documentElement.clientWidth - 8) {
+      combo.classList.add('combo-flip');
+    }
+  }
+
+  function initCombos() {
+    document.querySelectorAll('details.combo').forEach(function (combo) {
+      if (combo.__comboInit) return;
+      combo.__comboInit = true;
+      combo.addEventListener('change', function () { updateComboLabel(combo); });
+      combo.addEventListener('toggle', function () {
+        if (combo.open) positionComboPanel(combo);
+      });
+      updateComboLabel(combo);
+    });
+  }
+
+  function closeCombos(except) {
+    document.querySelectorAll('details.combo[open]').forEach(function (combo) {
+      if (!except || !combo.contains(except)) combo.open = false;
     });
   }
 
@@ -87,55 +136,184 @@
     if (el) { el.focus(); var v = el.value; el.value = ''; el.value = v; }
   }
 
-  // ---- Client model: filter rows in place ----
+  // ---- Client model: filter + sort rows in place ----
+  //
+  // Controls opt in with data-filter-input + data-filter-target="#container";
+  // the things they filter are [data-filter-row] elements inside it.
+  //
+  //   text input                          substring match on the row's data-search
+  //   select[data-filter-key]             exact match on data-<key> ('' = any)
+  //   details.combo[data-filter-key]      any-of match over the checked boxes
+  //   input[type=date][data-filter-key]   ISO compare, data-filter-op="gte"|"lte"
+  //
+  // A control inside a .tb-hidden wrapper sits out, so a page with tabbed
+  // sections can offer only the filters that apply to the open tab.
+  //
+  // Optional companions, all keyed off the same target selector:
+  //   [data-filter-clear="#c"]     reset every control (hides itself when idle)
+  //   [data-filter-active]         inside a clear button: count of live filters
+  //   [data-sort-target="#c"]      reorder rows; values are "<key>-asc|desc"
+  //                                and read data-sort-<key> off each row
+  //   [data-filter-section="name"] scope for counts + a filtered-empty notice
+  //   [data-filter-count="name"]   live count of matching rows in that section
+  //   [data-filter-empty]          shown when a non-empty section filters to 0
+  var filterGroups = {};   // target selector -> controls
+  var sortControls = {};   // target selector -> select
+
   function initClientFilters() {
-    var groups = {};   // target selector -> [inputs]
-    document.querySelectorAll('[data-filter-input]').forEach(function (input) {
-      if (input.__toolbarFilter) return;
-      input.__toolbarFilter = true;
-      var target = input.getAttribute('data-filter-target');
+    document.querySelectorAll('[data-filter-input]').forEach(function (control) {
+      if (control.__toolbarFilter) return;
+      control.__toolbarFilter = true;
+      var target = control.getAttribute('data-filter-target');
       if (!target) return;
-      (groups[target] = groups[target] || []).push(input);
-      var ev = input.tagName === 'SELECT' ? 'change' : 'input';
-      input.addEventListener(ev, function () { applyFilter(target, groups[target]); });
+      (filterGroups[target] = filterGroups[target] || []).push(control);
+      // Checkbox `change` bubbles up from inside a combo, so one listener on
+      // the <details> covers every option in it.
+      var ev = (control.tagName === 'INPUT' && control.type === 'text') ? 'input' : 'change';
+      control.addEventListener(ev, function () { applyFilter(target); });
     });
-    // Clear buttons reset every input pointed at their target, then re-filter.
+
     document.querySelectorAll('[data-filter-clear]').forEach(function (btn) {
       if (btn.__toolbarClear) return;
       btn.__toolbarClear = true;
       var target = btn.getAttribute('data-filter-clear');
       btn.addEventListener('click', function () {
-        (groups[target] || []).forEach(function (input) { input.value = ''; });
-        applyFilter(target, groups[target] || []);
+        (filterGroups[target] || []).forEach(resetControl);
+        applyFilter(target);
+        var search = document.querySelector('[data-filter-target="' + target + '"].tb-search-input');
+        if (search) search.focus();
       });
     });
-    Object.keys(groups).forEach(function (t) { applyFilter(t, groups[t]); });
+
+    document.querySelectorAll('[data-sort-target]').forEach(function (select) {
+      if (select.__toolbarSort) return;
+      select.__toolbarSort = true;
+      var target = select.getAttribute('data-sort-target');
+      sortControls[target] = select;
+      select.addEventListener('change', function () { applyFilter(target); });
+    });
+
+    // Remember each row's server-rendered position so "default" sort can undo.
+    Object.keys(filterGroups).concat(Object.keys(sortControls)).forEach(function (target) {
+      var container = document.querySelector(target);
+      if (!container) return;
+      container.querySelectorAll('[data-filter-row]').forEach(function (row, i) {
+        if (row.__order === undefined) row.__order = i;
+      });
+    });
+
+    Object.keys(filterGroups).forEach(applyFilter);
   }
 
-  function applyFilter(targetSel, inputs) {
+  function resetControl(control) {
+    if (control.tagName === 'DETAILS') {
+      control.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = false; });
+      updateComboLabel(control);
+    } else {
+      control.value = '';
+    }
+  }
+
+  // Controls in a hidden wrapper (a tab that isn't showing) don't constrain.
+  function isLive(control) {
+    return !control.closest('.' + HIDE) && !control.closest('[hidden]');
+  }
+
+  function isSet(control) {
+    if (control.tagName === 'DETAILS') return comboChecked(control).length > 0;
+    return (control.value || '').trim() !== '';
+  }
+
+  function matches(control, row) {
+    var key = control.getAttribute('data-filter-key');
+    if (control.tagName === 'DETAILS') {
+      var checked = comboChecked(control);
+      if (!checked.length) return true;
+      var rowVal = (row.getAttribute('data-' + key) || '').toLowerCase();
+      return checked.some(function (cb) { return cb.value.toLowerCase() === rowVal; });
+    }
+    var val = (control.value || '').trim().toLowerCase();
+    if (!val) return true;
+    if (control.type === 'date') {
+      var when = (row.getAttribute('data-' + key) || '').slice(0, 10);
+      if (!when) return false;
+      return control.getAttribute('data-filter-op') === 'lte' ? when <= val : when >= val;
+    }
+    if (key) return (row.getAttribute('data-' + key) || '').toLowerCase() === val;
+    // Free-text search: every whitespace-separated term has to appear, so
+    // "kxyz flood" narrows rather than finding nothing.
+    var haystack = (row.getAttribute('data-search') || '').toLowerCase();
+    return val.split(/\s+/).every(function (term) { return haystack.indexOf(term) !== -1; });
+  }
+
+  function applyFilter(targetSel) {
     var container = document.querySelector(targetSel);
     if (!container) return;
-    var rows = container.querySelectorAll('[data-filter-row]');
-    var shown = 0;
-    rows.forEach(function (row) {
-      var ok = inputs.every(function (input) {
-        var val = (input.value || '').trim().toLowerCase();
-        if (!val) return true;
-        if (input.hasAttribute('data-filter-key')) {
-          var key = input.getAttribute('data-filter-key');
-          return (row.getAttribute('data-' + key) || '').toLowerCase() === val;
-        }
-        return (row.getAttribute('data-search') || '').toLowerCase().indexOf(val) !== -1;
-      });
-      row.hidden = !ok;
-      if (ok) shown++;
+    var controls = (filterGroups[targetSel] || []).filter(isLive);
+
+    container.querySelectorAll('[data-filter-row]').forEach(function (row) {
+      var ok = controls.every(function (control) { return matches(control, row); });
+      row.classList.toggle(HIDE, !ok);
     });
-    var count = container.parentElement
-      ? container.parentElement.querySelector('[data-filter-count]')
-      : null;
-    if (!count) count = document.querySelector('[data-filter-count][data-for="' + targetSel.replace('#', '') + '"]');
-    if (count) count.textContent = shown;
+
+    applySort(container, sortControls[targetSel]);
+
+    var sections = [].slice.call(container.querySelectorAll('[data-filter-section]'));
+    if (container.matches('[data-filter-section]')) sections.unshift(container);
+    sections.forEach(function (section) {
+      var rows = section.querySelectorAll('[data-filter-row]');
+      var shown = 0;
+      rows.forEach(function (row) { if (!row.classList.contains(HIDE)) shown++; });
+      var name = section.getAttribute('data-filter-section');
+      document.querySelectorAll('[data-filter-count="' + name + '"]').forEach(function (el) {
+        el.textContent = shown;
+      });
+      var empty = section.querySelector('[data-filter-empty]');
+      if (empty) empty.classList.toggle(HIDE, !(rows.length && !shown));
+    });
+
+    // Clear button: show a live count of what's applied, and stay out of the
+    // way entirely while nothing is.
+    var active = controls.filter(isSet).length;
+    document.querySelectorAll('[data-filter-clear="' + targetSel + '"]').forEach(function (btn) {
+      btn.classList.toggle(HIDE, active === 0);
+      var badge = btn.querySelector('[data-filter-active]');
+      if (badge) badge.textContent = active;
+    });
   }
+
+  function applySort(container, select) {
+    if (!select || !isLive(select)) return;
+    var parts = (select.value || '').split('-');
+    var key = parts[0];
+    var dir = parts[1] === 'asc' ? 1 : -1;
+    // Sort inside each row's own parent so separate grids/tables keep their rows.
+    var groups = [];
+    container.querySelectorAll('[data-filter-row]').forEach(function (row) {
+      var parent = row.parentElement;
+      var group = groups.find(function (g) { return g.parent === parent; });
+      if (!group) groups.push(group = { parent: parent, rows: [] });
+      group.rows.push(row);
+    });
+    groups.forEach(function (group) {
+      group.rows.sort(function (a, b) {
+        if (!key) return a.__order - b.__order;
+        var av = a.getAttribute('data-sort-' + key) || '';
+        var bv = b.getAttribute('data-sort-' + key) || '';
+        // Rows missing the value sink to the bottom either way round.
+        if (!av || !bv) return (!av && !bv) ? a.__order - b.__order : (av ? -1 : 1);
+        var cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
+        return cmp ? cmp * dir : a.__order - b.__order;
+      });
+      group.rows.forEach(function (row) { group.parent.appendChild(row); });
+    });
+  }
+
+  // Pages with tabbed sections call this after showing/hiding tab-scoped
+  // filters, so the newly relevant controls take effect right away.
+  window.refreshToolbarFilters = function () {
+    Object.keys(filterGroups).forEach(applyFilter);
+  };
 
   // ---- Toast flash messages: auto-dismiss + manual close ----
   var TOAST_ICON_OK =
@@ -248,11 +426,16 @@
 
   ready(function () {
     updateScrollbarWidth();
+    initCombos();
     initServerForms();
     initClientFilters();
     restoreSearchFocus();
     initToasts();
     initSubmitPending();
+    document.addEventListener('click', function (e) { closeCombos(e.target); });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeCombos(null);
+    });
     // Recompute when the layout reflows (resize, or content growing/shrinking
     // enough to add or remove the scrollbar — e.g. client-side filtering).
     window.addEventListener('resize', updateScrollbarWidth);

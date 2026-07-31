@@ -13,10 +13,18 @@
     <button class="btn ghost" title="Recompute verdicts from current annotations + metrics">Recompute verdicts</button>
   </form>
 {% endset %}
+{% set TR = "#traits-list" %}
 {% set tr_filters %}
-  {{ ui.search(name="q", placeholder="trait name…", debounce=false, filter_target="#traits-list") }}
+  {{ ui.search(name="q", placeholder="trait name…", debounce=false, filter_target=TR) }}
+  {{ ui.select("state", [("enabled", "Enabled"), ("disabled", "Disabled")], submit=false,
+               filter_target=TR, filter_key="state", all_label="Any status") }}
+  {{ ui.select("tagged", [("yes", "Tagged on posts"), ("no", "Not tagged yet")], submit=false,
+               filter_target=TR, filter_key="tagged", all_label="Any coverage") }}
+  {{ ui.sort(TR, [("name-asc", "Name A–Z"), ("name-desc", "Name Z–A"),
+                  ("posts-desc", "Most posts"), ("posts-asc", "Fewest posts")]) }}
+  {{ ui.clear_filters(TR) }}
 {% endset %}
-{{ ui.pagebar("Traits", count=traits|length,
+{{ ui.pagebar("Traits", count=traits|length, count_key="traits",
               sub="Footage labels on published clips. Observations only until learning gates unlock; " ~ annotated_posts ~ " of " ~ published_total ~ " posts annotated so far.",
               actions=tr_actions, filters=tr_filters) }}
 
@@ -42,12 +50,15 @@
   </form>
 </div>
 
-<div id="traits-list">
+<div id="traits-list" data-filter-section="traits">
 {% for t in traits %}
 {% set w = weights.get(t.name) %}
 {% set n = post_counts.get(t.name, 0) %}
 <div class="card tight item" style="{{ 'opacity: 0.55;' if not t.enabled }}"
-     data-filter-row data-search="{{ t.name | lower }}">
+     data-filter-row data-search="{{ t.name | lower }}"
+     data-state="{{ 'enabled' if t.enabled else 'disabled' }}"
+     data-tagged="{{ 'yes' if n else 'no' }}"
+     data-sort-name="{{ t.name }}" data-sort-posts="{{ n }}">
   <div class="row center">
     <div class="grow">
       <div style="font-weight: 650;">
@@ -91,6 +102,7 @@
 {% else %}
   <div class="meta">None yet — add one above.</div>
 {% endfor %}
+{{ ui.no_matches("traits") }}
 </div>{# /traits-list #}
 
 <p class="meta" style="margin-top: 18px;">Stats use each post's views at {{ metric_age_hours }}h (from metric snapshots),

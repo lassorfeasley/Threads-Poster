@@ -6,12 +6,17 @@
   <button type="button" class="btn primary"
           onclick="document.getElementById('add-channel-dialog').showModal()">＋ Add channel</button>
 {% endset %}
+{% set CH = "#channel-table" %}
 {% set ch_filters %}
-  {{ ui.search(name="q", placeholder="call sign, network, market…", debounce=false, filter_target="#channel-table") }}
-  {{ ui.select("country", channels|map(attribute='country')|select|unique|list|sort, label="Country", submit=false, filter_target="#channel-table", filter_key="country", all_label="All countries") }}
-  {{ ui.select("region", channels|map(attribute='region')|select|unique|list|sort, label="Region", submit=false, filter_target="#channel-table", filter_key="region", all_label="All regions") }}
-  {{ ui.select("scope", ["local", "national", "international"], label="Scope", submit=false, filter_target="#channel-table", filter_key="scope", all_label="All scopes") }}
-  <button type="button" class="btn ghost sm tb-clear" data-filter-clear="#channel-table">Clear</button>
+  {{ ui.search(name="q", placeholder="call sign, network, market…", debounce=false, filter_target=CH) }}
+  {{ ui.combo("country", channels|map(attribute='country')|select|unique|list|sort, all_label="All countries", filter_target=CH, filter_key="country") }}
+  {{ ui.combo("region", channels|map(attribute='region')|select|unique|list|sort, all_label="All regions", filter_target=CH, filter_key="region") }}
+  {{ ui.combo("scope", ["local", "national", "international"], all_label="All scopes", filter_target=CH, filter_key="scope") }}
+  {{ ui.select("state", [("ok", "OK"), ("pending", "Pending resolve"), ("error", "Error"), ("disabled", "Disabled")],
+               submit=false, filter_target=CH, filter_key="state", all_label="Any status") }}
+  {{ ui.sort(CH, [("callsign-asc", "Call sign A–Z"), ("callsign-desc", "Call sign Z–A"),
+                  ("checked-desc", "Recently checked"), ("checked-asc", "Least recently checked")]) }}
+  {{ ui.clear_filters(CH) }}
 {% endset %}
 {{ ui.pagebar("Channels", count=channels|length, actions=ch_actions, filters=ch_filters) }}
 
@@ -118,14 +123,19 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
   </details>
 </dialog>
 
+<div id="channel-table" data-filter-section="channels">
 <div class="table-wrap">
-<table id="channel-table">
+<table>
   <tr><th>Call sign</th><th>Network</th><th>Market</th><th>Region</th><th>Country</th><th>Scope</th><th>Status</th><th>Last checked</th><th></th></tr>
   {% for ch in channels %}
+  {% set state = "error" if ch.last_error else ("disabled" if not ch.enabled else ("ok" if ch.channel_id else "pending")) %}
   <tr class="ch-row" style="{{ 'opacity:.45' if not ch.enabled }}"
+      data-filter-row
       data-search="{{ (ch.call_sign ~ ' ' ~ ch.network ~ ' ' ~ ch.market ~ ' ' ~ ch.region ~ ' ' ~ (ch.country or '')) | lower }}"
       data-country="{{ ch.country or '' }}" data-region="{{ ch.region or '' }}"
-      data-scope="{{ ch.scope or 'local' }}">
+      data-scope="{{ ch.scope or 'local' }}" data-state="{{ state }}"
+      data-sort-callsign="{{ ch.call_sign }}"
+      data-sort-checked="{{ ch.last_checked_at.isoformat() if ch.last_checked_at else '' }}">
     <td><a href="{{ ch.url }}" target="_blank">{{ ch.call_sign }}</a></td>
     <td>{{ ch.network }}</td>
     <td>{{ ch.market }}</td>
@@ -150,7 +160,9 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
   {% endfor %}
 </table>
 </div>
-<div class="meta" style="margin-top: 10px;"><span data-filter-count data-for="channel-table">{{ channels|length }}</span> of {{ channels|length }} shown</div>
+{{ ui.no_matches("channels") }}
+</div>
+<div class="meta" style="margin-top: 10px;"><span data-filter-count="channels">{{ channels|length }}</span> of {{ channels|length }} shown</div>
 
 <p class="meta" style="margin-top: 12px;">Channels from <code>config/channels.yaml</code> are synced in
 on startup; removing one here only disables it if it has stored candidates.</p>

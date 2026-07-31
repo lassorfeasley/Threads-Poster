@@ -19,9 +19,10 @@
   <div class="post-list">
     {% for p in failed %}
     {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
+    {% set thumb = thumb_for(cand) %}
     <div class="post-card is-alert">
-      {% if cand and cand.thumbnail_url %}
-      <img class="pc-thumb" src="{{ cand.thumbnail_url }}" alt="" loading="lazy"
+      {% if thumb %}
+      <img class="pc-thumb" src="{{ thumb }}" alt="" loading="lazy"
            onerror="this.classList.add('is-broken')">
       {% else %}
       <div class="pc-thumb is-empty" aria-hidden="true">

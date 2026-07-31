@@ -187,7 +187,9 @@
         </span>
         {% else %}
         <span class="ti-type">first reply
-          {%- if first_reply_error %} · failed
+          {#- "not posted" rather than "failed": the reason below covers both a
+              genuine API failure and a deliberate skip. -#}
+          {%- if first_reply_error %} · not posted
           {%- elif not first_reply_id and attribution_text %} · pending{% endif %}</span>
         <span class="ti-tools">
           <details class="ti-menu">

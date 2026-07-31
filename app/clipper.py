@@ -11,12 +11,14 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 from .config import ROOT
 
 log = logging.getLogger("clipper")
 
 CLIPS_DIR = ROOT / "data" / "clips"
+THUMBS_DIR = ROOT / "data" / "thumbs"
 
 ENCODE_ARGS = [
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -184,10 +186,8 @@ def extract_still(source_path: str | Path, dest_path: str | Path,
                   at_seconds: float | None = None) -> Path:
     """Grab a single representative frame from ``source_path`` as a JPEG.
 
-    Uploaded clips have no poster image, so the workflow tiles render an empty
-    placeholder. We pull one frame (a little into the clip, to skip black/fade
-    intros) so those cards show a real still like discovered clips do. Raises
-    ClipExportError if the frame can't be extracted.
+    Seeks a little way in by default, since a first frame is often black or
+    mid-fade. Raises ClipExportError if no frame can be extracted.
     """
     source = Path(source_path)
     if not source.exists():
@@ -208,4 +208,32 @@ def extract_still(source_path: str | Path, dest_path: str | Path,
     ])
     if not dest.exists() or dest.stat().st_size == 0:
         raise ClipExportError(f"Still extraction produced no image for {source}")
+    return dest
+
+
+def cached_still(source_path: str | Path, key: str) -> Path:
+    """Poster frame for ``source_path``, extracted once and reused thereafter.
+
+    Keyed rather than written next to the source because clips live in several
+    trees (per-channel, uploads, pasted URLs) and some of those are pruned.
+    A source newer than its cached frame wins, so replacing a video file — a
+    re-download, a re-upload over the same id — refreshes the still.
+    """
+    source = Path(source_path)
+    if not source.exists():
+        raise ClipExportError(f"Clip for still not found: {source}")
+    dest = THUMBS_DIR / f"{key}.jpg"
+    try:
+        if dest.stat().st_size > 0 and dest.stat().st_mtime >= source.stat().st_mtime:
+            return dest
+    except OSError:
+        pass
+    # Extract to a private path and rename into place: two requests for the same
+    # clip can race here, and a half-written JPEG would be cached as a valid one.
+    tmp = dest.with_name(f"{key}.{uuid4().hex[:8]}.tmp.jpg")
+    try:
+        extract_still(source, tmp)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     return dest
