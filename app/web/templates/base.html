@@ -5,22 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Climate Clip Monitor</title>
 <script>
-  // Apply saved theme before first paint to avoid a flash.
+    // Apply saved theme before first paint to avoid a flash.
   (function () {
     try {
       var t = localStorage.getItem('theme') || 'dark';
       document.documentElement.setAttribute('data-theme', t);
     } catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
-    // Apply saved sidebar state pre-paint to avoid a collapse flash.
-    try {
-      if (localStorage.getItem('navCollapsed') === '1')
-        document.documentElement.classList.add('nav-collapsed');
-    } catch (e) {}
   })();
-  function toggleSidebar() {
-    var collapsed = document.documentElement.classList.toggle('nav-collapsed');
-    try { localStorage.setItem('navCollapsed', collapsed ? '1' : '0'); } catch (e) {}
-  }
   function toggleTheme() {
     var cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
     var next = cur === 'light' ? 'dark' : 'light';
@@ -40,10 +31,7 @@
 <body>
 <aside class="sidebar">
   <div class="brand">
-    <button class="brand-collapse" type="button" onclick="toggleSidebar()"
-            title="Collapse sidebar" aria-label="Toggle sidebar">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
-    </button>
+    <span class="brand-mark" aria-hidden="true">C</span>
     <div class="name">Climate Clip<small>Monitor &amp; Poster</small></div>
   </div>
 

@@ -32,7 +32,8 @@
   --warn-soft: rgba(230, 180, 92, 0.12);
   --warn-border: rgba(230, 180, 92, 0.45);
 
-  --sidebar-w: 232px;
+  --sidebar-w: 64px;          /* layout gutter — always the collapsed rail */
+  --sidebar-full: 232px;      /* expanded overlay width on hover */
   --radius: 8px;
   --radius-lg: 12px;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 18px -10px rgba(0, 0, 0, 0.45);
@@ -145,7 +146,8 @@ body {
 ::selection { background: rgba(90, 169, 240, 0.35); }
 
 /* ------------------------------------------------------------
-   Sidebar
+   Sidebar — collapsed rail by default; expands as an overlay on hover
+   so page content never shifts.
    ------------------------------------------------------------ */
 aside.sidebar {
   position: fixed;
@@ -155,38 +157,42 @@ aside.sidebar {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 20px 12px 16px;
-  z-index: 10;
+  padding: 16px 8px;
+  z-index: 40;
+  overflow-x: hidden;
+  overflow-y: auto;
+  transition: width 0.18s ease, padding 0.18s ease, box-shadow 0.18s ease;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 2px 10px 20px;
+  padding: 2px 4px 20px;
+  justify-content: center;
+  min-height: 34px;
 }
-.brand .brand-collapse {
+.brand .brand-mark {
+  flex: none;
   width: 30px;
   height: 30px;
   border-radius: 8px;
   display: grid;
   place-items: center;
-  flex: none;
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: -0.02em;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), #2b6cb0);
+  user-select: none;
 }
-.brand .brand-collapse svg { opacity: 0.85; transition: transform 0.18s ease; }
-.brand .brand-collapse:hover { background: var(--panel2); color: var(--text); }
-.brand .brand-collapse:hover svg { opacity: 1; }
-html.nav-collapsed .brand .brand-collapse svg { transform: rotate(180deg); }
 .brand .name {
+  display: none;
   font-weight: 700;
   font-size: 14px;
   letter-spacing: 0.1px;
   line-height: 1.25;
+  white-space: nowrap;
 }
 .brand .name small {
   display: block;
@@ -197,30 +203,36 @@ html.nav-collapsed .brand .brand-collapse svg { transform: rotate(180deg); }
 }
 
 .nav-section {
+  display: none;
   font-size: 10.5px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
   color: var(--muted);
   padding: 14px 12px 6px;
+  white-space: nowrap;
 }
 
 a.nav {
   position: relative;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 11px;
   color: var(--text-dim);
   text-decoration: none;
-  padding: 8px 12px;
+  padding: 10px;
   border-radius: 8px;
   margin-bottom: 1px;
   font-weight: 500;
   font-size: 13.5px;
   border: 1px solid transparent;
   transition: background 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
 }
 a.nav svg { width: 17px; height: 17px; flex: none; opacity: 0.75; }
+a.nav .label,
+a.nav .count { display: none; }
 /* Notification bell: icon wrapper carries a red dot; a count badge sits at the far right. */
 .nav-ic-wrap { position: relative; display: inline-flex; flex: none; }
 .nav-dot {
@@ -230,13 +242,13 @@ a.nav svg { width: 17px; height: 17px; flex: none; opacity: 0.75; }
   border: 2px solid var(--bg-raised);
 }
 .nav-badge {
+  display: none;
   margin-left: auto;
   min-width: 18px; height: 18px; padding: 0 5px;
-  display: inline-flex; align-items: center; justify-content: center;
+  align-items: center; justify-content: center;
   font-size: 11px; font-weight: 700; line-height: 1;
   color: #fff; background: var(--danger); border-radius: 9px;
 }
-html.nav-collapsed a.nav .nav-badge { display: none; }
 a.nav:hover { color: var(--text); background: var(--panel2); }
 a.nav:hover svg { opacity: 1; }
 a.nav.active {
@@ -247,7 +259,7 @@ a.nav.active {
 a.nav.active::before {
   content: "";
   position: absolute;
-  left: -12px;
+  left: -8px;
   top: 8px;
   bottom: 8px;
   width: 3px;
@@ -268,6 +280,7 @@ a.nav.active .count { color: var(--text-dim); background: var(--panel3); }
 
 /* Persistent posting-queue status widget, shown on every page (calendar + queue view alike). */
 .nav-status {
+  display: none;
   margin: 6px 4px 4px;
   padding: 10px 8px 8px;
   border: 1px solid var(--border);
@@ -336,19 +349,19 @@ a.nav.active .count { color: var(--text-dim); background: var(--panel3); }
 }
 .info-tip:hover .info-tip-bubble,
 .info-tip:focus-within .info-tip-bubble { opacity: 1; visibility: visible; }
-html.nav-collapsed .nav-status { display: none; }
 
 .theme-toggle {
   margin-top: auto;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 11px;
   width: calc(100% - 8px);
   margin-left: 4px;
   color: var(--text-dim);
   background: transparent;
   border: 1px solid transparent;
-  padding: 8px 12px;
+  padding: 10px;
   border-radius: 8px;
   font-weight: 500;
   font-size: 13.5px;
@@ -356,34 +369,67 @@ html.nav-collapsed .nav-status { display: none; }
   cursor: pointer;
   text-align: left;
   transition: background 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
 }
 .theme-toggle svg { width: 17px; height: 17px; flex: none; opacity: 0.75; }
+.theme-toggle .label { display: none; }
 .theme-toggle:hover { color: var(--text); background: var(--panel2); }
 .theme-toggle:hover svg { opacity: 1; }
 
 .sidebar .foot {
+  display: none;
   padding: 12px;
   color: var(--muted);
   font-size: 11.5px;
   line-height: 1.5;
   border-top: 1px solid var(--border);
+  white-space: nowrap;
 }
 
-/* Collapse toggle + collapsed "rail" state */
-aside.sidebar { transition: width 0.18s ease; }
-body { transition: padding-left 0.18s ease; }
-
-html.nav-collapsed { --sidebar-w: 64px; }
-html.nav-collapsed aside.sidebar { padding: 16px 8px; }
-html.nav-collapsed .brand { padding: 2px 4px 20px; justify-content: center; }
-html.nav-collapsed .brand .name,
-html.nav-collapsed .nav-section,
-html.nav-collapsed a.nav .label,
-html.nav-collapsed a.nav .count,
-html.nav-collapsed .sidebar .foot,
-html.nav-collapsed .theme-toggle .label { display: none; }
-html.nav-collapsed a.nav,
-html.nav-collapsed .theme-toggle { justify-content: center; padding: 10px; }
+/* Expand as overlay — body padding stays on the rail width. */
+aside.sidebar:hover,
+aside.sidebar:focus-within {
+  width: var(--sidebar-full);
+  padding: 20px 12px 16px;
+  box-shadow: var(--shadow-lift);
+}
+aside.sidebar:hover .brand,
+aside.sidebar:focus-within .brand {
+  justify-content: flex-start;
+  padding: 2px 10px 20px;
+  gap: 10px;
+}
+aside.sidebar:hover .brand .name,
+aside.sidebar:focus-within .brand .name,
+aside.sidebar:hover .nav-section,
+aside.sidebar:focus-within .nav-section,
+aside.sidebar:hover a.nav .label,
+aside.sidebar:focus-within a.nav .label,
+aside.sidebar:hover a.nav .count,
+aside.sidebar:focus-within a.nav .count,
+aside.sidebar:hover .nav-status,
+aside.sidebar:focus-within .nav-status,
+aside.sidebar:hover .theme-toggle .label,
+aside.sidebar:focus-within .theme-toggle .label,
+aside.sidebar:hover .foot,
+aside.sidebar:focus-within .foot {
+  display: block;
+}
+aside.sidebar:hover a.nav .nav-badge,
+aside.sidebar:focus-within a.nav .nav-badge {
+  display: inline-flex;
+}
+aside.sidebar:hover a.nav,
+aside.sidebar:focus-within a.nav,
+aside.sidebar:hover .theme-toggle,
+aside.sidebar:focus-within .theme-toggle {
+  justify-content: flex-start;
+  padding: 8px 12px;
+}
+aside.sidebar:hover a.nav.active::before,
+aside.sidebar:focus-within a.nav.active::before {
+  left: -12px;
+}
 
 /* ------------------------------------------------------------
    Main layout
@@ -2044,11 +2090,6 @@ a.cal-event:hover { background: var(--panel3); }
   .cal-queue { position: static; max-height: none; }
 }
 @media (max-width: 860px) {
-  :root { --sidebar-w: 64px; }
-  aside.sidebar { padding: 16px 8px; }
-  .brand .name, .nav-section, a.nav .label, a.nav .count, a.nav .nav-badge, .sidebar .foot,
-  .nav-status, .theme-toggle .label { display: none; }
-  a.nav, .theme-toggle { justify-content: center; padding: 10px; }
   main { padding: 20px 18px 90px; }
   .cal-cell { min-height: 84px; }
   .queue-item { grid-template-columns: 64px minmax(0, 1fr); }
