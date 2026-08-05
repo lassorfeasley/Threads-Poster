@@ -46,7 +46,7 @@
       </div>
     </div>
     <div>
-      <a class="btn {{ '' if state.posted else 'primary' }}" href="/video/{{ c.id }}?step={{ state.current }}">
+      <a class="btn {{ '' if state.posted else 'primary' }}" href="/video/{{ c.id }}">
         {{ "Open" if state.posted else "Continue → " + state.current }}</a>
     </div>
   </div>

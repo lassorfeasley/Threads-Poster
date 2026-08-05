@@ -74,7 +74,13 @@ def _json_chat(model: str, system: str, user: str, max_tokens: int = 1000) -> di
 
 
 def score_relevance(model: str, title: str, description: str, matched_keywords: list[str]) -> dict:
-    """Return {score: float 0-1, rationale: str}."""
+    """Return {score: float 0-1}.
+
+    A free-text rationale used to be returned alongside the score; it wasn't
+    useful in the operator workflow and isn't a learning signal (numeric score
+    + keyword hits + visual traits already drive ranking). Kept accepting an
+    optional ``rationale`` key for old cached responses.
+    """
     system = (
         "You score local TV news videos for genuine climate-change relevance. "
         "A video is relevant if it covers climate change, its impacts (extreme weather, "
@@ -82,7 +88,7 @@ def score_relevance(model: str, title: str, description: str, matched_keywords: 
         "policy. It is NOT relevant if the keyword is incidental ('political climate', "
         "'business climate', a sports team name, routine weather forecasts with no "
         "climate angle). "
-        "JSON shape: {\"score\": 0.0-1.0, \"rationale\": \"one line\"}"
+        "JSON shape: {\"score\": 0.0-1.0}"
     )
     user = json.dumps(
         {"title": title, "description": description[:2000], "matched_keywords": matched_keywords}
@@ -90,7 +96,6 @@ def score_relevance(model: str, title: str, description: str, matched_keywords: 
     data = _json_chat(model, system, user)
     return {
         "score": max(0.0, min(1.0, float(data.get("score", 0.0)))),
-        "rationale": str(data.get("rationale", ""))[:500],
     }
 
 

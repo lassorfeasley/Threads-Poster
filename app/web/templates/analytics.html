@@ -6,7 +6,7 @@
     <button class="primary">Pull latest metrics</button>
   </form>
 {% endset %}
-{% set an_sub %}Post performance pulled from Threads, smoothed with a rolling 7-day average, plus an LLM digest of what's working.<div class="meta" style="margin-top: 6px;">LLM spend today: <strong>${{ "%.2f"|format(spend_today) }}</strong> of ${{ "%.2f"|format(spend_budget) }} budget{%- if spend_recent %} · last 7 days: {% for d in spend_recent %}{{ "%.2f"|format(d.spend_usd) }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}</div>{% endset %}
+{% set an_sub %}Post performance pulled from Threads — every post charted individually with a rolling 7-day median trend — plus an LLM digest of what's working.{% endset %}
 {{ ui.pagebar("Analytics", sub=an_sub, actions=an_actions) }}
 
 {% if not rows %}
@@ -38,10 +38,18 @@
   <div class="chart-head">
     <div class="card-title">Engagement over time</div>
     <div style="display: flex; align-items: center; gap: 16px;">
-      <label class="meta" style="display: inline-flex; align-items: center; gap: 6px;">
-        <input type="checkbox" id="show-daily" style="width: auto;"> Show daily averages
+      <div class="view-toggle" id="chart-view" role="group" aria-label="Chart view">
+        <button type="button" class="view-seg text is-active" data-view="days">Days</button>
+        <button type="button" class="view-seg text" data-view="posts">Posts</button>
+        <button type="button" class="view-seg text" data-view="trend">Trend</button>
+      </div>
+      <div class="view-toggle" role="group" aria-label="LLM spend">
+        <button type="button" class="view-seg text" data-view="spend">LLM spend</button>
+      </div>
+      <label class="meta" id="log-label" style="display: inline-flex; align-items: center; gap: 6px;">
+        <input type="checkbox" id="log-scale" style="width: auto;"> Log scale
       </label>
-      <label class="meta">Metric
+      <label class="meta" id="metric-label">Metric
         <select id="metric-select">
           <option value="views">Views</option>
           <option value="likes">Likes</option>
@@ -54,9 +62,8 @@
     </div>
   </div>
   <div class="chart-wrap"><canvas id="engagementChart"></canvas></div>
-  <div class="meta" style="margin-top: 6px;">The line is the trailing 7-day average per post. Toggle
-    <strong>Show daily averages</strong> to overlay each day's actual average — handy for spotting spikes, but a single
-    viral post can rescale the chart. Grouped by the day each post was published.</div>
+  <div class="meta" id="chart-note" style="margin-top: 6px;">One bar per day: that day's average per
+    post. Click a bar to open its post.</div>
 </div>
 
 {% if digest %}
@@ -84,35 +91,6 @@
   {% endif %}
 {% endfor %}
 </div>
-
-{# ---- Learned footage-trait verdicts (self-improving ranking) ---- #}
-<h2>Footage traits <span class="meta">(what the ranking is learning from views)</span></h2>
-<div class="meta" style="margin: -6px 0 12px;">Median views at a fixed post age for posts whose footage shows each
-  trait, vs. the account baseline (recency-weighted). A verdict only becomes <strong>active</strong> — and starts
-  nudging ranking — once you have {{ min_total_posts }} total posts <em>and</em> the trait has {{ min_trait_posts }}
-  observations; everything else is still collecting. Correlational — treat as a hint, not proof.</div>
-{% if trait_weights %}
-<div class="card">
-  <table style="margin-top: 4px;">
-    <tr><th>Trait</th><th>Posts</th><th>Median views</th><th>Baseline</th><th>Lift</th><th>Verdict</th></tr>
-    {% for w in trait_weights %}
-    <tr>
-      <td>{% if w.status == 'active' %}<strong>{{ w.trait }}</strong>{% else %}{{ w.trait }}{% endif %}</td>
-      <td>{{ w.n_posts }}</td>
-      <td>{{ w.median_metric if w.median_metric is not none else "—" }}</td>
-      <td>{{ w.baseline if w.baseline is not none else "—" }}</td>
-      <td>{% if w.lift is not none %}{{ "%+.0f%%"|format(w.lift * 100) }}{% else %}—{% endif %}</td>
-      <td>{% if w.status == 'active' %}<span class="badge {{ 'score-hi' if (w.lift or 0) >= 0 else 'score-lo' }}">active</span>
-          {% elif w.status == 'provisional' %}<span class="badge">provisional · {{ w.n_posts }}/{{ min_trait_posts }}</span>
-          {% else %}<span class="meta">collecting · {{ w.n_posts }}/{{ min_trait_posts }}</span>{% endif %}</td>
-    </tr>
-    {% endfor %}
-  </table>
-</div>
-{% else %}
-<div class="meta" style="margin-bottom: 16px;">No annotated posts yet — verdicts appear once published posts carry
-  footage traits (they're tagged automatically at publish; backfill older ones from the Traits page).</div>
-{% endif %}
 
 {# ---- Per-post table (collapsed) ---- #}
 <details style="margin-top: 20px;">
@@ -145,6 +123,10 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script>
 const TS = {{ timeseries | tojson }};
+// Oldest-first daily LLM spend (route sends newest-first).
+const SPEND = ({{ spend_recent | tojson }}).slice().reverse();
+const SPEND_BUDGET = {{ spend_budget }};
+const SPEND_TODAY = {{ spend_today }};
 const METRIC_LABELS = { views: 'Views', likes: 'Likes', replies: 'Replies',
                         reposts: 'Reposts', quotes: 'Quotes', shares: 'Shares' };
 
@@ -158,52 +140,206 @@ if (window.Chart && TS.days && TS.days.length) {
   const grid = cssVar('--border', '#27313d');
   const accent = cssVar('--accent', '#3ecf8e');
   const blue = '#5aa9f0';
+  const accentFill = /^#[0-9a-fA-F]{6}$/.test(accent) ? accent + '22' : 'rgba(62,207,142,0.13)';
   Chart.defaults.color = text;
   Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
 
-  const commonScales = {
-    x: { grid: { color: grid }, ticks: { color: text, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
-    y: { grid: { color: grid }, ticks: { color: text }, beginAtZero: true },
+  const fmt = new Intl.NumberFormat();
+  // ISO dates are unreadable as axis labels; show "Jul 9" on the axis and
+  // "Wed, Jul 9" in tooltips.
+  const shortDate = (iso) => {
+    const d = new Date(iso + 'T00:00:00');
+    return isNaN(d) ? iso : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
+  const longDate = (iso) => {
+    const d = new Date(iso + 'T00:00:00');
+    return isNaN(d) ? iso : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  };
+  const POINTS = TS.points || [];
+  const pointsFor = (m) => POINTS
+    .filter((p) => p[m] != null)
+    .map((p) => ({ x: p.date, y: p[m], caption: p.caption, pk: p.pk }));
+
+  const pksByDay = {};
+  POINTS.forEach((p) => {
+    if (p.pk != null) (pksByDay[p.date] = pksByDay[p.date] || []).push(p.pk);
+  });
+
+  // A lone viral post makes a linear axis useless (everything else flattens to
+  // zero), so default to log when the top post dwarfs the median post.
+  const spreadIsWide = (m) => {
+    const vals = POINTS.map((p) => p[m]).filter((v) => v > 0).sort((a, b) => a - b);
+    if (vals.length < 5) return false;
+    return vals[vals.length - 1] / vals[Math.floor(vals.length / 2)] > 20;
   };
 
-  // Engagement chart (metric-switchable).
-  const engCtx = document.getElementById('engagementChart');
-  const engChart = new Chart(engCtx, {
-    type: 'line',
-    data: {
-      labels: TS.days,
-      datasets: [
-        { label: '7-day avg / post', data: TS.metrics.views.rolling_7d,
-          borderColor: accent, backgroundColor: accent, borderWidth: 2.5,
-          tension: 0.3, pointRadius: 0, spanGaps: true },
-        { label: 'Daily avg / post', data: TS.metrics.views.daily_avg,
-          borderColor: blue, backgroundColor: blue, borderWidth: 0,
-          pointRadius: 3, pointHoverRadius: 5, showLine: false, spanGaps: false,
-          hidden: true },
+  const logToggle = document.getElementById('log-scale');
+  logToggle.checked = spreadIsWide('views');
+
+  const dollars = (v) => '$' + Number(v).toFixed(2);
+  const yScale = () => {
+    if (view === 'spend') {
+      return { type: 'linear', beginAtZero: true, grid: { color: grid },
+               ticks: { color: text, callback: dollars } };
+    }
+    return logToggle.checked
+      ? { type: 'logarithmic', grid: { color: grid },
+          ticks: { color: text, callback: (v) => fmt.format(v) } }
+      : { type: 'linear', beginAtZero: true, grid: { color: grid },
+          ticks: { color: text, callback: (v) => fmt.format(v) } };
+  };
+
+  // One representation at a time, switched with the Days / Posts / Trend
+  // segmented control (all in per-post units) — plus the separate LLM spend
+  // toggle, which swaps the chart to the cost ledger.
+  const amber = '#d9a03f';
+  const VIEWS = {
+    days: {
+      note: "One bar per day: that day's average per post. Click a bar to open its post.",
+      labels: () => TS.days,
+      datasets: (m) => [{
+        type: 'bar', label: `Daily avg ${METRIC_LABELS[m].toLowerCase()} / post`,
+        data: TS.metrics[m].daily_avg,
+        backgroundColor: blue + '99', hoverBackgroundColor: blue, borderRadius: 3,
+      }],
+    },
+    posts: {
+      note: 'One dot per post on its publish day — hover for the caption, click to open the post.',
+      labels: () => TS.days,
+      datasets: (m) => [{
+        type: 'scatter', label: METRIC_LABELS[m],
+        data: pointsFor(m),
+        backgroundColor: blue + 'cc', borderColor: blue,
+        pointRadius: 4, pointHoverRadius: 6,
+      }],
+    },
+    trend: {
+      note: 'Trailing 7-day median per post — robust to a single viral outlier.',
+      labels: () => TS.days,
+      datasets: (m) => [{
+        type: 'line', label: `7-day median ${METRIC_LABELS[m].toLowerCase()} / post`,
+        data: TS.metrics[m].rolling_median,
+        borderColor: accent, backgroundColor: accentFill, fill: 'origin',
+        borderWidth: 2.5, tension: 0.3, pointRadius: 0, spanGaps: true,
+      }],
+    },
+    spend: {
+      note: `Estimated LLM cost per UTC day, from token usage. Today: ${dollars(SPEND_TODAY)}`
+        + ` of the ${dollars(SPEND_BUDGET)} daily budget (dashed line).`,
+      labels: () => SPEND.map((d) => d.date),
+      datasets: () => [
+        { type: 'bar', label: 'LLM spend', isSpend: true,
+          data: SPEND.map((d) => d.spend_usd),
+          backgroundColor: amber + 'b3', hoverBackgroundColor: amber, borderRadius: 3 },
+        { type: 'line', label: 'Daily budget',
+          data: SPEND.map(() => SPEND_BUDGET),
+          borderColor: '#e05252', borderWidth: 1.5, borderDash: [6, 4],
+          pointRadius: 0, fill: false },
       ],
     },
+  };
+
+  let view = 'days';
+  try { view = localStorage.getItem('analyticsChartView') || 'days'; } catch (e) {}
+  if (!VIEWS[view]) view = 'days';
+
+  const engCtx = document.getElementById('engagementChart');
+  const engChart = new Chart(engCtx, {
+    type: 'bar',
+    data: { labels: TS.days, datasets: [] },
     options: {
       responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { labels: { color: text, usePointStyle: true } } },
-      scales: commonScales,
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title(items) {
+              return items.length ? longDate(engChart.data.labels[items[0].dataIndex]) : '';
+            },
+            label(ctx) {
+              if (ctx.dataset.isSpend) {
+                const d = SPEND[ctx.dataIndex] || {};
+                return `${dollars(ctx.parsed.y)}${d.calls ? ` · ${d.calls} call${d.calls === 1 ? '' : 's'}` : ''}`;
+              }
+              if (view === 'spend') return `${ctx.dataset.label}: ${dollars(ctx.parsed.y)}`;
+              const m = document.getElementById('metric-select').value;
+              const v = fmt.format(ctx.parsed.y);
+              if (ctx.raw && ctx.raw.caption) {
+                return `${v} ${METRIC_LABELS[m].toLowerCase()} — “${ctx.raw.caption}”`;
+              }
+              if (ctx.dataset.type === 'bar') {
+                const n = (TS.posts_per_day || [])[ctx.dataIndex];
+                return `${ctx.dataset.label}: ${v}${n > 1 ? ` (${n} posts)` : ''}`;
+              }
+              return `${ctx.dataset.label}: ${v}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: grid },
+             ticks: { color: text, maxRotation: 0, autoSkip: true, maxTicksLimit: 10,
+                      callback(value) { return shortDate(this.getLabelForValue(value)); } } },
+        y: yScale(),
+      },
     },
   });
 
-  document.getElementById('metric-select').addEventListener('change', (e) => {
-    const m = e.target.value;
-    engChart.data.datasets[0].data = TS.metrics[m].rolling_7d;
-    engChart.data.datasets[1].data = TS.metrics[m].daily_avg;
-    engChart.data.datasets[0].label = `7-day avg ${METRIC_LABELS[m].toLowerCase()} / post`;
-    engChart.data.datasets[1].label = `Daily avg ${METRIC_LABELS[m].toLowerCase()} / post`;
+  function applyView() {
+    const m = document.getElementById('metric-select').value;
+    engChart.data.labels = VIEWS[view].labels();
+    engChart.data.datasets = VIEWS[view].datasets(m);
+    engChart.options.scales.y = yScale();
+    engChart.update();
+    document.getElementById('chart-note').textContent = VIEWS[view].note;
+    document.querySelectorAll('.chart-head [data-view]').forEach((btn) => {
+      btn.classList.toggle('is-active', btn.dataset.view === view);
+    });
+    // Log scale and the metric picker only make sense for engagement views.
+    // (style.display, not the hidden attribute: the inline display on the
+    // log label would override [hidden].)
+    document.getElementById('log-label').style.display = view === 'spend' ? 'none' : 'inline-flex';
+    document.getElementById('metric-label').style.display = view === 'spend' ? 'none' : '';
+  }
+  applyView();
+
+  document.querySelector('.chart-head').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-view]');
+    if (!btn || btn.dataset.view === view) return;
+    view = btn.dataset.view;
+    try { localStorage.setItem('analyticsChartView', view); } catch (e2) {}
+    applyView();
+  });
+
+  document.getElementById('metric-select').addEventListener('change', applyView);
+
+  logToggle.addEventListener('change', () => {
+    engChart.options.scales.y = yScale();
     engChart.update();
   });
 
-  // Daily averages are hidden by default: a single viral outlier rescales the
-  // y-axis and flattens the 7-day line. The toggle overlays them on demand.
-  document.getElementById('show-daily').addEventListener('change', (e) => {
-    engChart.data.datasets[1].hidden = !e.target.checked;
-    engChart.update();
+  // Click-through to the post page: dots map 1:1; a bar maps to its day's
+  // post when the day has exactly one (multi-post days are ambiguous).
+  function postTarget(el) {
+    if (!el || view === 'spend') return null;
+    const ds = engChart.data.datasets[el.datasetIndex];
+    if (ds.type === 'scatter') return (ds.data[el.index] || {}).pk ?? null;
+    if (ds.type === 'bar') {
+      const pks = pksByDay[engChart.data.labels[el.index]] || [];
+      return pks.length === 1 ? pks[0] : null;
+    }
+    return null;
+  }
+  function elementAt(e) {
+    return engChart.getElementsAtEventForMode(e, 'nearest', { intersect: true }, true)[0];
+  }
+  engCtx.addEventListener('click', (e) => {
+    const pk = postTarget(elementAt(e));
+    if (pk != null) location.href = `/post/${pk}`;
+  });
+  engCtx.addEventListener('mousemove', (e) => {
+    engCtx.style.cursor = postTarget(elementAt(e)) != null ? 'pointer' : '';
   });
 }
 </script>

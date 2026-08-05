@@ -69,7 +69,7 @@
     {% for row in video_rows %}
     {% set cat = category_by_slug(row.c.category) %}
     {% set archived = row.c.archived_at.strftime("%Y-%m-%d") if row.c.archived_at else "" %}
-    <a class="media-card" href="/video/{{ row.c.id }}?step=cuts"
+    <a class="media-card" href="/video/{{ row.c.id }}"
        data-filter-row data-search="{{ (row.c.title ~ ' ' ~ row.c.channel.call_sign ~ ' ' ~ row.c.channel.market ~ ' ' ~ (cat.label if cat else '')) | lower }}"
        data-channel="{{ row.c.channel.call_sign }}" data-category="{{ row.c.category or '' }}"
        data-status="{{ 'posted' if row.state.posted else ('clips' if row.state.trimmed else 'none') }}"

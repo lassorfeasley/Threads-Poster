@@ -81,6 +81,11 @@ class Candidate(Base):
     category: Mapped[str] = mapped_column(String(30), default="")
     category_rationale: Mapped[str] = mapped_column(Text, default="")
 
+    # Operator marker: this video has material for more than one clip. Keeps
+    # the video pinned in the dashboard's "Selected to trim" bucket (even after
+    # exports/posts) until the operator toggles it off.
+    multi_clip_potential: Mapped[bool] = mapped_column(Boolean, default=False)
+
     status: Mapped[str] = mapped_column(String(20), default=STATUS_NEW)
     approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -148,6 +153,10 @@ class Cut(Base):
     use_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
     # Where burned-in captions sit on the frame: "bottom" (default) or "top".
     subs_position: Mapped[str] = mapped_column(String(10), default="bottom")
+    # Whisper word stream of the trimmed clip (same pass that drives burned-in
+    # captions). JSON sidecar path; Suggest caption / Copy transcript read it.
+    # Cleared on re-export with the video files.
+    clip_transcript_path: Mapped[str] = mapped_column(Text, default="")
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

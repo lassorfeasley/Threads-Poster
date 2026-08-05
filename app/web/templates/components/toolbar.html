@@ -58,6 +58,55 @@
 {% endmacro %}
 
 
+{# ---- Workflow breadcrumb: Video › Edit › Clip › Post ----
+
+   One fixed trail shared by every per-item page (video, cut, post). The shape
+   never changes: steps you've reached link back, steps not yet reachable
+   render as ghost (locked) crumbs. The Create-content list is a separate
+   workflow and deliberately never appears in this trail. #}
+
+{% macro _wf_crumb(label, is_current, href, title='') %}
+{%- if is_current -%}
+<span class="crumb crumb-current" aria-current="page"{% if title %} title="{{ title }}"{% endif %}>{{ label }}</span>
+{%- elif href -%}
+<a href="{{ href }}" class="crumb"{% if title %} title="{{ title }}"{% endif %}>{{ label }}</a>
+{%- else -%}
+<span class="crumb is-locked" aria-disabled="true"{% if title %} title="{{ title }}"{% endif %}>{{ label }}</span>
+{%- endif -%}
+{% endmacro %}
+
+{# current: one of "video" | "edit" | "clip" | "post".
+   Pass whatever ids exist; missing ids ghost the steps they unlock.
+   clip_exported gates the Clip step (a cut exists but hasn't been exported).
+   extra: optional trailing content rendered inside the nav (e.g. a badge). #}
+{% macro workflow_crumbs(current, video_id=none, video_title='',
+                         cut_id=none, clip_title='', clip_exported=false,
+                         post_id=none, extra='') %}
+<nav class="crumbs" aria-label="Workflow">
+  <a href="/library" class="crumb" title="All videos, clips and posts">Library</a>
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  {{ _wf_crumb('Video', current == 'video',
+               ('/video/' ~ video_id) if video_id else none,
+               ('Video: ' ~ video_title) if video_title else 'Video') }}
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  {{ _wf_crumb('Edit', current == 'edit',
+               ('/cut/' ~ cut_id ~ '?step=trim') if cut_id else none,
+               ('Trim and edit: ' ~ clip_title) if clip_title else
+               ('Trim and edit this clip' if cut_id else 'Create a clip to start editing')) }}
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  {{ _wf_crumb('Clip', current == 'clip',
+               ('/cut/' ~ cut_id ~ '?step=post') if (cut_id and clip_exported) else none,
+               (('Clip: ' ~ clip_title) if clip_title else 'Clip')
+                 if (clip_exported or current == 'clip') else 'Export the trim to unlock') }}
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  {{ _wf_crumb('Post', current == 'post',
+               ('/post/' ~ post_id) if post_id else none,
+               'Post' if (post_id or current == 'post') else 'No post yet') }}
+  {% if extra %}{{ extra|safe }}{% endif %}
+</nav>
+{% endmacro %}
+
+
 {# ---- Field helpers (reused across pages) ---- #}
 
 {# Search box. In a server form pass debounce=true to auto-submit; for client-side

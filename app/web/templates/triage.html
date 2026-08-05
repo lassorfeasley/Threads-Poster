@@ -34,7 +34,6 @@
       <div id="title" style="font-weight: 650; font-size: 16px; line-height: 1.4;"></div>
       <div class="meta" id="sub" style="margin: 8px 0;"></div>
       <div id="badges" class="badges" style="margin: 10px 0;"></div>
-      <div class="meta" id="rationale" style="margin-top: 6px;"></div>
       <div class="meta" id="visual-line" style="margin-top: 6px;"></div>
       <div style="margin-top: 8px;">
         <button class="btn ghost sm" id="score-visuals-btn" onclick="scoreVisuals()">Tag traits</button>
@@ -108,7 +107,6 @@ function render() {
   document.getElementById('sub').textContent =
     `${c.channel} · ${c.published}${c.duration ? ' · ' + c.duration : ''}`;
   renderBadges(c);
-  document.getElementById('rationale').textContent = c.rationale || '';
   renderVisual(c);
   document.getElementById('progress').textContent = `${idx + 1} of ${queue.length}`;
   setProgress(idx, queue.length);

@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{% set rm_sub %}Scope for turning this local operator tool into something you can distribute — and eventually into software that can run a Threads account with less babysitting. Nothing here is built yet unless marked Done.{% endset %}
+{{ ui.pagebar("Product roadmap", sub=rm_sub) }}
+
+<div class="card roadmap-card">
+  <div class="card-title" style="margin-bottom: 6px;">North star</div>
+  <p class="meta" style="margin: 0 0 10px;">
+    Keep improving the product as a local web UI (easy UX iteration). When distribution matters, package the same stack as a Mac app so customers never touch Python, yt-dlp, ffmpeg, or Whisper — those still run on <em>their</em> machine. Longer term: optional cloud for always-on publishing, shared workspaces, and fuller autopilot. Prefer notarized direct download over Mac App Store; do not plan a Swift rewrite.
+  </p>
+  <p class="meta" style="margin: 0;">
+    Autonomy goal: the app can operate a Threads account (queue, schedule, engage) with human taste checks as needed. Local media creation and cloud/always-on publishing can stay split — same shape as today’s local factory + headless publisher.
+  </p>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Phase 0 — Now</div>
+  <p class="meta" style="margin: 0 0 12px;">Single-operator, localhost. Polish in place.</p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge supportive">Doing</span>
+      <div>
+        <strong>UI / UX polish</strong>
+        <span class="meta">Ship small improvements daily in the existing FastAPI + Jinja UI. This <em>is</em> the product UI.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>Configurable workspace / brand in-app</strong>
+        <span class="meta">Entity name, mission/topic, audience, voice notes, keywords, categories, brand colors/fonts, standing first-reply — editable in the UI. Parameterize LLM prompts instead of hardcoding climate / local-TV / Renewables.org. Improves today’s use even before selling.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>RSS for channel monitoring</strong>
+        <span class="meta">Replace recurring YouTube Data API playlist polling with free channel RSS. Keep Data API (or yt-dlp metadata) for one-time channel resolve and durations. Cuts quota and key friction.</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Phase 1 — Distribute as a Mac app</div>
+  <p class="meta" style="margin: 0 0 12px;">Same local pipeline; hide the plumbing. Build when UX feels solid — not before.</p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Package with Tauri, Electron, or py2app</strong>
+        <span class="meta">Double-clickable <code>.app</code> that starts the Python backend and shows this UI (WebView or window). Bundle ffmpeg / yt-dlp; download Whisper weights on first run if needed. Sign + notarize for Gatekeeper.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Auto-update</strong>
+        <span class="meta">Electron-updater, Tauri updater, or Sparkle (if py2app). Customers get new UX without git. Direct download (site / Gumroad / etc.), not App Store as the default.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Licensing / seats (solo first)</strong>
+        <span class="meta">Simple paid license is enough for v1. Multi-seat collaboration waits on Phase 2.</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Phase 2 — Autopilot &amp; optional cloud</div>
+  <p class="meta" style="margin: 0 0 12px;">Run the account with less babysitting; keep scrape/Whisper local unless a deliberate decision says otherwise.</p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Stronger unattended publishing</strong>
+        <span class="meta">Durable queue + scheduler so the account keeps posting when the operator isn’t clicking. Mac-on is fine for early autopilot; cloud worker (like today’s Fly / Actions path) for set-and-forget.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Shared workspaces (if teams matter)</strong>
+        <span class="meta">User accounts → workspace owns channels, brand, and one Threads connection. Local apps claim download/trim jobs and upload finished clips. Triage can be multiplayer; media stays on someone’s machine.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Meta App Review (if customers connect their own Threads)</strong>
+        <span class="meta">Required to leave “testers only” on a Meta developer app. Can run in parallel with packaging.</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Explicitly out of scope (for now)</div>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge hostile">No</span>
+      <div>
+        <strong>Full Swift rewrite / App Store as north star</strong>
+        <span class="meta">Native Swift UI does not replace the Python media stack. App Store sandbox fights yt-dlp/ffmpeg and third-party YouTube downloading. Notarized DMG first; Store only as a later experiment with a stripped feature set if ever.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge hostile">No</span>
+      <div>
+        <strong>Hosted YouTube downloading as the default product</strong>
+        <span class="meta">Seamless zero-install SaaS that silently mirrors arbitrary channels means your servers run yt-dlp — ToS, blocking, and legal posture change. Prefer local (Mac app) creation. Upload-own-content SaaS is a different product if zero-install ever becomes the priority.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge hostile">No</span>
+      <div>
+        <strong>Separate “companion app” while still selling pure hosted web</strong>
+        <span class="meta">Unnecessary if the Mac app <em>is</em> the product. A browser-only hosted UI plus a side agent is the fallback if we ever need teams-on-web with local media — not the plan for v1.</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 6px;">Why local scrape / Whisper still “feel” seamless</div>
+  <p class="meta" style="margin: 0;">
+    Today you never “installed a companion” because you <em>are</em> the runtime (<code>python run.py dashboard</code>). A packaged Mac app preserves that: one install, browser-shaped UI, heavy work on-device. Customers should not need multiple product accounts for the core loop — Threads (and later YouTube) show up as connected integrations on one workspace.
+  </p>
+</div>
+
+<p class="meta" style="margin-top: 14px;">Living doc in the app — update this page when the plan changes. Do not treat items as committed work until pulled into active development.</p>
+{% endblock %}

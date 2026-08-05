@@ -2,21 +2,13 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {% import "components/category.html" as catui %}
+{% set post_badge %}{% if source == "threads" %}<span class="badge">Threads history</span>{% endif %}{% endset %}
 {% set post_crumbs %}
-<nav class="crumbs" aria-label="Breadcrumb">
-  {% if candidate_id %}
-    <a href="/video/{{ candidate_id }}?step=cuts" class="crumb"
-       title="Video{% if video_title %}: {{ video_title }}{% endif %}">Video</a>
-  {% endif %}
-  {% if cut_id %}
-    {% if candidate_id %}<span class="crumb-sep" aria-hidden="true">›</span>{% endif %}
-    <a href="/cut/{{ cut_id }}?step=post" class="crumb"
-       title="Clip{% if clip_title %}: {{ clip_title }}{% endif %}">Clip</a>
-  {% endif %}
-  {% if candidate_id or cut_id %}<span class="crumb-sep" aria-hidden="true">›</span>{% endif %}
-  <span class="crumb crumb-current" aria-current="page">Post</span>
-  {% if source == "threads" %}<span class="badge">Threads history</span>{% endif %}
-</nav>
+{{ ui.workflow_crumbs('post',
+     video_id=candidate_id, video_title=video_title or '',
+     cut_id=cut_id, clip_title=clip_title or '',
+     clip_exported=cut_id is not none,
+     post_id=pid, extra=post_badge) }}
 {% endset %}
 {% set post_actions %}
   {% if has_clip %}
@@ -27,7 +19,7 @@
   {% endif %}
   {% if status in ("draft", "queued", "failed") %}
     <form class="inline" method="post" action="/post/{{ pid }}/cancel">
-      <input type="hidden" name="next" value="{% if candidate_id %}/video/{{ candidate_id }}?step=post{% else %}/calendar{% endif %}">
+      <input type="hidden" name="next" value="{% if candidate_id %}/video/{{ candidate_id }}{% else %}/calendar{% endif %}">
       <button class="btn sm danger icon-btn" title="Delete this {{ status }} post" aria-label="Delete post"
               data-confirm="Delete this {{ status }} post? Your trimmed clip will stay saved."
               data-confirm-ok="Delete" data-confirm-variant="danger">

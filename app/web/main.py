@@ -2,8 +2,9 @@
 
 Run: python run.py dashboard   (serves http://127.0.0.1:8321)
 
-Workflow per video: Review -> Scrape & Transcribe -> Trim -> Post, surfaced as
-breadcrumb steps on the /video/{id} screen.
+Workflow per video: Review → download/transcribe → Trim → Post. The /video/{id}
+screen is a profile (player + transcript, clips in the rail); trimming happens
+on /cut/{id}.
 """
 from __future__ import annotations
 
@@ -457,6 +458,12 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
                     state["post_failed"] = True
                     trimmed_rows.append((c, state))
                     continue
+                # The multi-clip marker pins the video to "Selected to trim":
+                # more clips are expected, so exports/handled posts don't move
+                # it along until the operator toggles the marker off.
+                if c.multi_clip_potential:
+                    in_progress_rows.append((c, state))
+                    continue
                 # Hide once published or sitting in the outbound queue/drafts.
                 # If the operator deletes their only draft/queue, post_st is
                 # empty and the clip stays visible so they can re-post.
@@ -651,7 +658,6 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
                 "visual_traits": [t for t in (c.visual_traits or "").split(",") if t],
                 "visual_rationale": c.visual_rationale,
                 "keywords": [k for k in (c.matched_keywords or "").split(",") if k],
-                "rationale": c.relevance_rationale,
             }
             for c in candidates
         ]
@@ -754,6 +760,11 @@ def _cut_state(cut: Cut, posted_cut_pks: set[int]) -> dict:
 
 @app.get("/video/{candidate_id}", response_class=HTMLResponse)
 def video_detail(request: Request, candidate_id: int, step: str = "", msg: str = ""):
+    """Video profile: player + searchable transcript, clips/posts in the rail.
+
+    ``step`` is accepted for old bookmarks (``?step=cuts`` etc.) but ignored —
+    the page is no longer a Review → Scrape → Clips wizard.
+    """
     with session_scope() as session:
         c = session.execute(
             select(Candidate)
@@ -766,16 +777,6 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
         cuts = list(c.cuts)
         has_exported_cut = any(cut.trimmed_clip_path for cut in cuts)
         state = workflow_state(session, c, has_exported_cut=has_exported_cut)
-
-        # Operator can revisit any unlocked step; default to the current one.
-        # The video page has three video-level steps: review, scrape, cuts.
-        allowed = {"review"}
-        if state["reviewed"]:
-            allowed.add("scrape")
-        if state["scraped"]:
-            allowed.add("cuts")
-        default_step = "cuts" if state["scraped"] else state["current"]
-        active_step = step if step in allowed else default_step
 
         posts = session.execute(
             select(ThreadsPost).where(ThreadsPost.candidate_pk == c.id)
@@ -794,10 +795,21 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
             for cut in cuts
         ]
 
+        transcript_segments = []
+        if c.transcript_path and Path(c.transcript_path).exists():
+            try:
+                transcript_segments = json.loads(Path(c.transcript_path).read_text())
+            except Exception:
+                transcript_segments = []
+
+        has_local = bool(c.local_video_path and Path(c.local_video_path).exists())
+
     return templates.TemplateResponse(
         request, "video.html",
-        {"c": c, "state": state, "step": active_step,
+        {"c": c, "state": state, "step": step,
          "cut_rows": cut_rows, "posts": posts,
+         "transcript_segments": transcript_segments,
+         "has_local": has_local,
          "msg": msg, "active": "dashboard"},
     )
 
@@ -823,6 +835,20 @@ def create_cut(candidate_id: int):
     return _flash(f"/cut/{cut_id}?step=trim", "New clip — pick your segments")
 
 
+@app.post("/video/{candidate_id}/multi-clip")
+def toggle_multi_clip(candidate_id: int):
+    """Flip the video's "multiple clips potential" marker (AJAX). While on, the
+    video stays in the dashboard's "Selected to trim" bucket regardless of
+    exports or queued/published posts."""
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        c.multi_clip_potential = not bool(c.multi_clip_potential)
+        flag = c.multi_clip_potential
+    return JSONResponse({"multi_clip": flag})
+
+
 @app.get("/video/{candidate_id}/cut")
 def open_cut(candidate_id: int):
     """Jump straight into the trim editor for a video.
@@ -844,7 +870,7 @@ def open_cut(candidate_id: int):
         # the operator deliberately picks "reopen" vs "＋ New cut". Silently
         # reopening finished work is how a second trim ends up replacing the first.
         if len(existing) > 1 or any(cu.trimmed_clip_path for cu in existing):
-            return RedirectResponse(f"/video/{candidate_id}?step=cuts", status_code=303)
+            return RedirectResponse(f"/video/{candidate_id}", status_code=303)
         if len(existing) == 1:
             return RedirectResponse(f"/cut/{existing[0].id}?step=trim", status_code=303)
         # No caption seed — see create_cut: captions are drafted from the
@@ -891,19 +917,41 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
             except Exception:
                 pass
 
+        # Segments already claimed by the video's OTHER cuts, drawn as dashed
+        # outlines on the trim waveform so a second pass doesn't re-clip the
+        # same material.
+        other_cut_segments = []
+        siblings = session.execute(
+            select(Cut).where(
+                Cut.candidate_pk == c.id, Cut.id != cut.id,
+                Cut.trim_segments != "",
+            )
+        ).scalars().all()
+        for sib in siblings:
+            try:
+                sib_segments = json.loads(sib.trim_segments)
+            except Exception:
+                continue
+            title = (sib.clip_title or "").strip() or f"Clip {sib.id}"
+            for s in sib_segments:
+                other_cut_segments.append(
+                    {"start": s["start"], "end": s["end"],
+                     "cut_id": sib.id, "title": title})
+
         transcript_segments = []
         if c.transcript_path and Path(c.transcript_path).exists():
             try:
                 transcript_segments = json.loads(Path(c.transcript_path).read_text())
             except Exception:
                 pass
-        clip_transcript, clip_transcript_text = _load_clip_transcript(c, cut.trim_segments or "")
+        clip_transcript, clip_transcript_text = _load_clip_transcript(cut)
 
     threads_ok = threads_api.is_authenticated()
     return templates.TemplateResponse(
         request, "cut.html",
         {"cut": cut, "c": c, "state": cut_state, "step": active_step,
          "transcript_segments": transcript_segments, "saved_segments": segments,
+         "other_cut_segments": other_cut_segments,
          "clip_transcript": clip_transcript,
          "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
@@ -938,7 +986,7 @@ def delete_cut(cut_id: int):
             else:
                 p.cut_pk = None  # keep published history, drop the link
         session.delete(cut)
-    return _flash(f"/video/{candidate_id}?step=cuts", "Clip deleted")
+    return _flash(f"/video/{candidate_id}", "Clip deleted")
 
 
 
@@ -1378,12 +1426,13 @@ def _delete_if_unreferenced(session, paths: list[str]) -> None:
 
 
 @app.post("/cut/{cut_id}/export")
-def export_clip(cut_id: int, segments_json: str = Form(...)):
+def export_clip(cut_id: int, segments_json: str = Form(...), as_new: str = Form("0")):
     try:
         segments = json.loads(segments_json)
         assert isinstance(segments, list) and segments
     except Exception:
         return _flash(f"/cut/{cut_id}?step=trim", "No segments to export")
+    save_as_new = as_new in ("1", "true", "on", "yes")
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None:
@@ -1391,33 +1440,46 @@ def export_clip(cut_id: int, segments_json: str = Form(...)):
         c = cut.candidate
         if c is None or not c.local_video_path:
             return _flash("/", "Video not found or not downloaded")
+        # "Save as new clip": keep the open cut untouched and write the
+        # marked segments into a fresh sibling cut on the same video.
+        if save_as_new:
+            target = Cut(candidate_pk=c.id)
+            session.add(target)
+            session.flush()
+        else:
+            target = cut
         try:
             # Version every export. Re-exporting a cut must never overwrite the
             # file a queued post already points at — that would silently swap the
             # video under a scheduled post.
             stamp = utcnow().strftime("%Y%m%dT%H%M%S")
-            previous = [cut.trimmed_clip_path, cut.subtitled_clip_path]
+            previous = ([] if save_as_new else
+                        [target.trimmed_clip_path, target.subtitled_clip_path,
+                         target.clip_transcript_path])
             out = export_supercut(c.local_video_path, segments,
-                                  f"{c.video_id}_cut{cut.id}_{stamp}")
-            cut.trim_segments = json.dumps(segments)
-            cut.trimmed_clip_path = str(out)
-            cut.updated_at = utcnow()
+                                  f"{c.video_id}_cut{target.id}_{stamp}")
+            target.trim_segments = json.dumps(segments)
+            target.trimmed_clip_path = str(out)
+            target.updated_at = utcnow()
             # Any previously generated captions no longer match the new cut.
-            cut.subtitled_clip_path = ""
-            cut.use_subtitles = False
-            _delete_if_unreferenced(session, previous)
+            target.subtitled_clip_path = ""
+            target.clip_transcript_path = ""
+            target.use_subtitles = False
+            if previous:
+                _delete_if_unreferenced(session, previous)
             # Auto-title the fresh clip from its own transcript, but only when the
             # operator hasn't already set one (regeneration stays available in the
             # Post step). A titling failure must never block the export.
-            if not (cut.clip_title or "").strip():
+            if not (target.clip_title or "").strip():
                 try:
                     settings = load_settings()
                     model = settings.get("engagement.draft_model", "claude-sonnet-5")
                     excerpt = _transcript_excerpt(c, segments)
-                    title = suggest_title(model, c.title, excerpt, cut.draft_caption or None)
+                    title = suggest_title(model, c.title, excerpt, target.draft_caption or None)
                     if title:
-                        cut.clip_title = title
-                        cut.calendar_name = suggest_calendar_name(model, title, cut.draft_caption or None)
+                        target.clip_title = title
+                        target.calendar_name = suggest_calendar_name(
+                            model, title, target.draft_caption or None)
                 except Exception:
                     pass
             n = len(segments)
@@ -1428,12 +1490,23 @@ def export_clip(cut_id: int, segments_json: str = Form(...)):
             # cuts still carrying the old video-level seed) skip the auto-run
             # only when the text is genuinely theirs.
             seed = (c.draft_caption or "").strip()
-            current = (cut.draft_caption or "").strip()
+            current = (target.draft_caption or "").strip()
             autocaption = "&autocaption=1" if (not current or current == seed) else ""
+            # From the second exported clip onwards, a multi-clip video prompts
+            # the operator (on the Post step) to consider turning the marker off.
+            askmulti = ""
+            if c.multi_clip_potential:
+                exported_cuts = session.execute(
+                    select(func.count()).select_from(Cut).where(
+                        Cut.candidate_pk == c.id, Cut.trimmed_clip_path != "")
+                ).scalar() or 0
+                if exported_cuts >= 2:
+                    askmulti = f"&askmulti={exported_cuts}"
             # autosubs=1 makes the Post step kick off caption generation
             # immediately, so the captioned variant is the default.
-            return _flash(f"/cut/{cut_id}?step=post&autosubs=1{autocaption}",
-                          f"Exported {n} segment{'s' if n > 1 else ''} — generating captions…")
+            verb = "Saved new clip" if save_as_new else "Saved"
+            return _flash(f"/cut/{target.id}?step=post&autosubs=1{autocaption}{askmulti}",
+                          f"{verb} — {n} segment{'s' if n > 1 else ''} — generating captions…")
         except ClipExportError as exc:
             return _flash(f"/cut/{cut_id}?step=trim", f"Export failed: {exc}")
 
@@ -1444,9 +1517,12 @@ def generate_subtitles(cut_id: int, position: str = Form("")):
 
     Runs whisper word timestamps + the Pillow/ffmpeg burn; takes roughly
     10-60s for a typical clip, longer on the first run while the whisper
-    model downloads.
+    model downloads. Persists the Whisper word stream so Suggest caption /
+    Copy transcript can use the same source as the burned-in captions.
     """
-    from ..subtitles import SubtitleError, create_subtitled_clip
+    from ..subtitles import (
+        SubtitleError, clip_transcript_path_for, create_subtitled_clip,
+    )
 
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
@@ -1465,10 +1541,13 @@ def generate_subtitles(cut_id: int, position: str = Form("")):
     except Exception as exc:
         log.exception("Caption generation failed for cut %s", cut_id)
         return JSONResponse({"error": f"Caption generation failed: {exc}"}, status_code=500)
+    transcript_path = clip_transcript_path_for(clip_path)
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is not None:
             cut.subtitled_clip_path = str(out)
+            if transcript_path.exists():
+                cut.clip_transcript_path = str(transcript_path)
             _delete_if_unreferenced(session, [previous_subs])
             cut.use_subtitles = True
             cut.subs_position = "top" if (position or "").lower() == "top" else "bottom"
@@ -1534,8 +1613,76 @@ def _clip_transcript_plain(clip_transcript: list[dict]) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def _load_clip_transcript(candidate: Candidate | None, trim_segments_json: str) -> tuple[list[dict], str]:
-    """Return (timestamped lines, plain text) for a cut's exported windows."""
+def _load_whisper_clip_transcript(cut: Cut | None) -> tuple[list[dict], str]:
+    """Load the Whisper word stream of an exported cut (burned-in caption source).
+
+    Prefer the cut's stored sidecar; fall back to the default path next to the
+    trimmed clip. Returns ([], "") when nothing has been transcribed yet.
+    """
+    from ..subtitles import load_clip_words, words_to_lines, words_to_plain
+
+    if cut is None:
+        return [], ""
+    path = ""
+    if cut.clip_transcript_path and Path(cut.clip_transcript_path).exists():
+        path = cut.clip_transcript_path
+    elif cut.trimmed_clip_path:
+        sidecar = Path(cut.trimmed_clip_path).with_name(
+            f"{Path(cut.trimmed_clip_path).stem}_transcript.json"
+        )
+        if sidecar.exists():
+            path = str(sidecar)
+    if not path:
+        return [], ""
+    words = load_clip_words(path)
+    if not words:
+        return [], ""
+    lines = words_to_lines(words)
+    return lines, words_to_plain(words)
+
+
+def _ensure_whisper_clip_transcript(cut: Cut) -> tuple[list[dict], str]:
+    """Return the clip Whisper transcript, transcribing the trim if needed.
+
+    Used by Suggest caption when the operator asks before (or without) burning
+    captions in — still the same audio source the burned-in captions use.
+    """
+    from ..subtitles import SubtitleError, ensure_clip_words, words_to_lines, words_to_plain
+
+    lines, plain = _load_whisper_clip_transcript(cut)
+    if plain.strip():
+        return lines, plain
+    if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+        return [], ""
+    try:
+        words, path = ensure_clip_words(
+            cut.trimmed_clip_path,
+            cut.clip_transcript_path or None,
+        )
+    except SubtitleError:
+        return [], ""
+    cut.clip_transcript_path = str(path)
+    lines = words_to_lines(words)
+    return lines, words_to_plain(words)
+
+
+def _load_clip_transcript(cut: Cut | None = None,
+                          candidate: Candidate | None = None,
+                          trim_segments_json: str = "") -> tuple[list[dict], str]:
+    """Return (timestamped lines, plain text) for a cut's exported windows.
+
+    Prefer the Whisper transcript of the trimmed clip (same pass as burned-in
+    captions). Fall back to slicing the source video's YouTube/upload transcript
+    by trim windows only when Whisper hasn't run yet.
+    """
+    lines, plain = _load_whisper_clip_transcript(cut)
+    if plain.strip():
+        return lines, plain
+
+    if candidate is None and cut is not None:
+        candidate = cut.candidate
+    if not trim_segments_json and cut is not None:
+        trim_segments_json = cut.trim_segments or ""
     if not candidate or not trim_segments_json:
         return [], ""
     try:
@@ -1564,14 +1711,20 @@ def suggest_caption(cut_id: int):
         if cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         c = cut.candidate
-        # Draft strictly from the trimmed clip's own transcript. No trim, no
-        # caption — falling back to the full video transcript here produced
-        # captions about parts of the broadcast that aren't in the clip.
-        _lines, clip_text = _load_clip_transcript(c, cut.trim_segments or "")
+        # Draft from the Whisper transcript of the exported clip — the same
+        # source burned-in captions use. Transcribe on demand if captions
+        # haven't been generated yet. Never fall back to the full-video
+        # YouTube captions (those describe parts that aren't in the clip).
+        if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+            return JSONResponse(
+                {"error": "Export the clip first — the caption is drafted "
+                          "from what is said in the trimmed clip."},
+                status_code=409)
+        _lines, clip_text = _ensure_whisper_clip_transcript(cut)
         if not clip_text.strip():
             return JSONResponse(
-                {"error": "Trim and export the clip first — the caption is "
-                          "drafted from the trimmed clip's transcript."},
+                {"error": "No speech detected in the clip — nothing to draft "
+                          "a caption from."},
                 status_code=409)
         excerpt = " ".join(clip_text.split())[:3000]
         seconds = clip_duration(cut.trimmed_clip_path) if cut.trimmed_clip_path else None
@@ -1590,9 +1743,31 @@ def suggest_caption(cut_id: int):
             )
             # Not persisted: the suggestion is only a proposal until the
             # operator explicitly accepts it (/cut/{id}/caption).
-            return {"caption": caption, "voice_examples": len(voice["examples"])}
+            return {"caption": caption, "voice_examples": len(voice["examples"]),
+                    "transcript": clip_text}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/cut/{cut_id}/transcript")
+def cut_transcript(cut_id: int):
+    """Plain Whisper transcript of the exported clip (for Copy transcript).
+
+    Transcribes on demand when burned-in captions haven't been generated yet,
+    so the button works even with "No captions" selected.
+    """
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+            return JSONResponse(
+                {"error": "Export the clip first."}, status_code=409)
+        _lines, clip_text = _ensure_whisper_clip_transcript(cut)
+        if not clip_text.strip():
+            return JSONResponse(
+                {"error": "No speech detected in the clip."}, status_code=409)
+        return {"transcript": clip_text}
 
 
 @app.post("/cut/{cut_id}/caption")
@@ -1944,7 +2119,7 @@ def post_recaption(post_id: int, position: str = Form("bottom")):
     """
     from ..publishing import _object_key
     from ..storage_supabase import upload_trimmed_clip
-    from ..subtitles import SubtitleError, create_subtitled_clip
+    from ..subtitles import SubtitleError, clip_transcript_path_for, create_subtitled_clip
 
     raw = str(position).strip().lower()
     if raw in ("none", "off", "plain"):
@@ -1997,12 +2172,15 @@ def post_recaption(post_id: int, position: str = Form("bottom")):
         log.exception("Re-caption failed for post %s", post_id)
         return JSONResponse({"error": f"Caption render failed: {exc}"}, status_code=500)
 
+    transcript_path = clip_transcript_path_for(plain_path)
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         cut = session.get(Cut, cut_id)
         if p is None or cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         cut.subtitled_clip_path = str(out)
+        if transcript_path.exists():
+            cut.clip_transcript_path = str(transcript_path)
         cut.subs_position = mode
         cut.use_subtitles = True
         cut.updated_at = utcnow()
@@ -2048,9 +2226,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
         # Burnt-in captions live in *_subs.mp4; surface that on the post page
         # so the plain Threads text caption isn't confused with video subs.
         has_burned_captions = bool(clip_path and clip_path.endswith("_subs.mp4"))
-        _clip_lines, clip_transcript_text = _load_clip_transcript(
-            cand, cut.trim_segments if cut else "",
-        )
+        _clip_lines, clip_transcript_text = _load_clip_transcript(cut)
         snap = session.execute(
             select(MetricSnapshot).where(MetricSnapshot.post_pk == p.id)
             .order_by(MetricSnapshot.captured_at.desc()).limit(1)
@@ -2505,18 +2681,14 @@ def giphy_search(q: str = "", limit: int = 24):
 
 @app.get("/analytics", response_class=HTMLResponse)
 def analytics_page(request: Request, msg: str = ""):
-    settings = load_settings()
     with session_scope() as session:
         report = generate_report(session)
     return templates.TemplateResponse(
         request, "analytics.html",
         {"rows": report["rows"], "slices": report["slices"], "digest": report["digest"],
          "timeseries": report["timeseries"], "summary": report["summary"],
-         "trait_weights": report.get("trait_weights", []),
-         "min_trait_posts": settings.get("learning.min_trait_posts", 20),
-         "min_total_posts": settings.get("learning.min_total_posts", 100),
          "spend_today": spend.today_spend(), "spend_budget": spend.daily_budget(),
-         "spend_recent": spend.recent(7),
+         "spend_recent": spend.recent(30),
          "msg": msg, "active": "analytics"},
     )
 
@@ -2724,6 +2896,12 @@ def traits_page(request: Request, msg: str = ""):
                       "median_metric": w.median_metric, "baseline": w.baseline}
             for w in weight_rows
         }
+        # Verdict summary table (moved here from Analytics), best lift first.
+        trait_weights = sorted(
+            ({"trait": w.trait, "n_posts": w.n_posts or 0, "status": w.status,
+              "median_metric": w.median_metric, "baseline": w.baseline, "lift": w.lift}
+             for w in weight_rows),
+            key=lambda d: (d["lift"] if d["lift"] is not None else -99), reverse=True)
         baseline = next((w.baseline for w in weight_rows if w.baseline is not None), None)
         post_tag_rows = session.execute(
             select(ThreadsPost.footage_traits).where(ThreadsPost.status == "published")
@@ -2751,7 +2929,7 @@ def traits_page(request: Request, msg: str = ""):
         {"traits": traits, "post_counts": post_counts,
          "annotated_posts": annotated_posts,
          "published_total": published_total, "unannotated": unannotated,
-         "weights": weights, "baseline": baseline,
+         "weights": weights, "baseline": baseline, "trait_weights": trait_weights,
          "min_trait_posts": settings.get("learning.min_trait_posts", 20),
          "min_total_posts": settings.get("learning.min_total_posts", 100),
          "metric_age_hours": settings.get("learning.metric_age_hours", 48),
@@ -3044,3 +3222,14 @@ def channel_delete(channel_id: int):
             return _flash("/channels", f"{channel.call_sign} has {n} stored candidates; disabled instead of deleted")
         session.delete(channel)
     return _flash("/channels", "Deleted")
+
+
+# --- Product roadmap (scope only; not a build queue) -------------------------
+
+@app.get("/product-roadmap", response_class=HTMLResponse)
+def product_roadmap_page(request: Request):
+    """Living scope doc for productization — no features are built from this page."""
+    return templates.TemplateResponse(
+        request, "product_roadmap.html",
+        {"msg": "", "active": "product_roadmap"},
+    )

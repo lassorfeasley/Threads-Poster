@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "15"
+SCHEMA_VERSION = "17"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -106,6 +106,7 @@ _SCHEMA_SENTINELS = (
     "SELECT calendar_name FROM cuts LIMIT 0",
     "SELECT calendar_name FROM threads_posts LIMIT 0",
     "SELECT category FROM candidates LIMIT 0",
+    "SELECT multi_clip_potential FROM candidates LIMIT 0",
     "SELECT attribution_text FROM threads_posts LIMIT 0",
     "SELECT attribution_skipped FROM threads_posts LIMIT 0",
 )
@@ -168,6 +169,7 @@ def _ensure_new_columns() -> None:
             "visual_scored_at": "TIMESTAMP",
             "category": "VARCHAR(30) DEFAULT ''",
             "category_rationale": "TEXT DEFAULT ''",
+            "multi_clip_potential": "BOOLEAN DEFAULT FALSE",
         },
         "threads_posts": {
             "cut_pk": "INTEGER",
@@ -201,6 +203,7 @@ def _ensure_new_columns() -> None:
         "cuts": {
             "subs_position": "VARCHAR(10) DEFAULT 'bottom'",
             "calendar_name": "TEXT DEFAULT ''",
+            "clip_transcript_path": "TEXT DEFAULT ''",
         },
     }
     added: list[tuple[str, str]] = []
@@ -257,11 +260,17 @@ def _migrate_cuts() -> None:
             cid = r[0]
             if cid in already:
                 continue
+            # Raw INSERTs don't get SQLAlchemy's Python-side column defaults,
+            # so every NOT NULL column added to Cut after this migration was
+            # written must be supplied explicitly (calendar_name & co. once
+            # broke this backfill on a pre-cuts database).
             conn.execute(text(
-                "INSERT INTO cuts (candidate_pk, clip_title, draft_caption, "
-                "trim_segments, trimmed_clip_path, subtitled_clip_path, "
-                "use_subtitles, created_at, updated_at) VALUES "
-                "(:cid, :title, :draft, :segs, :clip, :subs, :use_subs, :now, :now)"
+                "INSERT INTO cuts (candidate_pk, clip_title, calendar_name, "
+                "draft_caption, trim_segments, trimmed_clip_path, "
+                "subtitled_clip_path, use_subtitles, subs_position, "
+                "clip_transcript_path, created_at, updated_at) VALUES "
+                "(:cid, :title, '', :draft, :segs, :clip, :subs, :use_subs, "
+                "'bottom', '', :now, :now)"
             ), {
                 "cid": cid,
                 "title": r[1] or "",

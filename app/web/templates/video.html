@@ -3,34 +3,14 @@
 {% import "components/toolbar.html" as ui %}
 {% import "components/category.html" as catui %}
 
-{# Workflow stages live in the pagebar as crumbs — same convention as
-   Video › Edit › Clip on the cut page. #}
+{# Steps ahead point at the most recent clip / post when one exists. #}
+{% set latest_cut = cut_rows[-1] if cut_rows else none %}
 {% set vid_crumbs %}
-<nav class="crumbs" aria-label="Workflow">
-  <a href="/" class="crumb" title="Back to Create content">Create</a>
-  <span class="crumb-sep" aria-hidden="true">›</span>
-  {% if step == "review" %}
-  <span class="crumb crumb-current" aria-current="page">Review</span>
-  {% else %}
-  <a href="/video/{{ c.id }}?step=review" class="crumb">Review</a>
-  {% endif %}
-  <span class="crumb-sep" aria-hidden="true">›</span>
-  {% if step == "scrape" %}
-  <span class="crumb crumb-current" aria-current="page">Scrape</span>
-  {% elif state.reviewed %}
-  <a href="/video/{{ c.id }}?step=scrape" class="crumb" title="Scrape &amp; Transcribe">Scrape</a>
-  {% else %}
-  <span class="crumb is-locked" title="Approve the video first">Scrape</span>
-  {% endif %}
-  <span class="crumb-sep" aria-hidden="true">›</span>
-  {% if step == "cuts" %}
-  <span class="crumb crumb-current" aria-current="page">Clips</span>
-  {% elif state.scraped %}
-  <a href="/video/{{ c.id }}?step=cuts" class="crumb">Clips</a>
-  {% else %}
-  <span class="crumb is-locked" title="Download &amp; transcribe first">Clips</span>
-  {% endif %}
-</nav>
+{{ ui.workflow_crumbs('video', video_id=c.id, video_title=c.title,
+     cut_id=latest_cut.cut.id if latest_cut else none,
+     clip_title=(latest_cut.cut.clip_title or '') if latest_cut else '',
+     clip_exported=latest_cut.state.exported if latest_cut else false,
+     post_id=posts[0].id if posts else none) }}
 {% endset %}
 {% set vid_actions %}
   <a class="copy-btn" href="{{ c.url }}" target="_blank" title="Open on YouTube" aria-label="Open on YouTube">
@@ -38,260 +18,455 @@
   </a>
   {% if c.status != "rejected" %}
   <form method="post" action="/video/{{ c.id }}/reject" class="inline"
-        data-confirm="{{ 'Reject this clip? It was already downloaded — the file stays on disk but the clip leaves your workflow. You can find it later with the Rejected status filter.' if state.scraped else 'Reject this clip?' }}"
+        data-confirm="{{ 'Reject this video? It was already downloaded — the file stays on disk but the video leaves your workflow. You can find it later with the Rejected status filter.' if state.scraped else 'Reject this video?' }}"
         data-confirm-ok="Reject" data-confirm-variant="danger">
-    <button class="btn sm danger icon-btn" title="Reject this clip" aria-label="Reject clip">
+    <button class="btn sm danger icon-btn" title="Reject this video" aria-label="Reject video">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6M14 11v6"/></svg>
     </button>
   </form>
   {% else %}
   <form method="post" action="/video/{{ c.id }}/unreject" class="inline">
-    <button class="btn sm" title="Restore this rejected clip">Un-reject</button>
+    <button class="btn sm" title="Restore this rejected video">Un-reject</button>
   </form>
   {% endif %}
 {% endset %}
+
+<div class="canvas canvas-wide">
 {{ ui.pagebar("", crumbs=vid_crumbs, actions=vid_actions) }}
 
-{# Video identity — title and source meta, formerly the pagebar head. #}
+{# Video identity — title and source meta. #}
 <div class="video-ident">
   <h1 class="video-ident-title">{{ c.title }}</h1>
   <div class="meta">
     {{ c.channel.call_sign }} · {{ c.channel.market }}
     · {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
     {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
-    {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>{% endif %}
+    {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>
+    {% else %} · <span class="badge">{{ c.status }}</span>{% endif %}
+    {% if c.relevance_score is not none %}
+      · <span class="badge score-hi" title="Climate relevance">score {{ "%.2f"|format(c.relevance_score) }}</span>
+    {% endif %}
+    {% for k in c.matched_keywords.split(",") if k %} · <span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
   </div>
 </div>
 
-{# ============ STEP 1: REVIEW ============ #}
-{% if step == "review" %}
-<div class="row">
-  <div style="width: 560px; max-width: 100%;">
-    <iframe class="yt" src="https://www.youtube-nocookie.com/embed/{{ c.video_id }}"
-      allow="encrypted-media; picture-in-picture" allowfullscreen></iframe>
-  </div>
-  <div class="grow stack-sm">
-    <div class="badges" id="badges">
-      {% if c.relevance_score is not none %}
-        <span class="badge score-hi" title="Climate relevance">score {{ "%.2f"|format(c.relevance_score) }}</span>
-      {% endif %}
-      {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
-      {% for k in c.matched_keywords.split(",") if k %}<span class="badge" title="matched keyword">{{ k }}</span>{% endfor %}
-      <span class="badge">{{ c.status }}</span>
-    </div>
-    {% if c.relevance_rationale %}<div class="meta">{{ c.relevance_rationale }}</div>{% endif %}
-    <div class="meta" id="visual-line">{% if c.visual_rationale %}Tags: {{ c.visual_rationale }}{% endif %}</div>
-    <div style="margin-top: 8px;">
+<div class="video-layout">
+
+{# ============ MAIN: player + transcript ============ #}
+<div class="video-main">
+
+  {# Compact toolbar above the player — Approve stays visible for new videos. #}
+  <div class="video-meta stack-sm">
+    <div class="video-meta-row">
+      {{ catui.field(c.id, c.category, "/video/" ~ c.id, show_label=false) }}
       <button type="button" class="btn ghost sm" id="score-visuals-btn" onclick="scoreVisuals()">
         {{ "Re-tag traits" if c.visual_traits else "Tag traits" }}</button>
-    </div>
-    <div style="margin-top: 10px; max-width: 340px;">
-      {{ catui.field(c.id, c.category, "/video/" ~ c.id ~ "?step=review") }}
-    </div>
-    <script>
-      async function scoreVisuals() {
-        const btn = document.getElementById('score-visuals-btn');
-        btn.disabled = true; btn.textContent = 'Tagging…';
-        try {
-          const r = await fetch('/video/{{ c.id }}/score-visuals', { method: 'POST' });
-          const d = await r.json();
-          if (!r.ok) { alert(d.error || 'Tagging failed'); btn.disabled = false; return; }
-          document.getElementById('visual-line').textContent = d.why ? 'Tags: ' + d.why : '';
-          window.location.reload();
-        } catch (e) { alert('Tagging failed: ' + e); btn.disabled = false; }
-      }
-    </script>
-    {% if c.description %}
-      <details style="margin: 8px 0;"><summary>Description</summary>
-        <div class="meta">{{ c.description[:1500] }}</div></details>
-    {% endif %}
-    <div class="btn-group" style="margin-top: 14px;" id="review-actions">
-      {% if c.status in ("new", "rejected") %}
-        <form class="inline" method="post" action="/video/{{ c.id }}/approve" id="approve-form">
-          <button class="approve" type="submit">Approve — download &amp; transcribe →</button></form>
-        {% if c.status == "new" %}
-        <form class="inline" method="post" action="/video/{{ c.id }}/reject">
-          <button class="reject">Reject</button></form>
-        {% endif %}
-      {% else %}
-        <span class="meta">Approved {{ c.approved_at.strftime("%b %-d %H:%M") if c.approved_at else "" }} —
-          {% if state.scraped %}continue to <a href="/video/{{ c.id }}/cut">trim</a>
-          {% else %}continue to <a href="/video/{{ c.id }}?step={{ state.current }}">{{ state.current }}</a>{% endif %}</span>
+      {% if c.description %}
+      <details class="video-desc">
+        <summary>Description</summary>
+        <div class="meta">{{ c.description[:1500] }}</div>
+      </details>
       {% endif %}
     </div>
-    <div id="approve-progress" style="display: none; margin-top: 14px;">
+    {% if c.visual_traits or c.visual_rationale %}
+    <div class="badges" id="badges">
+      {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
+    </div>
+    <div class="meta" id="visual-line">{% if c.visual_rationale %}Tags: {{ c.visual_rationale }}{% endif %}</div>
+    {% else %}
+    <div class="badges" id="badges" hidden></div>
+    <div class="meta" id="visual-line" hidden></div>
+    {% endif %}
+
+    {% if c.status in ("new", "rejected", "approved") %}
+    <div class="btn-group" id="review-actions">
+      {% if c.status in ("new", "rejected") %}
+        <form class="inline" method="post" action="/video/{{ c.id }}/approve" id="approve-form">
+          <button class="approve" type="submit">Approve — download &amp; transcribe →</button>
+        </form>
+        {% if c.status == "new" %}
+        <form class="inline" method="post" action="/video/{{ c.id }}/reject">
+          <button class="reject">Reject</button>
+        </form>
+        {% endif %}
+      {% else %}
+        <span class="meta">Download in progress…</span>
+      {% endif %}
+    </div>
+    {% endif %}
+    <div id="approve-progress" style="display: none;">
       <div class="badges" style="margin-bottom: 8px;">
         <span class="badge info"><span class="dot"></span> downloading &amp; transcribing</span>
       </div>
-      <div class="meta">Running in the background — you can leave this page. It advances to Cuts
-        automatically when the clip is ready.</div>
+      <div class="meta">Running in the background — you can leave this page. It opens the
+        trim editor automatically when the video is ready.</div>
       <div class="meta" id="approve-dots" style="margin-top: 8px;">working…</div>
+    </div>
+  </div>
+
+  <div class="card find-card video-find">
+    {% if has_local %}
+    <video id="player" src="/media/source/{{ c.id }}" controls preload="metadata"
+           playsinline></video>
+    {% else %}
+    <div class="video-embed">
+      <iframe class="yt" src="https://www.youtube-nocookie.com/embed/{{ c.video_id }}"
+        allow="encrypted-media; picture-in-picture" allowfullscreen title="{{ c.title }}"></iframe>
+    </div>
+    {% endif %}
+
+    {# Status banners when download/transcribe is in flight or failed. #}
+    {% if c.status == "approved" %}
+    <div class="video-status" id="scrape-wait">
+      <div class="badges" style="margin-bottom: 6px;">
+        <span class="badge info"><span class="dot"></span> downloading &amp; transcribing</span>
+      </div>
+      <div class="meta">Fetching captions, then downloading the full segment. This page
+        advances automatically when it's done — you can leave and come back.</div>
+      <div class="meta" id="scrape-dots" style="margin-top: 6px;">working…</div>
     </div>
     <script>
       (function () {
-        const form = document.getElementById('approve-form');
-        if (!form) return;
-        form.addEventListener('submit', async (ev) => {
-          ev.preventDefault();
-          const btn = form.querySelector('button');
-          btn.disabled = true; btn.textContent = 'Approving…';
+        let dots = 0;
+        setInterval(async () => {
+          dots = (dots + 1) % 4;
+          const el = document.getElementById('scrape-dots');
+          if (el) el.textContent = 'working' + '.'.repeat(dots + 1);
           try {
-            const r = await fetch('/video/{{ c.id }}/approve',
-              { method: 'POST', headers: { 'Accept': 'application/json' } });
-            const d = await r.json().catch(() => ({}));
-            if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
-            document.getElementById('review-actions').style.display = 'none';
-            document.getElementById('approve-progress').style.display = '';
-            let dots = 0;
-            const dotsEl = document.getElementById('approve-dots');
-            const poll = setInterval(async () => {
-              dots = (dots + 1) % 4;
-              dotsEl.textContent = 'working' + '.'.repeat(dots + 1);
-              try {
-                const sr = await fetch('/video/{{ c.id }}/status');
-                const s = await sr.json();
-                if (s.status === 'archived') {
-                  clearInterval(poll);
-                  window.location = '/video/{{ c.id }}/cut';
-                } else if (s.status === 'failed') {
-                  clearInterval(poll);
-                  window.location = '/video/{{ c.id }}?step=scrape';
-                }
-              } catch (e) { /* keep polling */ }
-            }, 3000);
-          } catch (e) {
-            alert('Approve failed: ' + e);
-            btn.disabled = false;
-            btn.textContent = 'Approve — download & transcribe →';
-          }
-        });
+            const r = await fetch('/video/{{ c.id }}/status');
+            const s = await r.json();
+            if (s.status === 'archived') window.location = '/video/{{ c.id }}/cut';
+            if (s.status === 'failed') window.location.reload();
+          } catch (e) { /* keep polling */ }
+        }, 3000);
       })();
     </script>
-  </div>
-</div>
-{% endif %}
-
-{# ============ STEP 2: SCRAPE & TRANSCRIBE ============ #}
-{% if step == "scrape" %}
-<div class="card">
-  {% if c.status == "approved" %}
-    <div id="scrape-wait">
-      <div class="badges" style="margin-bottom: 8px;">
-        <span class="badge info"><span class="dot"></span> downloading &amp; transcribing</span>
-      </div>
-      <div class="meta">Fetching captions, then downloading the full segment with
-        polite randomized delays. This page advances automatically when it's done.</div>
-      <div style="margin-top: 12px;" class="meta" id="scrape-dots">working…</div>
+    {% elif c.status == "failed" %}
+    <div class="video-status">
+      <div class="badges" style="margin-bottom: 6px;"><span class="badge hostile">scrape failed</span></div>
+      <div class="meta" style="margin-bottom: 10px;">{{ c.scrape_error }}</div>
+      <form class="inline" method="post" action="/video/{{ c.id }}/retry">
+        <button class="primary">Retry download</button>
+      </form>
     </div>
-    <script>
-      let dots = 0;
-      setInterval(async () => {
-        dots = (dots + 1) % 4;
-        document.getElementById('scrape-dots').textContent = 'working' + '.'.repeat(dots + 1);
-        const r = await fetch('/video/{{ c.id }}/status');
-        const s = await r.json();
-        if (s.status === 'archived') window.location = '/video/{{ c.id }}/cut';
-        if (s.status === 'failed') window.location = '/video/{{ c.id }}?step=scrape';
-      }, 3000);
-    </script>
-  {% elif c.status == "failed" %}
-    <div class="badges" style="margin-bottom: 8px;"><span class="badge hostile">scrape failed</span></div>
-    <div class="meta" style="margin-bottom: 12px;">{{ c.scrape_error }}</div>
-    <form class="inline" method="post" action="/video/{{ c.id }}/retry"><button class="primary">Retry download</button></form>
-  {% elif c.status == "archived" %}
-    <div class="badges" style="margin-bottom: 10px;"><span class="badge supportive">download complete</span></div>
-    <table>
-      <tr><th style="width: 150px;">Video file</th><td><code>{{ c.local_video_path }}</code></td></tr>
-      <tr><th>Transcript</th><td><code>{{ c.transcript_path }}</code> ({{ c.transcription_method }})</td></tr>
-      {% if c.suggested_highlight %}
-      <tr><th>Suggested highlight <span class="badge score-lo">draft</span></th><td>{{ c.suggested_highlight }}</td></tr>
-      {% endif %}
-    </table>
-    <div style="margin-top: 16px;"><a class="btn approve" href="/video/{{ c.id }}/cut">Continue to trim →</a></div>
-  {% else %}
-    <span class="meta">Not approved yet — go back to <a href="/video/{{ c.id }}?step=review">Review</a>.</span>
-  {% endif %}
-</div>
-{% endif %}
+    {% endif %}
 
-{# ============ STEP 3: CUTS ============ #}
-{% if step == "cuts" %}
-{% if not state.scraped %}
-  <div class="empty"><strong>Nothing to clip yet</strong>The video hasn't been downloaded.</div>
-{% else %}
-<div class="page-head" style="margin-top: 4px;">
-  <div class="titles"></div>
-  <div class="actions">
-    <form method="post" action="/video/{{ c.id }}/cuts">
-      <button class="approve">＋ New clip</button>
-    </form>
+    <div class="find-transcript">
+      <div class="find-search">
+        <svg class="find-search-ic" width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input type="search" id="tx-search" placeholder="Search transcript…"
+               autocomplete="off" {% if not transcript_segments %}disabled{% endif %}>
+        <span class="meta" id="tx-search-count" aria-live="polite"></span>
+      </div>
+      <div id="tx-focus" class="tx-focus video-tx" title="Click a line to jump"></div>
+      {% if not transcript_segments %}
+      <div class="meta" id="tx-empty">
+        {% if c.status == "approved" %}
+          Transcript appears when download finishes.
+        {% elif c.status == "failed" %}
+          No transcript — retry the download.
+        {% elif not state.reviewed %}
+          Approve the video to download and transcribe it.
+        {% else %}
+          No transcript for this video.
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
   </div>
 </div>
 
-{% if not cut_rows %}
-  <div class="empty"><span class="icon">✂</span><strong>No clips yet</strong>
+{# ============ RAIL: clips + posts ============ #}
+<aside class="video-rail">
+  <div class="video-rail-head">
+    <h2 class="video-rail-title">Clips
+      {% if cut_rows %}<span class="crumb-count">{{ cut_rows|length }}</span>{% endif %}
+    </h2>
+    {% if state.scraped %}
+    <form method="post" action="/video/{{ c.id }}/cuts" class="inline">
+      <button class="approve sm">＋ New clip</button>
+    </form>
+    {% endif %}
+  </div>
+
+  {% if state.scraped %}
+  <label class="switch video-bookmark" style="gap: 10px;"
+         title="Keeps the video under “Selected to trim” on the dashboard until you turn it off.">
+    <input type="checkbox" id="multi-clip-toggle"
+           {% if c.multi_clip_potential %}checked{% endif %}
+           onchange="toggleMultiClip(this)">
+    <span class="switch-track"><span class="switch-thumb"></span></span>
+    <span style="margin-left: 10px;">Bookmark for additional clips</span>
+  </label>
+
+  {% if not cut_rows %}
+  <div class="empty video-rail-empty"><strong>No clips yet</strong>
     Make your first clip to pick the segments you want to post.</div>
-{% else %}
-<div class="cut-list">
-  {% for row in cut_rows %}
-  <div class="card item">
-    <div class="row center">
-      <div class="grow stack-sm">
-        <a class="item-title" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
+  {% else %}
+  <div class="video-clip-list">
+    {% for row in cut_rows %}
+    <div class="video-clip">
+      <div class="video-clip-main">
+        <a class="video-clip-title" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
           {{ row.cut.clip_title or "Untitled clip #" ~ loop.index }}</a>
         <div class="badges">
           {% if row.state.posted %}<span class="badge supportive">posted</span>
-          {% elif row.state.exported %}<span class="badge info">clip exported — not posted</span>
-          {% else %}<span class="badge score-lo">not trimmed yet</span>{% endif %}
+          {% elif row.state.exported %}<span class="badge info">exported</span>
+          {% else %}<span class="badge score-lo">not trimmed</span>{% endif %}
           {% if row.state.captioned %}<span class="badge">captioned</span>{% endif %}
           {% if row.post_count %}<span class="badge" title="Posts from this clip">{{ row.post_count }} post{{ "s" if row.post_count != 1 }}</span>{% endif %}
-          <span class="meta">created {{ row.cut.created_at.strftime("%b %-d %H:%M") if row.cut.created_at else "?" }}</span>
         </div>
+        <div class="meta">{{ row.cut.created_at.strftime("%b %-d %H:%M") if row.cut.created_at else "?" }}</div>
       </div>
-      <div class="btn-group" style="align-items: center;">
-        <a class="btn {{ '' if row.state.posted else 'primary' }}"
+      <div class="video-clip-actions">
+        <a class="btn sm {{ '' if row.state.posted else 'primary' }}"
            href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
           {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Edit →") }}</a>
         <form method="post" action="/cut/{{ row.cut.id }}/delete"
               data-confirm="Delete this clip? Its draft/queued posts are removed; published posts are kept."
               data-confirm-ok="Delete" data-confirm-variant="danger">
-          <button class="reject sm" title="Delete this clip">✕</button>
+          <button class="reject sm icon-btn" title="Delete this clip" aria-label="Delete clip">✕</button>
         </form>
-      </div>
-    </div>
-  </div>
-  {% endfor %}
-</div>
-{% endif %}
-
-{% if posts %}
-<section class="wf-section" style="margin-top: 22px;">
-  <h2>Posts from this video</h2>
-  <div class="video-posts">
-    {% for p in posts %}
-    <div class="video-post">
-      <div class="video-post-main">
-        <div class="video-post-meta">
-          <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
-          <span class="meta">
-            {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
-            {% elif p.status == "publishing" %}publishing…
-            {% elif p.created_at %}added {{ p.created_at.strftime("%b %-d") }}
-            {% endif %}
-          </span>
-        </div>
-        <a class="video-post-caption" href="/post/{{ p.id }}" title="{{ p.caption }}">{{ p.caption or "(untitled)" }}</a>
-      </div>
-      <div class="video-post-actions">
-        <a class="sm" href="/post/{{ p.id }}">Details</a>
-        {% if p.cut_pk %}<a class="sm" href="/cut/{{ p.cut_pk }}?step=post">Clip</a>{% endif %}
-        {% if p.permalink %}<a class="sm" href="{{ p.permalink }}" target="_blank">Open ↗</a>{% endif %}
       </div>
     </div>
     {% endfor %}
   </div>
-</section>
+  {% endif %}
+
+  {% else %}
+  <div class="empty video-rail-empty">
+    <strong>Clips unlock after download</strong>
+    {% if c.status in ("new", "rejected") %}
+      Approve the video to download &amp; transcribe it.
+    {% elif c.status == "approved" %}
+      Download in progress…
+    {% elif c.status == "failed" %}
+      Retry the download to continue.
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if posts %}
+  <section class="video-rail-posts">
+    <h2 class="video-rail-title">Posts
+      <span class="crumb-count">{{ posts|length }}</span>
+    </h2>
+    <div class="video-posts">
+      {% for p in posts %}
+      <div class="video-post">
+        <div class="video-post-main">
+          <div class="video-post-meta">
+            <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
+            <span class="meta">
+              {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
+              {% elif p.status == "publishing" %}publishing…
+              {% elif p.created_at %}added {{ p.created_at.strftime("%b %-d") }}
+              {% endif %}
+            </span>
+          </div>
+          <a class="video-post-caption" href="/post/{{ p.id }}" title="{{ p.caption }}">{{ p.caption or "(untitled)" }}</a>
+        </div>
+        <div class="video-post-actions">
+          <a class="sm" href="/post/{{ p.id }}">Details</a>
+          {% if p.cut_pk %}<a class="sm" href="/cut/{{ p.cut_pk }}?step=post">Clip</a>{% endif %}
+          {% if p.permalink %}<a class="sm" href="{{ p.permalink }}" target="_blank">Open ↗</a>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+</aside>
+
+</div>{# /.video-layout #}
+</div>{# /.canvas #}
+
+<script>
+async function scoreVisuals() {
+  const btn = document.getElementById('score-visuals-btn');
+  btn.disabled = true; btn.textContent = 'Tagging…';
+  try {
+    const r = await fetch('/video/{{ c.id }}/score-visuals', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || 'Tagging failed'); btn.disabled = false; return; }
+    document.getElementById('visual-line').textContent = d.why ? 'Tags: ' + d.why : '';
+    window.location.reload();
+  } catch (e) { alert('Tagging failed: ' + e); btn.disabled = false; }
+}
+
+async function toggleMultiClip(cb) {
+  cb.disabled = true;
+  try {
+    const r = await fetch('/video/{{ c.id }}/multi-clip', { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    cb.checked = !!j.multi_clip;
+  } catch (e) {
+    cb.checked = !cb.checked;
+  }
+  cb.disabled = false;
+}
+
+(function () {
+  const form = document.getElementById('approve-form');
+  if (!form) return;
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const btn = form.querySelector('button');
+    btn.disabled = true; btn.textContent = 'Approving…';
+    try {
+      const r = await fetch('/video/{{ c.id }}/approve',
+        { method: 'POST', headers: { 'Accept': 'application/json' } });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      document.getElementById('review-actions').style.display = 'none';
+      document.getElementById('approve-progress').style.display = '';
+      let dots = 0;
+      const dotsEl = document.getElementById('approve-dots');
+      const poll = setInterval(async () => {
+        dots = (dots + 1) % 4;
+        dotsEl.textContent = 'working' + '.'.repeat(dots + 1);
+        try {
+          const sr = await fetch('/video/{{ c.id }}/status');
+          const s = await sr.json();
+          if (s.status === 'archived') {
+            clearInterval(poll);
+            window.location = '/video/{{ c.id }}/cut';
+          } else if (s.status === 'failed') {
+            clearInterval(poll);
+            window.location.reload();
+          }
+        } catch (e) { /* keep polling */ }
+      }, 3000);
+    } catch (e) {
+      alert('Approve failed: ' + e);
+      btn.disabled = false;
+      btn.textContent = 'Approve — download & transcribe →';
+    }
+  });
+})();
+
+{# ---- Searchable transcript (local player only) ---- #}
+{% if transcript_segments %}
+const player = document.getElementById('player');
+const transcriptLines = {{ transcript_segments | tojson }};
+let txFocusIdx = -1;
+let txQuery = '';
+let txUserScrollUntil = 0;
+
+function txFmt(t) {
+  const m = Math.floor(t / 60), s = Math.floor(t % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+function currentTxIndex(t) {
+  if (!transcriptLines.length) return -1;
+  let idx = 0;
+  for (let i = 0; i < transcriptLines.length; i++) {
+    if (transcriptLines[i].start <= t) idx = i;
+    else break;
+  }
+  return idx;
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function highlightQuery(text, q) {
+  const safe = escapeHtml(text);
+  if (!q) return safe;
+  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'ig');
+  return safe.replace(re, m => `<mark>${m}</mark>`);
+}
+function txLineEls() {
+  return document.querySelectorAll('#tx-focus .tx-line');
+}
+function buildTranscriptList() {
+  const focus = document.getElementById('tx-focus');
+  if (!focus || !transcriptLines.length) return;
+  focus.innerHTML = transcriptLines.map((line, i) =>
+    `<button type="button" class="tx-line" data-idx="${i}" data-start="${line.start}">`
+    + `<span class="ts">${txFmt(line.start)}</span>`
+    + `<span class="tx-text">${escapeHtml(line.text)}</span></button>`
+  ).join('');
+}
+function updateTranscriptFocus(force) {
+  const focus = document.getElementById('tx-focus');
+  if (!focus || !transcriptLines.length || !player) return;
+  if (txQuery) return;
+  const idx = currentTxIndex(player.currentTime || 0);
+  if (!force && idx === txFocusIdx) return;
+  txFocusIdx = idx;
+  txLineEls().forEach((btn, i) => {
+    btn.classList.toggle('is-current', i === idx);
+    btn.classList.toggle('is-near', i === idx - 1 || i === idx + 1);
+    btn.classList.toggle('is-dim', i !== idx && i !== idx - 1 && i !== idx + 1);
+  });
+  if (txUserScrollUntil && performance.now() < txUserScrollUntil) return;
+  const cur = focus.querySelector('.tx-line.is-current');
+  if (!cur) return;
+  const top = cur.offsetTop - (focus.clientHeight - cur.offsetHeight) / 2;
+  focus.scrollTop = Math.max(0, top);
+}
+function onTxSearch() {
+  const input = document.getElementById('tx-search');
+  const count = document.getElementById('tx-search-count');
+  txQuery = ((input && input.value) || '').trim().toLowerCase();
+  let matches = 0;
+  txLineEls().forEach((btn, i) => {
+    const text = transcriptLines[i].text || '';
+    const hit = !txQuery || text.toLowerCase().includes(txQuery);
+    btn.hidden = !hit;
+    if (hit && txQuery) matches++;
+    const span = btn.querySelector('.tx-text');
+    if (span) span.innerHTML = highlightQuery(text, txQuery);
+    btn.classList.toggle('is-hit', !!(hit && txQuery));
+    if (txQuery) btn.classList.remove('is-current', 'is-near', 'is-dim');
+  });
+  if (count) {
+    count.textContent = txQuery
+      ? (matches ? `${matches} match${matches === 1 ? '' : 'es'}` : 'no matches')
+      : '';
+  }
+  if (!txQuery) {
+    txFocusIdx = -1;
+    updateTranscriptFocus(true);
+  }
+}
+function seek(t) {
+  if (!player) return;
+  player.currentTime = t;
+  player.play();
+  updateTranscriptFocus(true);
+}
+(function initTranscript() {
+  const focus = document.getElementById('tx-focus');
+  const input = document.getElementById('tx-search');
+  if (!transcriptLines.length) return;
+  buildTranscriptList();
+  focus.addEventListener('click', e => {
+    const btn = e.target.closest('.tx-line');
+    if (!btn) return;
+    seek(+btn.dataset.start);
+  });
+  focus.addEventListener('wheel', () => { txUserScrollUntil = performance.now() + 2500; }, { passive: true });
+  focus.addEventListener('pointerdown', () => { txUserScrollUntil = performance.now() + 2500; });
+  if (input) {
+    input.addEventListener('input', onTxSearch);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { input.value = ''; onTxSearch(); input.blur(); }
+    });
+  }
+  updateTranscriptFocus(true);
+  if (player) {
+    player.addEventListener('seeked', () => {
+      txUserScrollUntil = 0;
+      updateTranscriptFocus(true);
+    });
+    player.addEventListener('timeupdate', () => updateTranscriptFocus(false));
+  }
+})();
 {% endif %}
-{% endif %}
-{% endif %}
+</script>
 {% endblock %}

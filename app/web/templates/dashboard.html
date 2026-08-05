@@ -178,8 +178,7 @@
 {% for c, state in in_progress %}
 <div class="media-card is-clickable" tabindex="0" role="link"
      onclick="location.href='/video/{{ c.id }}/cut'"
-     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}/cut'}"
-     {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
+     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}/cut'}">
   {% set thumb = thumb_for(c) %}
   <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
     {% if thumb %}
@@ -195,6 +194,7 @@
       {% elif state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
+      {% if c.multi_clip_potential %}<span class="badge info" title="Marked as having more clips — stays here until turned off">multi-clip</span>{% endif %}
     </span>
     {% if c.duration_seconds %}
     <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>
@@ -226,8 +226,7 @@
 {% for c, state in trimmed %}
 <div class="media-card is-clickable" tabindex="0" role="link"
      onclick="location.href='/video/{{ c.id }}'"
-     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
-     {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
+     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}">
   {% set thumb = thumb_for(c) %}
   <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
     {% if thumb %}
@@ -343,8 +342,7 @@
 {% for c in candidates %}
 <div class="media-card is-clickable" tabindex="0" role="link"
      onclick="location.href='/video/{{ c.id }}'"
-     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}"
-     {% if c.relevance_rationale %}title="{{ c.relevance_rationale }}"{% endif %}>
+     onkeydown="if(event.key==='Enter'){location.href='/video/{{ c.id }}'}">
   {% set thumb = thumb_for(c) %}
   <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
     {% if thumb %}

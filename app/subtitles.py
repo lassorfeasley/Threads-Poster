@@ -9,9 +9,14 @@ Pillow does the text rendering because the system ffmpeg is built without
 libass/freetype; this also gives full control over the style. Captions are
 optional per clip — generation writes a separate ``*_subs.mp4`` next to the
 original and the operator chooses which file to post.
+
+The same Whisper word stream is persisted next to the trimmed clip
+(``*_transcript.json``) so Suggest caption / Copy transcript use what was
+actually said in the export — not the source video's YouTube captions.
 """
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import tempfile
@@ -53,6 +58,12 @@ def _video_size(path: str | Path) -> tuple[int, int]:
         raise SubtitleError(f"Could not probe video size: {proc.stdout!r}") from exc
 
 
+def clip_transcript_path_for(clip_path: str | Path) -> Path:
+    """Sidecar JSON for the Whisper word stream of an exported trim."""
+    clip = Path(clip_path)
+    return clip.with_name(f"{clip.stem}_transcript.json")
+
+
 def transcribe_words(clip_path: str | Path) -> list[dict]:
     """Word-level timestamps for the exported clip: [{word, start, end}]."""
     from .scrape import _get_whisper_model
@@ -72,6 +83,61 @@ def transcribe_words(clip_path: str | Path) -> list[dict]:
             if text:
                 words.append({"word": text, "start": float(w.start), "end": float(w.end)})
     return words
+
+
+def save_clip_transcript(clip_path: str | Path, words: list[dict]) -> Path:
+    """Persist Whisper words next to the trimmed clip; returns the JSON path."""
+    path = clip_transcript_path_for(clip_path)
+    path.write_text(json.dumps(words, indent=1))
+    return path
+
+
+def load_clip_words(transcript_path: str | Path) -> list[dict]:
+    """Load a previously saved Whisper word stream."""
+    try:
+        data = json.loads(Path(transcript_path).read_text())
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [w for w in data if isinstance(w, dict) and (w.get("word") or "").strip()]
+
+
+def ensure_clip_words(clip_path: str | Path,
+                      transcript_path: str | Path | None = None) -> tuple[list[dict], Path]:
+    """Load cached Whisper words for a trim, or transcribe and cache them.
+
+    ``transcript_path`` is preferred when set (the cut's stored sidecar); otherwise
+    the default sidecar next to ``clip_path`` is used.
+    """
+    clip = Path(clip_path)
+    path = Path(transcript_path) if transcript_path else clip_transcript_path_for(clip)
+    if path.exists():
+        words = load_clip_words(path)
+        if words:
+            return words, path
+    words = transcribe_words(clip)
+    if not words:
+        raise SubtitleError("No speech detected in the clip — nothing to caption.")
+    return words, save_clip_transcript(clip, words)
+
+
+def words_to_lines(words: list[dict], max_words: int = 12) -> list[dict]:
+    """Group Whisper words into readable lines: [{start, text, clip_start}]."""
+    groups = group_words(words, max_words=max_words)
+    lines: list[dict] = []
+    for group in groups:
+        text = " ".join(w["word"] for w in group).strip()
+        if not text:
+            continue
+        start = float(group[0]["start"])
+        lines.append({"start": start, "text": text, "clip_start": round(start, 2)})
+    return lines
+
+
+def words_to_plain(words: list[dict], max_words: int = 12) -> str:
+    """Newline-joined readable transcript from a Whisper word stream."""
+    return "\n".join(line["text"] for line in words_to_lines(words, max_words=max_words))
 
 
 def group_words(words: list[dict], max_words: int = 4, max_gap: float = 0.8) -> list[list[dict]]:
@@ -201,9 +267,9 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
         "box_text": _hex_to_rgba(settings.get("subtitles.highlight_text_color", "#1A4A7D")),
     }
 
-    words = transcribe_words(clip)
-    if not words:
-        raise SubtitleError("No speech detected in the clip — nothing to caption.")
+    # Reuse a cached Whisper pass when re-rendering at a new position; the
+    # sidecar is also what Suggest caption / Copy transcript read from.
+    words, _transcript_path = ensure_clip_words(clip)
     groups = group_words(words, max_words=max_words)
 
     width, height = _video_size(clip)

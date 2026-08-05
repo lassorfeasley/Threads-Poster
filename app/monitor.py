@@ -143,7 +143,7 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
                 settings.get("matching.model", "claude-haiku-4-5"), up.title, up.description, matched
             )
             candidate.relevance_score = result["score"]
-            candidate.relevance_rationale = result["rationale"]
+            candidate.relevance_rationale = ""
         except Exception as exc:  # scoring failure shouldn't lose the candidate
             log.warning("LLM scoring failed for %s: %s", up.video_id, exc)
             candidate.relevance_rationale = f"(scoring failed: {exc})"

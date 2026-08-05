@@ -2,26 +2,11 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {% set cut_crumbs %}
-<nav class="crumbs" aria-label="Breadcrumb">
-  <a href="/video/{{ c.id }}?step=cuts" class="crumb"
-     title="Video{% if c.title %}: {{ c.title }}{% endif %}">Video</a>
-  <span class="crumb-sep" aria-hidden="true">›</span>
-  {% if step == "trim" %}
-  <span class="crumb crumb-current" aria-current="page"
-        title="Trim and edit: {{ cut.clip_title or 'Untitled clip' }}">Edit</span>
-  {% if state.exported %}
-  <span class="crumb-sep" aria-hidden="true">›</span>
-  <a href="/cut/{{ cut.id }}?step=post" class="crumb"
-     title="Back to the clip without re-exporting">Clip</a>
-  {% endif %}
-  {% else %}
-  <a href="/cut/{{ cut.id }}?step=trim" class="crumb"
-     title="Trim and edit this clip">Edit</a>
-  <span class="crumb-sep" aria-hidden="true">›</span>
-  <span class="crumb crumb-current" aria-current="page"
-        title="{{ cut.clip_title or 'Untitled clip' }}">Clip</span>
-  {% endif %}
-</nav>
+{{ ui.workflow_crumbs('edit' if step == 'trim' else 'clip',
+     video_id=c.id, video_title=c.title,
+     cut_id=cut.id, clip_title=cut.clip_title or '',
+     clip_exported=state.exported,
+     post_id=posts[0].id if posts else none) }}
 {% endset %}
 {% set cut_actions %}
   <a id="download-clip-link" class="copy-btn"
@@ -42,68 +27,120 @@
 
 {# ============ STEP 1: TRIM ============ #}
 {% if step == "trim" %}
-{# Waveform scrubber sits on top, spanning the full width. #}
+<div class="trim-cta-wrap">
+  <div class="trim-cta" role="group" aria-label="Mark a segment">
+    <button type="button" class="trim-cta-btn" id="btn-set-start" onclick="setStart()"
+            title="Mark start at the playhead (←)">
+      Set start <kbd class="trim-cta-kbd">←</kbd>
+    </button>
+    <button type="button" class="trim-cta-btn" id="btn-set-end" onclick="setEnd()"
+            title="Mark end at the playhead (→)">
+      Set end <kbd class="trim-cta-kbd">→</kbd>
+    </button>
+    <button type="button" class="trim-cta-btn trim-cta-add" id="btn-add-segment"
+            onclick="addSegment()" disabled
+            title="Set a start and end point first (↓)">
+      Add segment <kbd class="trim-cta-kbd">↓</kbd>
+    </button>
+  </div>
+</div>
+
+{# Overview waveform (full video) + detail strip for the selected segment. #}
 <div style="margin-top: 6px; position: relative;">
   <canvas id="wave"></canvas>
   <div class="meta" id="wave-hint" style="position: absolute; inset: 0; display: flex;
        align-items: center; justify-content: center; pointer-events: none;">loading waveform…</div>
 </div>
+{% if other_cut_segments %}
+<div class="meta" style="margin-top: 4px;">
+  <span style="color: rgba(240,180,90,0.9);">▧ dashed</span> = already clipped by
+  {{ other_cut_segments | map(attribute="title") | unique | join(", ") }}
+</div>
+{% endif %}
+<div id="detail-strip" class="detail-strip" hidden>
+  <div class="seg-pill detail-pill">
+    <span class="seg-len" id="detail-strip-len">0s</span>
+    <button type="button" class="seg-del" id="detail-strip-close" title="Deselect segment"
+            aria-label="Deselect segment" onclick="clearSegmentSelection()">
+      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
+           stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18"/>
+      </svg>
+    </button>
+  </div>
+  <canvas id="detail-wave" title="Drag the orange edges to fine-trim. Click to play from there up to the end. The dim sides are lead-in / lead-out room."></canvas>
+</div>
 
-<div class="row" style="margin-top: 16px; align-items: flex-start;">
-  {# Left column: the video with its transcript beneath it. #}
-  <div style="flex: 1; min-width: 300px;">
+<div class="row trim-layout" style="margin-top: 16px; align-items: flex-start;">
+  {# Wide: find material — player + focused, searchable transcript. #}
+  <div class="card find-card trim-find" style="margin-bottom: 0;">
     <video id="player" src="/media/source/{{ c.id }}" controls preload="metadata"></video>
-    <div class="transcript-box" id="transcript-box" title="Click a line to jump" style="margin-top: 14px;">
-      {% for s in transcript_segments %}
-        <div class="tline" onclick="seek({{ s.start }})">
-          <span class="ts">{{ "%d:%02d"|format(s.start // 60, s.start % 60) }}</span>{{ s.text }}</div>
-      {% else %}
-        <div class="meta">No transcript segments found.</div>
-      {% endfor %}
+    <div class="find-transcript">
+      <div class="find-search">
+        <svg class="find-search-ic" width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input type="search" id="tx-search" placeholder="Search transcript…"
+               autocomplete="off" {% if not transcript_segments %}disabled{% endif %}>
+        <span class="meta" id="tx-search-count" aria-live="polite"></span>
+      </div>
+      <div id="tx-focus" class="tx-focus" title="Click a line to jump"></div>
+      {% if not transcript_segments %}
+      <div class="meta" id="tx-empty">No transcript for this video.</div>
+      {% endif %}
     </div>
   </div>
 
-  {# Right sidebar: trim controls + the cut list (each clip shows its own waveform). #}
-  <div style="flex: 1.7; min-width: 420px;">
-    <div class="btn-group">
-      <button type="button" class="sm" onclick="setStart()">⇤ Set start</button>
-      <button type="button" class="sm" onclick="setEnd()">Set end ⇥</button>
-      <button type="button" class="primary sm" onclick="addSegment()">＋ Add segment</button>
-      <button type="button" class="sm" id="preview-mode-btn" style="margin-left: auto;"
+  {# Narrow: clip list + save. #}
+  <div class="trim-rail">
+    <div id="segments-bar" class="segments-bar" hidden>
+      <div id="total-len" class="clip-total" aria-live="polite"></div>
+      <button type="button" class="sm icon-btn" id="preview-mode-btn"
               onclick="togglePreviewMode()"
-              title="Play through every segment in order, skipping the gaps. Pause and resume from anywhere — it keeps flowing and loops, so you can fine-tune start/end points without restarting from the top.">▶ Preview mode</button>
+              aria-pressed="false"
+              aria-label="Preview segments"
+              title="Play through every segment in order, skipping the gaps. Pause and resume from anywhere — it keeps flowing and loops, so you can fine-tune start/end points without restarting from the top.">
+        <svg class="preview-icon-play" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        <svg class="preview-icon-stop" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+      </button>
     </div>
-    <div class="meta" id="pending-range" style="margin-top: 6px;">start: — · end: —</div>
-
-    <div id="segments" style="margin-top: 14px;"></div>
-    <div class="meta" id="total-len" style="margin: 6px 0;"></div>
+    <div id="segments"></div>
+    <div id="export-panel" hidden>
     <form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return prepExport(this)">
       <input type="hidden" name="segments_json" value="">
-      <div class="btn-group" style="margin-top: 8px;">
-        <button class="approve"
+      <div class="btn-group export-actions" style="margin-top: 8px;">
+        <button class="approve" name="as_new" value="0"
           {% if pending_post_status %}
-          data-confirm-title="Re-export this clip?"
-          data-confirm-ok="Export new clip"
-          data-confirm="This clip has a {{ pending_post_status }} post. That post keeps the video it was queued with — the new export won't replace it. To post the new video, re-queue it from the clip page."
+          data-confirm-title="Save clip changes?"
+          data-confirm-ok="Save changes"
+          data-confirm-variant="approve"
+          data-confirm="This clip has a {{ pending_post_status }} post. That post keeps the video it was queued with — saving won't replace it. To post the new video, re-queue it from the clip page."
           {% elif state.exported %}
-          data-confirm-title="Re-export this clip?"
-          data-confirm-ok="Replace clip"
-          data-confirm="Exporting again replaces this clip's current video (and its burned-in captions). Made no changes? Use the Clip breadcrumb to go back without re-exporting."
-          {% endif %}>Export {{ "new " if state.exported }}clip →</button>
+          data-confirm-title="Save clip changes?"
+          data-confirm-ok="Save changes"
+          data-confirm-variant="approve"
+          data-confirm="Saving replaces this clip's current video (and its burned-in captions)."
+          {% endif %}>{{ "Save clip changes" if state.exported else "Save clip" }} →</button>
+        {% if state.exported %}
+        <button type="submit" class="export-as-new" name="as_new" value="1"
+                title="Keep this clip as-is and create a second clip from the current segments">
+          Save as new clip
+        </button>
+        {% endif %}
       </div>
     </form>
-    {% if pending_post_status %}
-      <div class="meta" style="margin-top: 10px;">This clip has a
-        <strong>{{ pending_post_status }}</strong> post. Exporting again won't change that
-        post's video — re-queue from the <a href="/cut/{{ cut.id }}?step=post">clip page</a>
-        to use the new export. Want both versions? Start a
-        <a href="/video/{{ c.id }}?step=cuts">new clip</a> instead.</div>
-    {% elif state.exported %}
-      <div class="meta" style="margin-top: 10px;">This clip is already exported —
-        <a href="/cut/{{ cut.id }}?step=post">back to the clip</a> if nothing changed, or export
-        again to replace it. To keep this one and make a second clip, start a
-        <a href="/video/{{ c.id }}?step=cuts">new clip</a>.</div>
-    {% endif %}
+    </div>
+
+    {# Video-level marker: more clips are waiting in this footage. #}
+    <div style="margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);">
+      <label class="switch" style="gap: 10px;">
+        <input type="checkbox" id="multi-clip-toggle"
+               {% if c.multi_clip_potential %}checked{% endif %}
+               onchange="toggleMultiClip(this)">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span style="margin-left: 10px;">Bookmark for additional clips</span>
+      </label>
+    </div>
   </div>
 </div>
 
@@ -111,7 +148,28 @@
 const player = document.getElementById('player');
 let pending = { start: null, end: null };
 let segments = {{ saved_segments | tojson }};
+// Segments already claimed by this video's other clips — drawn as dashed
+// outlines on the main waveform (display-only, never draggable).
+const otherSegments = {{ other_cut_segments | tojson }};
+// Source transcript (YouTube captions or upload Whisper) — drives the
+// focused 3-line view and keyword search under the player.
+const transcriptLines = {{ transcript_segments | tojson }};
 let selectedSeg = null;         // index of the segment highlighted for deletion
+let txFocusIdx = -1;            // last rendered focus index (skip redundant paints)
+let txQuery = '';               // active search query (lowercase)
+
+async function toggleMultiClip(cb) {
+  cb.disabled = true;
+  try {
+    const r = await fetch('/video/{{ c.id }}/multi-clip', { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    cb.checked = !!j.multi_clip;
+  } catch (e) {
+    cb.checked = !cb.checked;   // revert on failure
+  }
+  cb.disabled = false;
+}
 
 // ---- Undo stack (Cmd/Ctrl+Z) ----
 let undoStack = [];
@@ -130,23 +188,152 @@ function undoEdit() {
   renderSegments();
 }
 
-const fmt = t => `${t.toFixed(1)}s`;
-
-function seek(t) { cancelPlayback(); activeStop = null; player.currentTime = t; player.play(); }
+function seek(t) { cancelPlayback(); activeStop = null; player.currentTime = t; player.play(); updateTranscriptFocus(true); }
 function setStart() { pushUndo(); pending.start = player.currentTime; renderPending(); }
 function setEnd() { pushUndo(); pending.end = player.currentTime; renderPending(); }
+
+// ---- Scrollable transcript with focused current line + keyword search ----
+function txFmt(t) {
+  const m = Math.floor(t / 60), s = Math.floor(t % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+function currentTxIndex(t) {
+  if (!transcriptLines.length) return -1;
+  let idx = 0;
+  for (let i = 0; i < transcriptLines.length; i++) {
+    if (transcriptLines[i].start <= t) idx = i;
+    else break;
+  }
+  return idx;
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function highlightQuery(text, q) {
+  const safe = escapeHtml(text);
+  if (!q) return safe;
+  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'ig');
+  return safe.replace(re, m => `<mark>${m}</mark>`);
+}
+function txLineEls() {
+  return document.querySelectorAll('#tx-focus .tx-line');
+}
+function buildTranscriptList() {
+  const focus = document.getElementById('tx-focus');
+  if (!focus || !transcriptLines.length) return;
+  focus.innerHTML = transcriptLines.map((line, i) =>
+    `<button type="button" class="tx-line" data-idx="${i}" data-start="${line.start}">`
+    + `<span class="ts">${txFmt(line.start)}</span>`
+    + `<span class="tx-text">${escapeHtml(line.text)}</span></button>`
+  ).join('');
+}
+function updateTranscriptFocus(force) {
+  const focus = document.getElementById('tx-focus');
+  if (!focus || !transcriptLines.length) return;
+  // Search owns visibility/highlights; don't fight the filtered list.
+  if (txQuery) return;
+  const idx = currentTxIndex(player.currentTime || 0);
+  if (!force && idx === txFocusIdx) return;
+  txFocusIdx = idx;
+  txLineEls().forEach((btn, i) => {
+    btn.classList.toggle('is-current', i === idx);
+    btn.classList.toggle('is-near', i === idx - 1 || i === idx + 1);
+    btn.classList.toggle('is-dim', i !== idx && i !== idx - 1 && i !== idx + 1);
+  });
+  // Keep the current line centered in the transcript viewport only —
+  // never scrollIntoView (that scrolls the whole page when the wave is used).
+  if (txUserScrollUntil && performance.now() < txUserScrollUntil) return;
+  const cur = focus.querySelector('.tx-line.is-current');
+  if (!cur) return;
+  const top = cur.offsetTop - (focus.clientHeight - cur.offsetHeight) / 2;
+  focus.scrollTop = Math.max(0, top);
+}
+function onTxSearch() {
+  const input = document.getElementById('tx-search');
+  const count = document.getElementById('tx-search-count');
+  txQuery = ((input && input.value) || '').trim().toLowerCase();
+  let matches = 0;
+  txLineEls().forEach((btn, i) => {
+    const text = transcriptLines[i].text || '';
+    const hit = !txQuery || text.toLowerCase().includes(txQuery);
+    btn.hidden = !hit;
+    if (hit && txQuery) matches++;
+    const span = btn.querySelector('.tx-text');
+    if (span) span.innerHTML = highlightQuery(text, txQuery);
+    btn.classList.toggle('is-hit', !!(hit && txQuery));
+    if (txQuery) {
+      btn.classList.remove('is-current', 'is-near', 'is-dim');
+    }
+  });
+  if (count) {
+    count.textContent = txQuery
+      ? (matches ? `${matches} match${matches === 1 ? '' : 'es'}` : 'no matches')
+      : '';
+  }
+  if (!txQuery) {
+    txFocusIdx = -1;
+    updateTranscriptFocus(true);
+  }
+}
+let txUserScrollUntil = 0;
+(function initTranscript() {
+  const focus = document.getElementById('tx-focus');
+  const input = document.getElementById('tx-search');
+  if (!transcriptLines.length) return;
+  buildTranscriptList();
+  focus.addEventListener('click', e => {
+    const btn = e.target.closest('.tx-line');
+    if (!btn) return;
+    seek(+btn.dataset.start);
+  });
+  // Manual browsing: pause auto-follow briefly so scrolling isn't yanked back.
+  focus.addEventListener('wheel', () => { txUserScrollUntil = performance.now() + 2500; }, { passive: true });
+  focus.addEventListener('pointerdown', () => { txUserScrollUntil = performance.now() + 2500; });
+  if (input) {
+    input.addEventListener('input', onTxSearch);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { input.value = ''; onTxSearch(); input.blur(); }
+    });
+  }
+  updateTranscriptFocus(true);
+  player.addEventListener('seeked', () => {
+    txUserScrollUntil = 0;  // seeks should always snap the list
+    updateTranscriptFocus(true);
+  });
+})();
 function renderPending() {
-  document.getElementById('pending-range').textContent =
-    `start: ${pending.start === null ? '—' : fmt(pending.start)} · end: ${pending.end === null ? '—' : fmt(pending.end)}`;
+  const startBtn = document.getElementById('btn-set-start');
+  const endBtn = document.getElementById('btn-set-end');
+  const addBtn = document.getElementById('btn-add-segment');
+  const hasStart = pending.start !== null;
+  const hasEnd = pending.end !== null;
+  const ready = hasStart && hasEnd && (pending.end - pending.start) >= 0.5;
+  if (startBtn) startBtn.classList.toggle('is-set', hasStart);
+  if (endBtn) {
+    endBtn.classList.toggle('is-set', hasEnd);
+    endBtn.classList.toggle('is-next', hasStart && !hasEnd);
+  }
+  if (addBtn) {
+    addBtn.disabled = !ready;
+    addBtn.classList.toggle('is-ready', ready);
+    addBtn.title = ready
+      ? 'Add this range to the clip (↓)'
+      : (!hasStart || !hasEnd
+          ? 'Set a start and end point first (↓)'
+          : 'Segment must be at least 0.5s');
+  }
   drawWave();
 }
 function addSegment() {
-  if (pending.start === null || pending.end === null) { alert('Set both start and end first.'); return; }
-  if (pending.end - pending.start < 0.5) { alert('Segment must be at least 0.5s.'); return; }
+  if (pending.start === null || pending.end === null) return;
+  if (pending.end - pending.start < 0.5) return;
   pushUndo();
   segments.push({ start: +pending.start.toFixed(2), end: +pending.end.toFixed(2) });
   pending = { start: null, end: null };
+  selectedSeg = segments.length - 1;
   renderPending(); renderSegments();
+  previewSegment(selectedSeg);
 }
 function removeSegment(i) {
   pushUndo();
@@ -155,24 +342,111 @@ function removeSegment(i) {
   else if (selectedSeg !== null && selectedSeg > i) selectedSeg--;
   renderSegments();
 }
-// ---- Drag-to-reorder (grip handle) -------------------------------------
+// ---- Drag-to-reorder (vertical drag on mini-wave) ----------------------
 // Insertion-point model: you drop a clip into the gap BETWEEN two clips, not
 // on top of the one it displaces. While dragging, the rows between the clip's
 // old and new spots slide aside to open an empty slot and a red line marks it,
 // so the result is visible before releasing.
 //
-// Row geometry is measured once at dragstart and never re-read mid-drag. Rows
+// Row geometry is measured once at drag-begin and never re-read mid-drag. Rows
 // move by transform only, which leaves layout (and so the cached rects) alone;
 // measuring live would feed the shifted positions back into the hit test and
 // make the target oscillate between two slots under a still cursor.
+//
+// Reorder arms on a vertical pointer drag anywhere on the mini-wave (or grip).
+// A plain click still selects / previews the segment.
 let dragFrom = null;
 let segDragRects = [];   // per-row {top, height}, viewport coords at dragstart
 let segDragBoxTop = 0;   // #segments top at dragstart, for line placement
 let segDragPitch = 0;    // slot-to-slot distance (row height + margin)
 let segDropAt = null;    // current insertion index, 0..segments.length
+let segPtr = null;       // { from, x, y, mode: 'pending'|'reorder'|'edge'|'click', edge?, pid }
+let segDragGhost = null; // floating clone that follows the pointer while reordering
+let segDragGrabY = 0;    // pointer offset within the row at drag start
+let segHover = null;     // { i, x } css-px hover scrub line on a mini-wave
 
 function segRowEls() {
   return Array.from(document.querySelectorAll('#segments .seg-row'));
+}
+
+function setSegHover(i, clientX) {
+  // Scrub line only after the clip is selected — first click plays from start.
+  if (i !== selectedSeg) { clearSegHover(); return; }
+  const canvas = document.getElementById(`seg-wave-${i}`);
+  if (!canvas || i < 0) { clearSegHover(); return; }
+  const r = canvas.getBoundingClientRect();
+  const x = Math.min(r.width, Math.max(0, clientX - r.left));
+  if (segHover && segHover.i === i && Math.abs(segHover.x - x) < 0.5) return;
+  const prev = segHover ? segHover.i : null;
+  segHover = { i, x };
+  if (prev !== null && prev !== i) drawSegWave(prev);
+  drawSegWave(i);
+}
+
+function clearSegHover() {
+  if (!segHover) return;
+  const i = segHover.i;
+  segHover = null;
+  drawSegWave(i);
+}
+
+function segWaveGeom(i, clientX) {
+  const canvas = document.getElementById(`seg-wave-${i}`);
+  if (!canvas || !segments[i]) return null;
+  const r = canvas.getBoundingClientRect();
+  const win = segWindow(i);
+  const span = (win.b - win.a) || 1;
+  const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+  return { canvas, r, win, span, t: win.a + frac * span, x: clientX - r.left };
+}
+
+function segWaveEdgeAt(i, clientX, grab = 10) {
+  const g = segWaveGeom(i, clientX);
+  if (!g) return null;
+  const px = t => ((t - g.win.a) / g.span) * g.r.width;
+  let best = null, bd = grab + 1;
+  for (const edge of ['start', 'end']) {
+    const d = Math.abs(g.x - px(segments[i][edge]));
+    if (d <= grab && d < bd) { best = edge; bd = d; }
+  }
+  return best;
+}
+
+function segGhostStart(from, clientY) {
+  segGhostClear();
+  const row = segRowEls()[from];
+  if (!row) return;
+  const r = row.getBoundingClientRect();
+  segDragGrabY = clientY - r.top;
+  const ghost = row.cloneNode(true);
+  ghost.removeAttribute('id');
+  ghost.classList.add('seg-drag-ghost');
+  ghost.classList.remove('dragging', 'selected');
+  ghost.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+  const srcCanvas = row.querySelector('.seg-wave');
+  const ghostCanvas = ghost.querySelector('.seg-wave');
+  if (srcCanvas && ghostCanvas) {
+    ghostCanvas.width = srcCanvas.width;
+    ghostCanvas.height = srcCanvas.height;
+    ghostCanvas.getContext('2d').drawImage(srcCanvas, 0, 0);
+  }
+  ghost.style.width = `${r.width}px`;
+  ghost.style.left = `${r.left}px`;
+  ghost.style.top = `${r.top}px`;
+  document.body.appendChild(ghost);
+  segDragGhost = ghost;
+}
+
+function segGhostMove(clientY) {
+  if (!segDragGhost) return;
+  segDragGhost.style.top = `${clientY - segDragGrabY}px`;
+}
+
+function segGhostClear() {
+  if (segDragGhost) {
+    segDragGhost.remove();
+    segDragGhost = null;
+  }
 }
 
 function segDragBegin(from) {
@@ -236,9 +510,14 @@ function segDragClear() {
   dragFrom = null;
   segDropAt = null;
   segDragRects = [];
+  segGhostClear();
+  const box = document.getElementById('segments');
+  if (box) box.style.cursor = '';
   segRowEls().forEach(el => {
     el.style.transform = '';
     el.classList.remove('dragging');
+    const c = el.querySelector('.seg-wave');
+    if (c) c.style.cursor = '';
   });
   const line = document.querySelector('#segments .seg-drop-line');
   if (line) line.classList.remove('on');
@@ -258,29 +537,165 @@ function reorderSegment(from, to) {
   renderSegments();
 }
 
-// Bound once on the container, not per row: the cursor spends much of the drag
-// in the margins between rows, where per-row dragover/drop never fire.
+// Bound once on the container: pointer-driven reorder so a vertical drag on a
+// mini-wave can start mid-gesture (HTML5 DnD can't arm after a threshold).
+// Near an edge, the same gesture edits start/end (like the detail strip).
 function initSegDnd() {
   const box = document.getElementById('segments');
-  const over = e => {
-    if (dragFrom === null) return;
+  const THRESH = 6;
+
+  // Capture immediately on down so moves aren't stolen by the browser's
+  // native canvas/image drag (which made the first wave gesture a no-op
+  // unless you hit the grip).
+  box.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    if (e.target.closest('.seg-del')) return;
+    const row = e.target.closest('.seg-row');
+    if (!row) return;
+    const onWave = e.target.closest('.seg-wave');
+    const onGrip = e.target.closest('.seg-grip');
+    if (!onWave && !onGrip) return;
+    const from = segRowEls().indexOf(row);
+    if (from < 0) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    segDragPaint(segDropIndexFor(e.clientY));
-  };
-  box.addEventListener('dragenter', over);
-  box.addEventListener('dragover', over);
-  box.addEventListener('dragleave', e => {
-    // Bubbles from children too, so only react to leaving the list itself.
-    if (dragFrom === null || box.contains(e.relatedTarget)) return;
-    segDragPaint(dragFrom);
+    try { box.setPointerCapture(e.pointerId); } catch (_) {}
+
+    // Edge grab on the mini-wave → fine-trim (same as detail / main wave).
+    if (onWave) {
+      const edge = segWaveEdgeAt(from, e.clientX);
+      if (edge) {
+        cancelPlayback();
+        editing = true;
+        pushUndo();
+        selectedSeg = from;
+        highlightSelectedRow();
+        syncDetailStrip();
+        if (previewMode) player.pause();
+        frozenSegWin = null; frozenSegIdx = null;
+        frozenSegWin = segWindow(from); frozenSegIdx = from;
+        const g = segWaveGeom(from, e.clientX);
+        segPtr = { from, x: e.clientX, y: e.clientY, mode: 'edge', edge, pid: e.pointerId };
+        if (g) setSegEdge(from, edge, g.t);
+        drawWave();
+        return;
+      }
+    }
+
+    segPtr = { from, x: e.clientX, y: e.clientY, mode: 'pending', pid: e.pointerId, onWave: !!onWave };
   });
-  box.addEventListener('drop', e => {
-    if (dragFrom === null) return;
-    e.preventDefault();
-    const from = dragFrom, to = segDropIndexFor(e.clientY);
-    segDragClear();
-    reorderSegment(from, to);
+
+  // Belt-and-suspenders: kill any native drag the canvas might still start.
+  box.addEventListener('dragstart', e => {
+    if (e.target.closest('.seg-wave') || e.target.closest('.seg-row')) e.preventDefault();
+  });
+
+  box.addEventListener('pointermove', e => {
+    if (!segPtr || segPtr.pid !== e.pointerId) {
+      const canvas = e.target.closest && e.target.closest('.seg-wave');
+      if (canvas) {
+        const row = canvas.closest('.seg-row');
+        const i = segRowEls().indexOf(row);
+        if (i >= 0) {
+          setSegHover(i, e.clientX);
+          canvas.style.cursor = segWaveEdgeAt(i, e.clientX) ? 'ew-resize' : 'crosshair';
+        }
+      } else {
+        clearSegHover();
+      }
+      return;
+    }
+    clearSegHover();
+    if (segPtr.mode === 'edge') {
+      e.preventDefault();
+      const g = segWaveGeom(segPtr.from, e.clientX);
+      if (g) {
+        setSegEdge(segPtr.from, segPtr.edge, g.t);
+        drawWave();
+      }
+      return;
+    }
+    const dx = e.clientX - segPtr.x, dy = e.clientY - segPtr.y;
+    if (segPtr.mode === 'pending') {
+      if (Math.hypot(dx, dy) < THRESH) return;
+      if (Math.abs(dy) < Math.abs(dx)) {
+        // Horizontal scrub intent — treat release as a normal click.
+        segPtr.mode = 'click';
+        return;
+      }
+      segPtr.mode = 'reorder';
+      box.style.cursor = 'grabbing';
+      const row = segRowEls()[segPtr.from];
+      if (row) {
+        row.classList.add('dragging');
+        const c = row.querySelector('.seg-wave');
+        if (c) c.style.cursor = 'grabbing';
+      }
+      segGhostStart(segPtr.from, e.clientY);
+      segDragBegin(segPtr.from);
+      segDragPaint(segDropIndexFor(e.clientY));
+    }
+    if (segPtr.mode === 'reorder') {
+      e.preventDefault();
+      box.style.cursor = 'grabbing';
+      segGhostMove(e.clientY);
+      segDragPaint(segDropIndexFor(e.clientY));
+    }
+  });
+
+  box.addEventListener('pointerleave', () => {
+    if (!segPtr) clearSegHover();
+  });
+
+  const end = e => {
+    if (!segPtr || segPtr.pid !== e.pointerId) return;
+    const { from, mode, edge, onWave } = segPtr;
+    segPtr = null;
+    try { box.releasePointerCapture(e.pointerId); } catch (_) {}
+    if (mode === 'edge') {
+      editing = false;
+      if (segments[from]) {
+        if (edge === 'start') auditionStart(segments[from].start, segments[from].end, from);
+        else if (edge === 'end') auditionEnd(segments[from].end, from);
+      }
+      frozenSegWin = null; frozenSegIdx = null;
+      syncSegLen(from);
+      updateTotal();
+      syncDetailLen();
+      drawWave();
+      drawSegWave(from);
+      drawDetailWave();
+      return;
+    }
+    if (mode === 'reorder') {
+      const to = segDropAt !== null ? segDropAt : segDropIndexFor(e.clientY);
+      segDragClear();
+      reorderSegment(from, to);
+      return;
+    }
+    // Preview mode: click seeks within the clip and keeps the pass flowing.
+    // Outside preview: second click on the selected wave seeks; first click
+    // selects and plays from the start.
+    if (onWave && segments[from]) {
+      const g = segWaveGeom(from, e.clientX);
+      if (g) {
+        if (previewMode) { seekInPreview(from, g.t); return; }
+        if (from === selectedSeg) { playSegFrom(from, g.t); return; }
+      }
+    }
+    selectSegment(from);
+  };
+  box.addEventListener('pointerup', end);
+  box.addEventListener('pointercancel', e => {
+    if (!segPtr || segPtr.pid !== e.pointerId) return;
+    const wasReorder = segPtr.mode === 'reorder';
+    const wasEdge = segPtr.mode === 'edge';
+    segPtr = null;
+    try { box.releasePointerCapture(e.pointerId); } catch (_) {}
+    if (wasReorder) segDragClear();
+    if (wasEdge) {
+      editing = false;
+      frozenSegWin = null; frozenSegIdx = null;
+    }
   });
 }
 // ---- Segment playback --------------------------------------------------
@@ -301,7 +716,22 @@ function playSegments(segs) {
 }
 function cancelPlayback() { if (playback) { playback = null; } }
 
-function previewSegment(i) { playSegments([{ ...segments[i] }]); }
+function previewSegment(i) { playSegFrom(i, segments[i].start); }
+
+function playSegFrom(i, t) {
+  const s = segments[i];
+  if (!s) return;
+  if (previewMode) setPreviewMode(false);
+  cancelPlayback();
+  t = Math.max(0, Math.min(t, duration()));
+  player.currentTime = t;
+  if (t < s.end - 0.02) {
+    activeStop = s.end;
+    player.play();
+  } else {
+    activeStop = null;
+  }
+}
 
 // True while an edge is being dragged, so the preview-mode flow below doesn't
 // yank the playhead around mid-edit.
@@ -350,9 +780,13 @@ function setPreviewMode(on) {
   const btn = document.getElementById('preview-mode-btn');
   if (btn) {
     btn.classList.toggle('primary', on);
-    btn.textContent = on ? '■ Stop preview' : '▶ Preview mode';
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.setAttribute('aria-label', on ? 'Stop preview' : 'Preview segments');
   }
-  if (!on) return;
+  if (!on) {
+    player.pause();
+    return;
+  }
   playback = null; activeStop = null;  // preview mode is the authority
   const segs = previewSegs();
   if (!segs.length) { alert('Add at least one segment first.'); setPreviewMode(false); return; }
@@ -362,9 +796,35 @@ function setPreviewMode(on) {
   let idx = segs.findIndex(s => t >= s.start && t < s.end);
   if (idx < 0) { idx = 0; player.currentTime = segs[0].start; }
   previewIdx = idx;
+  syncPreviewSelection(true);
   player.play();
 }
 function togglePreviewMode() { setPreviewMode(!previewMode); }
+
+// Keep the orange selection + detail strip on the clip preview mode is playing.
+function syncPreviewSelection(force) {
+  const segs = previewSegs();
+  const seg = segs[previewIdx];
+  if (!seg) return;
+  const i = segments.indexOf(seg);
+  if (i < 0) return;
+  if (!force && i === selectedSeg) return;
+  selectedSeg = i;
+  highlightSelectedRow();
+  syncDetailStrip();
+  drawWave();
+}
+
+// Seek within a segment without leaving preview mode.
+function seekInPreview(segIndex, t) {
+  const s = segments[segIndex];
+  if (!s) return;
+  setPreviewIdxTo(segIndex);
+  const clamped = Math.max(s.start, Math.min(t, Math.max(s.start, s.end - 0.02)));
+  player.currentTime = clamped;
+  syncPreviewSelection(true);
+  player.play();
+}
 
 // Frame-accurate boundary enforcement, run every frame from the rAF draw loop.
 // `timeupdate` only fires ~4x/sec, letting clips overshoot their out point by a
@@ -395,9 +855,13 @@ function enforceBounds() {
     if (previewIdx >= segs.length) previewIdx = 0;
     const seg = segs[previewIdx];
     const t = player.currentTime;
-    if (t >= seg.start && t < seg.end) return;  // inside the current clip — let it play
+    if (t >= seg.start && t < seg.end) {
+      syncPreviewSelection();
+      return;  // inside the current clip — let it play
+    }
     previewIdx = (previewIdx + 1) % segs.length;  // step to the next clip in the list
     player.currentTime = segs[previewIdx].start;
+    syncPreviewSelection(true);
     return;
   }
   // Edge-drag scrub: pause exactly at the segment's out point.
@@ -421,6 +885,7 @@ async function loadWave() {
     document.getElementById('wave-hint').style.display = 'none';
     sizeWave();
     drawWave();
+    redrawDetailWave(true);
     redrawAllSegWaves(true);
   } catch (e) {
     document.getElementById('wave-hint').textContent = 'waveform unavailable';
@@ -432,7 +897,9 @@ function sizeWave() {
   wave.width = wave.clientWidth * dpr;
   wave.height = wave.clientHeight * dpr;
 }
-window.addEventListener('resize', () => { sizeWave(); drawWave(); redrawAllSegWaves(true); });
+window.addEventListener('resize', () => {
+  sizeWave(); drawWave(); redrawDetailWave(true); redrawAllSegWaves(true);
+});
 
 const duration = () => (wf && wf.duration) || player.duration || 1;
 const xOf = t => (t / duration()) * wave.width;
@@ -447,12 +914,26 @@ function drawWave() {
   const gridColor = css.getPropertyValue('--wave-grid').trim() || 'rgba(255,255,255,0.12)';
   wctx.clearRect(0, 0, W, H);
 
+  // Material already used by the video's other clips: faint amber fill with a
+  // dashed outline, painted first so the active (green) segments sit on top.
+  otherSegments.forEach(s => {
+    const x0 = xOf(s.start), x1 = xOf(s.end);
+    wctx.fillStyle = 'rgba(240,180,90,0.10)';
+    wctx.fillRect(x0, 0, x1 - x0, H);
+    wctx.strokeStyle = 'rgba(240,180,90,0.75)';
+    wctx.lineWidth = 1.5;
+    wctx.setLineDash([5 * dpr, 4 * dpr]);
+    wctx.strokeRect(x0 + 1, 1, (x1 - x0) - 2, H - 2);
+    wctx.setLineDash([]);
+  });
+
   segments.forEach((s, i) => {
     const x0 = xOf(s.start), x1 = xOf(s.end);
-    wctx.fillStyle = i === selectedSeg ? 'rgba(62,207,142,0.28)' : 'rgba(62,207,142,0.14)';
+    const sel = i === selectedSeg;
+    wctx.fillStyle = sel ? 'rgba(240,180,90,0.28)' : 'rgba(62,207,142,0.14)';
     wctx.fillRect(x0, 0, x1 - x0, H);
-    if (i === selectedSeg) {
-      wctx.strokeStyle = 'rgba(62,207,142,0.95)';
+    if (sel) {
+      wctx.strokeStyle = 'rgba(240,180,90,0.95)';
       wctx.lineWidth = 2;
       wctx.strokeRect(x0 + 1, 1, (x1 - x0) - 2, H - 2);
     }
@@ -483,11 +964,11 @@ function drawWave() {
     wctx.fillText(`${t}s`, xOf(t) + 3, H - 4);
   }
 
-  wctx.fillStyle = 'rgba(62,207,142,0.95)';
-  for (const s of segments) {
+  segments.forEach((s, i) => {
+    wctx.fillStyle = i === selectedSeg ? 'rgba(240,180,90,0.95)' : 'rgba(62,207,142,0.95)';
     wctx.fillRect(xOf(s.start) - 1, 0, 2, H);
     wctx.fillRect(xOf(s.end) - 1, 0, 2, H);
-  }
+  });
 
   wctx.fillStyle = '#ef7070';
   for (const t of [pending.start, pending.end]) {
@@ -497,17 +978,27 @@ function drawWave() {
 
   wctx.fillStyle = '#5aa9f0';
   wctx.fillRect(xOf(player.currentTime) - 1, 0, 2, H);
+
+  if (waveHoverX !== null && !dragging) {
+    const hx = waveHoverX * dpr;
+    wctx.fillStyle = 'rgba(255,255,255,0.85)';
+    wctx.fillRect(hx - Math.max(1, dpr * 0.5), 0, Math.max(1, dpr), H);
+  }
 }
 
 (function tick() {
   enforceBounds();
   drawWave();
+  updateTranscriptFocus(false);
+  if (selectedSeg !== null) drawDetailWave();
   if (!player.paused) redrawAllSegWaves(false);
   requestAnimationFrame(tick);
 })();
 
 let dragging = null;
 const GRAB_PX = 8;
+let waveHoverX = null;   // css-px scrub preview on the main waveform
+let detailHoverX = null; // css-px scrub preview on the detail strip
 
 function timeAt(e) {
   const rect = wave.getBoundingClientRect();
@@ -545,18 +1036,16 @@ function setSegEdge(i, edge, t) {
   t = Math.max(0, Math.min(t, duration()));
   if (edge === 'start') s.start = +Math.min(t, s.end - 0.1).toFixed(2);
   else s.end = +Math.max(t, s.start + 0.1).toFixed(2);
-  syncSegInputs(i);
+  syncSegLen(i);
+  if (i === selectedSeg) syncDetailLen();
   updateTotal();
+  drawDetailWave();
   drawSegWave(i);
 }
 
-function syncSegInputs(i) {
-  const a = document.getElementById(`seg-start-${i}`);
-  const b = document.getElementById(`seg-end-${i}`);
+function syncSegLen(i) {
   const len = document.getElementById(`seg-len-${i}`);
-  if (a) a.value = segments[i].start.toFixed(1);
-  if (b) b.value = segments[i].end.toFixed(1);
-  if (len) len.textContent = `(${(segments[i].end - segments[i].start).toFixed(1)}s)`;
+  if (len) len.textContent = `${Math.round(segments[i].end - segments[i].start)}s`;
 }
 
 wave.addEventListener('pointerdown', e => {
@@ -566,32 +1055,64 @@ wave.addEventListener('pointerdown', e => {
   const h = handleAt(e);
   const t = timeAt(e);
   if (h) {
-    pushUndo();
-    dragging = h;
-    if (previewMode) player.pause();  // freeze the pass while dragging an edge
-    if (h.kind === 'pending') { pending[h.edge] = t; renderPending(); }
-    else { selectedSeg = h.index; setSegEdge(h.index, h.edge, t); }
+    // Arm an edge drag, but don't move the edge until the pointer actually
+    // travels — a plain click near a handle should scrub, not trim.
+    dragging = { ...h, ox: e.clientX, oy: e.clientY, moved: false, t0: t };
+    if (previewMode) player.pause();
+    if (h.kind === 'seg') {
+      selectedSeg = h.index;
+      highlightSelectedRow();
+      syncDetailStrip();
+      drawWave();
+    }
   } else {
     const i = segAtTime(t);
     selectedSeg = i >= 0 ? i : null;
     dragging = { kind: 'scrub' };
     player.currentTime = t;
     renderSegments();
+    if (i >= 0) playSegFrom(i, t);
+    else { highlightSelectedRow(); syncDetailStrip(); drawWave(); }
   }
 });
 wave.addEventListener('pointermove', e => {
+  const rect = wave.getBoundingClientRect();
+  waveHoverX = Math.min(rect.width, Math.max(0, e.clientX - rect.left));
   if (!dragging) {
     const h = handleAt(e);
-    wave.style.cursor = h ? 'ew-resize' : (segAtTime(timeAt(e)) >= 0 ? 'pointer' : 'crosshair');
+    wave.style.cursor = h ? 'ew-resize' : 'crosshair';
     return;
   }
   const t = timeAt(e);
-  if (dragging.kind === 'scrub') player.currentTime = t;
-  else if (dragging.kind === 'pending') { pending[dragging.edge] = t; renderPending(); }
+  if (dragging.kind === 'scrub') {
+    player.currentTime = t;
+    return;
+  }
+  // Edge / pending-handle drag: require a few px of movement before trimming.
+  if (!dragging.moved) {
+    if (Math.hypot(e.clientX - dragging.ox, e.clientY - dragging.oy) < 4) return;
+    dragging.moved = true;
+    pushUndo();
+  }
+  if (dragging.kind === 'pending') { pending[dragging.edge] = t; renderPending(); }
   else setSegEdge(dragging.index, dragging.edge, t);
 });
+wave.addEventListener('pointerleave', () => { waveHoverX = null; });
 wave.addEventListener('pointerup', () => {
   if (dragging) {
+    if ((dragging.kind === 'seg' || dragging.kind === 'pending') && !dragging.moved) {
+      // Click on/near a handle with no drag → seek, don't trim.
+      const t = dragging.t0;
+      const i = dragging.kind === 'seg' ? dragging.index : segAtTime(t);
+      selectedSeg = i >= 0 ? i : selectedSeg;
+      highlightSelectedRow();
+      syncDetailStrip();
+      player.currentTime = t;
+      if (i >= 0) playSegFrom(i, t);
+      else drawWave();
+      dragging = null;
+      return;
+    }
     if (dragging.kind === 'pending') {
       if (dragging.edge === 'start' && pending.start !== null) auditionStart(pending.start);
       else if (dragging.edge === 'end' && pending.end !== null) auditionEnd(pending.end);
@@ -626,59 +1147,65 @@ document.addEventListener('keydown', e => {
     if (typing) return;
     e.preventDefault();
     if (player.paused) player.play(); else player.pause();
+    return;
+  }
+  // Mark segment: ← start, → end, ↓ add (ignored while typing / with modifiers).
+  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); setStart(); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); setEnd(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); addSegment(); return; }
   }
 });
 
 loadWave();
+function syncExportControls() {
+  const has = segments.length > 0;
+  const segmentsBar = document.getElementById('segments-bar');
+  const exportPanel = document.getElementById('export-panel');
+  if (segmentsBar) segmentsBar.hidden = !has;
+  if (exportPanel) exportPanel.hidden = !has;
+  // Deleting the last segment while previewing would leave a stuck pass.
+  if (!has && previewMode) setPreviewMode(false);
+}
 function renderSegments() {
+  syncExportControls();
   const box = document.getElementById('segments');
   box.innerHTML = segments.length ? '' : '<div class="meta">No segments yet — set start/end and add one.</div>';
   segments.forEach((s, i) => {
     const div = document.createElement('div');
     div.className = 'seg-row' + (i === selectedSeg ? ' selected' : '');
-    div.onclick = ev => {
-      if (ev.target.closest('button') || ev.target.closest('input') || ev.target.closest('canvas') || ev.target.closest('.seg-grip')) return;
-      selectedSeg = i; renderSegments();
-    };
-    div.innerHTML = `<div class="seg-main">
-      <span class="seg-grip" title="Drag to reorder" aria-label="Drag to reorder">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="5" r="1.6"/><circle cx="15" cy="5" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="19" r="1.6"/><circle cx="15" cy="19" r="1.6"/></svg>
+    div.innerHTML = `<span class="seg-grip" title="Drag vertically to reorder" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><circle cx="9" cy="5" r="1.6"/><circle cx="15" cy="5" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="19" r="1.6"/><circle cx="15" cy="19" r="1.6"/></svg>
       </span>
-      <input type="number" id="seg-start-${i}" class="seg-num" step="0.1" min="0" value="${s.start.toFixed(1)}"
-             title="Start (seconds) — changing it plays from there"
-             onchange="updateSegment(${i}, 'start', this.value)">
-      <span class="meta">→</span>
-      <input type="number" id="seg-end-${i}" class="seg-num" step="0.1" min="0" value="${s.end.toFixed(1)}"
-             title="End (seconds)" onchange="updateSegment(${i}, 'end', this.value)">
-      <span class="meta">s</span>
-      <span class="meta" id="seg-len-${i}">(${(s.end - s.start).toFixed(1)}s)</span>
-      <span style="margin-left:auto"></span>
-      <button type="button" title="Preview" onclick="previewSegment(${i})">▶</button>
-      <button type="button" class="reject seg-del" title="Delete segment (or select + Delete key)" aria-label="Delete segment" onclick="removeSegment(${i})"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+      <div class="seg-pill">
+        <span class="seg-len" id="seg-len-${i}">${Math.round(s.end - s.start)}s</span>
+        <button type="button" class="seg-del" title="Delete segment (or select + Delete key)" aria-label="Delete segment"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
       </div>
-      <canvas class="seg-wave" id="seg-wave-${i}" title="Drag the green edges to fine-trim. Click to play from there up to the end line (it stops so you can check the transition). The dim sides are lead-in / lead-out room."></canvas>`;
+      <canvas class="seg-wave" id="seg-wave-${i}" title="Drag edges to trim · drag vertically to reorder · click to play (again to play from click)"></canvas>`;
     box.appendChild(div);
 
-    // Drag-to-reorder: only the grip handle arms dragging so canvas/input edits still work.
-    const grip = div.querySelector('.seg-grip');
-    grip.addEventListener('mousedown', () => { div.draggable = true; });
-    grip.addEventListener('mouseup', () => { div.draggable = false; });
-    div.addEventListener('dragstart', e => {
-      segDragBegin(i);
-      e.dataTransfer.effectAllowed = 'move';
-      try { e.dataTransfer.setData('text/plain', String(i)); } catch (_) {}
-      // Deferred a tick: the browser snapshots the drag image right after this
-      // handler returns, so hiding the row now would drag an invisible ghost.
-      setTimeout(() => div.classList.add('dragging'), 0);
+    div.querySelector('.seg-del').addEventListener('click', ev => {
+      ev.stopPropagation();
+      removeSegment(i);
     });
-    div.addEventListener('dragend', () => {
-      div.draggable = false;
-      segDragClear();
-    });
-    initSegWave(i, div.querySelector(`#seg-wave-${i}`));
+    const canvas = div.querySelector('.seg-wave');
+    canvas.draggable = false;
+
+    sizeSegWave(i);
+    drawSegWave(i);
   });
   updateTotal();
   drawWave();
+  syncDetailStrip();
+}
+
+function selectSegment(i) {
+  if (i === null || i < 0 || i >= segments.length) return;
+  selectedSeg = i;
+  highlightSelectedRow();
+  syncDetailStrip();
+  drawWave();
+  previewSegment(i);
 }
 
 let frozenSegIdx = null, frozenSegWin = null;
@@ -713,7 +1240,7 @@ function drawSegWave(i) {
   const s = segments[i], win = segWindow(i), span = (win.b - win.a) || 1;
   const xOfT = t => ((t - win.a) / span) * W;
 
-  ctx.fillStyle = 'rgba(62,207,142,0.16)';
+  ctx.fillStyle = i === selectedSeg ? 'rgba(240,180,90,0.28)' : 'rgba(62,207,142,0.14)';
   ctx.fillRect(xOfT(s.start), 0, xOfT(s.end) - xOfT(s.start), H);
 
   if (wf && wf.peaks && wf.peaks.length) {
@@ -732,7 +1259,7 @@ function drawSegWave(i) {
     ctx.fillRect(0, mid - 1, W, 2);
   }
 
-  ctx.fillStyle = 'rgba(62,207,142,0.95)';
+  ctx.fillStyle = i === selectedSeg ? 'rgba(240,180,90,0.95)' : 'rgba(62,207,142,0.95)';
   ctx.fillRect(xOfT(s.start) - 1, 0, 2, H);
   ctx.fillRect(xOfT(s.end) - 1, 0, 2, H);
 
@@ -741,18 +1268,127 @@ function drawSegWave(i) {
     ctx.fillStyle = '#5aa9f0';
     ctx.fillRect(xOfT(pt) - 1, 0, 2, H);
   }
+
+  // Hover scrub line: where a click would seek / play from.
+  if (segHover && segHover.i === i) {
+    const hx = segHover.x * dpr;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(hx - Math.max(1, dpr * 0.5), 0, Math.max(1, dpr), H);
+  }
 }
 
-function initSegWave(i, canvas) {
+function redrawAllSegWaves(resize) {
+  segments.forEach((_, i) => { if (resize) sizeSegWave(i); drawSegWave(i); });
+}
+
+function clearSegmentSelection() {
+  selectedSeg = null;
+  clearSegHover();
+  detailHoverX = null;
+  highlightSelectedRow();
+  syncDetailStrip();
+  drawWave();
+}
+
+function syncDetailLen() {
+  const len = document.getElementById('detail-strip-len');
+  const i = selectedSeg;
+  if (!len || i === null || !segments[i]) return;
+  len.textContent = `${Math.round(segments[i].end - segments[i].start)}s`;
+}
+
+function syncDetailStrip() {
+  const strip = document.getElementById('detail-strip');
+  if (!strip) return;
+  const i = selectedSeg;
+  const show = i !== null && i >= 0 && i < segments.length;
+  strip.hidden = !show;
+  if (!show) return;
+  syncDetailLen();
+  // Size after un-hiding so clientWidth is real.
+  requestAnimationFrame(() => redrawDetailWave(true));
+}
+
+function sizeDetailWave() {
+  const canvas = document.getElementById('detail-wave');
+  if (!canvas || !canvas.clientWidth) return;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+}
+
+function drawDetailWave() {
+  const canvas = document.getElementById('detail-wave');
+  const i = selectedSeg;
+  if (!canvas || i === null || !segments[i] || !canvas.width) return;
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height, mid = H / 2;
+  const css = getComputedStyle(document.documentElement);
+  const barColor = css.getPropertyValue('--wave-bar').trim() || 'rgba(255,255,255,0.32)';
+  const barOn = css.getPropertyValue('--wave-bar-on').trim() || 'rgba(255,255,255,0.92)';
+  ctx.clearRect(0, 0, W, H);
+
+  const s = segments[i], win = segWindow(i), span = (win.b - win.a) || 1;
+  const xOfT = t => ((t - win.a) / span) * W;
+
+  ctx.fillStyle = 'rgba(240,180,90,0.28)';
+  ctx.fillRect(xOfT(s.start), 0, xOfT(s.end) - xOfT(s.start), H);
+
+  if (wf && wf.peaks && wf.peaks.length) {
+    const n = wf.peaks.length, total = duration(), step = Math.max(2, Math.round(2 * dpr));
+    for (let x = 0; x < W; x += step) {
+      const t = win.a + (x / W) * span;
+      if (t < 0 || t > total) continue;
+      const k = Math.min(n - 1, Math.max(0, Math.floor((t / total) * n)));
+      const inSeg = t >= s.start && t <= s.end;
+      const h = Math.max(1, wf.peaks[k] * (H * 0.8));
+      ctx.fillStyle = inSeg ? barOn : barColor;
+      ctx.fillRect(x, mid - h / 2, Math.max(1, step * 0.65), h);
+    }
+  } else {
+    ctx.fillStyle = barColor;
+    ctx.fillRect(0, mid - 1, W, 2);
+  }
+
+  // Edge handles — thicker than the overview so they're easy to grab.
+  ctx.fillStyle = 'rgba(240,180,90,0.95)';
+  ctx.fillRect(xOfT(s.start) - 2, 0, 4, H);
+  ctx.fillRect(xOfT(s.end) - 2, 0, 4, H);
+
+  const pt = player.currentTime;
+  if (pt >= win.a && pt <= win.b) {
+    ctx.fillStyle = '#5aa9f0';
+    ctx.fillRect(xOfT(pt) - 1, 0, 2, H);
+  }
+
+  if (detailHoverX !== null) {
+    const hx = detailHoverX * dpr;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(hx - Math.max(1, dpr * 0.5), 0, Math.max(1, dpr), H);
+  }
+}
+
+function redrawDetailWave(resize) {
+  if (selectedSeg === null || selectedSeg >= segments.length) return;
+  if (resize) sizeDetailWave();
+  drawDetailWave();
+}
+
+(function initDetailWave() {
+  const canvas = document.getElementById('detail-wave');
   if (!canvas) return;
-  const GRAB = 9;
+  const GRAB = 10;
   const winX = clientX => {
+    const i = selectedSeg;
     const r = canvas.getBoundingClientRect();
     const win = segWindow(i), span = (win.b - win.a) || 1;
     const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
-    return { t: win.a + frac * span, r, win, span };
+    return { t: win.a + frac * span, r, win, span, i };
   };
   const edgeAt = clientX => {
+    const i = selectedSeg;
+    if (i === null || !segments[i]) return null;
     const { r, win, span } = winX(clientX);
     const x = clientX - r.left;
     const px = t => ((t - win.a) / span) * r.width;
@@ -765,20 +1401,21 @@ function initSegWave(i, canvas) {
   };
   let drag = null;
   canvas.addEventListener('pointerdown', ev => {
+    const i = selectedSeg;
+    if (i === null || !segments[i]) return;
     cancelPlayback();
-    editing = true;  // hold the preview-mode flow steady while dragging
+    editing = true;
+    detailHoverX = null;
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic */ }
-    if (selectedSeg !== i) { selectedSeg = i; highlightSelectedRow(); }
     const edge = edgeAt(ev.clientX);
     const { t } = winX(ev.clientX);
     if (edge) {
       pushUndo(); drag = edge;
-      if (previewMode) player.pause();  // freeze the pass while dragging an edge
+      if (previewMode) player.pause();
       frozenSegWin = null; frozenSegIdx = null;
       frozenSegWin = segWindow(i); frozenSegIdx = i;
-      setSegEdge(i, edge, t); drawSegWave(i);
-    }
-    else {
+      setSegEdge(i, edge, t); drawDetailWave();
+    } else {
       drag = 'scrub';
       player.currentTime = Math.max(0, t);
       if (t < segments[i].end - 0.02) { activeStop = segments[i].end; player.play(); }
@@ -786,55 +1423,59 @@ function initSegWave(i, canvas) {
     }
   });
   canvas.addEventListener('pointermove', ev => {
-    if (!drag) { canvas.style.cursor = edgeAt(ev.clientX) ? 'ew-resize' : 'pointer'; return; }
-    const { t } = winX(ev.clientX);
+    if (selectedSeg === null) return;
+    const r = canvas.getBoundingClientRect();
+    if (!drag) {
+      detailHoverX = Math.min(r.width, Math.max(0, ev.clientX - r.left));
+      canvas.style.cursor = edgeAt(ev.clientX) ? 'ew-resize' : 'crosshair';
+      drawDetailWave();
+      return;
+    }
+    detailHoverX = null;
+    const { t, i } = winX(ev.clientX);
     if (drag === 'scrub') player.currentTime = Math.max(0, t);
-    else { setSegEdge(i, drag, t); drawSegWave(i); }
+    else { setSegEdge(i, drag, t); drawDetailWave(); }
+  });
+  canvas.addEventListener('pointerleave', () => {
+    if (drag) return;
+    detailHoverX = null;
+    drawDetailWave();
   });
   canvas.addEventListener('pointerup', () => {
     editing = false;
-    if (drag === 'start') {
-      auditionStart(segments[i].start, segments[i].end, i);
-    } else if (drag === 'end') {
-      auditionEnd(segments[i].end, i);  // replay the last 0.5s into the out point
+    const i = selectedSeg;
+    if (i !== null && segments[i]) {
+      if (drag === 'start') auditionStart(segments[i].start, segments[i].end, i);
+      else if (drag === 'end') auditionEnd(segments[i].end, i);
     }
     const wasEdge = drag && drag !== 'scrub';
     frozenSegWin = null; frozenSegIdx = null;
-    if (wasEdge) renderSegments();
+    if (wasEdge) {
+      // Refresh list length chips + detail pill without rebuilding the strip.
+      syncSegLen(i);
+      updateTotal();
+      syncDetailLen();
+      drawWave();
+      drawDetailWave();
+    }
     drag = null;
   });
-  sizeSegWave(i);
-  drawSegWave(i);
-}
-
-function redrawAllSegWaves(resize) {
-  segments.forEach((_, i) => { if (resize) sizeSegWave(i); drawSegWave(i); });
-}
+})();
 
 function highlightSelectedRow() {
   document.querySelectorAll('#segments .seg-row').forEach((el, idx) =>
     el.classList.toggle('selected', idx === selectedSeg));
 }
 
-function updateSegment(i, key, val) {
-  let v = parseFloat(val);
-  if (isNaN(v)) return;
-  v = Math.max(0, Math.min(v, duration()));
-  pushUndo();
-  segments[i][key] = +v.toFixed(1);
-  const lenEl = document.getElementById(`seg-len-${i}`);
-  if (lenEl) lenEl.textContent = `(${(segments[i].end - segments[i].start).toFixed(1)}s)`;
-  updateTotal();
-  drawWave();
-  drawSegWave(i);
-  if (key === 'start') auditionStart(segments[i].start, null, i);
-  else if (key === 'end') auditionEnd(segments[i].end, i);
-}
-
 function updateTotal() {
+  const el = document.getElementById('total-len');
+  if (!el) return;
+  if (!segments.length) { el.innerHTML = ''; return; }
   const total = segments.reduce((a, s) => a + (s.end - s.start), 0);
-  document.getElementById('total-len').textContent =
-    segments.length ? `Total clip length: ${total.toFixed(1)}s${total > 300 ? ' — Threads max is 300s' : ''}` : '';
+  const secs = Math.round(total);
+  const over = total > 300;
+  el.innerHTML = `<span class="clip-total-value${over ? ' is-over' : ''}"`
+    + ` title="${over ? 'Threads max is 300s' : 'Total clip length'}">${secs}s</span>`;
 }
 function prepExport(form) {
   if (!segments.length) { alert('Add at least one segment.'); return false; }
@@ -891,7 +1532,7 @@ initSegDnd();
       <textarea form="post-form" name="caption" id="caption" class="ti-text" required
                 placeholder="Write the caption for this post…">{{ cut.draft_caption }}</textarea>
       <div id="caption-proposal" class="caption-proposal" hidden>
-        <div class="caption-proposal-label">Suggested caption — drafted from the trimmed transcript. Review before using.</div>
+        <div class="caption-proposal-label">Suggested caption — drafted from the clip's spoken audio. Review before using.</div>
         <p class="caption-proposal-text" id="caption-proposal-text"></p>
         <div class="ctl-strip">
           <button type="button" class="approve sm" onclick="acceptProposal()">Use this caption</button>
@@ -921,9 +1562,10 @@ initSegDnd();
           <button type="button" class="{{ 'is-on' if cut.use_subtitles and subs_position == 'top' }}"
                   data-pos="top" onclick="setSubsMode('top')">Top</button>
         </div>
-        {% if clip_transcript_text %}
-        <button type="button" class="ghost-line-btn" onclick="copyTranscript(this)"
-                title="Copy the clip's transcript">
+        {% if state.exported %}
+        <button type="button" class="ghost-line-btn" id="copy-transcript-btn"
+                onclick="copyTranscript(this)"
+                title="Copy the clip's spoken transcript">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           Copy transcript
         </button>
@@ -993,10 +1635,9 @@ initSegDnd();
   </div>
   {% endif %}
 
-  {% if clip_transcript_text %}
-  {# Clipboard source for the copy-transcript button (never displayed). #}
+  {# Clipboard source for Copy transcript. May be empty on first paint before
+     Whisper has run; copyTranscript() fetches /cut/{id}/transcript on demand. #}
   <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
-  {% endif %}
 
 </div>{# /thread-preview #}
 </div>{# /post-preview #}
@@ -1034,7 +1675,7 @@ initSegDnd();
       generateSubtitles(mode);
     }
 
-    async function generateSubtitles(position) {
+    async function generateSubtitles(position, after) {
       const status = document.getElementById('subs-status');
       const line = document.getElementById('subs-line');
       line.querySelectorAll('button').forEach(b => b.disabled = true);
@@ -1046,7 +1687,18 @@ initSegDnd();
         fd.append('position', position || subsPos || 'bottom');
         const r = await fetch('/cut/{{ cut.id }}/subtitles', { method: 'POST', body: fd });
         const d = await r.json();
-        if (d.url) { location.reload(); return; }
+        if (d.url) {
+          // Reload so Copy transcript + Suggest caption see the Whisper sidecar
+          // written during this pass. Preserve autocaption so the draft runs
+          // after the transcript exists (not against empty YouTube captions).
+          const params = new URLSearchParams(location.search);
+          params.set('step', 'post');
+          params.delete('autosubs');
+          if (after && after.autocaption) params.set('autocaption', '1');
+          else params.delete('autocaption');
+          location.href = location.pathname + '?' + params.toString();
+          return;
+        }
         status.textContent = d.error || 'Caption generation failed';
       } catch (e) { status.textContent = 'Caption generation failed: ' + e; }
       status.classList.remove('busy');
@@ -1055,13 +1707,34 @@ initSegDnd();
       // Nothing rendered — snap the toggle back to what's actually in effect.
       const field = document.getElementById('use-subtitles-field');
       markSubsMode(field && field.value === '1' ? subsPos : 'none');
+      // Captions failed: still try to draft from an on-demand Whisper pass.
+      if (after && after.autocaption && typeof suggestCaption === 'function') {
+        suggestCaption(true);
+      }
     }
 
-    {% if not cut.subtitled_clip_path %}
-    if (new URLSearchParams(location.search).get('autosubs') === '1') {
-      generateSubtitles(subsPos);
-    }
-    {% endif %}
+    (function bootPostMedia() {
+      const params = new URLSearchParams(location.search);
+      const wantAutocaption = params.get('autocaption') === '1';
+      const wantAutosubs = params.get('autosubs') === '1' && !hasSubs;
+      // Consume flags from the URL up front so a manual reload doesn't re-fire.
+      if (wantAutocaption || params.has('autosubs')) {
+        params.delete('autocaption');
+        params.delete('autosubs');
+        const qs = params.toString();
+        history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
+      }
+      if (wantAutosubs) {
+        generateSubtitles(subsPos, { autocaption: wantAutocaption });
+        return;
+      }
+      // Transcript already on disk (or operator skipped burned-in captions):
+      // draft now. Suggest caption will Whisper on demand if needed.
+      if (wantAutocaption) {
+        // suggestCaption is defined in the later script block; defer a tick.
+        setTimeout(() => { if (typeof suggestCaption === 'function') suggestCaption(true); }, 0);
+      }
+    })();
     // Briefly swap a copy button's contents for a checkmark, then restore —
     // works for icon-only buttons without wiping the icon permanently.
     function flashCopied(btn) {
@@ -1079,10 +1752,29 @@ initSegDnd();
     }
     async function copyTranscript(btn) {
       const box = document.getElementById('clip-transcript-plain');
-      const text = (box && box.value) || '';
-      if (!text.trim()) { alert('No transcript to copy.'); return; }
+      let text = (box && box.value) || '';
+      if (!text.trim()) {
+        const old = btn && btn.textContent;
+        if (btn) { btn.disabled = true; btn.classList.add('is-busy'); }
+        try {
+          const r = await fetch('/cut/{{ cut.id }}/transcript');
+          const d = await r.json();
+          if (!r.ok || !d.transcript) {
+            alert(d.error || 'No transcript to copy.');
+            return;
+          }
+          text = d.transcript;
+          if (box) box.value = text;
+        } catch (e) {
+          alert('Transcript failed: ' + e);
+          return;
+        } finally {
+          if (btn) { btn.disabled = false; btn.classList.remove('is-busy'); }
+        }
+      }
       try { await navigator.clipboard.writeText(text); }
       catch (e) {
+        if (!box) { alert('Copy failed: ' + e); return; }
         box.hidden = false; box.focus(); box.select();
         try { document.execCommand('copy'); } catch (e2) { alert('Copy failed: ' + e); return; }
         finally { box.hidden = true; }
@@ -1185,6 +1877,10 @@ initSegDnd();
         try {
           const r = await fetch('/cut/{{ cut.id }}/suggest-caption', { method: 'POST' });
           const d = await r.json();
+          if (d.transcript) {
+            const box = document.getElementById('clip-transcript-plain');
+            if (box) box.value = d.transcript;
+          }
           if (d.caption) showProposal(d.caption);
           else if (!silent) alert(d.error || 'No caption returned');
         } catch (e) { if (!silent) alert('Suggestion failed: ' + e); }
@@ -1255,18 +1951,10 @@ initSegDnd();
         if (captionEl.value !== lastSavedCaption) saveCaptionNow();
       });
       // Fresh export whose caption isn't operator-written yet: draft one from
-      // the clip's own transcript (compiled from the saved trim windows) and
+      // the clip's Whisper transcript (same source as burned-in captions) and
       // show it as a proposal to review — the field itself is never touched.
-      // The param is consumed immediately so the reload after subtitle
-      // generation doesn't fire a second suggestion.
-      (function () {
-        const params = new URLSearchParams(location.search);
-        if (params.get('autocaption') !== '1') return;
-        params.delete('autocaption');
-        const qs = params.toString();
-        history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
-        suggestCaption(true);
-      })();
+      // Boot is handled by bootPostMedia above (runs after autosubs when both
+      // flags are present, so we don't draft against an empty YouTube excerpt).
       const postForm = document.getElementById('post-form');
       function captionOk() {
         if (!postForm) return false;
@@ -1358,6 +2046,52 @@ initSegDnd();
     }
     flashCopied(btn);
   }
+</script>
+
+{# Multi-clip check-in: from the second exported clip onwards the export
+   redirect carries ?askmulti=N, and we ask whether the video is done. #}
+<dialog id="multi-clip-dialog" class="modal">
+  <div class="modal-head">
+    <strong>Done clipping this video?</strong>
+    <button type="button" class="btn ghost sm" aria-label="Close"
+            onclick="document.getElementById('multi-clip-dialog').close()">✕</button>
+  </div>
+  <p class="meta" style="margin: 0 0 16px;">That's clip <span id="multi-clip-n"></span> exported
+    from this video. It's marked as having more clips, so it stays under
+    “Selected to trim” on the dashboard until the marker is turned off.</p>
+  <div class="btn-group">
+    <button type="button" class="approve" id="multi-clip-off-btn"
+            onclick="multiClipDone()">Done — turn it off</button>
+    <button type="button" class="ghost"
+            onclick="document.getElementById('multi-clip-dialog').close()">More clips left — keep it</button>
+  </div>
+</dialog>
+<script>
+  async function multiClipDone() {
+    const btn = document.getElementById('multi-clip-off-btn');
+    btn.disabled = true;
+    try {
+      const r = await fetch('/video/{{ c.id }}/multi-clip', { method: 'POST' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = 'Failed — try again';
+      return;
+    }
+    document.getElementById('multi-clip-dialog').close();
+  }
+  (function bootMultiClipAsk() {
+    const params = new URLSearchParams(location.search);
+    const n = params.get('askmulti');
+    if (!n) return;
+    // Consume the flag immediately so reloads (including the automatic
+    // post-captioning reload) don't re-ask.
+    params.delete('askmulti');
+    const qs = params.toString();
+    history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
+    document.getElementById('multi-clip-n').textContent = n;
+    document.getElementById('multi-clip-dialog').showModal();
+  })();
 </script>
 {% endif %}
 {% endif %}

@@ -198,6 +198,7 @@ def build_post_rows(session) -> list[dict]:
         candidate: Candidate | None = post.candidate
         row = {
             "post_id": post.threads_media_id,
+            "post_pk": post.id,
             "permalink": post.permalink,
             "caption": post.caption[:120],
             "published_at": post.published_at.isoformat() if post.published_at else None,
@@ -262,13 +263,26 @@ def _mean(vals: list) -> float | None:
     return round(sum(vals) / len(vals), 1) if vals else None
 
 
+def _median(vals: list) -> float | None:
+    vals = sorted(v for v in vals if v is not None)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    if len(vals) % 2:
+        return round(float(vals[mid]), 1)
+    return round((vals[mid - 1] + vals[mid]) / 2, 1)
+
+
 def daily_timeseries(rows: list[dict], window: int = 7) -> dict:
     """Group posts by publish date across the full calendar span, then compute
-    per-day figures plus a trailing ``window``-day rolling average.
+    per-day figures plus trailing ``window``-day rolling mean and median.
 
     Rolling per-post metrics pool every post published in the trailing window
     (not an average-of-daily-averages), which is the honest reading when posting
-    cadence is uneven. Returns arrays aligned to a contiguous list of days.
+    cadence is uneven. The median is what the chart draws: a single viral post
+    barely moves it, whereas it drags the mean up for a whole window. Also emits
+    ``points`` — one entry per post — so each post can be drawn individually.
+    Returns arrays aligned to a contiguous list of days.
     """
     dated: list[tuple[dt.date, dict]] = []
     for r in rows:
@@ -281,8 +295,9 @@ def daily_timeseries(rows: list[dict], window: int = 7) -> dict:
             continue
         dated.append((day, r))
 
-    empty = {"days": [], "posts_per_day": [], "rolling_posts_7d": [],
-             "metrics": {m: {"daily_avg": [], "rolling_7d": []} for m in METRICS},
+    empty = {"days": [], "posts_per_day": [], "rolling_posts_7d": [], "points": [],
+             "metrics": {m: {"daily_avg": [], "rolling_7d": [], "rolling_median": []}
+                         for m in METRICS},
              "window": window}
     if not dated:
         return empty
@@ -301,19 +316,29 @@ def daily_timeseries(rows: list[dict], window: int = 7) -> dict:
 
     metrics_out: dict = {}
     for m in METRICS:
-        daily_avg, rolling = [], []
+        daily_avg, rolling, rolling_med = [], [], []
         for i, d in enumerate(days):
             daily_avg.append(_mean([r.get(m) for r in by_date.get(d, [])]))
             pool: list = []
             for j in range(max(0, i - window + 1), i + 1):
                 pool.extend(r.get(m) for r in by_date.get(days[j], []))
             rolling.append(_mean(pool))
-        metrics_out[m] = {"daily_avg": daily_avg, "rolling_7d": rolling}
+            rolling_med.append(_median(pool))
+        metrics_out[m] = {"daily_avg": daily_avg, "rolling_7d": rolling,
+                          "rolling_median": rolling_med}
+
+    points = [
+        {"date": day.isoformat(), "caption": (r.get("caption") or "")[:90],
+         "pk": r.get("post_pk"),
+         **{m: r.get(m) for m in METRICS}}
+        for day, r in sorted(dated, key=lambda t: t[0])
+    ]
 
     return {
         "days": [d.isoformat() for d in days],
         "posts_per_day": posts_per_day,
         "rolling_posts_7d": rolling_posts,
+        "points": points,
         "metrics": metrics_out,
         "window": window,
     }
