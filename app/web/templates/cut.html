@@ -1543,7 +1543,20 @@ initSegDnd();
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
         <span class="lbl">{{ "Regenerate caption" if cut.draft_caption else "Suggest caption" }}</span>
       </button>
-      <div class="ti-media">
+      {# ---- Platform preview toggle: what each platform receives — Threads
+           the 16:9 clip, Instagram the vertical composite. ---- #}
+      <div class="ti-clip-tools" style="margin-bottom: 6px;">
+        <div class="seg-toggle cat-toggle" id="platform-line" role="group"
+             aria-label="Preview per platform">
+          <button type="button" class="is-on" data-platform="threads"
+                  onclick="setPlatformPreview('threads')">Threads</button>
+          <button type="button" data-platform="instagram" id="platform-ig-btn"
+                  onclick="setPlatformPreview('instagram')"
+                  {{ '' if has_vertical else 'disabled' }}
+                  title="{{ 'Preview the vertical composite' if has_vertical else 'Generate the vertical composite below first' }}">Instagram</button>
+        </div>
+      </div>
+      <div class="ti-media" id="clip-media">
         {# ?v= cache-buster: the media URLs never change, so without it the browser
            keeps playing its cached copy after a re-export or caption regeneration. #}
         {% set media_v = (cut.updated_at.timestamp() | int) if cut.updated_at else 0 %}
@@ -1655,12 +1668,6 @@ initSegDnd();
         {% endif %}
       </div>
       <div class="meta" id="vertical-status" aria-live="polite"></div>
-      <div class="ti-media" id="vertical-preview-wrap" {{ '' if has_vertical else 'hidden' }}
-           style="max-width: 240px;">
-        <video id="vertical-player" controls preload="metadata"
-               style="aspect-ratio: 9 / 16; width: 100%;"
-               {% if has_vertical %}src="/media/vertical/{{ cut.id }}?v={{ media_v }}"{% endif %}></video>
-      </div>
       <textarea form="post-form" name="ig_caption" id="ig-caption" class="ti-text" maxlength="2200"
                 placeholder="Reel caption — leave empty to reuse the Threads caption.">{{ cut.ig_draft_caption }}</textarea>
     </div>
@@ -1696,6 +1703,10 @@ initSegDnd();
     // Whether a burned-in caption file already exists for this cut, and where it sits.
     let hasSubs = {{ 'true' if cut.subtitled_clip_path else 'false' }};
     let subsPos = {{ subs_position|tojson }};
+    // Whether the vertical Instagram composite exists, and which platform the
+    // hero preview is currently showing.
+    let hasVertical = {{ 'true' if has_vertical else 'false' }};
+    let platformMode = 'threads';
 
     // Swap the hero preview + download link + posted-version flag between the
     // captioned and the plain export.
@@ -1716,6 +1727,30 @@ initSegDnd();
         b.classList.toggle('is-on', b.dataset.pos === mode));
     }
 
+    // Hero preview per platform: Threads shows the 16:9 export (respecting the
+    // caption toggle), Instagram shows the vertical composite. The caption
+    // toggle only applies to the Threads file, so it snaps the view back.
+    function setPlatformPreview(which, freshSrc) {
+      if (which === 'instagram' && !hasVertical) return;
+      platformMode = which;
+      document.querySelectorAll('#platform-line button').forEach((b) => {
+        b.classList.toggle('is-on', b.dataset.platform === which);
+      });
+      const p = document.getElementById('clip-player');
+      const media = document.getElementById('clip-media');
+      const subsLine = document.getElementById('subs-line');
+      if (which === 'instagram') {
+        p.src = freshSrc || ('/media/vertical/{{ cut.id }}?v=' + Date.now());
+        media.classList.add('is-vertical');
+        subsLine.classList.add('is-disabled');
+      } else {
+        media.classList.remove('is-vertical');
+        subsLine.classList.remove('is-disabled');
+        const field = document.getElementById('use-subtitles-field');
+        swapPreview(field && field.value === '1');
+      }
+    }
+
     // ---- Instagram Reel: vertical composite + per-platform copy ----
     async function generateVertical() {
       const btn = document.getElementById('vertical-generate');
@@ -1728,11 +1763,14 @@ initSegDnd();
         const r = await fetch('/cut/{{ cut.id }}/vertical', { method: 'POST', body: fd });
         const d = await r.json();
         if (d.url) {
-          const wrap = document.getElementById('vertical-preview-wrap');
-          const player = document.getElementById('vertical-player');
-          wrap.hidden = false;
-          player.src = d.url + '?v=' + Date.now();
-          status.textContent = d.warning || 'Vertical ready — preview below.';
+          hasVertical = true;
+          const igBtn = document.getElementById('platform-ig-btn');
+          igBtn.disabled = false;
+          igBtn.title = 'Preview the vertical composite';
+          // Show the result right away in the hero preview.
+          setPlatformPreview('instagram', d.url + '?v=' + Date.now());
+          status.textContent = d.warning ||
+            'Vertical ready — previewing above (Threads/Instagram toggle).';
           btn.innerHTML = btn.innerHTML.replace('Generate vertical', 'Regenerate vertical');
         } else {
           status.textContent = d.error || 'Vertical render failed.';
@@ -1774,7 +1812,6 @@ initSegDnd();
       if (!box) return;
       box.addEventListener('change', () => {
         const status = document.getElementById('vertical-status');
-        const hasVertical = !document.getElementById('vertical-preview-wrap').hidden;
         if (box.checked && !hasVertical) {
           status.textContent = 'Generate the vertical composite before queueing with Instagram.';
         }
@@ -1785,6 +1822,8 @@ initSegDnd();
     // Reuses an already-rendered captioned file when the position matches;
     // otherwise kicks off a (re)generate at that spot.
     function setSubsMode(mode) {
+      // Captions belong to the Threads file — snap the preview back to it.
+      if (platformMode === 'instagram') setPlatformPreview('threads');
       if (mode === 'none') { markSubsMode('none'); swapPreview(false); return; }
       if (hasSubs && subsPos === mode) { markSubsMode(mode); swapPreview(true); return; }
       markSubsMode(mode);
