@@ -1662,10 +1662,12 @@ initSegDnd();
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
           {{ "Regenerate vertical" if has_vertical else "Generate vertical" }}
         </button>
-        {% if has_vertical %}
         <a class="ghost-line-btn" href="/cut/{{ cut.id }}/download-vertical" download
-           id="vertical-download" title="Download the vertical composite">Download</a>
-        {% endif %}
+           id="vertical-download" title="Download the vertical composite"
+           {{ '' if has_vertical else 'hidden' }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+          Download vertical
+        </a>
       </div>
       <div class="meta" id="vertical-status" aria-live="polite"></div>
       <textarea form="post-form" name="ig_caption" id="ig-caption" class="ti-text" maxlength="2200"
@@ -1743,9 +1745,18 @@ initSegDnd();
         p.src = freshSrc || ('/media/vertical/{{ cut.id }}?v=' + Date.now());
         media.classList.add('is-vertical');
         subsLine.classList.add('is-disabled');
+        // The toolbar download follows the previewed version.
+        const dl = document.getElementById('download-clip-link');
+        if (dl) {
+          dl.href = '/cut/{{ cut.id }}/download-vertical';
+          dl.title = dl.ariaLabel = 'Download vertical composite';
+        }
       } else {
         media.classList.remove('is-vertical');
         subsLine.classList.remove('is-disabled');
+        const dl = document.getElementById('download-clip-link');
+        if (dl) dl.title = dl.ariaLabel = 'Download clip';
+        // swapPreview also restores the download href for the Threads file.
         const field = document.getElementById('use-subtitles-field');
         swapPreview(field && field.value === '1');
       }
@@ -1767,6 +1778,8 @@ initSegDnd();
           const igBtn = document.getElementById('platform-ig-btn');
           igBtn.disabled = false;
           igBtn.title = 'Preview the vertical composite';
+          const dlV = document.getElementById('vertical-download');
+          if (dlV) dlV.hidden = false;
           // Show the result right away in the hero preview.
           setPlatformPreview('instagram', d.url + '?v=' + Date.now());
           status.textContent = d.warning ||

@@ -12,7 +12,7 @@
 {% endset %}
 {% set post_actions %}
   {% if has_clip %}
-    <a class="copy-btn" href="/post/{{ pid }}/download-clip" download
+    <a class="copy-btn" id="post-download-link" href="/post/{{ pid }}/download-clip" download
        title="Download clip" aria-label="Download clip">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
     </a>
@@ -476,17 +476,27 @@
     document.querySelectorAll('#platform-preview button').forEach((b) => {
       b.classList.toggle('is-on', b.dataset.platform === which);
     });
+    // The toolbar download follows the previewed version.
+    const dl = document.getElementById('post-download-link');
     if (which === 'instagram') {
       if (!player.dataset.threadsSrc) player.dataset.threadsSrc = player.getAttribute('src');
       player.src = {{ ig.video_url | tojson }};
       media.classList.add('is-vertical');
       if (igCap) igCap.hidden = false;
       if (thCap) thCap.style.display = 'none';
+      if (dl) {
+        dl.href = {{ ((ig.video_url | replace("/media/vertical/", "/cut/")) ~ "/download-vertical") | tojson }};
+        dl.title = dl.ariaLabel = 'Download vertical composite';
+      }
     } else {
       if (player.dataset.threadsSrc) player.src = player.dataset.threadsSrc;
       media.classList.remove('is-vertical');
       if (igCap) igCap.hidden = true;
       if (thCap) thCap.style.display = '';
+      if (dl) {
+        dl.href = '/post/{{ pid }}/download-clip';
+        dl.title = dl.ariaLabel = 'Download clip';
+      }
     }
   }
   {% endif %}
