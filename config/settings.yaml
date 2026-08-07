@@ -218,6 +218,10 @@ vertical:
   hook_text_color: "#FFFFFF"
   # Caption word size on the canvas (style/colors follow the `subtitles:` section).
   caption_font_px: 78
+  # Words per caption phrase. Larger than the 16:9 export's grouping on
+  # purpose: at caption_font_px on a 1080px canvas, ~6 words wrap into two
+  # balanced lines, so the strip shows two lines at a time.
+  caption_max_words: 6
 
 engagement:
   # HARD SCOPE LIMIT. The tool only ever reads/replies on the operator's own

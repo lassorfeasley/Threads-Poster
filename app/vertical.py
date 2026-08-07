@@ -135,8 +135,10 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
 
     # Caption styling follows the subtitles section (same brand look), with the
     # size in canvas pixels since the strip no longer scales with clip height.
+    # The group size is the vertical's own: bigger phrases than the 16:9
+    # export, so the strip fills two lines at a time.
     uppercase = bool(settings.get("subtitles.uppercase", False))
-    max_words = int(settings.get("subtitles.max_words_per_group", 3))
+    max_words = int(settings.get("vertical.caption_max_words", 6))
     caption_font_name = settings.get("subtitles.font_file", "FunnelDisplay-SemiBold.ttf")
     dwell = max(0.0, float(settings.get("subtitles.dwell_seconds", 2.0)))
     colors = {
@@ -171,6 +173,7 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
         concat = render_caption_concat(
             groups, tmpdir, width=width, strip_h=strip_h, fonts=fonts,
             colors=colors, position="top", uppercase=uppercase, dwell=dwell,
+            two_lines=True,
         )
 
         # Single pass. The background is the clip itself scaled to cover the

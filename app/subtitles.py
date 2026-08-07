@@ -168,9 +168,12 @@ def _load_fonts(px: int, font_name: str) -> tuple[ImageFont.FreeTypeFont, ImageF
 
 
 def _render_state(texts: list[str], active: int, width: int, strip_h: int,
-                  fonts: tuple, colors: dict, position: str = "bottom") -> Image.Image:
+                  fonts: tuple, colors: dict, position: str = "bottom",
+                  two_lines: bool = False) -> Image.Image:
     """One caption state: the group's words, with the ``active`` word set on a
-    solid rounded box in inverted colors (the "talks Renewables.org" look)."""
+    solid rounded box in inverted colors (the "talks Renewables.org" look).
+    ``two_lines`` forces the balanced two-line layout even when the phrase
+    would fit on one line (the vertical composite's steady two-line strip)."""
     from PIL import ImageFilter
 
     base_f, big_f = fonts
@@ -192,7 +195,7 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
     max_w = width * 0.92
     lines: list[list[int]] = [[i for i in range(len(texts))]]
     total = sum(slots) + space * (len(texts) - 1)
-    if total > max_w and len(texts) > 1:
+    if (total > max_w or two_lines) and len(texts) > 1:
         split, acc = 1, slots[0]
         for i in range(1, len(texts)):
             if acc + space + slots[i] > total / 2:
@@ -241,7 +244,8 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
 
 def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
                           strip_h: int, fonts: tuple, colors: dict, position: str,
-                          uppercase: bool, dwell: float) -> Path:
+                          uppercase: bool, dwell: float,
+                          two_lines: bool = False) -> Path:
     """Render one PNG per caption state plus an ffconcat list covering the whole
     clip: blank strips fill silences, and each finished phrase dwells on screen
     (up to ``dwell`` seconds, or until the next phrase). Returns the concat list
@@ -265,7 +269,8 @@ def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
             end = group[i + 1]["start"] if i + 1 < len(group) else g_end
             dur = max(0.05, end - w["start"])
             png = tmpdir / f"s{n_png:04d}.png"
-            _render_state(texts, i, width, strip_h, fonts, colors, position).save(png)
+            _render_state(texts, i, width, strip_h, fonts, colors, position,
+                          two_lines=two_lines).save(png)
             entries.append((png, dur))
             last_png = png
             n_png += 1
