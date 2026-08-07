@@ -120,8 +120,8 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
     bg_brightness = float(settings.get("vertical.background_brightness", 0.35))
     hook_y = int(settings.get("vertical.hook_y", 150))
     video_y = int(settings.get("vertical.video_y", 560))
-    caption_y = int(settings.get("vertical.caption_y", 1220))
-    strip_h = int(settings.get("vertical.caption_strip_px", 350))
+    caption_y = int(settings.get("vertical.caption_y", 1210))
+    strip_h = int(settings.get("vertical.caption_strip_px", 360))
     safe_px = int(settings.get("vertical.bottom_safe_px", 350))
     hook_font = settings.get("vertical.hook_font_file", "FunnelDisplay-ExtraBold.ttf")
     hook_px = int(settings.get("vertical.hook_font_px", 84))
@@ -136,10 +136,11 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
 
     # Caption styling follows the subtitles section (same brand look), with the
     # size in canvas pixels since the strip no longer scales with clip height.
-    # The group size is the vertical's own: bigger phrases than the 16:9
-    # export, so the strip fills two lines at a time.
+    # The group size and line count are the vertical's own: bigger phrases
+    # than the 16:9 export, wrapped naturally across up to caption_max_lines.
     uppercase = bool(settings.get("subtitles.uppercase", False))
-    max_words = int(settings.get("vertical.caption_max_words", 6))
+    max_words = int(settings.get("vertical.caption_max_words", 9))
+    caption_lines = int(settings.get("vertical.caption_max_lines", 3))
     caption_font_name = settings.get("subtitles.font_file", "FunnelDisplay-SemiBold.ttf")
     dwell = max(0.0, float(settings.get("subtitles.dwell_seconds", 2.0)))
     colors = {
@@ -174,7 +175,7 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
         concat = render_caption_concat(
             groups, tmpdir, width=width, strip_h=strip_h, fonts=fonts,
             colors=colors, position="top", uppercase=uppercase, dwell=dwell,
-            two_lines=True, align="left",
+            max_lines=caption_lines, align="left",
         )
 
         # Single pass. The background is the clip itself scaled to cover the

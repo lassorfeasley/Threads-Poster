@@ -206,10 +206,10 @@ vertical:
   # video_y .. video_y+608.
   video_y: 560
   # Top edge of the caption strip (word-by-word captions render from here down).
-  caption_y: 1220
-  # Height of the caption strip. caption_y + caption_strip_px should stay at or
-  # above height - bottom_safe_px.
-  caption_strip_px: 350
+  caption_y: 1210
+  # Height of the caption strip — deep enough for caption_max_lines lines.
+  # caption_y + caption_strip_px should stay at or above height - bottom_safe_px.
+  caption_strip_px: 360
   # Bottom band kept clear of platform UI (progress bar, actions, audio pill).
   bottom_safe_px: 350
   # Hook text styling (bundled Funnel weights; rendered by Pillow, not ffmpeg).
@@ -218,10 +218,11 @@ vertical:
   hook_text_color: "#FFFFFF"
   # Caption word size on the canvas (style/colors follow the `subtitles:` section).
   caption_font_px: 78
-  # Words per caption phrase. Larger than the 16:9 export's grouping on
-  # purpose: at caption_font_px on a 1080px canvas, ~6 words wrap into two
-  # balanced lines, so the strip shows two lines at a time.
-  caption_max_words: 6
+  # Words per caption phrase and how many lines they may wrap across. Phrases
+  # fill each line to the safe width and break naturally (ragged right), so
+  # ~9 words typically shows as three left-aligned lines.
+  caption_max_words: 9
+  caption_max_lines: 3
 
 engagement:
   # HARD SCOPE LIMIT. The tool only ever reads/replies on the operator's own

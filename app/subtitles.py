@@ -169,12 +169,14 @@ def _load_fonts(px: int, font_name: str) -> tuple[ImageFont.FreeTypeFont, ImageF
 
 def _render_state(texts: list[str], active: int, width: int, strip_h: int,
                   fonts: tuple, colors: dict, position: str = "bottom",
-                  two_lines: bool = False, align: str = "center") -> Image.Image:
+                  max_lines: int = 2, align: str = "center") -> Image.Image:
     """One caption state: the group's words, with the ``active`` word set on a
     solid rounded box in inverted colors (the "talks Renewables.org" look).
-    ``two_lines`` forces the balanced two-line layout even when the phrase
-    would fit on one line, and ``align="left"`` ragged-right lines against the
-    safe-width gutter (both used by the vertical composite)."""
+
+    ``align="center"`` (the 16:9 export) keeps the original layout: one
+    centered line, split into two balanced lines only on overflow.
+    ``align="left"`` (the vertical composite) wraps greedily instead — each
+    line fills the safe width and breaks naturally, up to ``max_lines``."""
     from PIL import ImageFilter
 
     base_f, big_f = fonts
@@ -192,28 +194,44 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
     # The box makes the active word occupy extra horizontal room.
     slots = [w + (2 * pad_x if i == active else 0) for i, w in enumerate(widths)]
 
-    # Wrap to two lines when the single line would overflow the safe width.
     max_w = width * 0.92
-    lines: list[list[int]] = [[i for i in range(len(texts))]]
-    total = sum(slots) + space * (len(texts) - 1)
-    if (total > max_w or two_lines) and len(texts) > 1:
-        split, acc = 1, slots[0]
-        for i in range(1, len(texts)):
-            if acc + space + slots[i] > total / 2:
-                split = i
-                break
-            acc += space + slots[i]
-        lines = [list(range(split)), list(range(split, len(texts)))]
+    if align == "left":
+        # Greedy ragged-right wrap: fill each line to the safe width, break
+        # where the text naturally overflows. The last line absorbs any
+        # remainder beyond max_lines (groups are sized to make that rare).
+        lines: list[list[int]] = [[]]
+        acc = 0.0
+        for i in range(len(texts)):
+            add = slots[i] if not lines[-1] else slots[i] + space
+            if lines[-1] and acc + add > max_w and len(lines) < max_lines:
+                lines.append([i])
+                acc = slots[i]
+            else:
+                lines[-1].append(i)
+                acc += add
+    else:
+        # Centered: one line, split into two balanced lines only on overflow.
+        lines = [[i for i in range(len(texts))]]
+        total = sum(slots) + space * (len(texts) - 1)
+        if total > max_w and len(texts) > 1:
+            split, acc = 1, slots[0]
+            for i in range(1, len(texts)):
+                if acc + space + slots[i] > total / 2:
+                    split = i
+                    break
+                acc += space + slots[i]
+            lines = [list(range(split)), list(range(split, len(texts)))]
 
     line_h = (ascent + descent) * 1.06
     if position == "top":
-        # Mirror of the bottom layout: same edge margin, lines flow downward
-        # from the top of the strip (which sits at the top of the frame).
+        # Lines flow downward from the top of the strip (which sits at the
+        # top of the frame).
         first = line_h * 0.55 - descent + ascent
-        baselines = [first] if len(lines) == 1 else [first, first + line_h]
+        baselines = [first + k * line_h for k in range(len(lines))]
     else:
-        baselines = ([strip_h - line_h * 0.55] if len(lines) == 1
-                     else [strip_h - line_h * 1.55, strip_h - line_h * 0.55])
+        # Lines stack upward from the bottom edge of the strip.
+        last = strip_h - line_h * 0.55
+        baselines = [last - (len(lines) - 1 - k) * line_h for k in range(len(lines))]
 
     # Soft drop shadow (separate blurred layer) keeps white text readable on
     # bright footage without the hard outline of the old style.
@@ -246,7 +264,7 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
 def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
                           strip_h: int, fonts: tuple, colors: dict, position: str,
                           uppercase: bool, dwell: float,
-                          two_lines: bool = False, align: str = "center") -> Path:
+                          max_lines: int = 2, align: str = "center") -> Path:
     """Render one PNG per caption state plus an ffconcat list covering the whole
     clip: blank strips fill silences, and each finished phrase dwells on screen
     (up to ``dwell`` seconds, or until the next phrase). Returns the concat list
@@ -271,7 +289,7 @@ def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
             dur = max(0.05, end - w["start"])
             png = tmpdir / f"s{n_png:04d}.png"
             _render_state(texts, i, width, strip_h, fonts, colors, position,
-                          two_lines=two_lines, align=align).save(png)
+                          max_lines=max_lines, align=align).save(png)
             entries.append((png, dur))
             last_png = png
             n_png += 1
