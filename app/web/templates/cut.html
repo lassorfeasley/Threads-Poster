@@ -1615,6 +1615,57 @@ initSegDnd();
     </div>
   </article>
 
+  {# ---- Instagram Reel: optional vertical composite that rides the same
+       queue action. Hook text renders on the video; the reel caption is
+       per-platform copy. ---- #}
+  <article class="thread-item is-reply" id="ig-section">
+    <div class="ti-gutter" aria-hidden="true">
+      <span class="ti-avatar">IG</span>
+    </div>
+    <div class="ti-main">
+      <div class="ti-head">
+        <span class="ti-name">Instagram Reel</span>
+        <span class="ti-type">vertical 1080×1920</span>
+        <span class="ti-tools">
+          <span class="save-state" id="ig-save-state" aria-live="polite"></span>
+          <label class="meta" style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" form="post-form" name="include_instagram" value="1"
+                   id="include-instagram" {{ 'checked' if include_instagram }}
+                   {{ '' if instagram_ok else 'disabled' }}>
+            Include with this post
+          </label>
+        </span>
+      </div>
+      {% if not instagram_ok %}
+      <p class="field-hint">Instagram isn't connected —
+        <a href="/threads-account">connect it</a> to queue reels alongside Threads posts.</p>
+      {% endif %}
+      <textarea id="hook-text" class="ti-text" maxlength="300"
+                placeholder="Hook text — rendered in the brand font at the top of the vertical frame.">{{ cut.hook_text }}</textarea>
+      <div class="ti-clip-tools">
+        <button type="button" class="ghost-line-btn" id="vertical-generate"
+                onclick="generateVertical()"
+                title="Compose the 1080×1920 reel: hook on top, clip mid-frame, captions below">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
+          {{ "Regenerate vertical" if has_vertical else "Generate vertical" }}
+        </button>
+        {% if has_vertical %}
+        <a class="ghost-line-btn" href="/cut/{{ cut.id }}/download-vertical" download
+           id="vertical-download" title="Download the vertical composite">Download</a>
+        {% endif %}
+      </div>
+      <div class="meta" id="vertical-status" aria-live="polite"></div>
+      <div class="ti-media" id="vertical-preview-wrap" {{ '' if has_vertical else 'hidden' }}
+           style="max-width: 240px;">
+        <video id="vertical-player" controls preload="metadata"
+               style="aspect-ratio: 9 / 16; width: 100%;"
+               {% if has_vertical %}src="/media/vertical/{{ cut.id }}?v={{ media_v }}"{% endif %}></video>
+      </div>
+      <textarea form="post-form" name="ig_caption" id="ig-caption" class="ti-text" maxlength="2200"
+                placeholder="Reel caption — leave empty to reuse the Threads caption.">{{ cut.ig_draft_caption }}</textarea>
+    </div>
+  </article>
+
   {% if threads_ok %}
   {# ---- Ship: buttons submit form#post-form via the form= attribute; JS
        confirms + validates the caption before anything fires. ---- #}
@@ -1664,6 +1715,71 @@ initSegDnd();
       document.querySelectorAll('#subs-line button').forEach(b =>
         b.classList.toggle('is-on', b.dataset.pos === mode));
     }
+
+    // ---- Instagram Reel: vertical composite + per-platform copy ----
+    async function generateVertical() {
+      const btn = document.getElementById('vertical-generate');
+      const status = document.getElementById('vertical-status');
+      btn.disabled = true;
+      status.textContent = 'Composing the vertical (runs Whisper first if the clip has no transcript yet)…';
+      try {
+        const fd = new FormData();
+        fd.append('hook_text', document.getElementById('hook-text').value);
+        const r = await fetch('/cut/{{ cut.id }}/vertical', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.url) {
+          const wrap = document.getElementById('vertical-preview-wrap');
+          const player = document.getElementById('vertical-player');
+          wrap.hidden = false;
+          player.src = d.url + '?v=' + Date.now();
+          status.textContent = d.warning || 'Vertical ready — preview below.';
+          btn.innerHTML = btn.innerHTML.replace('Generate vertical', 'Regenerate vertical');
+        } else {
+          status.textContent = d.error || 'Vertical render failed.';
+        }
+      } catch (e) {
+        status.textContent = 'Vertical render failed: ' + e;
+      }
+      btn.disabled = false;
+    }
+
+    // Autosave hook text + reel caption on blur (mirrors the caption autosave).
+    (function bindIgAutosave() {
+      const state = document.getElementById('ig-save-state');
+      let saveTimer = null;
+      async function saveIg() {
+        const fd = new FormData();
+        fd.append('hook_text', document.getElementById('hook-text').value);
+        fd.append('ig_caption', document.getElementById('ig-caption').value);
+        try {
+          await fetch('/cut/{{ cut.id }}/ig-copy', { method: 'POST', body: fd });
+          if (state) { state.textContent = 'Saved'; setTimeout(() => state.textContent = '', 1500); }
+        } catch (e) { /* retried on next blur */ }
+      }
+      for (const id of ['hook-text', 'ig-caption']) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener('blur', saveIg);
+        el.addEventListener('input', () => {
+          clearTimeout(saveTimer);
+          saveTimer = setTimeout(saveIg, 1200);
+        });
+      }
+    })();
+
+    // Queueing with the reel ticked needs a rendered vertical: warn early
+    // instead of bouncing off the server error.
+    (function guardIgQueue() {
+      const box = document.getElementById('include-instagram');
+      if (!box) return;
+      box.addEventListener('change', () => {
+        const status = document.getElementById('vertical-status');
+        const hasVertical = !document.getElementById('vertical-preview-wrap').hidden;
+        if (box.checked && !hasVertical) {
+          status.textContent = 'Generate the vertical composite before queueing with Instagram.';
+        }
+      });
+    })();
 
     // Three-state toggle: plain clip, or captions burned in at bottom/top.
     // Reuses an already-rendered captioned file when the position matches;

@@ -86,12 +86,25 @@
       <textarea form="queue-form" name="caption" id="caption" class="ti-text" maxlength="500"
                 placeholder="Write the caption for this post…">{{ caption }}</textarea>
       {% else %}
-      <div class="ti-text-static">{{ caption }}</div>
+      <div class="ti-text-static" id="caption-static">{{ caption }}</div>
       {% endif %}
-      <div class="ti-media">
+      {% if has_clip and ig and ig.video_url %}
+      {# ---- Platform preview toggle: the exact file each platform receives —
+           Threads gets the 16:9 clip, Instagram the vertical composite. ---- #}
+      <div class="ti-clip-tools" style="margin-bottom: 6px;">
+        <div class="seg-toggle cat-toggle" id="platform-preview" role="group"
+             aria-label="Preview per platform">
+          <button type="button" class="is-on" data-platform="threads"
+                  onclick="setPlatformPreview('threads')">Threads</button>
+          <button type="button" data-platform="instagram"
+                  onclick="setPlatformPreview('instagram')">Instagram</button>
+        </div>
+      </div>
+      {% endif %}
+      <div class="ti-media" id="post-media">
         {% if has_clip %}
           {# Play the post's attached file (often *_subs.mp4), not the plain trim. #}
-          <video src="/media/post/{{ pid }}" controls preload="metadata"></video>
+          <video id="post-player" src="/media/post/{{ pid }}" controls preload="metadata"></video>
         {% else %}
           <div class="empty" style="min-height: 160px; width: 100%;">
             <span class="icon">▷</span>
@@ -100,6 +113,13 @@
           </div>
         {% endif %}
       </div>
+      {% if has_clip and ig and ig.video_url %}
+      {# The reel's own caption, shown only while previewing Instagram. #}
+      <div id="ig-caption-preview" hidden>
+        <div class="ti-text-static">{{ ig.caption or caption }}</div>
+        {% if not ig.caption %}<div class="meta">Reel caption is empty — it reuses the Threads caption.</div>{% endif %}
+      </div>
+      {% endif %}
       {% if editable and (can_recaption or clip_transcript_text) %}
       {# Where Threads shows engagement icons, an unposted clip shows its
          controls: burned-in caption position + one-click transcript copy. #}
@@ -312,6 +332,41 @@
   </div>
   {% endif %}
 
+  {% if ig %}
+  {# ---- Paired Instagram reel: publishes right after this post's window. ---- #}
+  <div class="thread-actions">
+    <span class="ta-note">
+      Instagram Reel ·
+      {% if ig.status == "published" %}
+        <span class="badge supportive">published</span>
+        {% if ig.permalink %}<a href="{{ ig.permalink }}" target="_blank">open ↗</a>{% endif %}
+      {% elif ig.status == "failed" %}
+        <span class="badge hostile">failed</span>
+        {% if ig.error %}<span class="meta" style="color: var(--danger);">{{ ig.error[:160] }}</span>{% endif %}
+      {% else %}
+        <span class="badge">{{ ig.status }}</span>
+        <span class="meta">publishes with this post</span>
+      {% endif %}
+    </span>
+    {% if ig.status == "failed" %}
+    <form class="inline" method="post" action="/igpost/{{ ig.id }}/retry"
+          data-confirm="Publish this reel to Instagram now? Meta's processing can take a minute or two."
+          data-confirm-ok="Publish reel">
+      <input type="hidden" name="next" value="/post/{{ pid }}">
+      <button class="sm">Retry reel</button>
+    </form>
+    {% endif %}
+    {% if ig.status in ("queued", "draft", "failed") %}
+    <form class="inline" method="post" action="/igpost/{{ ig.id }}/cancel"
+          data-confirm="Remove the Instagram reel from this post? The Threads post stays queued."
+          data-confirm-ok="Remove reel" data-confirm-variant="danger">
+      <input type="hidden" name="next" value="/post/{{ pid }}">
+      <button class="reject sm">Remove reel</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+
   {% if editable %}
   {# ---- Save/publish: lives where the edits happen. The projected slot sits
        left; Update is ghost-quiet until caption/attribution change. ---- #}
@@ -410,6 +465,31 @@
     if (!ta || !btn) return;
     ta.addEventListener('input', () => { btn.hidden = ta.value.trim().length > 0; });
   })();
+  {% if has_clip and ig and ig.video_url %}
+  // Platform preview: swap the player between the Threads 16:9 file and the
+  // Instagram vertical composite (each is exactly what that platform receives).
+  function setPlatformPreview(which) {
+    const player = document.getElementById('post-player');
+    const media = document.getElementById('post-media');
+    const igCap = document.getElementById('ig-caption-preview');
+    const thCap = document.getElementById('caption') || document.getElementById('caption-static');
+    document.querySelectorAll('#platform-preview button').forEach((b) => {
+      b.classList.toggle('is-on', b.dataset.platform === which);
+    });
+    if (which === 'instagram') {
+      if (!player.dataset.threadsSrc) player.dataset.threadsSrc = player.getAttribute('src');
+      player.src = {{ ig.video_url | tojson }};
+      media.classList.add('is-vertical');
+      if (igCap) igCap.hidden = false;
+      if (thCap) thCap.style.display = 'none';
+    } else {
+      if (player.dataset.threadsSrc) player.src = player.dataset.threadsSrc;
+      media.classList.remove('is-vertical');
+      if (igCap) igCap.hidden = true;
+      if (thCap) thCap.style.display = '';
+    }
+  }
+  {% endif %}
   // Kebab menus: close when clicking anywhere outside the open menu.
   document.addEventListener('click', (e) => {
     document.querySelectorAll('details.ti-menu[open]').forEach((d) => {

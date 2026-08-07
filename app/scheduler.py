@@ -28,6 +28,7 @@ from .publishing import (
     clear_publishing,
     is_publish_active,
     mark_publishing,
+    publish_paired_reel,
     publish_post,
 )
 
@@ -77,6 +78,21 @@ def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
         p.pinned_window_key = ""
         recovered += 1
         log.warning("Recovered post %s stuck in 'publishing' -> 'failed'", p.id)
+    # Paired Instagram reels publish inline during the Threads publish, so a
+    # crash strands them the same way. A reel is in-flight exactly when its
+    # paired Threads post is actively publishing in this process.
+    from .models import InstagramPost
+
+    ig_rows = session.execute(
+        select(InstagramPost).where(InstagramPost.status == STATUS_PUBLISHING)
+    ).scalars().all()
+    for ig in ig_rows:
+        if only_inactive and ig.threads_post_pk and is_publish_active(ig.threads_post_pk):
+            continue
+        ig.status = "failed"
+        ig.error = _INTERRUPTED_PUBLISH_MSG
+        recovered += 1
+        log.warning("Recovered Instagram reel %s stuck in 'publishing' -> 'failed'", ig.id)
     return recovered
 
 
@@ -338,6 +354,11 @@ def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool
                 time.sleep(retry_delay)
         if not ok:
             log.warning("Queue post %s failed after %d attempt(s)", post_id, retries + 1)
+        if ok:
+            # After the publish transaction above has committed (see
+            # publish_paired_reel), and still inside the mark_publishing window
+            # so crash recovery can tell an in-flight reel from a stranded one.
+            publish_paired_reel(post_id)
     finally:
         clear_publishing(post_id)
 

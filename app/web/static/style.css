@@ -2634,6 +2634,11 @@ body.cal-committing #cal-layout {
   -webkit-box-orient: vertical;
 }
 .cal-event.card.pub .cal-ev-title { color: var(--text-dim); }
+/* Marker on posts that also carry a paired Instagram reel. */
+.cal-ev-reel {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
 /* Keep the lifted drag state readable on the taller cards. */
 .cal-event.card.cal-drag { cursor: grab; }
 
@@ -3056,6 +3061,13 @@ body.cal-committing #cal-layout {
 .ti-text-static.is-pending { color: var(--muted); font-style: italic; }
 
 .ti-media { margin-top: var(--sp-3); }
+/* Instagram preview: the 9:16 composite at phone-ish proportions. */
+.ti-media.is-vertical video {
+  width: auto;
+  max-height: 560px;
+  aspect-ratio: 9 / 16;
+  margin: 0 auto;
+}
 .ti-media video {
   display: block;
   width: 100%;

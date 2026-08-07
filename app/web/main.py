@@ -21,12 +21,12 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
-from .. import spend, threads_api, youtube
+from .. import instagram_api, spend, threads_api, youtube
 from ..analytics import generate_report, snapshot_metrics
 from ..categories import category_by_slug, category_options
 from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
 from ..config import (
-    load_caption_rules, load_first_reply, load_keywords, load_settings,
+    env, load_caption_rules, load_first_reply, load_keywords, load_settings,
     render_caption_guide, save_caption_rules, save_first_reply, save_keywords,
 )
 from ..db import (
@@ -57,6 +57,7 @@ from ..models import (
     Candidate,
     Channel,
     Cut,
+    InstagramPost,
     MetricSnapshot,
     MonitorRun,
     SchedulerState,
@@ -74,8 +75,11 @@ from ..publishing import (
     mark_publishing,
     maybe_post_first_reply,
     publish_clip,
+    publish_instagram_post,
+    publish_paired_reel,
     publish_post,
     queue_clip,
+    record_instagram_post,
     record_post,
 )
 from ..ranking import load_trait_weights, order_expr, sort_candidates
@@ -139,16 +143,24 @@ templates.env.globals["thumb_for"] = _thumb_for
 
 
 def _attention_count() -> int:
-    """Number of unacknowledged failed posts. Rendered on every page (the sidebar
-    notification bell), so it must never raise — return 0 on any error."""
+    """Number of unacknowledged failed posts (Threads + Instagram reels).
+    Rendered on every page (the sidebar notification bell), so it must never
+    raise — return 0 on any error."""
     try:
         with session_scope() as session:
-            return int(session.execute(
+            threads_failed = int(session.execute(
                 select(func.count()).select_from(ThreadsPost).where(
                     ThreadsPost.status == "failed",
                     ThreadsPost.attention_dismissed_at.is_(None),
                 )
             ).scalar_one())
+            ig_failed = int(session.execute(
+                select(func.count()).select_from(InstagramPost).where(
+                    InstagramPost.status == "failed",
+                    InstagramPost.attention_dismissed_at.is_(None),
+                )
+            ).scalar_one())
+            return threads_failed + ig_failed
     except Exception:
         return 0
 
@@ -946,7 +958,16 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
                 pass
         clip_transcript, clip_transcript_text = _load_clip_transcript(cut)
 
+        # Pending reel for this cut: pre-tick the Instagram toggle on requeue.
+        pending_reel = session.execute(
+            select(InstagramPost).where(
+                InstagramPost.cut_pk == cut.id,
+                InstagramPost.status.in_(["queued", "draft", "failed"]),
+            ).order_by(InstagramPost.created_at.desc()).limit(1)
+        ).scalar_one_or_none()
+
     threads_ok = threads_api.is_authenticated()
+    instagram_ok = instagram_api.is_authenticated()
     return templates.TemplateResponse(
         request, "cut.html",
         {"cut": cut, "c": c, "state": cut_state, "step": active_step,
@@ -955,6 +976,9 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "clip_transcript": clip_transcript,
          "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
+         "instagram_ok": instagram_ok,
+         "has_vertical": bool(cut.vertical_clip_path) and Path(cut.vertical_clip_path).exists(),
+         "include_instagram": bool(pending_reel),
          "account_name": threads_api.account_username(),
          "pending_post_status": pending_post_status,
          "pending_post_id": pending_post_id,
@@ -977,11 +1001,25 @@ def delete_cut(cut_id: int):
         if cut is None:
             return _flash("/", "Clip not found")
         candidate_id = cut.candidate_pk
+        reels = session.execute(
+            select(InstagramPost).where(InstagramPost.cut_pk == cut.id)
+        ).scalars().all()
+        deleted_reel_ids = set()
+        for ig in reels:
+            if ig.status == "published":
+                ig.cut_pk = None  # keep published history
+            else:
+                deleted_reel_ids.add(ig.id)
+                session.delete(ig)
         posts = session.execute(
             select(ThreadsPost).where(ThreadsPost.cut_pk == cut.id)
         ).scalars().all()
         for p in posts:
             if p.status in ("queued", "draft", "failed"):
+                # A surviving (published) reel must not reference a deleted post.
+                for ig in reels:
+                    if ig.threads_post_pk == p.id and ig.id not in deleted_reel_ids:
+                        ig.threads_post_pk = None
                 session.delete(p)
             else:
                 p.cut_pk = None  # keep published history, drop the link
@@ -1346,6 +1384,16 @@ def media_subtitled(cut_id: int):
         return FileResponse(cut.subtitled_clip_path, media_type="video/mp4")
 
 
+@app.get("/media/vertical/{cut_id}")
+def media_vertical(cut_id: int):
+    """The cut's 1080x1920 Instagram Reels composite (hook + clip + captions)."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.vertical_clip_path or not Path(cut.vertical_clip_path).exists():
+            return JSONResponse({"error": "no vertical composite"}, status_code=404)
+        return FileResponse(cut.vertical_clip_path, media_type="video/mp4")
+
+
 @app.get("/media/post/{post_id}")
 def media_post_clip(post_id: int):
     """Serve the exact clip attached to a post (captioned or plain).
@@ -1389,6 +1437,18 @@ def download_clip(cut_id: int, captioned: int = 1):
                             filename=f"{vid or 'clip'}-cut{cut.id}{suffix}.mp4")
 
 
+@app.get("/cut/{cut_id}/download-vertical")
+def download_vertical(cut_id: int):
+    """The vertical Reels composite as an attachment (for manual posting)."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.vertical_clip_path or not Path(cut.vertical_clip_path).exists():
+            return JSONResponse({"error": "no vertical composite"}, status_code=404)
+        vid = cut.candidate.video_id if cut.candidate else None
+        return FileResponse(cut.vertical_clip_path, media_type="video/mp4",
+                            filename=f"{vid or 'clip'}-cut{cut.id}-vertical.mp4")
+
+
 @app.get("/post/{post_id}/download-clip")
 def download_post_clip(post_id: int):
     """Download the clip attached to a post (used from the Posts page)."""
@@ -1408,7 +1468,8 @@ def download_post_clip(post_id: int):
 # --- Trim / export ----------------------------------------------------------------
 
 def _delete_if_unreferenced(session, paths: list[str]) -> None:
-    """Remove superseded clip files that no ThreadsPost still points at.
+    """Remove superseded clip files that no ThreadsPost or InstagramPost still
+    points at.
 
     Exports are versioned per run, so a pending post keeps the exact file it was
     queued with. We only reclaim the disk space when nothing references the old
@@ -1417,6 +1478,11 @@ def _delete_if_unreferenced(session, paths: list[str]) -> None:
         referenced = session.execute(
             select(ThreadsPost.id).where(ThreadsPost.clip_local_path == path).limit(1)
         ).scalar_one_or_none()
+        if referenced is None:
+            referenced = session.execute(
+                select(InstagramPost.id)
+                .where(InstagramPost.clip_local_path == path).limit(1)
+            ).scalar_one_or_none()
         if referenced is not None:
             continue
         try:
@@ -1455,14 +1521,15 @@ def export_clip(cut_id: int, segments_json: str = Form(...), as_new: str = Form(
             stamp = utcnow().strftime("%Y%m%dT%H%M%S")
             previous = ([] if save_as_new else
                         [target.trimmed_clip_path, target.subtitled_clip_path,
-                         target.clip_transcript_path])
+                         target.vertical_clip_path, target.clip_transcript_path])
             out = export_supercut(c.local_video_path, segments,
                                   f"{c.video_id}_cut{target.id}_{stamp}")
             target.trim_segments = json.dumps(segments)
             target.trimmed_clip_path = str(out)
             target.updated_at = utcnow()
-            # Any previously generated captions no longer match the new cut.
+            # Any previously generated captions/composites no longer match the new cut.
             target.subtitled_clip_path = ""
+            target.vertical_clip_path = ""
             target.clip_transcript_path = ""
             target.use_subtitles = False
             if previous:
@@ -1553,6 +1620,75 @@ def generate_subtitles(cut_id: int, position: str = Form("")):
             cut.subs_position = "top" if (position or "").lower() == "top" else "bottom"
             cut.updated_at = utcnow()
     return {"url": f"/media/subtitled/{cut_id}"}
+
+
+@app.post("/cut/{cut_id}/vertical")
+def generate_vertical(cut_id: int, hook_text: str = Form("")):
+    """Generate the 1080x1920 Instagram Reels composite for this cut (AJAX).
+
+    Composes the PLAIN trimmed export (the composite renders its own captions
+    below the video, so the burned-in 16:9 variant would double them). Runs
+    Whisper only if the word sidecar doesn't exist yet — same source as the
+    burned-in captions and Suggest caption.
+    """
+    from ..subtitles import clip_transcript_path_for
+    from ..vertical import VerticalCompositeError, create_vertical_composite
+
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+            return JSONResponse({"error": "Export a clip first"}, status_code=404)
+        # Persist the hook right away so it survives a failed render.
+        cut.hook_text = hook_text.strip()
+        cut.updated_at = utcnow()
+        clip_path = cut.trimmed_clip_path
+        transcript_path = cut.clip_transcript_path or None
+        previous_vertical = cut.vertical_clip_path
+    try:
+        out = create_vertical_composite(clip_path, hook_text,
+                                        transcript_path=transcript_path)
+    except VerticalCompositeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    except Exception as exc:
+        log.exception("Vertical composite failed for cut %s", cut_id)
+        return JSONResponse({"error": f"Vertical render failed: {exc}"}, status_code=500)
+    sidecar = clip_transcript_path_for(clip_path)
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is not None:
+            cut.vertical_clip_path = str(out)
+            if sidecar.exists():
+                cut.clip_transcript_path = str(sidecar)
+            _delete_if_unreferenced(session, [previous_vertical])
+            cut.updated_at = utcnow()
+    warning = ""
+    try:
+        duration = clip_duration(out)
+        # Outside 5-90s Meta still publishes, but as a plain video post that
+        # never reaches the Reels tab — worth flagging before it's queued.
+        if duration > 90:
+            warning = (f"Clip is {duration:.0f}s — reels over 90s publish as a "
+                       f"regular video post, not in the Reels tab.")
+        elif duration < 5:
+            warning = f"Clip is {duration:.1f}s — under Meta's 5s Reels minimum."
+    except Exception:
+        pass
+    return {"url": f"/media/vertical/{cut_id}", "warning": warning}
+
+
+@app.post("/cut/{cut_id}/ig-copy")
+def save_ig_copy(cut_id: int, hook_text: str = Form(None), ig_caption: str = Form(None)):
+    """Autosave the Instagram-side copy (hook text and/or reel caption)."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if hook_text is not None:
+            cut.hook_text = hook_text.strip()
+        if ig_caption is not None:
+            cut.ig_draft_caption = ig_caption.strip()
+        cut.updated_at = utcnow()
+    return {"ok": True}
 
 
 def _chosen_clip_path(cut: Cut, use_subtitles_form: str) -> str:
@@ -1803,13 +1939,42 @@ def suggest_clip_title(cut_id: int):
             return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+def _wants_instagram(value: str) -> bool:
+    return str(value).lower() in ("1", "true", "on", "yes")
+
+
+def _instagram_ready_error(cut: Cut, want_ig: bool) -> str:
+    """Why the reel can't ride along, or '' when it can."""
+    if not want_ig:
+        return ""
+    if not instagram_api.is_authenticated():
+        return "Connect Instagram first (Configure → Accounts)"
+    if not cut.vertical_clip_path or not Path(cut.vertical_clip_path).exists():
+        return "Generate the vertical composite first"
+    return ""
+
+
+def _drop_pending_reels(session, cut: Cut) -> None:
+    """Remove not-yet-published reels for a cut (operator un-ticked Instagram)."""
+    for ig in session.execute(
+        select(InstagramPost).where(
+            InstagramPost.cut_pk == cut.id,
+            InstagramPost.status.in_(["queued", "draft", "failed"]),
+        )
+    ).scalars().all():
+        session.delete(ig)
+
+
 @app.post("/cut/{cut_id}/post")
 def post_to_threads(cut_id: int, caption: str = Form(...),
-                    use_subtitles: str = Form(""), attribution: str = Form("")):
-    """Operator-confirmed publish of the exported clip."""
+                    use_subtitles: str = Form(""), attribution: str = Form(""),
+                    include_instagram: str = Form(""), ig_caption: str = Form("")):
+    """Operator-confirmed publish of the exported clip (Threads, and the paired
+    Instagram reel when the toggle is on)."""
     caption = caption.strip()
     if not caption:
         return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
+    want_ig = _wants_instagram(include_instagram)
     with session_scope() as session:
         ok, wait_min = spacing_allows_publish(session)
         if not ok:
@@ -1821,10 +1986,20 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
             return _flash(f"/cut/{cut_id}", "Export a clip first")
+        ig_error = _instagram_ready_error(cut, want_ig)
+        if ig_error:
+            return _flash(f"/cut/{cut_id}?step=post", ig_error)
         try:
-            post = publish_clip(session, cut.candidate,
-                                _chosen_clip_path(cut, use_subtitles), caption, cut=cut,
-                                attribution=attribution)
+            # Same flow as publish_clip, with the reel recorded before the
+            # publish so publish_paired_reel finds it afterwards.
+            post = record_post(session, cut.candidate,
+                               _chosen_clip_path(cut, use_subtitles), caption,
+                               status="draft", cut=cut, attribution=attribution)
+            if want_ig:
+                cut.ig_draft_caption = ig_caption.strip()
+                record_instagram_post(session, cut, post, cut.vertical_clip_path,
+                                      ig_caption.strip() or caption)
+            post = publish_post(session, post)
             # Keep the clip's caption in sync with what was actually posted.
             cut.draft_caption = caption
             state = session.get(SchedulerState, 1)
@@ -1834,27 +2009,43 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
             state.last_publish_at = utcnow()
             state.last_action = f"manual_publish:post={post.id}"
             state.updated_at = utcnow()
+            post_id = post.id
             msg = f"Published: {post.permalink or post.threads_media_id}"
             if post.first_reply_id:
                 msg += " · first reply posted"
             elif post.first_reply_error:
                 msg += f" · no first reply: {post.first_reply_error[:120]}"
-            return _flash(f"/cut/{cut_id}?step=post", msg)
         except Exception as exc:
             return _flash(f"/cut/{cut_id}?step=post", f"Publish failed: {exc}")
+    if want_ig:
+        # Outside the session above: the reel publishes through its own
+        # transactions once the Threads publish is committed.
+        ig = publish_paired_reel(post_id)
+        if ig is not None and ig.status == "published":
+            msg += f" · reel live: {ig.permalink or ig.ig_media_id}"
+        elif ig is not None:
+            msg += f" · reel {ig.status}: {(ig.error or '')[:120]}"
+    return _flash(f"/cut/{cut_id}?step=post", msg)
 
 
 @app.post("/cut/{cut_id}/queue")
 def queue_to_threads(cut_id: int, caption: str = Form(...),
-                     use_subtitles: str = Form(""), attribution: str = Form("")):
-    """Add the exported clip to the adaptive FIFO queue (no immediate post)."""
+                     use_subtitles: str = Form(""), attribution: str = Form(""),
+                     include_instagram: str = Form(""), ig_caption: str = Form("")):
+    """Add the exported clip to the adaptive FIFO queue (no immediate post).
+    With the Instagram toggle on, the same action queues the paired reel —
+    queueing stays the operator-approval step for both platforms."""
     caption = caption.strip()
     if not caption:
         return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
+    want_ig = _wants_instagram(include_instagram)
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
             return _flash(f"/cut/{cut_id}", "Export a clip first")
+        ig_error = _instagram_ready_error(cut, want_ig)
+        if ig_error:
+            return _flash(f"/cut/{cut_id}?step=post", ig_error)
         clip_path = _chosen_clip_path(cut, use_subtitles)
         try:
             # Reuse an existing not-yet-published post for THIS cut rather than
@@ -1891,9 +2082,17 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                 keep.error = ""
                 for extra in existing[1:]:
                     session.delete(extra)
+                post = keep
             else:
-                queue_clip(session, cut.candidate, clip_path, caption, cut=cut,
-                           attribution=attribution)
+                post = queue_clip(session, cut.candidate, clip_path, caption, cut=cut,
+                                  attribution=attribution)
+            if want_ig:
+                cut.ig_draft_caption = ig_caption.strip()
+                record_instagram_post(session, cut, post, cut.vertical_clip_path,
+                                      ig_caption.strip() or caption)
+            else:
+                # Toggle round-trips: un-ticking removes the pending reel.
+                _drop_pending_reels(session, cut)
             # Persist the queued caption back onto the clip so the clip reflects
             # what was scheduled, not the original generated draft. (Done after
             # record_post has frozen the AI draft as suggested_caption.)
@@ -1901,8 +2100,9 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
             updated = bool(existing)
         except Exception as exc:
             return _flash(f"/cut/{cut_id}?step=post", f"Queue failed: {exc}")
+    suffix = " (with Instagram reel)" if want_ig else ""
     return _flash(f"/cut/{cut_id}?step=post",
-                  "Queued post updated" if updated else "Added to the posting queue")
+                  ("Queued post updated" if updated else "Added to the posting queue") + suffix)
 
 
 @app.post("/cut/{cut_id}/save-draft")
@@ -1960,6 +2160,15 @@ def cancel_queued_post(post_id: int, next: str = Form("/calendar")):
             return _flash(next, "Only queued or draft posts can be removed")
         was = p.status
         cut_id = p.cut_pk
+        # The paired reel rides on this post's publish, so it goes with it
+        # (published reels are kept for history, just detached).
+        for ig in session.execute(
+            select(InstagramPost).where(InstagramPost.threads_post_pk == p.id)
+        ).scalars().all():
+            if ig.status == "published":
+                ig.threads_post_pk = None
+            else:
+                session.delete(ig)
         session.delete(p)
         # Send the operator back to the cut when deleting its only post record,
         # so they don't lose track of a trimmed export.
@@ -2040,6 +2249,7 @@ def unpin_window(post_id: int, next: str = Form("/calendar")):
 def _publish_in_thread(post_id: int) -> None:
     """Publish a post in the background. publish_post sets status to
     published/failed (+ error) itself, so we just swallow the exception here."""
+    published = False
     try:
         with session_scope() as session:
             p = session.get(ThreadsPost, post_id)
@@ -2047,6 +2257,7 @@ def _publish_in_thread(post_id: int) -> None:
                 return
             try:
                 publish_post(session, p)
+                published = True
                 state = session.get(SchedulerState, 1)
                 if state is None:
                     state = SchedulerState(id=1)
@@ -2056,6 +2267,9 @@ def _publish_in_thread(post_id: int) -> None:
                 state.updated_at = utcnow()
             except Exception:
                 log.exception("Background publish failed for post %s", post_id)
+        if published:
+            # After the publish transaction commits; see publish_paired_reel.
+            publish_paired_reel(post_id)
     finally:
         clear_publishing(post_id)
 
@@ -2297,6 +2511,21 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "schedule": schedule,
             "giphy_enabled": giphy_configured(),
         }
+        # Paired Instagram reel (queued alongside this post, publishes with it).
+        ig = session.execute(
+            select(InstagramPost).where(InstagramPost.threads_post_pk == p.id)
+            .order_by(InstagramPost.created_at.desc()).limit(1)
+        ).scalar_one_or_none()
+        ig_video_url = ""
+        if ig is not None and ig.cut_pk and cut is not None and cut.vertical_clip_path \
+                and Path(cut.vertical_clip_path).exists():
+            ig_video_url = f"/media/vertical/{cut.id}"
+        ctx["ig"] = ({
+            "id": ig.id, "status": ig.status, "caption": ig.caption,
+            "permalink": ig.permalink, "error": ig.error,
+            "published_at": ig.published_at,
+            "video_url": ig_video_url,
+        } if ig else None)
     return templates.TemplateResponse(
         request, "post.html", {**ctx, "msg": msg, "active": "posts"}
     )
@@ -2361,14 +2590,32 @@ def threads_connect(code: str = Form(...), next: str = Form("/calendar")):
         return _flash(next, f"Auth failed: {exc}")
 
 
+@app.post("/instagram/connect")
+def instagram_connect(code: str = Form(...), next: str = Form("/threads-account")):
+    try:
+        instagram_api.exchange_code(_clean_auth_code(code))
+        return _flash(next, "Instagram connected")
+    except Exception as exc:
+        return _flash(next, f"Instagram auth failed: {exc}")
+
+
 @app.get("/threads-account", response_class=HTMLResponse)
 def threads_account_page(request: Request, msg: str = ""):
-    """Threads OAuth connection status + account-level actions (Configure area)."""
+    """Threads + Instagram OAuth connection status (Configure area)."""
     authenticated = threads_api.is_authenticated()
+    ig_authenticated = instagram_api.is_authenticated()
+    try:
+        ig_auth_url = instagram_api.authorize_url() if not ig_authenticated else ""
+    except Exception:  # missing .env keys shouldn't 500 the page
+        ig_auth_url = ""
     return templates.TemplateResponse(
         request, "threads_account.html",
         {"authenticated": authenticated,
          "auth_url": threads_api.authorize_url() if not authenticated else "",
+         "ig_authenticated": ig_authenticated,
+         "ig_auth_url": ig_auth_url,
+         "ig_username": instagram_api.account_username() if ig_authenticated else "",
+         "ig_configured": bool(env("INSTAGRAM_APP_ID")),
          "msg": msg, "active": "threads_account"},
     )
 
@@ -2540,7 +2787,15 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
         windows_et = list(status.get("windows") or [])
 
         plan = build_window_plan(session, first_local, next_first_local)
+        # Posts that carry a paired Instagram reel get a marker on their card.
+        reel_post_ids = {
+            pk for (pk,) in session.execute(
+                select(InstagramPost.threads_post_pk)
+                .where(InstagramPost.threads_post_pk.is_not(None))
+            ).all()
+        }
         for e in plan:
+            e["has_reel"] = bool(e.get("post_id") and e["post_id"] in reel_post_ids)
             # Calendar grid: published history + upcoming filled/open windows.
             events.setdefault(e["day"], []).append(e)
 
@@ -2593,9 +2848,17 @@ def notifications_page(request: Request, msg: str = ""):
                    ThreadsPost.attention_dismissed_at.is_(None))
             .order_by(ThreadsPost.created_at.desc())
         ).scalars().all()
+        ig_failed = session.execute(
+            select(InstagramPost)
+            .options(selectinload(InstagramPost.cut).selectinload(Cut.candidate),
+                     selectinload(InstagramPost.threads_post))
+            .where(InstagramPost.status == "failed",
+                   InstagramPost.attention_dismissed_at.is_(None))
+            .order_by(InstagramPost.created_at.desc())
+        ).scalars().all()
     return templates.TemplateResponse(
         request, "notifications.html",
-        {"failed": failed, "msg": msg, "active": "notifications"},
+        {"failed": failed, "ig_failed": ig_failed, "msg": msg, "active": "notifications"},
     )
 
 
@@ -2608,6 +2871,47 @@ def dismiss_attention(post_id: int, next: str = Form("/notifications")):
             return _flash("/notifications", "Post not found")
         p.attention_dismissed_at = utcnow()
     return _flash(next, "Dismissed")
+
+
+@app.post("/igpost/{ig_id}/retry")
+def retry_instagram_post(ig_id: int, next: str = Form("/notifications")):
+    """Operator-confirmed retry of a failed reel. Synchronous, like manual
+    Threads publishing — Meta's processing poll can take a minute or two."""
+    with session_scope() as session:
+        ig = session.get(InstagramPost, ig_id)
+        if ig is None:
+            return _flash(next, "Reel not found")
+        if ig.status not in ("failed", "queued", "draft"):
+            return _flash(next, "This reel is not retryable")
+        try:
+            publish_instagram_post(session, ig)
+            return _flash(next, f"Reel published: {ig.permalink or ig.ig_media_id}")
+        except Exception as exc:
+            return _flash(next, f"Reel publish failed: {exc}")
+
+
+@app.post("/igpost/{ig_id}/dismiss")
+def dismiss_instagram_attention(ig_id: int, next: str = Form("/notifications")):
+    """Acknowledge a failed reel so it leaves the notifications list."""
+    with session_scope() as session:
+        ig = session.get(InstagramPost, ig_id)
+        if ig is None:
+            return _flash("/notifications", "Reel not found")
+        ig.attention_dismissed_at = utcnow()
+    return _flash(next, "Dismissed")
+
+
+@app.post("/igpost/{ig_id}/cancel")
+def cancel_instagram_post(ig_id: int, next: str = Form("/notifications")):
+    """Remove a not-yet-published reel (the Threads post is untouched)."""
+    with session_scope() as session:
+        ig = session.get(InstagramPost, ig_id)
+        if ig is None:
+            return _flash(next, "Reel not found")
+        if ig.status == "published":
+            return _flash(next, "This reel is already live")
+        session.delete(ig)
+    return _flash(next, "Reel removed — the Threads post is unaffected")
 
 
 # --- Engagement ----------------------------------------------------------------

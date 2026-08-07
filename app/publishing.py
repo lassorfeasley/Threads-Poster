@@ -12,9 +12,12 @@ import subprocess
 import threading
 from pathlib import Path
 
+from sqlalchemy import select
+
 from .config import load_first_reply, load_settings, scheduler_timezone
+from .instagram_api import publish_reel
 from .llm import caption_attributes, suggest_attribution
-from .models import Candidate, Cut, ThreadsPost, utcnow
+from .models import Candidate, Cut, InstagramPost, ThreadsPost, utcnow
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import publish_text_reply, publish_video
 
@@ -265,6 +268,161 @@ def publish_post(session, post: ThreadsPost) -> ThreadsPost:
     log.info("Published Threads post %s (%s)", post.threads_media_id, post.permalink)
     maybe_post_first_reply(session, post)
     return post
+
+
+# --- Instagram Reels (paired posts) ------------------------------------------
+
+def record_instagram_post(session, cut: Cut | None, threads_post: ThreadsPost,
+                          clip_path: str, caption: str) -> InstagramPost:
+    """Create (or refresh) the queued reel paired with ``threads_post``.
+
+    The reel posts the cut's VERTICAL composite while the Threads post keeps
+    its 16:9 clip, so the reel owns its own Supabase object. Uploaded now,
+    while the file is certainly on this machine, so a headless runner can
+    publish later (same rationale as ``record_post``). Reuses an existing
+    not-yet-published row for the cut instead of stacking duplicates.
+    """
+    clip = Path(clip_path).expanduser()
+    if not clip.exists():
+        raise FileNotFoundError(f"Vertical clip not found: {clip}")
+    existing = session.execute(
+        select(InstagramPost).where(
+            InstagramPost.cut_pk == (cut.id if cut else None),
+            InstagramPost.status.in_(["queued", "draft", "failed"]),
+        ).order_by(InstagramPost.created_at.desc())
+    ).scalars().all() if cut else []
+    if existing:
+        ig = existing[0]
+        for extra in existing[1:]:
+            session.delete(extra)
+    else:
+        ig = InstagramPost(cut_pk=cut.id if cut else None)
+        session.add(ig)
+    ig.threads_post_pk = threads_post.id
+    ig.caption = caption
+    if ig.clip_local_path != str(clip) or not ig.clip_object_path:
+        ig.clip_local_path = str(clip)
+        ig.clip_object_path = _object_key(clip)
+        try:
+            upload_trimmed_clip(clip, ig.clip_object_path)
+        except Exception as exc:
+            log.warning("Queue-time reel upload failed (will retry at publish): %s", exc)
+    ig.status = "queued"
+    ig.error = ""
+    session.flush()
+    return ig
+
+
+def _write_ig_row(ig_id: int, **values) -> None:
+    """Update an InstagramPost through a fresh connection/transaction.
+
+    Same rationale as ``_persist_publish_result``: the container poll can take
+    minutes and outlive the caller's connection. It also keeps the caller's
+    session free of pending writes during the publish — on SQLite an
+    uncommitted write in the caller would hold the database's write lock and
+    deadlock these fresh-connection updates against it."""
+    from sqlalchemy import update
+    from sqlalchemy.exc import OperationalError
+
+    from .db import session_scope
+
+    last_exc: Exception | None = None
+    for _ in range(2):
+        try:
+            with session_scope() as s:
+                s.execute(
+                    update(InstagramPost).where(InstagramPost.id == ig_id).values(**values)
+                )
+            return
+        except OperationalError as exc:
+            last_exc = exc
+    raise last_exc
+
+
+def publish_instagram_post(session, ig: InstagramPost) -> InstagramPost:
+    """Publish the paired reel to Instagram. Prefers the local composite
+    (re-uploading for the freshest copy); otherwise signs the copy uploaded at
+    queue time so a headless runner works. Sets status=failed + error on
+    failure and re-raises."""
+    if ig.ig_media_id:
+        # Already live — a retry after only the record failed to write.
+        ig.status = "published"
+        ig.published_at = ig.published_at or utcnow()
+        ig.error = ""
+        session.flush()
+        return ig
+
+    clip = Path(ig.clip_local_path or "").expanduser()
+    have_local = bool(ig.clip_local_path) and clip.exists()
+    if not have_local and not ig.clip_object_path:
+        ig.status = "failed"
+        ig.error = f"Clip missing: {clip} (and no uploaded copy)"
+        session.flush()
+        raise FileNotFoundError(f"Clip not found: {clip}")
+
+    if not ig.clip_object_path:
+        ig.clip_object_path = _object_key(clip)
+    # Claim + all publish-state writes go through fresh connections (see
+    # _write_ig_row) so the caller's session carries no pending writes while
+    # Meta processes the video.
+    _write_ig_row(ig.id, status="publishing", error="",
+                  clip_object_path=ig.clip_object_path)
+    try:
+        if have_local:
+            signed_url = upload_trimmed_clip(clip, ig.clip_object_path)
+        else:
+            signed_url = signed_clip_url(ig.clip_object_path)
+        result = publish_reel(signed_url, ig.caption)
+        published_at = utcnow()
+        # Live on Instagram from here: persist before anything else can fail.
+        _write_ig_row(ig.id, ig_media_id=result["media_id"],
+                      permalink=result["permalink"], status="published",
+                      published_at=published_at, error="")
+        ig.ig_media_id = result["media_id"]
+        ig.permalink = result["permalink"]
+        ig.status = "published"
+        ig.published_at = published_at
+        ig.error = ""
+    except Exception as exc:
+        try:
+            _write_ig_row(ig.id, status="failed", error=str(exc)[:1000])
+        except Exception:
+            log.warning("Could not record reel failure for %s", ig.id)
+        ig.status = "failed"
+        ig.error = str(exc)[:1000]
+        raise
+    log.info("Published Instagram reel %s (%s)", ig.ig_media_id, ig.permalink)
+    return ig
+
+
+def publish_paired_reel(post_id: int) -> InstagramPost | None:
+    """Fire the reel queued alongside a just-published Threads post.
+
+    Called by every publish path (scheduler window, Post now, retry) AFTER the
+    Threads publish transaction commits — it must not run inside that
+    transaction, because reel state is persisted through fresh connections
+    (``_write_ig_row``) which on SQLite would deadlock against the caller's
+    uncommitted writes. Best-effort by design: the Threads result is already
+    on disk, and a reel failure only marks the ``InstagramPost`` row failed —
+    it never unwinds the Threads publish. Returns a detached snapshot of the
+    reel row (or None when no reel is paired)."""
+    from .db import session_scope
+
+    with session_scope() as session:
+        ig = session.execute(
+            select(InstagramPost).where(
+                InstagramPost.threads_post_pk == post_id,
+                InstagramPost.status.in_(["queued", "failed", "publishing"]),
+            ).order_by(InstagramPost.created_at.desc()).limit(1)
+        ).scalar_one_or_none()
+        if ig is None:
+            return None
+        try:
+            publish_instagram_post(session, ig)
+        except Exception as exc:
+            log.warning("Paired Instagram reel failed for post %s: %s", post_id, exc)
+        session.expunge(ig)
+    return ig
 
 
 def _annotate_footage(session, post: ThreadsPost) -> None:

@@ -239,6 +239,61 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
     return Image.alpha_composite(shadow, img)
 
 
+def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
+                          strip_h: int, fonts: tuple, colors: dict, position: str,
+                          uppercase: bool, dwell: float) -> Path:
+    """Render one PNG per caption state plus an ffconcat list covering the whole
+    clip: blank strips fill silences, and each finished phrase dwells on screen
+    (up to ``dwell`` seconds, or until the next phrase). Returns the concat list
+    path; the PNGs live in ``tmpdir``. Shared by the 16:9 burned-caption export
+    and the vertical composite (which overlays the strip mid-frame)."""
+    blank = tmpdir / "blank.png"
+    Image.new("RGBA", (width, strip_h), (0, 0, 0, 0)).save(blank)
+
+    # Timeline of (png, duration) entries covering the whole clip.
+    entries: list[tuple[Path, float]] = []
+    t = 0.0
+    n_png = 0
+    for gi, group in enumerate(groups):
+        texts = [w["word"].upper() if uppercase else w["word"] for w in group]
+        g_start, g_end = group[0]["start"], group[-1]["end"]
+        if g_start > t + 0.01:
+            entries.append((blank, g_start - t))
+        last_png: Path | None = None
+        for i, w in enumerate(group):
+            # A word stays highlighted until the next word starts (no flicker).
+            end = group[i + 1]["start"] if i + 1 < len(group) else g_end
+            dur = max(0.05, end - w["start"])
+            png = tmpdir / f"s{n_png:04d}.png"
+            _render_state(texts, i, width, strip_h, fonts, colors, position).save(png)
+            entries.append((png, dur))
+            last_png = png
+            n_png += 1
+        t = g_end
+        # Hold the finished phrase on screen through short pauses so text
+        # doesn't vanish the instant the speaker stops. Cap at ``dwell``,
+        # or cut short when the next phrase is ready to take over.
+        if last_png is not None and dwell > 0:
+            next_start = (
+                groups[gi + 1][0]["start"] if gi + 1 < len(groups) else None
+            )
+            gap = (next_start - t) if next_start is not None else dwell
+            hold = min(dwell, max(0.0, gap))
+            if hold > 0.01:
+                entries.append((last_png, hold))
+                t += hold
+    entries.append((blank, 1.0))
+
+    concat = tmpdir / "list.txt"
+    lines = ["ffconcat version 1.0"]
+    for png, dur in entries:
+        lines.append(f"file '{png}'")
+        lines.append(f"duration {max(0.05, dur):.3f}")
+    lines.append(f"file '{blank}'")  # concat demuxer needs a trailing entry
+    concat.write_text("\n".join(lines) + "\n")
+    return concat
+
+
 def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
                           out_path: str | Path | None = None) -> Path:
     """Generate ``<clip>_subs.mp4`` with burned-in word captions. Returns path.
@@ -280,50 +335,10 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
     out = Path(out_path) if out_path else CLIPS_DIR / f"{clip.stem}_subs.mp4"
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        blank = tmpdir / "blank.png"
-        Image.new("RGBA", (width, strip_h), (0, 0, 0, 0)).save(blank)
-
-        # Timeline of (png, duration) entries covering the whole clip.
-        entries: list[tuple[Path, float]] = []
-        t = 0.0
-        n_png = 0
-        for gi, group in enumerate(groups):
-            texts = [w["word"].upper() if uppercase else w["word"] for w in group]
-            g_start, g_end = group[0]["start"], group[-1]["end"]
-            if g_start > t + 0.01:
-                entries.append((blank, g_start - t))
-            last_png: Path | None = None
-            for i, w in enumerate(group):
-                # A word stays highlighted until the next word starts (no flicker).
-                end = group[i + 1]["start"] if i + 1 < len(group) else g_end
-                dur = max(0.05, end - w["start"])
-                png = tmpdir / f"s{n_png:04d}.png"
-                _render_state(texts, i, width, strip_h, fonts, colors, position).save(png)
-                entries.append((png, dur))
-                last_png = png
-                n_png += 1
-            t = g_end
-            # Hold the finished phrase on screen through short pauses so text
-            # doesn't vanish the instant the speaker stops. Cap at ``dwell``,
-            # or cut short when the next phrase is ready to take over.
-            if last_png is not None and dwell > 0:
-                next_start = (
-                    groups[gi + 1][0]["start"] if gi + 1 < len(groups) else None
-                )
-                gap = (next_start - t) if next_start is not None else dwell
-                hold = min(dwell, max(0.0, gap))
-                if hold > 0.01:
-                    entries.append((last_png, hold))
-                    t += hold
-        entries.append((blank, 1.0))
-
-        concat = tmpdir / "list.txt"
-        lines = ["ffconcat version 1.0"]
-        for png, dur in entries:
-            lines.append(f"file '{png}'")
-            lines.append(f"duration {max(0.05, dur):.3f}")
-        lines.append(f"file '{blank}'")  # concat demuxer needs a trailing entry
-        concat.write_text("\n".join(lines) + "\n")
+        concat = render_caption_concat(
+            groups, tmpdir, width=width, strip_h=strip_h, fonts=fonts,
+            colors=colors, position=position, uppercase=uppercase, dwell=dwell,
+        )
 
         try:
             _run_ffmpeg([

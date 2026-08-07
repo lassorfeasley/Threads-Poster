@@ -181,6 +181,41 @@ threads:
   # How often to poll the media container's processing status (seconds).
   publish_poll_interval_seconds: 10
 
+instagram:
+  # Instagram Reels publishing (Instagram API with Instagram Login: professional
+  # account required, no linked Facebook Page). Same container -> poll ->
+  # publish flow as Threads, so the same knobs.
+  publish_poll_timeout_seconds: 600
+  publish_poll_interval_seconds: 10
+
+vertical:
+  # 1080x1920 branded composite for Instagram Reels: hook text at the top, the
+  # 16:9 clip full-width in the upper-middle, burned-in captions below it, and
+  # the bottom kept clear of the Reels UI overlays. All layout lives here —
+  # nothing is hardcoded in the ffmpeg filter graph.
+  width: 1080
+  height: 1920
+  # Flat branded background (the talks Renewables.org navy).
+  background_color: "#1A4A7D"
+  # Top edge of the hook text block (it wraps/shrinks to fit above the video).
+  hook_y: 150
+  # Top edge of the clip. A 16:9 source lands 1080x608, so it spans
+  # video_y .. video_y+608.
+  video_y: 560
+  # Top edge of the caption strip (word-by-word captions render from here down).
+  caption_y: 1220
+  # Height of the caption strip. caption_y + caption_strip_px should stay at or
+  # above height - bottom_safe_px.
+  caption_strip_px: 350
+  # Bottom band kept clear of platform UI (progress bar, actions, audio pill).
+  bottom_safe_px: 350
+  # Hook text styling (bundled Funnel weights; rendered by Pillow, not ffmpeg).
+  hook_font_file: FunnelDisplay-ExtraBold.ttf
+  hook_font_px: 84
+  hook_text_color: "#FFFFFF"
+  # Caption word size on the canvas (style/colors follow the `subtitles:` section).
+  caption_font_px: 78
+
 engagement:
   # HARD SCOPE LIMIT. The tool only ever reads/replies on the operator's own
   # posts. This flag exists but is HIGH-RISK and should stay false: enabling it

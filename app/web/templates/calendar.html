@@ -3,6 +3,7 @@
 {% macro ev_card(e, label) %}
   <span class="cal-ev-body">
     <span class="cal-ev-title">{{ (label or '(post)')[:64] }}</span>
+    {% if e.has_reel %}<span class="cal-ev-reel" title="Also queued as an Instagram Reel">+IG</span>{% endif %}
   </span>
 {% endmacro %}
 {% import "components/toolbar.html" as ui %}
@@ -146,6 +147,7 @@
             <a class="queue-caption" href="/post/{{ e.post_id }}">{{ e.caption[:110] or '(untitled)' }}</a>
             <div class="meta">
               {% if e.channel %}{{ e.channel }} · {% endif %}
+              {% if e.has_reel %}+ Instagram Reel · {% endif %}
               {% if e.pinned %}pinned · {% elif e.kind == 'queued' %}projected · {% endif %}
               {% if e.kind == 'queued' %}drag to move{% endif %}
             </div>

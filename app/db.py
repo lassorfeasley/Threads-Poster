@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "17"
+SCHEMA_VERSION = "18"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -109,6 +109,8 @@ _SCHEMA_SENTINELS = (
     "SELECT multi_clip_potential FROM candidates LIMIT 0",
     "SELECT attribution_text FROM threads_posts LIMIT 0",
     "SELECT attribution_skipped FROM threads_posts LIMIT 0",
+    "SELECT hook_text FROM cuts LIMIT 0",
+    "SELECT id FROM instagram_posts LIMIT 0",
 )
 
 
@@ -204,6 +206,9 @@ def _ensure_new_columns() -> None:
             "subs_position": "VARCHAR(10) DEFAULT 'bottom'",
             "calendar_name": "TEXT DEFAULT ''",
             "clip_transcript_path": "TEXT DEFAULT ''",
+            "hook_text": "TEXT DEFAULT ''",
+            "vertical_clip_path": "TEXT DEFAULT ''",
+            "ig_draft_caption": "TEXT DEFAULT ''",
         },
     }
     added: list[tuple[str, str]] = []
@@ -309,6 +314,10 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_candidates_published_at ON candidates (published_at)",
         "CREATE INDEX IF NOT EXISTS ix_threads_comments_post_pk ON threads_comments (post_pk)",
         "CREATE INDEX IF NOT EXISTS ix_threads_comments_reply_status ON threads_comments (reply_status)",
+        "CREATE INDEX IF NOT EXISTS ix_instagram_posts_status ON instagram_posts (status)",
+        "CREATE INDEX IF NOT EXISTS ix_instagram_posts_threads_post_pk "
+        "ON instagram_posts (threads_post_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_instagram_posts_cut_pk ON instagram_posts (cut_pk)",
     )
     with engine.begin() as conn:
         for stmt in statements:
