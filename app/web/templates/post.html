@@ -203,7 +203,7 @@
       </div>
       {% if editable %}
       <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to skip.">{{ attribution_text }}</textarea>
+                placeholder="Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted.">{{ attribution_text }}</textarea>
       {% if can_suggest_attribution %}
       {# Visible way into the LLM draft while the comment is empty; the kebab
          keeps "Regenerate draft" once there's text. Hidden as soon as typing
@@ -528,6 +528,10 @@
       const r = await fetch('/post/{{ pid }}/suggest-attribution', { method: 'POST' });
       const d = await r.json();
       if (!r.ok) { alert(d.error || 'Attribution draft failed.'); return; }
+      if (d.unavailable || !d.text) {
+        alert(d.message || 'No citation drafted — the source data is not available.');
+        return;
+      }
       ta.value = d.text;
       ta.dispatchEvent(new Event('input'));
       const regen = document.getElementById('attribution-regen');

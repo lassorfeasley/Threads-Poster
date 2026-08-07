@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import time
 from pathlib import Path
 
@@ -138,15 +139,117 @@ def fetch_video_metadata(url: str) -> dict:
 
 # --- Download ----------------------------------------------------------------
 
+_MEDIA_SUFFIXES = (".mp4", ".mkv", ".webm", ".mov")
+# yt-dlp sidecars / in-progress names left behind when a download is killed
+# (laptop sleep, kill -9, network drop) before the final merge.
+_PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
+
+
+def _has_stream(path: Path, codec_type: str) -> bool:
+    """True when ffprobe sees at least one stream of ``codec_type`` (``audio`` /
+    ``video``) on ``path``."""
+    import subprocess
+
+    sel = {"audio": "a", "video": "v"}.get(codec_type)
+    if not sel:
+        return False
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", sel,
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return codec_type in (out.stdout or "")
+    except Exception:
+        return False
+
+
+def _has_audio_stream(path: Path) -> bool:
+    return _has_stream(path, "audio")
+
+
+def _has_video_stream(path: Path) -> bool:
+    return _has_stream(path, "video")
+
+
+def _is_format_fragment(path: Path) -> bool:
+    """yt-dlp names single-format intermediates ``id.f399.mp4`` / ``id.f140.m4a``.
+    Those are never the finished merge — treating them as done is what made an
+    interrupted download look permanently "ready" with no waveform."""
+    return bool(re.search(r"\.f\d+$", path.stem))
+
+
+def _is_usable_media(path: Path) -> bool:
+    """Finished download: real video+audio, not a yt-dlp format fragment."""
+    if not path.exists() or path.suffix.lower() not in _MEDIA_SUFFIXES:
+        return False
+    if _is_format_fragment(path):
+        return False
+    return _has_video_stream(path) and _has_audio_stream(path)
+
+
+def _candidate_artifacts(video_dir: Path, video_id: str) -> list[Path]:
+    """Every on-disk artifact for a video id (media, audio sidecars, partials)."""
+    return sorted(p for p in video_dir.glob(f"{video_id}.*") if p.is_file())
+
+
+def _candidate_media_files(video_dir: Path, video_id: str) -> list[Path]:
+    return [p for p in _candidate_artifacts(video_dir, video_id)
+            if p.suffix.lower() in _MEDIA_SUFFIXES]
+
+
+def _pick_usable_media(paths: list[Path]) -> Path | None:
+    usable = [p for p in paths if _is_usable_media(p)]
+    if not usable:
+        return None
+    # Prefer mp4 (our merge_output_format) when several somehow exist.
+    usable.sort(key=lambda p: (0 if p.suffix.lower() == ".mp4" else 1, p.name))
+    return usable[0]
+
+
+def _purge_download_artifacts(video_dir: Path, video_id: str, *, keep: Path | None = None) -> None:
+    """Wipe incomplete yt-dlp leftovers for ``video_id``.
+
+    Safe to call before a download, after a failed attempt, or when a "finished"
+    run produced only fragments. Keeps ``keep`` (the verified merged file).
+    """
+    for p in _candidate_artifacts(video_dir, video_id):
+        if keep is not None and p.resolve() == keep.resolve():
+            continue
+        # Always drop partials / format fragments / audio-only sidecars.
+        drop = (
+            p.suffix.lower() in _PARTIAL_SUFFIXES
+            or _is_format_fragment(p)
+            or p.suffix.lower() in (".m4a", ".aac", ".opus")
+            or (p.suffix.lower() in _MEDIA_SUFFIXES and not _is_usable_media(p))
+        )
+        if not drop:
+            continue
+        try:
+            p.unlink()
+            log.warning("Removed incomplete download artifact: %s", p.name)
+        except OSError as exc:
+            log.warning("Could not remove %s: %s", p.name, exc)
+
+
 def download_video(candidate: Candidate, video_dir: Path, settings) -> Path:
-    """Download the full segment with yt-dlp. Idempotent: skips if file exists."""
+    """Download the full segment with yt-dlp. Idempotent only when a *usable*
+    audio+video merge already exists. Interrupted downloads (laptop sleep,
+    killed process, failed audio merge) leave video-only ``.fNNN`` fragments —
+    those are purged and the download is retried rather than archived as ready.
+    """
     import yt_dlp
 
-    existing = list(video_dir.glob(f"{candidate.video_id}.*"))
-    media = [p for p in existing if p.suffix in (".mp4", ".mkv", ".webm", ".mov")]
-    if media:
-        log.info("Already downloaded: %s", media[0].name)
-        return media[0]
+    existing = _candidate_media_files(video_dir, candidate.video_id)
+    usable = _pick_usable_media(existing)
+    if usable is not None:
+        # Drop any leftover fragments sitting next to a good merge.
+        _purge_download_artifacts(video_dir, candidate.video_id, keep=usable)
+        log.info("Already downloaded: %s", usable.name)
+        return usable
+    # Nothing usable — clear partials so yt-dlp starts clean (a resume of a
+    # half-written fragment after sleep is how we used to get stuck).
+    _purge_download_artifacts(video_dir, candidate.video_id)
 
     _politeness_delay(settings)
     opts = {
@@ -156,30 +259,57 @@ def download_video(candidate: Candidate, video_dir: Path, settings) -> Path:
         "quiet": True,
         "no_warnings": True,
         "retries": 3,
+        # Don't resume a half-written fragment from an interrupted prior run —
+        # those are what looked "done" with no audio. Fresh download each try.
+        "continuedl": False,
+        "overwrites": True,
         # Gentle: single connection, no fragment parallelism.
         "concurrent_fragment_downloads": 1,
     }
     # YouTube occasionally serves transient 403s on freshly extracted media
-    # URLs; a re-extraction after a polite pause usually succeeds.
+    # URLs; a re-extraction after a polite pause usually succeeds. Also retry
+    # when the process is interrupted mid-merge (laptop sleep → empty/partial).
+    last_exc: Exception | None = None
     for attempt in range(3):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([candidate.url])
-            break
+            usable = _pick_usable_media(
+                _candidate_media_files(video_dir, candidate.video_id)
+            )
+            if usable is not None:
+                _purge_download_artifacts(video_dir, candidate.video_id, keep=usable)
+                return usable
+            # yt-dlp exited 0 but left only fragments (typical after a sleep
+            # during the audio fetch / ffmpeg merge).
+            _purge_download_artifacts(video_dir, candidate.video_id)
+            last_exc = RuntimeError(
+                "download finished without a merged audio+video file "
+                "(interrupted mid-merge?); will retry"
+            )
+            log.warning("%s for %s (attempt %d/3)",
+                        last_exc, candidate.video_id, attempt + 1)
         except Exception as exc:
-            transient = "403" in str(exc) or "Forbidden" in str(exc)
-            if transient and attempt < 2:
-                wait = random.uniform(20, 40)
-                log.info("Transient 403 for %s; retrying in %.0fs (attempt %d/3)",
-                         candidate.video_id, wait, attempt + 2)
+            last_exc = exc
+            _purge_download_artifacts(video_dir, candidate.video_id)
+            if attempt < 2:
+                wait = random.uniform(20, 40) if "403" in str(exc) or "Forbidden" in str(exc) else random.uniform(3, 8)
+                log.info("Download failed for %s (%s); retrying in %.0fs (attempt %d/3)",
+                         candidate.video_id, exc, wait, attempt + 2)
                 time.sleep(wait)
-            else:
-                raise
+                continue
+            raise
 
-    media = [p for p in video_dir.glob(f"{candidate.video_id}.*") if p.suffix in (".mp4", ".mkv", ".webm", ".mov")]
-    if not media:
-        raise RuntimeError("yt-dlp reported success but no media file found")
-    return media[0]
+        if attempt < 2:
+            wait = random.uniform(3, 8)
+            log.info("Retrying download for %s in %.0fs (attempt %d/3)",
+                     candidate.video_id, wait, attempt + 2)
+            time.sleep(wait)
+
+    raise RuntimeError(
+        f"yt-dlp could not produce a merged audio+video file for {candidate.video_id}"
+        + (f": {last_exc}" if last_exc else "")
+    )
 
 
 # --- Orchestration -----------------------------------------------------------
@@ -205,8 +335,10 @@ def _wants_transcript_title(candidate: Candidate) -> bool:
 def archive_candidate(session, candidate: Candidate, with_highlight: bool = True) -> None:
     """Full post-approval pipeline for one approved candidate.
 
-    Idempotent: already-archived candidates return immediately; a re-run after
-    partial failure resumes (existing files are reused, not re-downloaded).
+    Idempotent for a *successful* archive. A re-run after failure (or after
+    Retry) resumes: incomplete downloads are purged and re-fetched rather than
+    reused, so an interrupted laptop sleep can't leave a video permanently
+    stuck as "ready" with no waveform.
     """
     if candidate.status == STATUS_ARCHIVED:
         return
@@ -222,14 +354,33 @@ def archive_candidate(session, candidate: Candidate, with_highlight: bool = True
             video_path = Path(candidate.local_video_path)
             if not video_path.exists():
                 raise RuntimeError(f"Uploaded file missing: {video_path}")
+            if not _has_audio_stream(video_path):
+                raise RuntimeError(
+                    f"Uploaded file has no audio track (needed for waveform/"
+                    f"transcript): {video_path.name}"
+                )
             segments = transcribe_local(video_path, settings)
             method = "whisper" if segments else ""
         else:
             # 1. Transcript from YouTube captions (no media download needed).
             segments = fetch_captions(candidate.video_id)
             method = "captions" if segments else ""
-            # 2. Full segment download.
+            # 2. Full segment download (refuses to return a video-only partial).
             video_path = download_video(candidate, video_dir, settings)
+            if not _is_usable_media(video_path):
+                raise RuntimeError(
+                    "Download did not produce a usable audio+video file — "
+                    "often caused by interrupting the download (e.g. closing "
+                    "the laptop). Hit Retry and leave it running until it finishes."
+                )
+            # 3. Captions missing (disabled / unavailable) — fall back to local
+            # Whisper now that we have audio. Same path uploads already take.
+            # Missing captions alone must NOT fail the archive.
+            if not segments:
+                log.info("No captions for %s; transcribing locally with Whisper",
+                         candidate.video_id)
+                segments = transcribe_local(video_path, settings)
+                method = "whisper" if segments else ""
 
         candidate.local_video_path = str(video_path)
 
@@ -238,10 +389,11 @@ def archive_candidate(session, candidate: Candidate, with_highlight: bool = True
             candidate.transcript_path = str(json_path)
             candidate.transcript_text = plain
         else:
-            log.warning("No captions for %s; archiving without a transcript", candidate.video_id)
+            log.warning("No transcript for %s (captions and Whisper both empty); "
+                        "archiving without one", candidate.video_id)
         candidate.transcription_method = method
 
-        # 3. Retitle pasted clips from what is actually said. Runs before the
+        # 4. Retitle pasted clips from what is actually said. Runs before the
         # highlight pass so the caption draft is written against the corrected
         # title. Best-effort: any failure leaves the ingest-time title standing.
         if segments and _wants_transcript_title(candidate):
@@ -258,7 +410,7 @@ def archive_candidate(session, candidate: Candidate, with_highlight: bool = True
             except Exception as exc:
                 log.warning("Transcript title failed for %s: %s", candidate.video_id, exc)
 
-        # 4. Optional LLM highlight suggestion + draft caption (clearly drafts).
+        # 5. Optional LLM highlight suggestion + draft caption (clearly drafts).
         if with_highlight and segments:
             try:
                 hl = suggest_highlight(

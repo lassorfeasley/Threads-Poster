@@ -76,10 +76,11 @@ FIRST_REPLY_HEADER = """\
 # Auto first-reply posted under every Threads post this app publishes.
 # Editable via the cog on the Replies page; no code changes needed.
 #
-# attribution_enabled: when true, an AI-drafted attribution comment (crediting
-# the source station/publisher) is generated per post and published as the
-# first comment after the post goes live. The operator previews/edits/clears
-# it on each post's page before it publishes.
+# attribution_enabled: when true, an attribution comment the OPERATOR set on a
+# post (typed, or accepted from the "Suggest a draft" formal citation) is
+# published as the first comment after the post goes live. Nothing is ever
+# drafted or posted automatically — a post whose attribution field is empty
+# publishes without one.
 #
 # When enabled is true and text is non-empty, that static text is the reply
 # instead — used as the fallback for posts without an attribution. A reply

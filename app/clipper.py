@@ -151,6 +151,16 @@ def get_waveform(source_path: str | Path, video_id: str, buckets: int = 1200) ->
         capture_output=True, timeout=300,
     )
     if proc.returncode != 0 or not proc.stdout:
+        # Distinguish "no audio track" (common after a failed video+audio merge)
+        # from a genuine decode failure — the trim UI's "waveform unavailable"
+        # is much clearer with the real reason.
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(source)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if "audio" not in (probe.stdout or ""):
+            raise ClipExportError("source has no audio track")
         raise ClipExportError("ffmpeg could not decode audio for waveform")
 
     samples = array.array("h")

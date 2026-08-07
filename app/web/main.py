@@ -1869,9 +1869,9 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                 keep = existing[0]
                 keep.caption = caption
                 # The cut page pre-fills this field from the pending post, so
-                # whatever came back (edited or cleared) is the operator's call —
-                # a clear has to survive publishing, which otherwise drafts a
-                # replacement for any post it finds without one.
+                # whatever came back (edited or cleared) is the operator's call.
+                # Publishing never drafts a replacement — empty means no
+                # attribution comment.
                 keep.attribution_text = attribution.strip()
                 keep.attribution_skipped = not attribution.strip()
                 if keep.clip_local_path != clip_path:
@@ -1944,8 +1944,11 @@ def suggest_cut_attribution(cut_id: int):
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
     if not text:
-        return JSONResponse({"error": "The model returned an empty attribution — try again."},
-                            status_code=500)
+        # The model declined rather than guess — surface that honestly instead
+        # of proposing a made-up credit.
+        return {"text": "", "unavailable": True,
+                "message": ("No citation drafted — the source data available isn't "
+                            "enough for a reliable attribution.")}
     return {"text": text}
 
 
@@ -2743,8 +2746,11 @@ def suggest_post_attribution(post_id: int):
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
     if not text:
-        return JSONResponse({"error": "The model returned an empty attribution — try again."},
-                            status_code=500)
+        # The model declined rather than guess — surface that honestly instead
+        # of proposing a made-up credit.
+        return {"text": "", "unavailable": True,
+                "message": ("No citation drafted — the source data available isn't "
+                            "enough for a reliable attribution.")}
     return {"text": text}
 
 

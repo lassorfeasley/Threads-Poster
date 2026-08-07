@@ -880,15 +880,16 @@ let wf = null;   // {peaks: [...], duration}
 async function loadWave() {
   try {
     const r = await fetch('/video/{{ c.id }}/waveform');
-    if (!r.ok) throw new Error('waveform unavailable');
-    wf = await r.json();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || 'waveform unavailable');
+    wf = body;
     document.getElementById('wave-hint').style.display = 'none';
     sizeWave();
     drawWave();
     redrawDetailWave(true);
     redrawAllSegWaves(true);
   } catch (e) {
-    document.getElementById('wave-hint').textContent = 'waveform unavailable';
+    document.getElementById('wave-hint').textContent = e.message || 'waveform unavailable';
   }
 }
 
@@ -1600,7 +1601,7 @@ initSegDnd();
         </span>
       </div>
       <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to auto-draft at queue time.">{{ attribution_text }}</textarea>
+                placeholder="Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted.">{{ attribution_text }}</textarea>
       {# Visible way into the LLM draft while the comment is empty; the kebab
          keeps "Regenerate draft" once there's text. #}
       <button type="button" id="attribution-suggest" class="suggest-btn"
@@ -1850,6 +1851,10 @@ initSegDnd();
           const r = await fetch('/cut/{{ cut.id }}/suggest-attribution', { method: 'POST' });
           const d = await r.json();
           if (!r.ok) { alert(d.error || 'Attribution draft failed.'); return; }
+          if (d.unavailable || !d.text) {
+            alert(d.message || 'No citation drafted — the source data is not available.');
+            return;
+          }
           ta.value = d.text;
           ta.dispatchEvent(new Event('input'));
           const regen = document.getElementById('attribution-regen');
