@@ -333,7 +333,9 @@ function addSegment() {
   pending = { start: null, end: null };
   selectedSeg = segments.length - 1;
   renderPending(); renderSegments();
-  previewSegment(selectedSeg);
+  // Don't seek/replay the new segment — leave the source playing so the
+  // operator can keep marking more ranges without interruption. Click a
+  // segment row later to audition it.
 }
 function removeSegment(i) {
   pushUndo();
