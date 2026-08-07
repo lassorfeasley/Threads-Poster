@@ -169,11 +169,12 @@ def _load_fonts(px: int, font_name: str) -> tuple[ImageFont.FreeTypeFont, ImageF
 
 def _render_state(texts: list[str], active: int, width: int, strip_h: int,
                   fonts: tuple, colors: dict, position: str = "bottom",
-                  two_lines: bool = False) -> Image.Image:
+                  two_lines: bool = False, align: str = "center") -> Image.Image:
     """One caption state: the group's words, with the ``active`` word set on a
     solid rounded box in inverted colors (the "talks Renewables.org" look).
     ``two_lines`` forces the balanced two-line layout even when the phrase
-    would fit on one line (the vertical composite's steady two-line strip)."""
+    would fit on one line, and ``align="left"`` ragged-right lines against the
+    safe-width gutter (both used by the vertical composite)."""
     from PIL import ImageFilter
 
     base_f, big_f = fonts
@@ -221,7 +222,7 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
 
     for line, base_y in zip(lines, baselines):
         line_w = sum(slots[i] for i in line) + space * (len(line) - 1)
-        x = (width - line_w) / 2
+        x = (width - max_w) / 2 if align == "left" else (width - line_w) / 2
         for i in line:
             f = word_font(i)
             if i == active:
@@ -245,7 +246,7 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
 def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
                           strip_h: int, fonts: tuple, colors: dict, position: str,
                           uppercase: bool, dwell: float,
-                          two_lines: bool = False) -> Path:
+                          two_lines: bool = False, align: str = "center") -> Path:
     """Render one PNG per caption state plus an ffconcat list covering the whole
     clip: blank strips fill silences, and each finished phrase dwells on screen
     (up to ``dwell`` seconds, or until the next phrase). Returns the concat list
@@ -270,7 +271,7 @@ def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
             dur = max(0.05, end - w["start"])
             png = tmpdir / f"s{n_png:04d}.png"
             _render_state(texts, i, width, strip_h, fonts, colors, position,
-                          two_lines=two_lines).save(png)
+                          two_lines=two_lines, align=align).save(png)
             entries.append((png, dur))
             last_png = png
             n_png += 1

@@ -60,7 +60,7 @@ def _wrap_hook_lines(draw: ImageDraw.ImageDraw, text: str,
 
 def render_hook_png(text: str, width: int, max_height: int, *, font_name: str,
                     font_px: int, color: str) -> Image.Image:
-    """Render the hook text block: centered, wrapped, shrunk to fit.
+    """Render the hook text block: left-aligned, wrapped, shrunk to fit.
 
     Returns a transparent-background RGBA image exactly ``width`` wide whose
     height is the rendered block (<= ``max_height``). Rendering happens here in
@@ -74,7 +74,8 @@ def render_hook_png(text: str, width: int, max_height: int, *, font_name: str,
     if not font_file.exists():
         raise VerticalCompositeError(f"Hook font missing: {font_file}")
 
-    max_w = width * 0.88
+    # Same safe width as the caption strip so both share one left rail.
+    max_w = width * 0.92
     fill = _hex_to_rgba(color)
     probe = ImageDraw.Draw(Image.new("RGBA", (width, 8), (0, 0, 0, 0)))
 
@@ -92,9 +93,9 @@ def render_hook_png(text: str, width: int, max_height: int, *, font_name: str,
 
     img = Image.new("RGBA", (width, block_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
+    margin = (width - max_w) / 2  # same side gutter the wrap width leaves
     for i, line in enumerate(lines):
-        line_w = draw.textlength(line, font=font)
-        draw.text(((width - line_w) / 2, i * line_h + ascent),
+        draw.text((margin, i * line_h + ascent),
                   line, font=font, fill=fill, anchor="ls")
     return img
 
@@ -173,7 +174,7 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
         concat = render_caption_concat(
             groups, tmpdir, width=width, strip_h=strip_h, fonts=fonts,
             colors=colors, position="top", uppercase=uppercase, dwell=dwell,
-            two_lines=True,
+            two_lines=True, align="left",
         )
 
         # Single pass. The background is the clip itself scaled to cover the
