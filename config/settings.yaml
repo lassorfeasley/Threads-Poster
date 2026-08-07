@@ -195,8 +195,11 @@ vertical:
   # nothing is hardcoded in the ffmpeg filter graph.
   width: 1080
   height: 1920
-  # Flat branded background (the talks Renewables.org navy).
-  background_color: "#1A4A7D"
+  # Background = the clip itself scaled to fill the frame, blurred and
+  # darkened. blur is the radius in full-frame pixels; brightness multiplies
+  # the RGB channels (0 = black, 1 = untouched).
+  background_blur: 32
+  background_brightness: 0.35
   # Top edge of the hook text block (it wraps/shrinks to fit above the video).
   hook_y: 150
   # Top edge of the clip. A 16:9 source lands 1080x608, so it spans

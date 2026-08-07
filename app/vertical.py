@@ -1,9 +1,10 @@
 """1080x1920 vertical composite for Instagram Reels.
 
-Layout, top to bottom on a flat branded background: an operator-written hook
-text block, the 16:9 trimmed clip full-width, the word-by-word caption strip,
-and a bottom band kept clear of the Reels UI overlays. Text is rendered with
-Pillow (hook block + the caption PNG stream shared with app/subtitles.py) and
+Layout, top to bottom: an operator-written hook text block, the 16:9 trimmed
+clip full-width, the word-by-word caption strip, and a bottom band kept clear
+of the Reels UI overlays — all over a background made from the clip itself,
+scaled to fill the frame, blurred and darkened. Text is rendered with Pillow
+(hook block + the caption PNG stream shared with app/subtitles.py) and
 composited in a single ffmpeg pass; every layout coordinate comes from the
 ``vertical:`` section of config/settings.yaml rather than being hardcoded in
 the filter graph, so a different canvas (e.g. a 1:1 variant) is a settings
@@ -35,11 +36,6 @@ log = logging.getLogger("vertical")
 
 class VerticalCompositeError(RuntimeError):
     pass
-
-
-def _ffmpeg_color(value: str) -> str:
-    """'#1A4A7D' -> '0x1A4A7D' (the form ffmpeg's pad/color filters accept)."""
-    return "0x" + value.lstrip("#")
 
 
 def _wrap_hook_lines(draw: ImageDraw.ImageDraw, text: str,
@@ -119,7 +115,8 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
     settings = load_settings()
     width = int(settings.get("vertical.width", 1080))
     height = int(settings.get("vertical.height", 1920))
-    bg = str(settings.get("vertical.background_color", "#1A4A7D"))
+    bg_blur = int(settings.get("vertical.background_blur", 32))
+    bg_brightness = float(settings.get("vertical.background_brightness", 0.35))
     hook_y = int(settings.get("vertical.hook_y", 150))
     video_y = int(settings.get("vertical.video_y", 560))
     caption_y = int(settings.get("vertical.caption_y", 1220))
@@ -176,12 +173,21 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
             colors=colors, position="top", uppercase=uppercase, dwell=dwell,
         )
 
-        # Single pass: pad puts the scaled clip on the branded canvas (keeping
-        # the clip's own fps/duration as the timeline), then the hook and the
-        # caption stream are overlaid at their configured offsets.
+        # Single pass. The background is the clip itself scaled to cover the
+        # full frame, blurred and darkened; the sharp clip sits on top at its
+        # configured offset, then the hook and caption stream are overlaid.
+        # Blur trick: cover-scale to quarter resolution, boxblur there, and
+        # upscale back — visually a heavy gaussian at a fraction of the cost.
+        bw, bh = max(2, width // 4), max(2, height // 4)
+        dim = max(0.0, min(1.0, bg_brightness))
         chains = [
-            f"[0:v]scale={width}:-2,"
-            f"pad={width}:{height}:(ow-iw)/2:{video_y}:color={_ffmpeg_color(bg)}[base]",
+            "[0:v]split=2[bgsrc][fgsrc]",
+            f"[bgsrc]scale={bw}:{bh}:force_original_aspect_ratio=increase,"
+            f"crop={bw}:{bh},boxblur={max(1, bg_blur // 4)}:2,"
+            f"scale={width}:{height},setsar=1,"
+            f"colorchannelmixer=rr={dim}:gg={dim}:bb={dim}[bg]",
+            f"[fgsrc]scale={width}:-2[fg]",
+            f"[bg][fg]overlay=x=(main_w-overlay_w)/2:y={video_y}[base]",
             "[1:v]format=rgba[cap]",
         ]
         args = [
