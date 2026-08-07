@@ -1552,8 +1552,7 @@ initSegDnd();
                   onclick="setPlatformPreview('threads')">Threads</button>
           <button type="button" data-platform="instagram" id="platform-ig-btn"
                   onclick="setPlatformPreview('instagram')"
-                  {{ '' if has_vertical else 'disabled' }}
-                  title="{{ 'Preview the vertical composite' if has_vertical else 'Generate the vertical composite below first' }}">Instagram</button>
+                  title="Set up and preview the Instagram Reel">Instagram</button>
         </div>
       </div>
       <div class="ti-media" id="clip-media">
@@ -1563,6 +1562,12 @@ initSegDnd();
         <video id="clip-player"
                src="{{ ('/media/subtitled/' ~ cut.id if (cut.subtitled_clip_path and cut.use_subtitles) else '/media/clip/' ~ cut.id) ~ '?v=' ~ media_v }}"
                controls preload="metadata"></video>
+        {# Shown only while Instagram is selected and no vertical composite
+           exists yet — keeps the hero in 9:16 so the layout matches the reel. #}
+        <div class="ti-vertical-empty" id="vertical-empty" hidden>
+          <p>No vertical composite yet.</p>
+          <p class="meta">Add hook text below, then Generate vertical.</p>
+        </div>
       </div>
       {# Clip controls where Threads shows engagement: burned-in caption
          position + one-click transcript copy. #}
@@ -1588,50 +1593,11 @@ initSegDnd();
     </div>
   </article>
 
-  {# ---- The first comment (attribution) — configured here, saved onto the
-       post when it's queued/drafted/published. ---- #}
-  <article class="thread-item is-reply">
-    <div class="ti-gutter" aria-hidden="true">
-      <span class="ti-avatar">{{ handle[0]|upper }}</span>
-    </div>
-    <div class="ti-main">
-      <div class="ti-head">
-        <span class="ti-name">{{ handle }}</span>
-        <span class="ti-type">first reply · attribution</span>
-        <span class="ti-tools">
-          <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
-          <details class="ti-menu">
-            <summary aria-label="Attribution actions" title="Attribution actions">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
-            </summary>
-            <div class="ti-menu-pop">
-              <button type="button" id="attribution-regen"
-                      onclick="suggestAttribution(this)">{{ "Regenerate draft" if attribution_text else "Suggest draft" }}</button>
-              <a href="/engagement/first-reply">Reply settings</a>
-            </div>
-          </details>
-        </span>
-      </div>
-      <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to auto-draft at queue time.">{{ attribution_text }}</textarea>
-      {# Visible way into the LLM draft while the comment is empty; the kebab
-         keeps "Regenerate draft" once there's text. #}
-      <button type="button" id="attribution-suggest" class="suggest-btn"
-              {% if attribution_text %}hidden{% endif %} onclick="suggestAttribution(this)">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
-        <span class="lbl">Suggest a draft</span>
-      </button>
-      {% if not attribution_enabled %}
-      <p class="field-hint">Attribution comments are off under
-        <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
-      {% endif %}
-    </div>
-  </article>
-
   {# ---- Instagram Reel: optional vertical composite that rides the same
        queue action. Hook text renders on the video; the reel caption is
-       per-platform copy. ---- #}
-  <article class="thread-item is-reply" id="ig-section">
+       per-platform copy. Only shown while the Instagram preview toggle is
+       active — setPlatformPreview() flips the hidden flag. ---- #}
+  <article class="thread-item is-reply" id="ig-section" hidden>
     <div class="ti-gutter" aria-hidden="true">
       <span class="ti-avatar">IG</span>
     </div>
@@ -1672,6 +1638,46 @@ initSegDnd();
       <div class="meta" id="vertical-status" aria-live="polite"></div>
       <textarea form="post-form" name="ig_caption" id="ig-caption" class="ti-text" maxlength="2200"
                 placeholder="Reel caption — leave empty to reuse the Threads caption.">{{ cut.ig_draft_caption }}</textarea>
+    </div>
+  </article>
+
+  {# ---- The first comment (attribution) — configured here, saved onto the
+       post when it's queued/drafted/published. ---- #}
+  <article class="thread-item is-reply">
+    <div class="ti-gutter" aria-hidden="true">
+      <span class="ti-avatar">{{ handle[0]|upper }}</span>
+    </div>
+    <div class="ti-main">
+      <div class="ti-head">
+        <span class="ti-name">{{ handle }}</span>
+        <span class="ti-type">first reply · attribution</span>
+        <span class="ti-tools">
+          <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
+          <details class="ti-menu">
+            <summary aria-label="Attribution actions" title="Attribution actions">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+            </summary>
+            <div class="ti-menu-pop">
+              <button type="button" id="attribution-regen"
+                      onclick="suggestAttribution(this)">{{ "Regenerate draft" if attribution_text else "Suggest draft" }}</button>
+              <a href="/engagement/first-reply">Reply settings</a>
+            </div>
+          </details>
+        </span>
+      </div>
+      <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
+                placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to auto-draft at queue time.">{{ attribution_text }}</textarea>
+      {# Visible way into the LLM draft while the comment is empty; the kebab
+         keeps "Regenerate draft" once there's text. #}
+      <button type="button" id="attribution-suggest" class="suggest-btn"
+              {% if attribution_text %}hidden{% endif %} onclick="suggestAttribution(this)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+        <span class="lbl">Suggest a draft</span>
+      </button>
+      {% if not attribution_enabled %}
+      <p class="field-hint">Attribution comments are off under
+        <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
+      {% endif %}
     </div>
   </article>
 
@@ -1730,30 +1736,46 @@ initSegDnd();
     }
 
     // Hero preview per platform: Threads shows the 16:9 export (respecting the
-    // caption toggle), Instagram shows the vertical composite. The caption
-    // toggle only applies to the Threads file, so it snaps the view back.
+    // caption toggle), Instagram shows the vertical composite plus the reel
+    // setup card (hook text, caption, include checkbox). Always switch the
+    // hero to 9:16 on Instagram — composite if ready, empty frame if not —
+    // so the toggle never leaves the landscape clip looking like the reel.
     function setPlatformPreview(which, freshSrc) {
-      if (which === 'instagram' && !hasVertical) return;
       platformMode = which;
       document.querySelectorAll('#platform-line button').forEach((b) => {
         b.classList.toggle('is-on', b.dataset.platform === which);
       });
+      const igSection = document.getElementById('ig-section');
+      if (igSection) igSection.hidden = which !== 'instagram';
       const p = document.getElementById('clip-player');
       const media = document.getElementById('clip-media');
+      const empty = document.getElementById('vertical-empty');
       const subsLine = document.getElementById('subs-line');
       if (which === 'instagram') {
-        p.src = freshSrc || ('/media/vertical/{{ cut.id }}?v=' + Date.now());
         media.classList.add('is-vertical');
         subsLine.classList.add('is-disabled');
-        // The toolbar download follows the previewed version.
-        const dl = document.getElementById('download-clip-link');
-        if (dl) {
-          dl.href = '/cut/{{ cut.id }}/download-vertical';
-          dl.title = dl.ariaLabel = 'Download vertical composite';
+        if (hasVertical) {
+          p.hidden = false;
+          if (empty) empty.hidden = true;
+          p.src = freshSrc || ('/media/vertical/{{ cut.id }}?v=' + Date.now());
+          const dl = document.getElementById('download-clip-link');
+          if (dl) {
+            dl.href = '/cut/{{ cut.id }}/download-vertical';
+            dl.title = dl.ariaLabel = 'Download vertical composite';
+          }
+        } else {
+          // Empty 9:16 frame — don't leave the Threads landscape clip up.
+          p.pause();
+          p.removeAttribute('src');
+          p.load();
+          p.hidden = true;
+          if (empty) empty.hidden = false;
         }
       } else {
         media.classList.remove('is-vertical');
         subsLine.classList.remove('is-disabled');
+        p.hidden = false;
+        if (empty) empty.hidden = true;
         const dl = document.getElementById('download-clip-link');
         if (dl) dl.title = dl.ariaLabel = 'Download clip';
         // swapPreview also restores the download href for the Threads file.
@@ -1775,9 +1797,6 @@ initSegDnd();
         const d = await r.json();
         if (d.url) {
           hasVertical = true;
-          const igBtn = document.getElementById('platform-ig-btn');
-          igBtn.disabled = false;
-          igBtn.title = 'Preview the vertical composite';
           const dlV = document.getElementById('vertical-download');
           if (dlV) dlV.hidden = false;
           // Show the result right away in the hero preview.
