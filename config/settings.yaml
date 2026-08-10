@@ -181,6 +181,49 @@ threads:
   # How often to poll the media container's processing status (seconds).
   publish_poll_interval_seconds: 10
 
+instagram:
+  # Instagram Reels publishing (Instagram API with Instagram Login: professional
+  # account required, no linked Facebook Page). Same container -> poll ->
+  # publish flow as Threads, so the same knobs.
+  publish_poll_timeout_seconds: 600
+  publish_poll_interval_seconds: 10
+
+vertical:
+  # 1080x1920 branded composite for Instagram Reels: hook text at the top, the
+  # 16:9 clip full-width in the upper-middle, burned-in captions below it, and
+  # the bottom kept clear of the Reels UI overlays. All layout lives here —
+  # nothing is hardcoded in the ffmpeg filter graph.
+  width: 1080
+  height: 1920
+  # Background = the clip itself scaled to fill the frame, blurred and
+  # darkened. blur is the radius in full-frame pixels; brightness multiplies
+  # the RGB channels (0 = black, 1 = untouched).
+  background_blur: 32
+  background_brightness: 0.55
+  # Top edge of the hook text block (it wraps/shrinks to fit above the video).
+  hook_y: 150
+  # Top edge of the clip. A 16:9 source lands 1080x608, so it spans
+  # video_y .. video_y+608.
+  video_y: 560
+  # Top edge of the caption strip (word-by-word captions render from here down).
+  caption_y: 1210
+  # Height of the caption strip — deep enough for caption_max_lines lines.
+  # caption_y + caption_strip_px should stay at or above height - bottom_safe_px.
+  caption_strip_px: 360
+  # Bottom band kept clear of platform UI (progress bar, actions, audio pill).
+  bottom_safe_px: 350
+  # Hook text styling (bundled Funnel weights; rendered by Pillow, not ffmpeg).
+  hook_font_file: FunnelDisplay-ExtraBold.ttf
+  hook_font_px: 126
+  hook_text_color: "#FFFFFF"
+  # Caption word size on the canvas (style/colors follow the `subtitles:` section).
+  caption_font_px: 78
+  # Words per caption phrase and how many lines they may wrap across. Phrases
+  # fill each line to the safe width and break naturally (ragged right), so
+  # ~9 words typically shows as three left-aligned lines.
+  caption_max_words: 9
+  caption_max_lines: 3
+
 engagement:
   # HARD SCOPE LIMIT. The tool only ever reads/replies on the operator's own
   # posts. This flag exists but is HIGH-RISK and should stay false: enabling it

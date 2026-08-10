@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
-{% set ta_sub %}Connect the Threads account this app posts to, and pull in posts you made outside of it.{% endset %}
-{{ ui.pagebar("Threads account", sub=ta_sub) }}
+{% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel.{% endset %}
+{{ ui.pagebar("Accounts", sub=ta_sub) }}
 
 <div class="card">
-  <div class="card-title" style="margin-bottom: 8px;">Connection</div>
+  <div class="card-title" style="margin-bottom: 8px;">Threads</div>
   {% if authenticated %}
     <p class="meta"><span class="badge supportive">Connected</span> Posts are published to this account.</p>
   {% else %}
@@ -14,6 +14,32 @@
        2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
        Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
     <form method="post" action="/threads/connect">
+      <input type="hidden" name="next" value="/threads-account">
+      <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
+      <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
+    </form>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 8px;">Instagram</div>
+  {% if ig_authenticated %}
+    <p class="meta"><span class="badge supportive">Connected</span>
+      Reels publish to {% if ig_username %}<strong>@{{ ig_username }}</strong>{% else %}this account{% endif %}
+      when you tick “Include Instagram Reel” on a clip's Post step.</p>
+  {% elif not ig_configured %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not configured</span></p>
+    <p class="meta">To publish Reels, add the <strong>Instagram API with Instagram Login</strong> product to
+      your Meta app at developers.facebook.com (your Instagram account must be a
+      <em>professional</em> account, added as an Instagram Tester), then set
+      <code>INSTAGRAM_APP_ID</code>, <code>INSTAGRAM_APP_SECRET</code> and
+      <code>INSTAGRAM_REDIRECT_URI</code> in <code>.env</code> and restart.</p>
+  {% else %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
+    <p class="meta">1. <a href="{{ ig_auth_url }}" target="_blank">Authorize with Instagram ↗</a> using the account you post reels from.<br>
+       2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
+       Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
+    <form method="post" action="/instagram/connect">
       <input type="hidden" name="next" value="/threads-account">
       <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
       <div style="margin-top: 12px;"><button class="primary">Connect</button></div>

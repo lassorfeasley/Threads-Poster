@@ -168,9 +168,15 @@ def _load_fonts(px: int, font_name: str) -> tuple[ImageFont.FreeTypeFont, ImageF
 
 
 def _render_state(texts: list[str], active: int, width: int, strip_h: int,
-                  fonts: tuple, colors: dict, position: str = "bottom") -> Image.Image:
+                  fonts: tuple, colors: dict, position: str = "bottom",
+                  max_lines: int = 2, align: str = "center") -> Image.Image:
     """One caption state: the group's words, with the ``active`` word set on a
-    solid rounded box in inverted colors (the "talks Renewables.org" look)."""
+    solid rounded box in inverted colors (the "talks Renewables.org" look).
+
+    ``align="center"`` (the 16:9 export) keeps the original layout: one
+    centered line, split into two balanced lines only on overflow.
+    ``align="left"`` (the vertical composite) wraps greedily instead — each
+    line fills the safe width and breaks naturally, up to ``max_lines``."""
     from PIL import ImageFilter
 
     base_f, big_f = fonts
@@ -188,28 +194,44 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
     # The box makes the active word occupy extra horizontal room.
     slots = [w + (2 * pad_x if i == active else 0) for i, w in enumerate(widths)]
 
-    # Wrap to two lines when the single line would overflow the safe width.
     max_w = width * 0.92
-    lines: list[list[int]] = [[i for i in range(len(texts))]]
-    total = sum(slots) + space * (len(texts) - 1)
-    if total > max_w and len(texts) > 1:
-        split, acc = 1, slots[0]
-        for i in range(1, len(texts)):
-            if acc + space + slots[i] > total / 2:
-                split = i
-                break
-            acc += space + slots[i]
-        lines = [list(range(split)), list(range(split, len(texts)))]
+    if align == "left":
+        # Greedy ragged-right wrap: fill each line to the safe width, break
+        # where the text naturally overflows. The last line absorbs any
+        # remainder beyond max_lines (groups are sized to make that rare).
+        lines: list[list[int]] = [[]]
+        acc = 0.0
+        for i in range(len(texts)):
+            add = slots[i] if not lines[-1] else slots[i] + space
+            if lines[-1] and acc + add > max_w and len(lines) < max_lines:
+                lines.append([i])
+                acc = slots[i]
+            else:
+                lines[-1].append(i)
+                acc += add
+    else:
+        # Centered: one line, split into two balanced lines only on overflow.
+        lines = [[i for i in range(len(texts))]]
+        total = sum(slots) + space * (len(texts) - 1)
+        if total > max_w and len(texts) > 1:
+            split, acc = 1, slots[0]
+            for i in range(1, len(texts)):
+                if acc + space + slots[i] > total / 2:
+                    split = i
+                    break
+                acc += space + slots[i]
+            lines = [list(range(split)), list(range(split, len(texts)))]
 
     line_h = (ascent + descent) * 1.06
     if position == "top":
-        # Mirror of the bottom layout: same edge margin, lines flow downward
-        # from the top of the strip (which sits at the top of the frame).
+        # Lines flow downward from the top of the strip (which sits at the
+        # top of the frame).
         first = line_h * 0.55 - descent + ascent
-        baselines = [first] if len(lines) == 1 else [first, first + line_h]
+        baselines = [first + k * line_h for k in range(len(lines))]
     else:
-        baselines = ([strip_h - line_h * 0.55] if len(lines) == 1
-                     else [strip_h - line_h * 1.55, strip_h - line_h * 0.55])
+        # Lines stack upward from the bottom edge of the strip.
+        last = strip_h - line_h * 0.55
+        baselines = [last - (len(lines) - 1 - k) * line_h for k in range(len(lines))]
 
     # Soft drop shadow (separate blurred layer) keeps white text readable on
     # bright footage without the hard outline of the old style.
@@ -218,7 +240,7 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
 
     for line, base_y in zip(lines, baselines):
         line_w = sum(slots[i] for i in line) + space * (len(line) - 1)
-        x = (width - line_w) / 2
+        x = (width - max_w) / 2 if align == "left" else (width - line_w) / 2
         for i in line:
             f = word_font(i)
             if i == active:
@@ -237,6 +259,63 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
 
     shadow = shadow.filter(ImageFilter.GaussianBlur(base_f.size * 0.06))
     return Image.alpha_composite(shadow, img)
+
+
+def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
+                          strip_h: int, fonts: tuple, colors: dict, position: str,
+                          uppercase: bool, dwell: float,
+                          max_lines: int = 2, align: str = "center") -> Path:
+    """Render one PNG per caption state plus an ffconcat list covering the whole
+    clip: blank strips fill silences, and each finished phrase dwells on screen
+    (up to ``dwell`` seconds, or until the next phrase). Returns the concat list
+    path; the PNGs live in ``tmpdir``. Shared by the 16:9 burned-caption export
+    and the vertical composite (which overlays the strip mid-frame)."""
+    blank = tmpdir / "blank.png"
+    Image.new("RGBA", (width, strip_h), (0, 0, 0, 0)).save(blank)
+
+    # Timeline of (png, duration) entries covering the whole clip.
+    entries: list[tuple[Path, float]] = []
+    t = 0.0
+    n_png = 0
+    for gi, group in enumerate(groups):
+        texts = [w["word"].upper() if uppercase else w["word"] for w in group]
+        g_start, g_end = group[0]["start"], group[-1]["end"]
+        if g_start > t + 0.01:
+            entries.append((blank, g_start - t))
+        last_png: Path | None = None
+        for i, w in enumerate(group):
+            # A word stays highlighted until the next word starts (no flicker).
+            end = group[i + 1]["start"] if i + 1 < len(group) else g_end
+            dur = max(0.05, end - w["start"])
+            png = tmpdir / f"s{n_png:04d}.png"
+            _render_state(texts, i, width, strip_h, fonts, colors, position,
+                          max_lines=max_lines, align=align).save(png)
+            entries.append((png, dur))
+            last_png = png
+            n_png += 1
+        t = g_end
+        # Hold the finished phrase on screen through short pauses so text
+        # doesn't vanish the instant the speaker stops. Cap at ``dwell``,
+        # or cut short when the next phrase is ready to take over.
+        if last_png is not None and dwell > 0:
+            next_start = (
+                groups[gi + 1][0]["start"] if gi + 1 < len(groups) else None
+            )
+            gap = (next_start - t) if next_start is not None else dwell
+            hold = min(dwell, max(0.0, gap))
+            if hold > 0.01:
+                entries.append((last_png, hold))
+                t += hold
+    entries.append((blank, 1.0))
+
+    concat = tmpdir / "list.txt"
+    lines = ["ffconcat version 1.0"]
+    for png, dur in entries:
+        lines.append(f"file '{png}'")
+        lines.append(f"duration {max(0.05, dur):.3f}")
+    lines.append(f"file '{blank}'")  # concat demuxer needs a trailing entry
+    concat.write_text("\n".join(lines) + "\n")
+    return concat
 
 
 def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
@@ -280,50 +359,10 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
     out = Path(out_path) if out_path else CLIPS_DIR / f"{clip.stem}_subs.mp4"
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        blank = tmpdir / "blank.png"
-        Image.new("RGBA", (width, strip_h), (0, 0, 0, 0)).save(blank)
-
-        # Timeline of (png, duration) entries covering the whole clip.
-        entries: list[tuple[Path, float]] = []
-        t = 0.0
-        n_png = 0
-        for gi, group in enumerate(groups):
-            texts = [w["word"].upper() if uppercase else w["word"] for w in group]
-            g_start, g_end = group[0]["start"], group[-1]["end"]
-            if g_start > t + 0.01:
-                entries.append((blank, g_start - t))
-            last_png: Path | None = None
-            for i, w in enumerate(group):
-                # A word stays highlighted until the next word starts (no flicker).
-                end = group[i + 1]["start"] if i + 1 < len(group) else g_end
-                dur = max(0.05, end - w["start"])
-                png = tmpdir / f"s{n_png:04d}.png"
-                _render_state(texts, i, width, strip_h, fonts, colors, position).save(png)
-                entries.append((png, dur))
-                last_png = png
-                n_png += 1
-            t = g_end
-            # Hold the finished phrase on screen through short pauses so text
-            # doesn't vanish the instant the speaker stops. Cap at ``dwell``,
-            # or cut short when the next phrase is ready to take over.
-            if last_png is not None and dwell > 0:
-                next_start = (
-                    groups[gi + 1][0]["start"] if gi + 1 < len(groups) else None
-                )
-                gap = (next_start - t) if next_start is not None else dwell
-                hold = min(dwell, max(0.0, gap))
-                if hold > 0.01:
-                    entries.append((last_png, hold))
-                    t += hold
-        entries.append((blank, 1.0))
-
-        concat = tmpdir / "list.txt"
-        lines = ["ffconcat version 1.0"]
-        for png, dur in entries:
-            lines.append(f"file '{png}'")
-            lines.append(f"duration {max(0.05, dur):.3f}")
-        lines.append(f"file '{blank}'")  # concat demuxer needs a trailing entry
-        concat.write_text("\n".join(lines) + "\n")
+        concat = render_caption_concat(
+            groups, tmpdir, width=width, strip_h=strip_h, fonts=fonts,
+            colors=colors, position=position, uppercase=uppercase, dwell=dwell,
+        )
 
         try:
             _run_ffmpeg([

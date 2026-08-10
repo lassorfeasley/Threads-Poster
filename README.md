@@ -55,6 +55,7 @@ Optional extras:
 | `DATABASE_URL` | Optional. Empty = local SQLite at `data/app.db` (fast for local UI work). For Supabase Postgres use the connection string from Project Settings → Database. Keep Storage (`SUPABASE_*`) even when using SQLite. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Supabase project (Settings → API). Used for the trimmed-clip bucket only. Create a **private** Storage bucket named `trimmed-clips` (or change `storage.trimmed_clip_bucket` in settings). |
 | `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_REDIRECT_URI` | Meta app for the Threads API (below). |
+| `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_REDIRECT_URI` | Optional. Same Meta app with the **Instagram API with Instagram Login** product — required only to queue/publish paired Reels. |
 
 ### Threads / Meta app + OAuth
 
@@ -67,9 +68,21 @@ Optional extras:
    copy the `code=` parameter from the address bar).
 3. Add your Threads account as a tester (App roles) and accept the invite in
    Threads (Settings → Website permissions → Invites).
-4. Put app ID/secret/redirect URI in `.env`, then open the dashboard's **Publish**
+4. Put app ID/secret/redirect URI in `.env`, then open the dashboard's **Accounts**
    page → "Authorize with Threads" → paste the code. The long-lived token (~60
    days) is stored at `data/threads_token.json` (gitignored) and auto-refreshes.
+
+### Instagram Reels (optional, paired posts)
+
+1. On the same Meta app, add **Instagram API with Instagram Login**. The Instagram
+   account must be a **professional** account and added as an Instagram Tester.
+2. Scopes used today: `instagram_business_basic`, `instagram_business_content_publish`
+   (Insights can be added later when you want IG analytics).
+3. Register a redirect URI (e.g. `https://localhost/instagram/callback`) and set
+   `INSTAGRAM_APP_ID` / `INSTAGRAM_APP_SECRET` / `INSTAGRAM_REDIRECT_URI` in `.env`.
+4. Connect from the dashboard **Accounts** page. On a clip's Post step, leave
+   "Include Instagram Reel" on (default) to queue the vertical composite alongside
+   the Threads post. Analytics stay Threads-only until Insights is wired up.
 
 ## Running
 

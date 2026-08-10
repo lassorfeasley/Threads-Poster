@@ -158,11 +158,20 @@ class Cut(Base):
     # Cleared on re-export with the video files.
     clip_transcript_path: Mapped[str] = mapped_column(Text, default="")
 
+    # Vertical (9:16) composite for Instagram Reels: operator-written hook text
+    # rendered at the top of the frame, the 16:9 clip mid-frame on a branded
+    # background, captions below. Cleared on re-export with the video files.
+    hook_text: Mapped[str] = mapped_column(Text, default="")
+    vertical_clip_path: Mapped[str] = mapped_column(Text, default="")
+    # Unused: reel caption is the Threads ``draft_caption``. Kept for existing DBs.
+    ig_draft_caption: Mapped[str] = mapped_column(Text, default="")
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     candidate: Mapped[Candidate] = relationship(back_populates="cuts")
     threads_posts: Mapped[list["ThreadsPost"]] = relationship(back_populates="cut")
+    instagram_posts: Mapped[list["InstagramPost"]] = relationship(back_populates="cut")
 
 
 class ThreadsPost(Base):
@@ -248,6 +257,44 @@ class ThreadsPost(Base):
     cut: Mapped["Cut | None"] = relationship(back_populates="threads_posts")
     comments: Mapped[list["ThreadsComment"]] = relationship(back_populates="post")
     metrics: Mapped[list["MetricSnapshot"]] = relationship(back_populates="post")
+    instagram_post: Mapped["InstagramPost | None"] = relationship(
+        back_populates="threads_post", uselist=False,
+    )
+
+
+class InstagramPost(Base):
+    """An Instagram Reel queued/published alongside a ThreadsPost.
+
+    The reel shares the paired Threads post's uploaded composite (same Supabase
+    ``clip_object_path``) but carries its own caption and its own publish
+    lifecycle: a reel failure never rolls back or blocks the Threads publish.
+    """
+
+    __tablename__ = "instagram_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cut_pk: Mapped[int | None] = mapped_column(ForeignKey("cuts.id"), nullable=True)
+    # The paired Threads post whose scheduler window fires this reel.
+    threads_post_pk: Mapped[int | None] = mapped_column(
+        ForeignKey("threads_posts.id"), nullable=True,
+    )
+    caption: Mapped[str] = mapped_column(Text, default="")
+    clip_local_path: Mapped[str] = mapped_column(Text, default="")
+    clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase object key
+    ig_media_id: Mapped[str] = mapped_column(String(60), default="")
+    permalink: Mapped[str] = mapped_column(String(300), default="")
+    # draft | queued | publishing | published | failed
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    error: Mapped[str] = mapped_column(Text, default="")
+    # Operator acknowledged a failure (drops out of needs-attention; kept for history).
+    attention_dismissed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    cut: Mapped["Cut | None"] = relationship(back_populates="instagram_posts")
+    threads_post: Mapped["ThreadsPost | None"] = relationship(back_populates="instagram_post")
 
 
 class SchedulerState(Base):
