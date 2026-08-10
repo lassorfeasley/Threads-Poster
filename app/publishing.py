@@ -271,7 +271,7 @@ def publish_post(session, post: ThreadsPost) -> ThreadsPost:
 
 # --- Instagram Reels (paired posts) ------------------------------------------
 
-def record_instagram_post(session, cut: Cut | None, threads_post: ThreadsPost,
+def record_instagram_post(session, cut: Cut | None, threads_post: ThreadsPost | None,
                           clip_path: str, caption: str) -> InstagramPost:
     """Create (or refresh) the queued reel paired with ``threads_post``.
 
@@ -280,6 +280,11 @@ def record_instagram_post(session, cut: Cut | None, threads_post: ThreadsPost,
     while the file is certainly on this machine, so a headless runner can
     publish later (same rationale as ``record_post``). Reuses an existing
     not-yet-published row for the cut instead of stacking duplicates.
+
+    ``threads_post`` is None for a reel shipped on its own (Instagram-only from
+    the clip's Post step); it then has no scheduler window of its own and the
+    caller publishes it directly. An existing row's pairing is left alone so
+    reusing it doesn't orphan a Threads post that's still waiting to go out.
     """
     clip = Path(clip_path).expanduser()
     if not clip.exists():
@@ -297,7 +302,8 @@ def record_instagram_post(session, cut: Cut | None, threads_post: ThreadsPost,
     else:
         ig = InstagramPost(cut_pk=cut.id if cut else None)
         session.add(ig)
-    ig.threads_post_pk = threads_post.id
+    if threads_post is not None:
+        ig.threads_post_pk = threads_post.id
     ig.caption = caption
     if ig.clip_local_path != str(clip) or not ig.clip_object_path:
         ig.clip_local_path = str(clip)
@@ -420,6 +426,28 @@ def publish_paired_reel(post_id: int) -> InstagramPost | None:
             publish_instagram_post(session, ig)
         except Exception as exc:
             log.warning("Paired Instagram reel failed for post %s: %s", post_id, exc)
+        session.expunge(ig)
+    return ig
+
+
+def publish_reel_now(ig_id: int) -> InstagramPost | None:
+    """Fire a recorded reel immediately, with no Threads post involved.
+
+    Same out-of-transaction contract as ``publish_paired_reel``: the caller's
+    recording transaction must have committed, because reel state is persisted
+    through fresh connections (``_write_ig_row``). Returns a detached snapshot
+    of the reel row (failures come back as ``status='failed'`` with ``error``
+    set rather than raising)."""
+    from .db import session_scope
+
+    with session_scope() as session:
+        ig = session.get(InstagramPost, ig_id)
+        if ig is None:
+            return None
+        try:
+            publish_instagram_post(session, ig)
+        except Exception as exc:
+            log.warning("Instagram-only reel %s failed: %s", ig_id, exc)
         session.expunge(ig)
     return ig
 

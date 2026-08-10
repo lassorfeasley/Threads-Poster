@@ -82,7 +82,10 @@ Optional extras:
    `INSTAGRAM_APP_ID` / `INSTAGRAM_APP_SECRET` / `INSTAGRAM_REDIRECT_URI` in `.env`.
 4. Connect from the dashboard **Accounts** page. On a clip's Post step, leave
    "Include Instagram Reel" on (default) to queue the vertical composite alongside
-   the Threads post. Analytics stay Threads-only until Insights is wired up.
+   the Threads post. **Post now** asks which platforms to publish to — both, the
+   Threads post only, or the reel only (a reel shipped on its own creates no
+   Threads post and skips the spacing floor). Analytics stay Threads-only until
+   Insights is wired up.
 
 ## Running
 

@@ -1678,6 +1678,10 @@ initSegDnd();
     <form method="post" action="/cut/{{ cut.id }}/post" id="post-form">
       <input type="hidden" name="use_subtitles" id="use-subtitles-field"
              value="{{ '1' if cut.use_subtitles else '0' }}">
+      {# Which platforms Post now ships to — set by the Post now dialog
+         (both | threads | instagram). Ignored by queue/draft, which follow the
+         Instagram toggle above. #}
+      <input type="hidden" name="publish_target" id="publish-target-field" value="">
     </form>
     {% if pending_post_status %}
     <span class="ta-note">Edits the clip's
@@ -2252,13 +2256,58 @@ initSegDnd();
       // to null once the event finishes dispatching, and submitting with a null
       // submitter would fall back to the form's default action (/post = post now),
       // silently publishing a clip you meant to queue.
+      // ---- Post now: pick the platforms ----
+      // Both is the usual ship, but either platform can go out on its own —
+      // the reel-only path publishes the vertical composite with no Threads
+      // post at all. Order follows the Instagram toggle so the emphasised
+      // (green) option is the one the page is already set up for.
+      const instagramConnected = {{ 'true' if instagram_ok else 'false' }};
+      function targetChoices() {
+        const box = document.getElementById('include-instagram');
+        const both = { value: 'both', label: 'Threads post + Instagram Reel',
+                       hint: 'This caption on both.' };
+        const threads = { value: 'threads', label: 'Threads post only',
+                          hint: 'No reel goes out.' };
+        const reel = { value: 'instagram', label: 'Instagram Reel only',
+                       hint: 'Publishes the vertical composite — nothing posts to Threads.' };
+        const ordered = (!box || box.checked) ? [both, threads, reel]
+                                              : [threads, both, reel];
+        ordered.forEach((c, i) => { c.variant = i === 0 ? 'approve' : 'primary'; });
+        return ordered;
+      }
+      // Returns 'both' | 'threads' | 'instagram', or null when the operator
+      // backs out (or the reel can't be shipped).
+      async function askPublishTarget() {
+        if (!instagramConnected) {
+          const ok = await confirmDialog('Post this clip to Threads now?',
+                                        { okText: 'Post now', okVariant: 'approve' });
+          return ok ? 'threads' : null;
+        }
+        const target = await chooseDialog('Publish right now — pick where this goes.',
+                                          { title: 'Post now', choices: targetChoices() });
+        if (!target) return null;
+        // The reel needs a rendered vertical: compose it on demand rather than
+        // bouncing the operator back with a server-side error.
+        if (target !== 'threads' && !hasVertical) {
+          if (!verticalBusy) await generateVertical();
+          if (!hasVertical) {
+            await alertDialog(verticalBusy
+              ? 'Still composing the vertical — try again in a moment.'
+              : "The vertical composite isn't ready, so the reel can't be published yet.");
+            return null;
+          }
+        }
+        return target;
+      }
       if (postForm) {
         document.getElementById('btn-post-now').addEventListener('click', async (e) => {
           e.preventDefault();
           const btn = e.currentTarget;
           if (!captionOk()) return;
-          if (await confirmDialog('Post this clip to Threads now?', { okText: 'Post now', okVariant: 'approve' }))
-            postForm.requestSubmit(btn);
+          const target = await askPublishTarget();
+          if (!target) return;
+          document.getElementById('publish-target-field').value = target;
+          postForm.requestSubmit(btn);
         });
         document.getElementById('btn-queue').addEventListener('click', async (e) => {
           e.preventDefault();

@@ -4,7 +4,9 @@
  * shared <dialog class="modal"> that matches the app's styling.
  *
  * Two ways to use it:
- *   1. Programmatic  — `await confirmDialog(msg, opts)` / `await alertDialog(msg)`.
+ *   1. Programmatic  — `await confirmDialog(msg, opts)` / `await alertDialog(msg)`
+ *                      / `await chooseDialog(msg, { choices: [...] })` when the
+ *                      answer is one of several outcomes rather than yes/no.
  *   2. Declarative   — add `data-confirm="Are you sure?"` to a form, submit
  *                      button, or link. Optional: data-confirm-title,
  *                      data-confirm-ok, data-confirm-cancel, data-confirm-variant.
@@ -16,7 +18,7 @@
 (function () {
   'use strict';
 
-  let dlg, titleEl, msgEl, okBtn, cancelBtn, closeBtn;
+  let dlg, titleEl, msgEl, choicesEl, okBtn, cancelBtn, closeBtn;
 
   function ensureDialog() {
     if (dlg) return dlg;
@@ -28,6 +30,7 @@
         '<button type="button" class="btn ghost sm" data-role="close" aria-label="Close">✕</button>' +
       '</div>' +
       '<p class="meta dialog-msg" data-role="msg"></p>' +
+      '<div class="dialog-choices" data-role="choices" hidden></div>' +
       '<div class="btn-group" style="justify-content: flex-end;">' +
         '<button type="button" class="btn ghost" data-role="cancel">Cancel</button>' +
         '<button type="button" class="primary" data-role="ok">OK</button>' +
@@ -35,15 +38,46 @@
     (document.body || document.documentElement).appendChild(dlg);
     titleEl = dlg.querySelector('[data-role="title"]');
     msgEl = dlg.querySelector('[data-role="msg"]');
+    choicesEl = dlg.querySelector('[data-role="choices"]');
     okBtn = dlg.querySelector('[data-role="ok"]');
     cancelBtn = dlg.querySelector('[data-role="cancel"]');
     closeBtn = dlg.querySelector('[data-role="close"]');
     return dlg;
   }
 
+  // One stacked button per outcome. Returns the first button so open() can
+  // focus it in place of OK.
+  function renderChoices(choices) {
+    choicesEl.textContent = '';
+    choices.forEach(function (c) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'dialog-choice ' + (c.variant || 'primary');
+      b.dataset.value = c.value;
+      const label = document.createElement('span');
+      label.className = 'dc-label';
+      label.textContent = c.label;
+      b.appendChild(label);
+      if (c.hint) {
+        const hint = document.createElement('span');
+        hint.className = 'dc-hint';
+        hint.textContent = c.hint;
+        b.appendChild(hint);
+      }
+      b.disabled = !!c.disabled;
+      choicesEl.appendChild(b);
+    });
+    return choicesEl.querySelector('button:not([disabled])');
+  }
+
   function open(opts) {
-    // No <dialog> support: degrade to the native equivalents.
+    const choices = opts.choices && opts.choices.length ? opts.choices : null;
+    // No <dialog> support: degrade to the native equivalents. Choices collapse
+    // to a yes/no on the first (recommended) option — better than no prompt.
     if (typeof document.createElement('dialog').showModal !== 'function') {
+      if (choices)
+        return Promise.resolve(window.confirm(opts.message + '\n\nOK = ' + choices[0].label)
+          ? choices[0].value : null);
       if (opts.showCancel === false) { window.__nativeAlert(opts.message); return Promise.resolve(true); }
       return Promise.resolve(window.confirm(opts.message));
     }
@@ -56,6 +90,9 @@
     const hideCancel = opts.showCancel === false;
     cancelBtn.style.display = hideCancel ? 'none' : '';
     closeBtn.style.display = hideCancel ? 'none' : '';
+    okBtn.style.display = choices ? 'none' : '';
+    choicesEl.hidden = !choices;
+    const firstChoice = choices ? renderChoices(choices) : null;
 
     return new Promise(function (resolve) {
       let done = false;
@@ -63,21 +100,30 @@
         if (done) return;
         done = true;
         okBtn.removeEventListener('click', onOk);
+        choicesEl.removeEventListener('click', onChoice);
         cancelBtn.removeEventListener('click', onCancel);
         closeBtn.removeEventListener('click', onCancel);
         dlg.removeEventListener('cancel', onEsc);
         try { dlg.close(); } catch (e) {}
         resolve(val);
       }
+      // Dismissal resolves null for choice dialogs (no outcome picked) and
+      // false for yes/no ones, so `if (!answer) return` works for both.
+      const dismissed = choices ? null : false;
       function onOk() { finish(true); }
-      function onCancel() { finish(false); }
-      function onEsc(e) { e.preventDefault(); finish(false); }
+      function onChoice(e) {
+        const b = e.target.closest('button[data-value]');
+        if (b && !b.disabled) finish(b.dataset.value);
+      }
+      function onCancel() { finish(dismissed); }
+      function onEsc(e) { e.preventDefault(); finish(dismissed); }
       okBtn.addEventListener('click', onOk);
+      choicesEl.addEventListener('click', onChoice);
       cancelBtn.addEventListener('click', onCancel);
       closeBtn.addEventListener('click', onCancel);
       dlg.addEventListener('cancel', onEsc);
       dlg.showModal();
-      okBtn.focus();
+      (firstChoice || okBtn).focus();
     });
   }
 
@@ -89,6 +135,20 @@
       okText: opts.okText || 'OK',
       okVariant: opts.okVariant || 'primary',
       cancelText: opts.cancelText || 'Cancel',
+      showCancel: true,
+    });
+  };
+
+  // Pick one of several outcomes. `opts.choices` is a list of
+  // { value, label, hint?, variant?, disabled? }; resolves to the chosen value,
+  // or null when the operator backs out.
+  window.chooseDialog = function (message, opts) {
+    opts = opts || {};
+    return open({
+      title: opts.title || 'Please confirm',
+      message: message,
+      cancelText: opts.cancelText || 'Cancel',
+      choices: opts.choices || [],
       showCancel: true,
     });
   };

@@ -79,6 +79,7 @@ from ..publishing import (
     publish_instagram_post,
     publish_paired_reel,
     publish_post,
+    publish_reel_now,
     queue_clip,
     record_instagram_post,
     record_post,
@@ -2054,6 +2055,50 @@ def _wants_instagram(value: str) -> bool:
     return str(value).lower() in ("1", "true", "on", "yes")
 
 
+def _publish_targets(target: str, include_instagram: str) -> tuple[bool, bool]:
+    """Which platforms a Post now click ships to, as ``(threads, instagram)``.
+
+    The Post now dialog sends an explicit ``target``; anything else (an older
+    cached page, a scripted POST) falls back to the Instagram toggle, which is
+    how this endpoint behaved before the dialog existed."""
+    choice = str(target).strip().lower()
+    if choice == "threads":
+        return True, False
+    if choice == "instagram":
+        return False, True
+    if choice == "both":
+        return True, True
+    return True, _wants_instagram(include_instagram)
+
+
+def _publish_reel_only(cut_id: int, caption: str):
+    """Ship just the Instagram reel for a cut — no Threads post is created, so
+    the Threads spacing floor doesn't apply and the scheduler state is left
+    untouched."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path:
+            return _flash(f"/cut/{cut_id}", "Export a clip first")
+        ig_error = _instagram_ready_error(cut, True)
+        if ig_error:
+            return _flash(f"/cut/{cut_id}?step=post", ig_error)
+        try:
+            # No Threads post to pair with: the reel is published directly
+            # below, once this transaction has committed.
+            ig = record_instagram_post(session, cut, None, cut.vertical_clip_path,
+                                       caption)
+            cut.draft_caption = caption
+            ig_id = ig.id
+        except Exception as exc:
+            return _flash(f"/cut/{cut_id}?step=post", f"Reel failed: {exc}")
+    ig = publish_reel_now(ig_id)
+    if ig is not None and ig.status == "published":
+        return _flash(f"/cut/{cut_id}?step=post",
+                      f"Reel live: {ig.permalink or ig.ig_media_id}")
+    detail = (ig.error or "")[:120] if ig is not None else "reel record vanished"
+    return _flash(f"/cut/{cut_id}?step=post", f"Reel failed: {detail}")
+
+
 def _instagram_ready_error(cut: Cut, want_ig: bool) -> str:
     """Why the reel can't ride along, or '' when it can."""
     if not want_ig:
@@ -2079,13 +2124,16 @@ def _drop_pending_reels(session, cut: Cut) -> None:
 @app.post("/cut/{cut_id}/post")
 def post_to_threads(cut_id: int, caption: str = Form(...),
                     use_subtitles: str = Form(""), attribution: str = Form(""),
-                    include_instagram: str = Form("")):
-    """Operator-confirmed publish of the exported clip (Threads, and the paired
-    Instagram reel when the toggle is on)."""
+                    include_instagram: str = Form(""),
+                    publish_target: str = Form("")):
+    """Operator-confirmed publish of the exported clip. ``publish_target`` picks
+    the platforms — the Threads post, the Instagram reel, or both."""
     caption = caption.strip()
     if not caption:
         return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
-    want_ig = _wants_instagram(include_instagram)
+    want_threads, want_ig = _publish_targets(publish_target, include_instagram)
+    if not want_threads:
+        return _publish_reel_only(cut_id, caption)
     with session_scope() as session:
         ok, wait_min = spacing_allows_publish(session)
         if not ok:

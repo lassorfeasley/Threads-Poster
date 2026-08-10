@@ -663,8 +663,11 @@ h2::after {
 h2:first-child { margin-top: 0; }
 h2 .meta { text-transform: none; letter-spacing: 0; font-weight: 500; white-space: normal; }
 
-/* Section header row: heading on the left, controls (e.g. view toggle) right. */
-.panel-head { display: flex; align-items: center; gap: 16px; }
+/* Section header row: heading on the left, controls (e.g. view toggle) right.
+   The heading's own margin is dropped so it can align with taller controls, so
+   the row carries the h2's bottom spacing itself — without it the header sits
+   flush against the list below while keeping the gap above. */
+.panel-head { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
 .panel-head h2 { flex: 1; min-width: 0; margin: 0; }
 .panel-head-actions {
   display: flex;
@@ -1153,6 +1156,26 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(
 }
 .modal-head strong { font-size: 15px; font-weight: 650; }
 .app-dialog .dialog-msg { margin: 4px 0 18px; white-space: pre-line; line-height: 1.5; }
+/* Choice dialog: one stacked, full-width button per outcome. */
+.app-dialog .dialog-choices { display: grid; gap: 8px; margin: 0 0 14px; }
+.app-dialog .dialog-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 14px;
+  text-align: left;
+  white-space: normal;
+}
+.app-dialog .dialog-choice .dc-hint { font-size: 12px; font-weight: 400; color: var(--muted); }
+.app-dialog .dialog-choice:hover .dc-hint { color: var(--text-dim); }
+/* On the solid-green variant the muted grey disappears into the fill. */
+.app-dialog .dialog-choice.approve .dc-hint,
+.app-dialog .dialog-choice.approve:hover .dc-hint {
+  color: var(--primary-ink);
+  opacity: 0.78;
+}
 
 /* --- Style guide: editable rule rows + advisory insight rows --- */
 .rule-row {
