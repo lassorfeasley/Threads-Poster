@@ -8,12 +8,14 @@
   <form method="post" action="/engagement/first-reply">
     <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 6px;">
       <input type="checkbox" name="attribution_enabled" value="1" {% if attribution_enabled %}checked{% endif %}>
-      Post an AI-drafted attribution comment crediting each clip's source
+      Post the attribution set on each post as its first comment
     </label>
     <p class="meta" style="margin: 0 0 14px 26px;">
-      Drafted per post from the station and video info (never @-tags anyone), e.g.
-      “Courtesy of KXYZ (ABC) in Springfield.” Preview, edit, or clear it on each
-      post's page before it publishes. Posts with an attribution skip the static text below.
+      Nothing is drafted or posted automatically: an attribution only goes out if
+      you set it on the post yourself. “Suggest a draft” on the post page writes a
+      formal citation from the full source video (never @-tags anyone) — and
+      declines when the data can't support one. Posts with an attribution skip
+      the static text below.
     </p>
 
     <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 14px;">

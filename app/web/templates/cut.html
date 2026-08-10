@@ -333,7 +333,9 @@ function addSegment() {
   pending = { start: null, end: null };
   selectedSeg = segments.length - 1;
   renderPending(); renderSegments();
-  previewSegment(selectedSeg);
+  // Don't seek/replay the new segment — leave the source playing so the
+  // operator can keep marking more ranges without interruption. Click a
+  // segment row later to audition it.
 }
 function removeSegment(i) {
   pushUndo();
@@ -880,15 +882,16 @@ let wf = null;   // {peaks: [...], duration}
 async function loadWave() {
   try {
     const r = await fetch('/video/{{ c.id }}/waveform');
-    if (!r.ok) throw new Error('waveform unavailable');
-    wf = await r.json();
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || 'waveform unavailable');
+    wf = body;
     document.getElementById('wave-hint').style.display = 'none';
     sizeWave();
     drawWave();
     redrawDetailWave(true);
     redrawAllSegWaves(true);
   } catch (e) {
-    document.getElementById('wave-hint').textContent = 'waveform unavailable';
+    document.getElementById('wave-hint').textContent = e.message || 'waveform unavailable';
   }
 }
 
@@ -1637,7 +1640,7 @@ initSegDnd();
       </div>
       <div class="ti-text-wrap">
         <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                  placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to auto-draft at queue time.">{{ attribution_text }}</textarea>
+                  placeholder="Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted.">{{ attribution_text }}</textarea>
         <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
                 title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
                 aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
@@ -2100,6 +2103,10 @@ initSegDnd();
           const r = await fetch('/cut/{{ cut.id }}/suggest-attribution', { method: 'POST' });
           const d = await r.json();
           if (!r.ok) { alert(d.error || 'Attribution draft failed.'); return; }
+          if (d.unavailable || !d.text) {
+            alert(d.message || 'No citation drafted — the source data is not available.');
+            return;
+          }
           ta.value = d.text;
           ta.dispatchEvent(new Event('input'));
           const regen = document.getElementById('attribution-regen');

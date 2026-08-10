@@ -67,6 +67,50 @@
         <span class="meta">Simple paid license is enough for v1. Multi-seat collaboration waits on Phase 2.</span>
       </div>
     </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Customer Threads connect (no Meta Developer for them)</strong>
+        <span class="meta">Customers click Connect Threads, log in with their normal Instagram/Threads account on Meta’s consent screen, and grant permissions — like “Sign in with Google.” They never open developers.facebook.com, create an app, copy secrets, register redirect URIs, or accept tester invites. <em>You</em> own one product Meta app; App ID/Secret stay server-side. Can run in parallel with packaging (see Meta section below).</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Meta / Threads for customers (prerequisite for anyone else’s account)</div>
+  <p class="meta" style="margin: 0 0 12px;">
+    Today’s flow is single-operator + tester invite + paste OAuth code from <code>https://localhost/…</code>. Productized, that admin stays with us once; customers only do OAuth consent. Can start before or alongside Mac packaging.
+  </p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>One product Meta app + App Review + publish</strong>
+        <span class="meta">Leave “testers only.” Get Advanced Access / review for the scopes we already use: <code>threads_basic</code>, <code>threads_content_publish</code>, <code>threads_manage_replies</code>, <code>threads_read_replies</code>, <code>threads_manage_insights</code>. Use the Threads app ID/secret (not the generic Meta app ID). Platform checklist: privacy policy URL, data-deletion callback/instructions, deauthorize callback, app icon. After publish, any Threads user can authorize — no tester role.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Real HTTPS OAuth callback (kill paste-code)</strong>
+        <span class="meta">Replace “authorize → broken localhost page → paste <code>?code=</code>” with a hosted redirect (e.g. <code>https://yourproduct.com/threads/callback</code>) that exchanges the code server-side. Mac app still needs this: Meta wants HTTPS redirects, so a small cloud OAuth broker (or license backend) completes the handshake and returns the token to the local app — customers still never configure Meta.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Per-workspace (or per-user) token storage</strong>
+        <span class="meta">Stop the single global <code>AppToken(name=&quot;threads&quot;)</code>. Store long-lived Threads tokens keyed by workspace/user + Threads user id; keep refresh (~60d tokens, refresh when stale). Headless publish (Fly / Actions / scheduler) uses that workspace’s token. Enforce Threads’ ~250 API posts / 24h per profile in product UX.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Product account vs Threads connection</strong>
+        <span class="meta">Optional light product login (license key or email) for the Mac app / workspace; Threads remains a connected integration, not the product identity. Same pattern later for YouTube if needed.</span>
+      </div>
+    </li>
   </ul>
 </div>
 
@@ -86,13 +130,6 @@
       <div>
         <strong>Shared workspaces (if teams matter)</strong>
         <span class="meta">User accounts → workspace owns channels, brand, and one Threads connection. Local apps claim download/trim jobs and upload finished clips. Triage can be multiplayer; media stays on someone’s machine.</span>
-      </div>
-    </li>
-    <li>
-      <span class="badge">Later</span>
-      <div>
-        <strong>Meta App Review (if customers connect their own Threads)</strong>
-        <span class="meta">Required to leave “testers only” on a Meta developer app. Can run in parallel with packaging.</span>
       </div>
     </li>
   </ul>
@@ -122,13 +159,27 @@
         <span class="meta">Unnecessary if the Mac app <em>is</em> the product. A browser-only hosted UI plus a side agent is the fallback if we ever need teams-on-web with local media — not the plan for v1.</span>
       </div>
     </li>
+    <li>
+      <span class="badge hostile">No</span>
+      <div>
+        <strong>Ask customers for Instagram/Threads passwords</strong>
+        <span class="meta">Not allowed and not needed. Only Meta OAuth through <em>our</em> reviewed app. No scraping credentials, no “paste your password.”</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge hostile">No</span>
+      <div>
+        <strong>Make each customer create their own Meta developer app</strong>
+        <span class="meta">That is today’s personal-setup tax. Distribution means we absorb Meta console admin once; customers only authorize.</span>
+      </div>
+    </li>
   </ul>
 </div>
 
 <div class="card roadmap-card" style="margin-top: 14px;">
   <div class="card-title" style="margin-bottom: 6px;">Why local scrape / Whisper still “feel” seamless</div>
   <p class="meta" style="margin: 0;">
-    Today you never “installed a companion” because you <em>are</em> the runtime (<code>python run.py dashboard</code>). A packaged Mac app preserves that: one install, browser-shaped UI, heavy work on-device. Customers should not need multiple product accounts for the core loop — Threads (and later YouTube) show up as connected integrations on one workspace.
+    Today you never “installed a companion” because you <em>are</em> the runtime (<code>python run.py dashboard</code>). A packaged Mac app preserves that: one install, browser-shaped UI, heavy work on-device. Customers should not need Meta Developer setup or multiple product accounts for the core loop — Threads (and later YouTube) show up as connected integrations on one workspace after a normal OAuth consent.
   </p>
 </div>
 

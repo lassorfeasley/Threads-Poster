@@ -97,18 +97,11 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
     )
     session.add(post)
     session.flush()
-    # Attribution first-comment: an operator-reviewed text (from the cut page's
-    # first-reply module) wins outright. Otherwise draft one now (not at publish
-    # time), so it can be previewed/edited on the post page before it goes out —
-    # and so a headless scheduler can publish without an LLM call. Best-effort:
-    # a drafting hiccup must never block queueing (Suggest on the post page retries).
+    # Attribution first-comment: only ever the operator's own text (typed or an
+    # accepted "Suggest" draft). Nothing is auto-drafted here — an empty field
+    # means this post gets no attribution comment.
     if attribution.strip():
         post.attribution_text = attribution.strip()
-    elif candidate is not None and load_first_reply().get("attribution_enabled"):
-        try:
-            post.attribution_text = generate_attribution(candidate)
-        except Exception as exc:
-            log.warning("Attribution draft failed for post %s: %s", post.id, exc)
     # Upload now, while the file is guaranteed to be on this machine, so a
     # headless scheduler (GitHub Actions / cron) can publish later without this
     # disk. Best-effort: publish_post re-uploads from local when it can.
@@ -120,9 +113,12 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
 
 
 def generate_attribution(candidate: Candidate) -> str:
-    """LLM-drafted courtesy line crediting the source station/publisher (and the
-    program/journalists when the video's own metadata establishes them). DRAFT
-    ONLY — the operator reviews it on the post page before it publishes."""
+    """LLM-drafted formal citation crediting the source station/publisher (and
+    the program/journalists when the video's own material establishes them).
+    Only runs when the operator clicks Suggest — never automatically. Gets the
+    FULL source video context (title, description, publish date, complete
+    transcript), not just the clipped segments. Returns "" when the data can't
+    support a credible citation."""
     channel = candidate.channel
     settings = load_settings()
     return suggest_attribution(
@@ -137,7 +133,10 @@ def generate_attribution(candidate: Candidate) -> str:
         },
         video_title=candidate.title or "",
         description=candidate.description or "",
-        transcript_excerpt=candidate.transcript_text or "",
+        transcript=candidate.transcript_text or "",
+        published_at=(candidate.published_at.strftime("%B %-d, %Y")
+                      if candidate.published_at else ""),
+        video_url=candidate.url or "",
     )
 
 
@@ -438,48 +437,24 @@ def _annotate_footage(session, post: ThreadsPost) -> None:
         log.warning("Footage annotation failed for post %s: %s", post.id, exc)
 
 
-def _draft_attribution_now(session, post: ThreadsPost) -> tuple[str, str]:
-    """``(attribution, error)`` for a post that reached publish without one.
-
-    Attribution is normally drafted at queue time so the operator can review it,
-    but a post can still arrive here empty: it was queued before attribution
-    comments existed, or its queue-time draft raised (best-effort, so queueing
-    went ahead anyway). Drafting now means such a post still credits its source
-    instead of publishing bare. A cleared attribution never reaches this — see
-    ``ThreadsPost.attribution_skipped``.
-    """
-    if post.candidate is None:
-        return "", ("No first comment: there's no source video on record to credit, "
-                    "and no static reply text is enabled under Replies settings.")
-    try:
-        text = generate_attribution(post.candidate)
-    except Exception as exc:
-        log.warning("Publish-time attribution draft failed for post %s: %s", post.id, exc)
-        return "", f"Could not draft an attribution comment: {exc}"[:1000]
-    if not text:
-        return "", "The model returned an empty attribution comment."
-    post.attribution_text = text
-    session.flush()
-    return text, ""
-
-
 def _no_first_comment_reason(post: ThreadsPost, cfg: dict) -> str:
     """Plain-language reason a published post carries no first comment, stored on
     the post so it shows up on the post page instead of looking untouched."""
+    if (post.attribution_text or "").strip() and not cfg.get("attribution_enabled"):
+        return ("No first comment: this post has attribution text, but attribution "
+                "comments are switched off under Replies settings.")
     if post.attribution_skipped:
         return ("No first comment: the attribution was cleared for this post, and "
                 "no static reply text is enabled under Replies settings.")
-    if not cfg.get("attribution_enabled") and not cfg.get("enabled"):
-        return ("No first comment: attribution comments and the static reply are "
-                "both switched off under Replies settings.")
-    return ("No first comment: this post has no attribution text, and no static "
+    return ("No first comment: no attribution was set on this post, and no static "
             "reply text is enabled under Replies settings.")
 
 
 def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:
     """Post the first reply under a published post: the post's own attribution
-    comment when it has one, else the static configured text. A post that arrives
-    with no attribution gets one drafted here rather than publishing bare.
+    comment when the operator set one, else the static configured text. Never
+    drafts anything itself — a post whose attribution field was left empty
+    simply publishes without an attribution comment.
 
     Returns True if a reply was posted. Skips when disabled / already posted
     (unless ``force``), recording why on the post either way. Never raises —
@@ -492,9 +467,6 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
 
     cfg = load_first_reply()
     attribution = (post.attribution_text or "").strip()
-    draft_error = ""
-    if not attribution and cfg.get("attribution_enabled") and not post.attribution_skipped:
-        attribution, draft_error = _draft_attribution_now(session, post)
     static_text = (cfg.get("text") or "").strip()
     text = ""
     if attribution and (cfg.get("attribution_enabled") or force):
@@ -505,7 +477,7 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
         # Record why, always — not just on ``force``. Publishing with no first
         # comment used to write nothing anywhere, so four posts in a row went out
         # bare and the post page showed a clean slate for each of them.
-        post.first_reply_error = draft_error or _no_first_comment_reason(post, cfg)
+        post.first_reply_error = _no_first_comment_reason(post, cfg)
         session.flush()
         log.warning("Post %s published without a first comment: %s",
                     post.id, post.first_reply_error)

@@ -347,39 +347,56 @@ def suggest_hook_text(model: str, title: str, station: str, market: str,
 
 
 def suggest_attribution(model: str, channel: dict, video_title: str,
-                        description: str = "", transcript_excerpt: str = "") -> str:
-    """Draft a short attribution line for the first comment under a post,
-    crediting the publisher and (when identifiable) the program/journalists —
-    e.g. "Courtesy of CNN, from Wolf Blitzer's prime time coverage." DRAFT
-    ONLY: the operator previews/edits it on the post page before it publishes.
+                        description: str = "", transcript: str = "",
+                        published_at: str = "", video_url: str = "") -> str:
+    """Draft a formal source citation for the first comment under a post,
+    crediting the publisher (and the program/journalists when the source
+    material establishes them). DRAFT ONLY: nothing posts until the operator
+    accepts it into the attribution field.
+
+    Returns "" when the available data cannot support a credible citation —
+    the model is instructed to decline rather than guess, and callers surface
+    that as "data not available" instead of a made-up credit.
 
     ``channel`` carries the station metadata (call_sign, network, market,
-    region, country, channel_title). Names of shows/anchors come only from the
-    provided title/description/transcript — never invented, never @-tagged.
+    region, country, channel_title). ``transcript`` is the FULL source-video
+    transcript (not just the clipped segments), so the model sees the whole
+    broadcast when identifying programs, segments, and journalists.
     """
     system = (
-        "You write a one-or-two-sentence courtesy/attribution note that will be "
-        "posted as the first comment under a short news clip on Threads, crediting "
-        "the original publisher. Hard rules:\n"
+        "You write a formal source citation to be posted as the first comment "
+        "under a short news clip on Threads, crediting the original publisher. "
+        "The clip is a short excerpt; you are given the FULL source video's "
+        "metadata and transcript — use all of it.\n\n"
+        "Citation style — a formal credit line assembled from whichever of these "
+        "elements the data clearly establishes, in this order:\n"
+        "  Source: <Station/Publisher> (<Network>), \"<program or segment name>\", "
+        "<Market, Region>, aired <date>. Reported by <journalist(s)>.\n"
+        "Omit any element the data does not establish; never pad with guesses.\n\n"
+        "Hard rules:\n"
+        "- Only state facts the provided metadata, description, or transcript "
+        "clearly establishes. NEVER guess or invent station names, programs, "
+        "journalists, dates, or network affiliations.\n"
+        "- If the data does not clearly establish at least the publisher, do NOT "
+        "write a citation at all: return {\"available\": false, \"attribution\": \"\"}.\n"
         "- NEVER tag or mention any account: no @handles of any kind.\n"
         "- No hashtags, no URLs, no emojis.\n"
-        "- Credit the station/publisher by name (and its network and market when "
-        "known), e.g. 'Courtesy of KXYZ (ABC) in Springfield, Illinois'.\n"
-        "- Mention the specific program, segment, or journalist ONLY when the "
-        "title, description, or transcript clearly establishes it — never guess "
-        "or invent names. When unsure, credit just the station.\n"
-        "- Plain, gracious, factual tone; under 280 characters; one line.\n"
-        "JSON shape: {\"attribution\": \"...\"}"
+        "- Plain, factual tone; under 400 characters; one line.\n"
+        "JSON shape: {\"available\": true|false, \"attribution\": \"...\"}"
     )
     user = json.dumps({
         "channel": {k: str(channel.get(k, "")) for k in
                     ("call_sign", "network", "market", "region", "country", "channel_title")},
-        "video_title": (video_title or "")[:300],
-        "video_description": (description or "")[:1500],
-        "transcript_excerpt": (transcript_excerpt or "")[:2500],
+        "video_title": (video_title or "")[:500],
+        "video_published_date": (published_at or "")[:40],
+        "video_url": (video_url or "")[:300],
+        "video_description": (description or "")[:4000],
+        "full_transcript": (transcript or "")[:24000],
     })
     data = _json_chat(model, system, user)
     text = str(data.get("attribution", "")).strip()
+    if not data.get("available", bool(text)) or not text:
+        return ""
     # Belt-and-braces: strip any @handle the model slipped in despite the rule.
     text = re.sub(r"@[\w.]+", "", text).strip()
     return " ".join(text.split())[:480]

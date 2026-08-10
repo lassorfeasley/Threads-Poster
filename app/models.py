@@ -230,18 +230,18 @@ class ThreadsPost(Base):
     post_day_of_week: Mapped[str] = mapped_column(String(10), default="")
     post_hour_local: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # LLM-drafted attribution for the first comment (publisher/source credit,
-    # e.g. "Courtesy of KXYZ (ABC) in Springfield…"). Drafted when the post is
-    # created; the operator previews/edits/clears it on the post page before it
-    # publishes. Empty = skip (the static config/first_reply.yaml text, when
-    # enabled, is the fallback). What actually got posted lands in first_reply_*.
+    # Operator-set attribution for the first comment (a formal source citation,
+    # e.g. 'Source: KXYZ (ABC), "Evening News", Springfield, IL, aired …').
+    # Only ever filled by the operator — typed by hand or accepted from the
+    # "Suggest a draft" LLM citation. Never auto-drafted: empty = this post
+    # publishes without an attribution comment (the static
+    # config/first_reply.yaml text, when enabled, is the fallback). What
+    # actually got posted lands in first_reply_*.
     attribution_text: Mapped[str] = mapped_column(Text, default="")
 
-    # Set when the operator clears the attribution on a post that already has one,
-    # which is the only way to say "this post gets no first comment". Without it,
-    # a deliberate clear and a post that never had a draft are both just an empty
-    # ``attribution_text``, and publishing (which drafts one when it finds none)
-    # would talk over the operator's decision.
+    # Set when the operator clears an attribution that a post already carried —
+    # kept as a record of that deliberate choice (publishing itself never drafts
+    # attributions, so an empty ``attribution_text`` already means "no comment").
     attribution_skipped: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Auto first-reply (text reply under the published post). Set after publish
