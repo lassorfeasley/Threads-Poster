@@ -1676,22 +1676,41 @@ def generate_vertical(cut_id: int, hook_text: str = Form("")):
     below the video, so the burned-in 16:9 variant would double them). Runs
     Whisper only if the word sidecar doesn't exist yet — same source as the
     burned-in captions and Suggest caption.
+
+    The first compose of a cut nobody has written a hook for drafts one, so the
+    reel arrives with on-screen text instead of a bare video. The transcript
+    that draft needs is the same one the composite's captions come from, so it
+    costs one model call rather than a second Whisper pass.
     """
     from ..subtitles import clip_transcript_path_for
     from ..vertical import VerticalCompositeError, create_vertical_composite
 
+    autodrafted = ""
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
             return JSONResponse({"error": "Export a clip first"}, status_code=404)
+        hook = hook_text.strip()
+        if not hook and not cut.hook_autodrafted:
+            try:
+                autodrafted, _clip_text = _draft_hook_for_cut(cut, load_settings())
+                hook = autodrafted
+                cut.hook_autodrafted = True
+            except ValueError as exc:
+                # Silent clip: there is nothing to draft from, now or later.
+                log.info("Hook auto-draft not possible for cut %s: %s", cut_id, exc)
+                cut.hook_autodrafted = True
+            except Exception as exc:
+                # Model/network trouble — leave the flag so the next compose retries.
+                log.warning("Hook auto-draft failed for cut %s: %s", cut_id, exc)
         # Persist the hook right away so it survives a failed render.
-        cut.hook_text = hook_text.strip()
+        cut.hook_text = hook
         cut.updated_at = utcnow()
         clip_path = cut.trimmed_clip_path
         transcript_path = cut.clip_transcript_path or None
         previous_vertical = cut.vertical_clip_path
     try:
-        out = create_vertical_composite(clip_path, hook_text,
+        out = create_vertical_composite(clip_path, hook,
                                         transcript_path=transcript_path)
     except VerticalCompositeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -1719,7 +1738,8 @@ def generate_vertical(cut_id: int, hook_text: str = Form("")):
             warning = f"Clip is {duration:.1f}s — under Meta's 5s Reels minimum."
     except Exception:
         pass
-    return {"url": f"/media/vertical/{cut_id}", "warning": warning}
+    return {"url": f"/media/vertical/{cut_id}", "warning": warning,
+            "hook": autodrafted}
 
 
 @app.post("/cut/{cut_id}/ig-copy")
@@ -1929,6 +1949,32 @@ def suggest_caption(cut_id: int):
             return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+def _draft_hook_for_cut(cut: Cut, settings) -> tuple[str, str]:
+    """Draft on-video hook text from the clip's own transcript.
+
+    Returns ``(hook, clip_transcript)``. Raises ``ValueError`` when the clip
+    can't support a hook at all (not exported yet, or nothing is said in it) and
+    ``RuntimeError`` when the model round trip fails — callers treat the first
+    as settled and the second as worth retrying. Must run inside a session.
+    """
+    if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+        raise ValueError("Export the clip first — the hook is drafted from "
+                         "what is said in the trimmed clip.")
+    _lines, clip_text = _ensure_whisper_clip_transcript(cut)
+    if not clip_text.strip():
+        raise ValueError("No speech detected in the clip — nothing to draft "
+                         "a hook from.")
+    c = cut.candidate
+    hook = suggest_hook_text(
+        settings.get("engagement.draft_model", "claude-sonnet-5"),
+        c.title, c.channel.call_sign, c.channel.market,
+        " ".join(clip_text.split())[:3000],
+    )
+    if not hook:
+        raise RuntimeError("The model returned an empty hook — try again.")
+    return hook, clip_text
+
+
 @app.post("/cut/{cut_id}/suggest-hook")
 def suggest_hook(cut_id: int):
     """Draft short on-video hook text for the Instagram vertical composite."""
@@ -1937,32 +1983,15 @@ def suggest_hook(cut_id: int):
         cut = session.get(Cut, cut_id)
         if cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        c = cut.candidate
-        if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
-            return JSONResponse(
-                {"error": "Export the clip first — the hook is drafted "
-                          "from what is said in the trimmed clip."},
-                status_code=409)
-        _lines, clip_text = _ensure_whisper_clip_transcript(cut)
-        if not clip_text.strip():
-            return JSONResponse(
-                {"error": "No speech detected in the clip — nothing to draft "
-                          "a hook from."},
-                status_code=409)
-        excerpt = " ".join(clip_text.split())[:3000]
         try:
-            hook = suggest_hook_text(
-                settings.get("engagement.draft_model", "claude-sonnet-5"),
-                c.title, c.channel.call_sign, c.channel.market, excerpt,
-            )
+            hook, clip_text = _draft_hook_for_cut(cut, settings)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
-        if not hook:
-            return JSONResponse(
-                {"error": "The model returned an empty hook — try again."},
-                status_code=500)
         # Persist so a regenerate / leave-and-return keeps the draft.
         cut.hook_text = hook
+        cut.hook_autodrafted = True
         cut.updated_at = utcnow()
         return {"hook": hook, "transcript": clip_text}
 

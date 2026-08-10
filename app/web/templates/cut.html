@@ -1738,6 +1738,7 @@ initSegDnd();
       });
       const igTools = document.getElementById('ig-tools');
       if (igTools) igTools.hidden = which !== 'instagram';
+      if (which === 'instagram') growHook();
       const threadsTools = document.getElementById('threads-clip-tools');
       if (threadsTools) threadsTools.hidden = which === 'instagram';
       const p = document.getElementById('clip-player');
@@ -1787,6 +1788,16 @@ initSegDnd();
     // Rendered hook last baked into the composite — skip no-op regenerates.
     let renderedHook = {{ (cut.hook_text or '')|tojson }};
     let verticalPending = false;
+
+    // Drafted hooks often wrap to two lines, so the field sizes to its content.
+    // It starts inside the hidden Instagram tools, where scrollHeight reads 0 —
+    // hence the re-measure on reveal rather than only on input.
+    function growHook() {
+      const el = document.getElementById('hook-text');
+      if (!el || el.offsetParent === null) return;
+      el.style.height = 'auto';
+      el.style.height = el.scrollHeight + 'px';
+    }
     async function generateVertical() {
       if (verticalBusy) { verticalPending = true; return; }
       const empty = document.getElementById('vertical-empty');
@@ -1810,8 +1821,20 @@ initSegDnd();
           ok = true;
           hasVertical = true;
           renderedHook = attemptHook;
-          // Show the result right away in the hero preview.
-          setPlatformPreview('instagram', d.url + '?v=' + Date.now());
+          // The first compose drafts a hook server-side when none was written.
+          // Adopt it as already-rendered so it doesn't look like a pending edit.
+          if (d.hook && hookEl && !attemptHook.trim()) {
+            hookEl.value = d.hook;
+            renderedHook = d.hook;
+            growHook();
+            const sug = document.getElementById('hook-suggest');
+            if (sug) sug.title = sug.ariaLabel = 'Regenerate draft';
+          }
+          // Composes also run in the background (page load, queue guard), where
+          // taking over the preview would pull it off the clip being watched.
+          if (platformMode === 'instagram') {
+            setPlatformPreview('instagram', d.url + '?v=' + Date.now());
+          }
         } else if (empty && platformMode === 'instagram' && !hasVertical) {
           empty.querySelector('p').textContent = 'Vertical render failed';
           const meta = empty.querySelector('p.meta');
@@ -1865,6 +1888,7 @@ initSegDnd();
       el.addEventListener('input', () => {
         clearTimeout(saveTimer);
         saveTimer = setTimeout(saveIg, 1200);
+        growHook();
         const btn = document.getElementById('hook-suggest');
         if (btn) {
           const label = el.value.trim() ? 'Regenerate draft' : 'Suggest a draft';

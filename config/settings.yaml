@@ -200,16 +200,25 @@ vertical:
   # the RGB channels (0 = black, 1 = untouched).
   background_blur: 32
   background_brightness: 0.55
+  # SAFE ZONES. Instagram never shows the whole 1080x1920 frame:
+  #  - full-screen Reels fills the height of a phone taller than 16:9, cropping
+  #    roughly 100px off each side of a 1080-wide frame;
+  #  - feed/grid surfaces crop to 4:5, keeping only y 285..1635.
+  # Everything that must stay readable therefore lives inside that band, and
+  # text is laid out across text_safe_frac of the width rather than edge to edge.
+  text_safe_frac: 0.80
   # Top edge of the hook text block (it wraps/shrinks to fit above the video).
-  hook_y: 150
+  # Starts below the 4:5 crop line so the hook survives feed and grid views.
+  hook_y: 300
   # Top edge of the clip. A 16:9 source lands 1080x608, so it spans
-  # video_y .. video_y+608.
-  video_y: 560
+  # video_y .. video_y+608. The gap above it is the hook's height budget
+  # (video_y - hook_y - 20), so raising video_y gives the hook more room.
+  video_y: 610
   # Top edge of the caption strip (word-by-word captions render from here down).
-  caption_y: 1210
+  caption_y: 1220
   # Height of the caption strip — deep enough for caption_max_lines lines.
   # caption_y + caption_strip_px should stay at or above height - bottom_safe_px.
-  caption_strip_px: 360
+  caption_strip_px: 350
   # Bottom band kept clear of platform UI (progress bar, actions, audio pill).
   bottom_safe_px: 350
   # Hook text styling (bundled Funnel weights; rendered by Pillow, not ffmpeg).

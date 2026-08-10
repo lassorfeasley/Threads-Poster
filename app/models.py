@@ -158,10 +158,16 @@ class Cut(Base):
     # Cleared on re-export with the video files.
     clip_transcript_path: Mapped[str] = mapped_column(Text, default="")
 
-    # Vertical (9:16) composite for Instagram Reels: operator-written hook text
-    # rendered at the top of the frame, the 16:9 clip mid-frame on a branded
-    # background, captions below. Cleared on re-export with the video files.
+    # Vertical (9:16) composite for Instagram Reels: hook text rendered at the
+    # top of the frame, the 16:9 clip mid-frame on a branded background,
+    # captions below. The hook is auto-drafted on the first compose and stays
+    # operator-editable. Cleared on re-export with the video files.
     hook_text: Mapped[str] = mapped_column(Text, default="")
+    # True once a hook has been drafted for this cut without being asked for.
+    # The hook is optional, so an empty ``hook_text`` is a legitimate choice —
+    # this flag is what stops the auto-draft from refilling a field the operator
+    # deliberately cleared. The sparkle button ignores it.
+    hook_autodrafted: Mapped[bool] = mapped_column(Boolean, default=False)
     vertical_clip_path: Mapped[str] = mapped_column(Text, default="")
     # Unused: reel caption is the Threads ``draft_caption``. Kept for existing DBs.
     ig_draft_caption: Mapped[str] = mapped_column(Text, default="")

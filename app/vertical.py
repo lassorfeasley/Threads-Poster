@@ -1,8 +1,8 @@
 """1080x1920 vertical composite for Instagram Reels.
 
-Layout, top to bottom: an operator-written hook text block, the 16:9 trimmed
-clip full-width, the word-by-word caption strip, and a bottom band kept clear
-of the Reels UI overlays — all over a background made from the clip itself,
+Layout, top to bottom: a hook text block, the 16:9 trimmed clip full-width, the
+word-by-word caption strip, and a bottom band kept clear of the Reels UI
+overlays — all over a background made from the clip itself,
 scaled to fill the frame, blurred and darkened. Text is rendered with Pillow
 (hook block + the caption PNG stream shared with app/subtitles.py) and
 composited in a single ffmpeg pass; every layout coordinate comes from the
@@ -59,7 +59,7 @@ def _wrap_hook_lines(draw: ImageDraw.ImageDraw, text: str,
 
 
 def render_hook_png(text: str, width: int, max_height: int, *, font_name: str,
-                    font_px: int, color: str) -> Image.Image:
+                    font_px: int, color: str, safe_frac: float = 0.80) -> Image.Image:
     """Render the hook text block: left-aligned, wrapped, shrunk to fit.
 
     Returns a transparent-background RGBA image exactly ``width`` wide whose
@@ -75,7 +75,7 @@ def render_hook_png(text: str, width: int, max_height: int, *, font_name: str,
         raise VerticalCompositeError(f"Hook font missing: {font_file}")
 
     # Same safe width as the caption strip so both share one left rail.
-    max_w = width * 0.92
+    max_w = width * max(0.4, min(1.0, safe_frac))
     fill = _hex_to_rgba(color)
     probe = ImageDraw.Draw(Image.new("RGBA", (width, 8), (0, 0, 0, 0)))
 
@@ -127,6 +127,10 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
     hook_px = int(settings.get("vertical.hook_font_px", 84))
     hook_color = str(settings.get("vertical.hook_text_color", "#FFFFFF"))
     caption_px = int(settings.get("vertical.caption_font_px", 78))
+    # Instagram crops the sides of a 9:16 frame on phones taller than 16:9
+    # (~100px per 1080 on a 20:9 screen), so text lives in a narrower rail
+    # than the canvas width.
+    text_safe = float(settings.get("vertical.text_safe_frac", 0.80))
 
     if caption_y + strip_h > height - safe_px:
         # Keep every overlay out of the platform-UI band rather than failing:
@@ -167,6 +171,7 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
         hook_img = render_hook_png(
             hook_text, width, max(60, video_y - hook_y - 20),
             font_name=hook_font, font_px=hook_px, color=hook_color,
+            safe_frac=text_safe,
         )
 
     if out_path:
@@ -202,7 +207,7 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
             concat = render_caption_concat(
                 groups, tmpdir, width=width, strip_h=strip_h, fonts=fonts,
                 colors=colors, position="top", uppercase=uppercase, dwell=dwell,
-                max_lines=caption_lines, align="left",
+                max_lines=caption_lines, align="left", safe_frac=text_safe,
             )
             args += ["-safe", "0", "-f", "concat", "-i", str(concat)]
             chains.append(f"[{next_in}:v]format=rgba[cap]")

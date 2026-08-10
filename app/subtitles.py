@@ -169,14 +169,19 @@ def _load_fonts(px: int, font_name: str) -> tuple[ImageFont.FreeTypeFont, ImageF
 
 def _render_state(texts: list[str], active: int, width: int, strip_h: int,
                   fonts: tuple, colors: dict, position: str = "bottom",
-                  max_lines: int = 2, align: str = "center") -> Image.Image:
+                  max_lines: int = 2, align: str = "center",
+                  safe_frac: float = 0.92) -> Image.Image:
     """One caption state: the group's words, with the ``active`` word set on a
     solid rounded box in inverted colors (the "talks Renewables.org" look).
 
     ``align="center"`` (the 16:9 export) keeps the original layout: one
     centered line, split into two balanced lines only on overflow.
     ``align="left"`` (the vertical composite) wraps greedily instead — each
-    line fills the safe width and breaks naturally, up to ``max_lines``."""
+    line fills the safe width and breaks naturally, up to ``max_lines``.
+
+    ``safe_frac`` is the share of ``width`` text may occupy. The vertical
+    composite passes a smaller value than the 16:9 export because Instagram
+    crops the sides of a 9:16 frame on phones taller than 16:9."""
     from PIL import ImageFilter
 
     base_f, big_f = fonts
@@ -194,7 +199,7 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
     # The box makes the active word occupy extra horizontal room.
     slots = [w + (2 * pad_x if i == active else 0) for i, w in enumerate(widths)]
 
-    max_w = width * 0.92
+    max_w = width * max(0.4, min(1.0, safe_frac))
     if align == "left":
         # Greedy ragged-right wrap: fill each line to the safe width, break
         # where the text naturally overflows. The last line absorbs any
@@ -264,7 +269,8 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
 def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
                           strip_h: int, fonts: tuple, colors: dict, position: str,
                           uppercase: bool, dwell: float,
-                          max_lines: int = 2, align: str = "center") -> Path:
+                          max_lines: int = 2, align: str = "center",
+                          safe_frac: float = 0.92) -> Path:
     """Render one PNG per caption state plus an ffconcat list covering the whole
     clip: blank strips fill silences, and each finished phrase dwells on screen
     (up to ``dwell`` seconds, or until the next phrase). Returns the concat list
@@ -289,7 +295,8 @@ def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
             dur = max(0.05, end - w["start"])
             png = tmpdir / f"s{n_png:04d}.png"
             _render_state(texts, i, width, strip_h, fonts, colors, position,
-                          max_lines=max_lines, align=align).save(png)
+                          max_lines=max_lines, align=align,
+                          safe_frac=safe_frac).save(png)
             entries.append((png, dur))
             last_png = png
             n_png += 1
