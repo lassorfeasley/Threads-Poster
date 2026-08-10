@@ -3029,7 +3029,7 @@ body.cal-committing #cal-layout {
 }
 .ti-menu-pop button:hover, .ti-menu-pop a:hover { background: var(--panel2); }
 
-/* In-place text: a textarea that reads as plain post text until touched.
+/* In-place text: bordered field that still reads as post copy.
    min-height stays at one line (unlike the 96px global textarea default) so a
    one-sentence attribution doesn't leave a block of dead space under it. */
 .ti-text {
@@ -3037,8 +3037,8 @@ body.cal-committing #cal-layout {
   width: 100%;
   min-height: calc(15px * 1.5 + 8px); /* one line + vertical padding */
   margin-top: 2px;
-  padding: 4px 6px 4px 0;
-  border: none;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
   border-radius: 8px;
   background: transparent;
   font: inherit;
@@ -3047,10 +3047,64 @@ body.cal-committing #cal-layout {
   color: var(--text);
   resize: none;
   overflow: hidden; /* JS auto-grow drives the height */
+  box-sizing: border-box;
+  transition: border-color 0.12s ease, background 0.12s ease;
 }
-.ti-text:hover { background: color-mix(in srgb, var(--panel2) 55%, transparent); }
-.ti-text:focus { outline: none; background: var(--panel2); padding-left: 6px; padding-right: 6px; }
+.ti-text:hover {
+  background: color-mix(in srgb, var(--panel2) 55%, transparent);
+  border-color: var(--border-strong, var(--border));
+}
+.ti-text:focus {
+  outline: none;
+  background: var(--panel2);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
 .ti-text::placeholder { color: var(--muted); opacity: 0.8; }
+
+/* Textarea + in-field sparkle (suggest / regenerate draft). */
+.ti-text-wrap {
+  position: relative;
+  margin-top: 2px;
+}
+.ti-text-wrap .ti-text {
+  margin-top: 0;
+  padding-right: 36px; /* room for the sparkle */
+}
+.ti-sparkle {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  box-shadow: none;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.ti-sparkle:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.ti-sparkle:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.ti-sparkle.is-busy {
+  color: var(--accent);
+  animation: ti-sparkle-pulse 0.9s ease-in-out infinite;
+}
+@keyframes ti-sparkle-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.ti-sparkle svg { display: block; }
 .ti-text-static {
   margin-top: 2px;
   font-size: 15px;
@@ -3076,6 +3130,11 @@ body.cal-committing #cal-layout {
   background: #000;
   border: 1px solid var(--border);
   border-radius: 12px;
+}
+/* Author display:block above beats the UA [hidden] rule — without this the
+   emptied player stays as a second black 9:16 slab under the composing frame. */
+.ti-media video[hidden] {
+  display: none;
 }
 .ti-vertical-empty {
   display: none;
@@ -3386,6 +3445,41 @@ body.cal-committing #cal-layout {
   padding: var(--sp-3) var(--sp-4) var(--sp-2);
   margin: var(--sp-2) calc(-1 * var(--sp-4)) 0;
   border-top: 1px solid var(--border);
+}
+/* Instagram include: full-width row directly above the ship buttons. */
+.ig-include-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sp-3) var(--sp-4) 0;
+  margin: var(--sp-2) calc(-1 * var(--sp-4)) 0;
+  border-top: 1px solid var(--border);
+}
+.ig-include-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+}
+.ig-include-label.is-disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+.ig-include-label .switch { flex: none; }
+.ig-include-bar .field-hint {
+  margin: 0;
+}
+/* Share one hairline when the include bar sits above the ship buttons. */
+.ig-include-bar + .thread-actions {
+  margin-top: 0;
+  border-top: none;
+  padding-top: var(--sp-3);
 }
 .thread-actions form.inline { margin: 0; }
 /* In the action bar the green primary sits flat — no lift shadow. */

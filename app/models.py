@@ -163,8 +163,7 @@ class Cut(Base):
     # background, captions below. Cleared on re-export with the video files.
     hook_text: Mapped[str] = mapped_column(Text, default="")
     vertical_clip_path: Mapped[str] = mapped_column(Text, default="")
-    # Per-platform copy: the Instagram caption draft (Threads copy stays in
-    # ``draft_caption``). Operator-edited on the Post step before queueing.
+    # Unused: reel caption is the Threads ``draft_caption``. Kept for existing DBs.
     ig_draft_caption: Mapped[str] = mapped_column(Text, default="")
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -1529,8 +1529,15 @@ initSegDnd();
           </details>
         </span>
       </div>
-      <textarea form="post-form" name="caption" id="caption" class="ti-text" required
-                placeholder="Write the caption for this post…">{{ cut.draft_caption }}</textarea>
+      <div class="ti-text-wrap">
+        <textarea form="post-form" name="caption" id="caption" class="ti-text" required
+                  placeholder="Write the caption for this post…">{{ cut.draft_caption }}</textarea>
+        <button type="button" class="ti-sparkle" id="suggest-btn" onclick="suggestCaption()"
+                title="{{ 'Regenerate caption' if cut.draft_caption else 'Suggest caption' }}"
+                aria-label="{{ 'Regenerate caption' if cut.draft_caption else 'Suggest caption' }}">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+        </button>
+      </div>
       <div id="caption-proposal" class="caption-proposal" hidden>
         <div class="caption-proposal-label">Suggested caption — drafted from the clip's spoken audio. Review before using.</div>
         <p class="caption-proposal-text" id="caption-proposal-text"></p>
@@ -1539,10 +1546,6 @@ initSegDnd();
           <button type="button" class="ghost sm" onclick="dismissProposal()">Dismiss</button>
         </div>
       </div>
-      <button type="button" class="suggest-btn" id="suggest-btn" onclick="suggestCaption()">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
-        <span class="lbl">{{ "Regenerate caption" if cut.draft_caption else "Suggest caption" }}</span>
-      </button>
       {# ---- Platform preview toggle: what each platform receives — Threads
            the 16:9 clip, Instagram the vertical composite. ---- #}
       <div class="ti-clip-tools" style="margin-bottom: 6px;">
@@ -1552,7 +1555,7 @@ initSegDnd();
                   onclick="setPlatformPreview('threads')">Threads</button>
           <button type="button" data-platform="instagram" id="platform-ig-btn"
                   onclick="setPlatformPreview('instagram')"
-                  title="Set up and preview the Instagram Reel">Instagram</button>
+                  title="Preview the Instagram Reel">Instagram</button>
         </div>
       </div>
       <div class="ti-media" id="clip-media">
@@ -1562,16 +1565,17 @@ initSegDnd();
         <video id="clip-player"
                src="{{ ('/media/subtitled/' ~ cut.id if (cut.subtitled_clip_path and cut.use_subtitles) else '/media/clip/' ~ cut.id) ~ '?v=' ~ media_v }}"
                controls preload="metadata"></video>
-        {# Shown only while Instagram is selected and no vertical composite
-           exists yet — keeps the hero in 9:16 so the layout matches the reel. #}
+        {# Shown only while Instagram is selected and the vertical is still
+           composing — keeps the hero in 9:16 so the layout matches the reel. #}
         <div class="ti-vertical-empty" id="vertical-empty" hidden>
-          <p>No vertical composite yet.</p>
-          <p class="meta">Add hook text below, then Generate vertical.</p>
+          <p>Composing vertical…</p>
+          <p class="meta">Hook text is optional.</p>
         </div>
       </div>
       {# Clip controls where Threads shows engagement: burned-in caption
-         position + one-click transcript copy. #}
-      <div class="ti-clip-tools">
+         position + one-click transcript copy. Hidden on Instagram — the
+         vertical composite burns its own captions mid-frame. #}
+      <div class="ti-clip-tools" id="threads-clip-tools">
         <div class="seg-toggle cat-toggle" id="subs-line" role="group" aria-label="Burned-in captions">
           <button type="button" class="{{ 'is-on' if not cut.use_subtitles }}"
                   data-pos="none" onclick="setSubsMode('none')">No captions</button>
@@ -1590,54 +1594,20 @@ initSegDnd();
         {% endif %}
       </div>
       <div class="meta" id="subs-status" aria-live="polite"></div>
-    </div>
-  </article>
 
-  {# ---- Instagram Reel: optional vertical composite that rides the same
-       queue action. Hook text renders on the video; the reel caption is
-       per-platform copy. Only shown while the Instagram preview toggle is
-       active — setPlatformPreview() flips the hidden flag. ---- #}
-  <article class="thread-item is-reply" id="ig-section" hidden>
-    <div class="ti-gutter" aria-hidden="true">
-      <span class="ti-avatar">IG</span>
-    </div>
-    <div class="ti-main">
-      <div class="ti-head">
-        <span class="ti-name">Instagram Reel</span>
-        <span class="ti-type">vertical 1080×1920</span>
-        <span class="ti-tools">
-          <span class="save-state" id="ig-save-state" aria-live="polite"></span>
-          <label class="meta" style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
-            <input type="checkbox" form="post-form" name="include_instagram" value="1"
-                   id="include-instagram" {{ 'checked' if include_instagram }}
-                   {{ '' if instagram_ok else 'disabled' }}>
-            Include with this post
-          </label>
-        </span>
+      {# Instagram controls live in this same card (not a second stacked panel).
+         setPlatformPreview() flips visibility with the Threads/Instagram toggle. #}
+      <div id="ig-tools" hidden>
+        <div class="ti-text-wrap" style="margin-top: var(--sp-3);">
+          <textarea id="hook-text" class="ti-text" maxlength="300"
+                    placeholder="Hook text (optional) — brand font at the top of the vertical frame.">{{ cut.hook_text }}</textarea>
+          <button type="button" class="ti-sparkle" id="hook-suggest" onclick="suggestHook(this)"
+                  title="{{ 'Regenerate draft' if cut.hook_text else 'Suggest a draft' }}"
+                  aria-label="{{ 'Regenerate draft' if cut.hook_text else 'Suggest a draft' }}">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+          </button>
+        </div>
       </div>
-      {% if not instagram_ok %}
-      <p class="field-hint">Instagram isn't connected —
-        <a href="/threads-account">connect it</a> to queue reels alongside Threads posts.</p>
-      {% endif %}
-      <textarea id="hook-text" class="ti-text" maxlength="300"
-                placeholder="Hook text — rendered in the brand font at the top of the vertical frame.">{{ cut.hook_text }}</textarea>
-      <div class="ti-clip-tools">
-        <button type="button" class="ghost-line-btn" id="vertical-generate"
-                onclick="generateVertical()"
-                title="Compose the 1080×1920 reel: hook on top, clip mid-frame, captions below">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
-          {{ "Regenerate vertical" if has_vertical else "Generate vertical" }}
-        </button>
-        <a class="ghost-line-btn" href="/cut/{{ cut.id }}/download-vertical" download
-           id="vertical-download" title="Download the vertical composite"
-           {{ '' if has_vertical else 'hidden' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-          Download vertical
-        </a>
-      </div>
-      <div class="meta" id="vertical-status" aria-live="polite"></div>
-      <textarea form="post-form" name="ig_caption" id="ig-caption" class="ti-text" maxlength="2200"
-                placeholder="Reel caption — leave empty to reuse the Threads caption.">{{ cut.ig_draft_caption }}</textarea>
     </div>
   </article>
 
@@ -1665,15 +1635,15 @@ initSegDnd();
           </details>
         </span>
       </div>
-      <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to auto-draft at queue time.">{{ attribution_text }}</textarea>
-      {# Visible way into the LLM draft while the comment is empty; the kebab
-         keeps "Regenerate draft" once there's text. #}
-      <button type="button" id="attribution-suggest" class="suggest-btn"
-              {% if attribution_text %}hidden{% endif %} onclick="suggestAttribution(this)">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
-        <span class="lbl">Suggest a draft</span>
-      </button>
+      <div class="ti-text-wrap">
+        <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
+                  placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to auto-draft at queue time.">{{ attribution_text }}</textarea>
+        <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
+                title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
+                aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+        </button>
+      </div>
       {% if not attribution_enabled %}
       <p class="field-hint">Attribution comments are off under
         <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
@@ -1682,6 +1652,23 @@ initSegDnd();
   </article>
 
   {% if threads_ok %}
+  {# Instagram include sits full-width above the ship buttons — on by default,
+     so queueing posts the paired reel without hunting for a toggle. #}
+  <div class="ig-include-bar">
+    <label class="ig-include-label {{ 'is-disabled' if not instagram_ok }}">
+      <span>Include Instagram Reel with this post</span>
+      <span class="switch">
+        <input type="checkbox" form="post-form" name="include_instagram" value="1"
+               id="include-instagram" {{ 'checked' if include_instagram }}
+               {{ '' if instagram_ok else 'disabled' }}>
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </span>
+    </label>
+    {% if not instagram_ok %}
+    <p class="field-hint">Instagram isn't connected —
+      <a href="/threads-account">connect it</a> to queue reels alongside Threads posts.</p>
+    {% endif %}
+  </div>
   {# ---- Ship: buttons submit form#post-form via the form= attribute; JS
        confirms + validates the caption before anything fires. ---- #}
   <div class="thread-actions">
@@ -1736,24 +1723,27 @@ initSegDnd();
     }
 
     // Hero preview per platform: Threads shows the 16:9 export (respecting the
-    // caption toggle), Instagram shows the vertical composite plus the reel
-    // setup card (hook text, caption, include checkbox). Always switch the
-    // hero to 9:16 on Instagram — composite if ready, empty frame if not —
-    // so the toggle never leaves the landscape clip looking like the reel.
+    // caption toggle), Instagram shows the vertical composite with IG controls
+    // inline in this same card. Auto-composes the vertical on first switch —
+    // hook text is optional. Always switch the hero to 9:16 on Instagram so
+    // the toggle never leaves the landscape clip looking like the reel.
+    let verticalBusy = false;
     function setPlatformPreview(which, freshSrc) {
       platformMode = which;
       document.querySelectorAll('#platform-line button').forEach((b) => {
         b.classList.toggle('is-on', b.dataset.platform === which);
       });
-      const igSection = document.getElementById('ig-section');
-      if (igSection) igSection.hidden = which !== 'instagram';
+      const igTools = document.getElementById('ig-tools');
+      if (igTools) igTools.hidden = which !== 'instagram';
+      const threadsTools = document.getElementById('threads-clip-tools');
+      if (threadsTools) threadsTools.hidden = which === 'instagram';
       const p = document.getElementById('clip-player');
       const media = document.getElementById('clip-media');
       const empty = document.getElementById('vertical-empty');
       const subsLine = document.getElementById('subs-line');
       if (which === 'instagram') {
         media.classList.add('is-vertical');
-        subsLine.classList.add('is-disabled');
+        if (subsLine) subsLine.classList.add('is-disabled');
         if (hasVertical) {
           p.hidden = false;
           if (empty) empty.hidden = true;
@@ -1764,16 +1754,22 @@ initSegDnd();
             dl.title = dl.ariaLabel = 'Download vertical composite';
           }
         } else {
-          // Empty 9:16 frame — don't leave the Threads landscape clip up.
+          // Empty 9:16 frame while composing — don't leave the landscape clip up.
           p.pause();
           p.removeAttribute('src');
           p.load();
           p.hidden = true;
-          if (empty) empty.hidden = false;
+          if (empty) {
+            empty.hidden = false;
+            empty.querySelector('p').textContent = 'Composing vertical…';
+            const meta = empty.querySelector('p.meta');
+            if (meta) meta.textContent = 'Hook text is optional.';
+          }
+          if (!verticalBusy) generateVertical();
         }
       } else {
         media.classList.remove('is-vertical');
-        subsLine.classList.remove('is-disabled');
+        if (subsLine) subsLine.classList.remove('is-disabled');
         p.hidden = false;
         if (empty) empty.hidden = true;
         const dl = document.getElementById('download-clip-link');
@@ -1785,69 +1781,134 @@ initSegDnd();
     }
 
     // ---- Instagram Reel: vertical composite + per-platform copy ----
+    // Rendered hook last baked into the composite — skip no-op regenerates.
+    let renderedHook = {{ (cut.hook_text or '')|tojson }};
+    let verticalPending = false;
     async function generateVertical() {
-      const btn = document.getElementById('vertical-generate');
-      const status = document.getElementById('vertical-status');
-      btn.disabled = true;
-      status.textContent = 'Composing the vertical (runs Whisper first if the clip has no transcript yet)…';
+      if (verticalBusy) { verticalPending = true; return; }
+      const empty = document.getElementById('vertical-empty');
+      const hookEl = document.getElementById('hook-text');
+      const attemptHook = hookEl ? hookEl.value : '';
+      verticalBusy = true;
+      verticalPending = false;
+      if (platformMode === 'instagram' && !hasVertical && empty) {
+        empty.hidden = false;
+        empty.querySelector('p').textContent = 'Composing vertical…';
+        const meta = empty.querySelector('p.meta');
+        if (meta) meta.textContent = 'Hook text is optional.';
+      }
+      let ok = false;
       try {
         const fd = new FormData();
-        fd.append('hook_text', document.getElementById('hook-text').value);
+        fd.append('hook_text', attemptHook);
         const r = await fetch('/cut/{{ cut.id }}/vertical', { method: 'POST', body: fd });
         const d = await r.json();
         if (d.url) {
+          ok = true;
           hasVertical = true;
-          const dlV = document.getElementById('vertical-download');
-          if (dlV) dlV.hidden = false;
+          renderedHook = attemptHook;
           // Show the result right away in the hero preview.
           setPlatformPreview('instagram', d.url + '?v=' + Date.now());
-          status.textContent = d.warning ||
-            'Vertical ready — previewing above (Threads/Instagram toggle).';
-          btn.innerHTML = btn.innerHTML.replace('Generate vertical', 'Regenerate vertical');
-        } else {
-          status.textContent = d.error || 'Vertical render failed.';
+        } else if (empty && platformMode === 'instagram' && !hasVertical) {
+          empty.querySelector('p').textContent = 'Vertical render failed';
+          const meta = empty.querySelector('p.meta');
+          if (meta) meta.textContent = d.error || 'Try again in a moment.';
         }
       } catch (e) {
-        status.textContent = 'Vertical render failed: ' + e;
+        if (empty && platformMode === 'instagram' && !hasVertical) {
+          empty.querySelector('p').textContent = 'Vertical render failed';
+          const meta = empty.querySelector('p.meta');
+          if (meta) meta.textContent = String(e);
+        }
       }
-      btn.disabled = false;
+      verticalBusy = false;
+      const latest = hookEl ? hookEl.value : '';
+      // Only re-run if the hook changed mid-render. Identical failures must not
+      // spin forever (e.g. a previous pending call while the first was busy).
+      if (latest !== attemptHook) {
+        generateVertical();
+      } else if (!ok) {
+        // Remember this attempt so blur/debounce don't immediately retry it.
+        renderedHook = attemptHook;
+      }
     }
 
-    // Autosave hook text + reel caption on blur (mirrors the caption autosave).
+    // Autosave hook text + debounce a vertical regenerate after edits.
     (function bindIgAutosave() {
-      const state = document.getElementById('ig-save-state');
+      const el = document.getElementById('hook-text');
+      if (!el) return;
       let saveTimer = null;
+      let regenTimer = null;
       async function saveIg() {
         const fd = new FormData();
-        fd.append('hook_text', document.getElementById('hook-text').value);
-        fd.append('ig_caption', document.getElementById('ig-caption').value);
+        fd.append('hook_text', el.value);
         try {
           await fetch('/cut/{{ cut.id }}/ig-copy', { method: 'POST', body: fd });
-          if (state) { state.textContent = 'Saved'; setTimeout(() => state.textContent = '', 1500); }
         } catch (e) { /* retried on next blur */ }
       }
-      for (const id of ['hook-text', 'ig-caption']) {
-        const el = document.getElementById(id);
-        if (!el) continue;
-        el.addEventListener('blur', saveIg);
-        el.addEventListener('input', () => {
-          clearTimeout(saveTimer);
-          saveTimer = setTimeout(saveIg, 1200);
-        });
+      function scheduleRegen() {
+        clearTimeout(regenTimer);
+        regenTimer = setTimeout(() => {
+          // Same hook as the last attempt (success or fail) — nothing new to bake.
+          if (el.value === renderedHook) return;
+          generateVertical();
+        }, 900);
       }
+      el.addEventListener('blur', () => {
+        clearTimeout(regenTimer);
+        saveIg();
+        if (el.value !== renderedHook) generateVertical();
+      });
+      el.addEventListener('input', () => {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(saveIg, 1200);
+        const btn = document.getElementById('hook-suggest');
+        if (btn) {
+          const label = el.value.trim() ? 'Regenerate draft' : 'Suggest a draft';
+          btn.title = btn.ariaLabel = label;
+        }
+        scheduleRegen();
+      });
     })();
 
-    // Queueing with the reel ticked needs a rendered vertical: warn early
-    // instead of bouncing off the server error.
+    async function suggestHook(btn) {
+      const ta = document.getElementById('hook-text');
+      if (!ta) return;
+      btn.disabled = true;
+      btn.classList.add('is-busy');
+      try {
+        const r = await fetch('/cut/{{ cut.id }}/suggest-hook', { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Hook draft failed.'); return; }
+        if (d.transcript) {
+          const box = document.getElementById('clip-transcript-plain');
+          if (box) box.value = d.transcript;
+        }
+        ta.value = d.hook || '';
+        ta.dispatchEvent(new Event('input'));
+        btn.title = btn.ariaLabel = 'Regenerate draft';
+        ta.focus();
+        // input handler schedules regen; kick it off immediately for the draft.
+        generateVertical();
+      } catch (e) {
+        alert('Hook draft failed: ' + e);
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove('is-busy');
+      }
+    }
+
+    // Queueing with the reel ticked needs a rendered vertical. Kick off
+    // compose when the box is on (including the default-on page load).
     (function guardIgQueue() {
       const box = document.getElementById('include-instagram');
       if (!box) return;
-      box.addEventListener('change', () => {
-        const status = document.getElementById('vertical-status');
-        if (box.checked && !hasVertical) {
-          status.textContent = 'Generate the vertical composite before queueing with Instagram.';
-        }
-      });
+      function ensureVertical() {
+        if (!box.checked || hasVertical || verticalBusy) return;
+        generateVertical();
+      }
+      box.addEventListener('change', ensureVertical);
+      ensureVertical();
     })();
 
     // Three-state toggle: plain clip, or captions burned in at bottom/top.
@@ -2006,13 +2067,15 @@ initSegDnd();
           grow(); render();
         }
       })();
-      // The inline "Suggest a draft" pill only makes sense while the comment is
-      // empty; it comes back if the operator clears the text again.
+      // Sparkle titles track empty vs filled; the icon stays visible either way.
       (function () {
         const ta = document.getElementById('attribution');
         const btn = document.getElementById('attribution-suggest');
         if (!ta || !btn) return;
-        ta.addEventListener('input', () => { btn.hidden = ta.value.trim().length > 0; });
+        ta.addEventListener('input', () => {
+          const label = ta.value.trim() ? 'Regenerate draft' : 'Suggest a draft';
+          btn.title = btn.ariaLabel = label;
+        });
       })();
       // Kebab menus: close when clicking anywhere outside the open menu.
       document.addEventListener('click', (e) => {
@@ -2027,12 +2090,12 @@ initSegDnd();
       async function suggestAttribution(btn) {
         const ta = document.getElementById('attribution');
         if (!ta) return;
-        // The inline pill keeps its icon by labelling through a child span; the
-        // kebab item is plain text, so fall back to the button itself.
-        const lbl = btn.querySelector('.lbl') || btn;
-        const old = lbl.textContent;
+        const isSparkle = btn.classList.contains('ti-sparkle');
+        const lbl = isSparkle ? null : (btn.querySelector('.lbl') || btn);
+        const old = lbl ? lbl.textContent : '';
         btn.disabled = true;
-        lbl.textContent = 'Drafting…';
+        if (isSparkle) btn.classList.add('is-busy');
+        else if (lbl) lbl.textContent = 'Drafting…';
         try {
           const r = await fetch('/cut/{{ cut.id }}/suggest-attribution', { method: 'POST' });
           const d = await r.json();
@@ -2041,26 +2104,30 @@ initSegDnd();
           ta.dispatchEvent(new Event('input'));
           const regen = document.getElementById('attribution-regen');
           if (regen) regen.textContent = 'Regenerate draft';
+          const sparkle = document.getElementById('attribution-suggest');
+          if (sparkle) sparkle.title = sparkle.ariaLabel = 'Regenerate draft';
           closeMenu(btn);
           ta.focus();
-          return;
         } catch (e) {
           alert('Attribution draft failed: ' + e);
         } finally {
           btn.disabled = false;
-          if (lbl.textContent === 'Drafting…') lbl.textContent = old;
+          if (isSparkle) btn.classList.remove('is-busy');
+          else if (lbl && lbl.textContent === 'Drafting…') lbl.textContent = old;
         }
       }
       // The suggestion is only ever a PROPOSAL: it renders in a review card
       // and touches the caption field/DB only when the operator accepts it.
       let proposedCaption = '';
-      function suggestLabel(text) {
+      function suggestTitle(text) {
         const btn = document.getElementById('suggest-btn');
-        (btn.querySelector('.lbl') || btn).textContent = text;
+        if (!btn) return;
+        btn.title = btn.ariaLabel = text;
       }
       async function suggestCaption(silent) {
         const btn = document.getElementById('suggest-btn');
-        btn.disabled = true; suggestLabel('Thinking…');
+        btn.disabled = true;
+        btn.classList.add('is-busy');
         try {
           const r = await fetch('/cut/{{ cut.id }}/suggest-caption', { method: 'POST' });
           const d = await r.json();
@@ -2072,7 +2139,8 @@ initSegDnd();
           else if (!silent) alert(d.error || 'No caption returned');
         } catch (e) { if (!silent) alert('Suggestion failed: ' + e); }
         btn.disabled = false;
-        suggestLabel(document.getElementById('caption').value.trim()
+        btn.classList.remove('is-busy');
+        suggestTitle(document.getElementById('caption').value.trim()
           ? 'Regenerate caption' : 'Suggest caption');
       }
       function showProposal(text) {
@@ -2090,7 +2158,7 @@ initSegDnd();
         ta.value = proposedCaption;
         ta.dispatchEvent(new Event('input')); // re-grow to the new text
         dismissProposal();
-        suggestLabel('Regenerate caption');
+        suggestTitle('Regenerate caption');
         // Persist the accepted draft so it survives leaving the page (and so
         // the voice-signal diff records what the AI proposed vs what posted).
         saveCaptionNow();

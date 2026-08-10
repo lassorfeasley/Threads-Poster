@@ -113,13 +113,6 @@
           </div>
         {% endif %}
       </div>
-      {% if has_clip and ig and ig.video_url %}
-      {# The reel's own caption, shown only while previewing Instagram. #}
-      <div id="ig-caption-preview" hidden>
-        <div class="ti-text-static">{{ ig.caption or caption }}</div>
-        {% if not ig.caption %}<div class="meta">Reel caption is empty — it reuses the Threads caption.</div>{% endif %}
-      </div>
-      {% endif %}
       {% if editable and (can_recaption or clip_transcript_text) %}
       {# Where Threads shows engagement icons, an unposted clip shows its
          controls: burned-in caption position + one-click transcript copy. #}
@@ -222,17 +215,19 @@
         {% endif %}
       </div>
       {% if editable %}
+      {% if can_suggest_attribution %}
+      <div class="ti-text-wrap">
+        <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
+                  placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to skip.">{{ attribution_text }}</textarea>
+        <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
+                title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
+                aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+        </button>
+      </div>
+      {% else %}
       <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
                 placeholder="Credit the source — auto-posts as the first comment right after this publishes. Leave empty to skip.">{{ attribution_text }}</textarea>
-      {% if can_suggest_attribution %}
-      {# Visible way into the LLM draft while the comment is empty; the kebab
-         keeps "Regenerate draft" once there's text. Hidden as soon as typing
-         or a draft fills the box (the input listener below toggles it). #}
-      <button type="button" id="attribution-suggest" class="suggest-btn"
-              {% if attribution_text %}hidden{% endif %} onclick="suggestAttribution(this)">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
-        <span class="lbl">Suggest a draft</span>
-      </button>
       {% endif %}
       {% if not attribution_enabled %}
       <p class="field-hint">Attribution comments are off under
@@ -457,13 +452,15 @@
     };
     fields.forEach(el => el.addEventListener('input', sync));
   })();
-  // The inline "Suggest a draft" pill only makes sense while the comment is
-  // empty; it comes back if the operator clears the text again.
+  // Sparkle titles track empty vs filled; the icon stays visible either way.
   (function () {
     const ta = document.getElementById('attribution');
     const btn = document.getElementById('attribution-suggest');
     if (!ta || !btn) return;
-    ta.addEventListener('input', () => { btn.hidden = ta.value.trim().length > 0; });
+    ta.addEventListener('input', () => {
+      const label = ta.value.trim() ? 'Regenerate draft' : 'Suggest a draft';
+      btn.title = btn.ariaLabel = label;
+    });
   })();
   {% if has_clip and ig and ig.video_url %}
   // Platform preview: swap the player between the Threads 16:9 file and the
@@ -471,8 +468,6 @@
   function setPlatformPreview(which) {
     const player = document.getElementById('post-player');
     const media = document.getElementById('post-media');
-    const igCap = document.getElementById('ig-caption-preview');
-    const thCap = document.getElementById('caption') || document.getElementById('caption-static');
     document.querySelectorAll('#platform-preview button').forEach((b) => {
       b.classList.toggle('is-on', b.dataset.platform === which);
     });
@@ -482,8 +477,6 @@
       if (!player.dataset.threadsSrc) player.dataset.threadsSrc = player.getAttribute('src');
       player.src = {{ ig.video_url | tojson }};
       media.classList.add('is-vertical');
-      if (igCap) igCap.hidden = false;
-      if (thCap) thCap.style.display = 'none';
       if (dl) {
         dl.href = {{ ((ig.video_url | replace("/media/vertical/", "/cut/")) ~ "/download-vertical") | tojson }};
         dl.title = dl.ariaLabel = 'Download vertical composite';
@@ -491,8 +484,6 @@
     } else {
       if (player.dataset.threadsSrc) player.src = player.dataset.threadsSrc;
       media.classList.remove('is-vertical');
-      if (igCap) igCap.hidden = true;
-      if (thCap) thCap.style.display = '';
       if (dl) {
         dl.href = '/post/{{ pid }}/download-clip';
         dl.title = dl.ariaLabel = 'Download clip';
@@ -608,12 +599,12 @@
   async function suggestAttribution(btn) {
     const ta = document.getElementById('attribution');
     if (!ta) return;
-    // The inline pill keeps its icon by labelling through a child span; the
-    // kebab item is plain text, so fall back to the button itself.
-    const lbl = btn.querySelector('.lbl') || btn;
-    const old = lbl.textContent;
+    const isSparkle = btn.classList.contains('ti-sparkle');
+    const lbl = isSparkle ? null : (btn.querySelector('.lbl') || btn);
+    const old = lbl ? lbl.textContent : '';
     btn.disabled = true;
-    lbl.textContent = 'Drafting…';
+    if (isSparkle) btn.classList.add('is-busy');
+    else if (lbl) lbl.textContent = 'Drafting…';
     try {
       const r = await fetch('/post/{{ pid }}/suggest-attribution', { method: 'POST' });
       const d = await r.json();
@@ -622,14 +613,16 @@
       ta.dispatchEvent(new Event('input'));
       const regen = document.getElementById('attribution-regen');
       if (regen) regen.textContent = 'Regenerate draft';
+      const sparkle = document.getElementById('attribution-suggest');
+      if (sparkle) sparkle.title = sparkle.ariaLabel = 'Regenerate draft';
       closeMenu(btn);
       ta.focus();
-      return;
     } catch (e) {
       alert('Attribution draft failed: ' + e);
     } finally {
       btn.disabled = false;
-      if (lbl.textContent === 'Drafting…') lbl.textContent = old;
+      if (isSparkle) btn.classList.remove('is-busy');
+      else if (lbl && lbl.textContent === 'Drafting…') lbl.textContent = old;
     }
   }
   async function recaption(pos) {

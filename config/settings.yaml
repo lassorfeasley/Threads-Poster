@@ -199,7 +199,7 @@ vertical:
   # darkened. blur is the radius in full-frame pixels; brightness multiplies
   # the RGB channels (0 = black, 1 = untouched).
   background_blur: 32
-  background_brightness: 0.35
+  background_brightness: 0.55
   # Top edge of the hook text block (it wraps/shrinks to fit above the video).
   hook_y: 150
   # Top edge of the clip. A 16:9 source lands 1080x608, so it spans
@@ -214,7 +214,7 @@ vertical:
   bottom_safe_px: 350
   # Hook text styling (bundled Funnel weights; rendered by Pillow, not ffmpeg).
   hook_font_file: FunnelDisplay-ExtraBold.ttf
-  hook_font_px: 84
+  hook_font_px: 126
   hook_text_color: "#FFFFFF"
   # Caption word size on the canvas (style/colors follow the `subtitles:` section).
   caption_font_px: 78

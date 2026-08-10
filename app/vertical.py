@@ -152,9 +152,14 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
     try:
         words, _sidecar = ensure_clip_words(clip, transcript_path)
     except SubtitleError as exc:
-        raise VerticalCompositeError(str(exc)) from exc
-    groups = group_words(words, max_words=max_words)
-    fonts = _load_fonts(max(18, caption_px), caption_font_name)
+        # Silent / music-only clips still get a vertical frame — just no
+        # burned-in captions. Any other Whisper failure stays fatal.
+        if "No speech" not in str(exc):
+            raise VerticalCompositeError(str(exc)) from exc
+        log.info("vertical: no speech in %s — composing without captions", clip.name)
+        words = []
+    groups = group_words(words, max_words=max_words) if words else []
+    fonts = _load_fonts(max(18, caption_px), caption_font_name) if groups else None
 
     hook_text = (hook_text or "").strip()
     hook_img: Image.Image | None = None
@@ -172,15 +177,10 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
 
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        concat = render_caption_concat(
-            groups, tmpdir, width=width, strip_h=strip_h, fonts=fonts,
-            colors=colors, position="top", uppercase=uppercase, dwell=dwell,
-            max_lines=caption_lines, align="left",
-        )
 
         # Single pass. The background is the clip itself scaled to cover the
         # full frame, blurred and darkened; the sharp clip sits on top at its
-        # configured offset, then the hook and caption stream are overlaid.
+        # configured offset, then the optional hook and caption stream.
         # Blur trick: cover-scale to quarter resolution, boxblur there, and
         # upscale back — visually a heavy gaussian at a fraction of the cost.
         bw, bh = max(2, width // 4), max(2, height // 4)
@@ -193,30 +193,44 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
             f"colorchannelmixer=rr={dim}:gg={dim}:bb={dim}[bg]",
             f"[fgsrc]scale={width}:-2[fg]",
             f"[bg][fg]overlay=x=(main_w-overlay_w)/2:y={video_y}[base]",
-            "[1:v]format=rgba[cap]",
         ]
-        args = [
-            "-i", str(clip),
-            "-safe", "0", "-f", "concat", "-i", str(concat),
-        ]
+        args = ["-i", str(clip)]
+        next_in = 1
         current = "[base]"
+
+        if groups and fonts is not None:
+            concat = render_caption_concat(
+                groups, tmpdir, width=width, strip_h=strip_h, fonts=fonts,
+                colors=colors, position="top", uppercase=uppercase, dwell=dwell,
+                max_lines=caption_lines, align="left",
+            )
+            args += ["-safe", "0", "-f", "concat", "-i", str(concat)]
+            chains.append(f"[{next_in}:v]format=rgba[cap]")
+            next_in += 1
+        else:
+            concat = None
+
         if hook_img is not None:
             hook_png = tmpdir / "hook.png"
             hook_img.save(hook_png)
             args += ["-i", str(hook_png)]
-            chains.append("[2:v]format=rgba[hook]")
+            chains.append(f"[{next_in}:v]format=rgba[hook]")
             chains.append(
                 f"{current}[hook]overlay=x=(main_w-overlay_w)/2:y={hook_y}:"
                 f"eof_action=repeat[withhook]"
             )
             current = "[withhook]"
-        chains.append(f"{current}[cap]overlay=x=0:y={caption_y}:eof_action=pass[outv]")
+            next_in += 1
+
+        if concat is not None:
+            chains.append(f"{current}[cap]overlay=x=0:y={caption_y}:eof_action=pass[outv]")
+            current = "[outv]"
 
         try:
             _run_ffmpeg([
                 *args,
                 "-filter_complex", ";".join(chains),
-                "-map", "[outv]", "-map", "0:a?",
+                "-map", current, "-map", "0:a?",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-c:a", "aac", "-b:a", "128k",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart",

@@ -319,6 +319,33 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     return str(data.get("caption", "")).strip()[:500]
 
 
+def suggest_hook_text(model: str, title: str, station: str, market: str,
+                      excerpt: str) -> str:
+    """Draft short on-video hook text for an Instagram Reel vertical composite.
+
+    Rendered large in the brand font at the top of the 9:16 frame — so it must
+    stay brief. DRAFT ONLY: the operator edits before regenerating the reel.
+    """
+    system = (
+        "You write a short HOOK line that appears as large on-screen text at the "
+        "top of an Instagram Reel (climate / local-TV news clip). Hard rules:\n"
+        "- 3–12 words, under 80 characters, ideally one line (two max).\n"
+        "- Lead with the most striking fact or tension from the excerpt.\n"
+        "- No hashtags, no URLs, no emojis, no quotation marks around the whole hook.\n"
+        "- Do not invent facts not in the excerpt; mention the place when it matters.\n"
+        "- Punchy and concrete — not a full caption, not a question unless irresistible.\n"
+        "JSON shape: {\"hook\": \"...\"}"
+    )
+    user = json.dumps({
+        "video_title": title,
+        "station": station,
+        "market": market,
+        "transcript_excerpt_of_clip": excerpt[:3000],
+    })
+    data = _json_chat(model, system, user, max_tokens=400)
+    return str(data.get("hook", "")).strip()[:300]
+
+
 def suggest_attribution(model: str, channel: dict, video_title: str,
                         description: str = "", transcript_excerpt: str = "") -> str:
     """Draft a short attribution line for the first comment under a post,

@@ -44,6 +44,7 @@ from ..history import import_history
 from ..llm import (
     suggest_calendar_name,
     suggest_channel_fields,
+    suggest_hook_text,
     suggest_post_caption,
     suggest_short_title,
     suggest_title,
@@ -958,13 +959,16 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
                 pass
         clip_transcript, clip_transcript_text = _load_clip_transcript(cut)
 
-        # Pending reel for this cut: pre-tick the Instagram toggle on requeue.
+        # Pending reel for this cut. Include is on by default for new clips;
+        # if a pending Threads post already exists without a reel, keep it off
+        # so requeueing doesn't silently re-add Instagram.
         pending_reel = session.execute(
             select(InstagramPost).where(
                 InstagramPost.cut_pk == cut.id,
                 InstagramPost.status.in_(["queued", "draft", "failed"]),
             ).order_by(InstagramPost.created_at.desc()).limit(1)
         ).scalar_one_or_none()
+        include_instagram = bool(pending_reel) if pending else True
 
     threads_ok = threads_api.is_authenticated()
     instagram_ok = instagram_api.is_authenticated()
@@ -978,7 +982,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "posts": posts, "threads_ok": threads_ok,
          "instagram_ok": instagram_ok,
          "has_vertical": bool(cut.vertical_clip_path) and Path(cut.vertical_clip_path).exists(),
-         "include_instagram": bool(pending_reel),
+         "include_instagram": include_instagram,
          "account_name": threads_api.account_username(),
          "pending_post_status": pending_post_status,
          "pending_post_id": pending_post_id,
@@ -1419,41 +1423,79 @@ def media_post_clip(post_id: int):
         return FileResponse(path, media_type="video/mp4")
 
 
+def _safe_download_stem(text: str, limit: int = 60) -> str:
+    """Filesystem-safe stem: letters/digits/space/-/_ only, spaces collapsed."""
+    keep = "".join(c if c.isalnum() or c in " -_" else " " for c in (text or ""))
+    return "-".join(keep.split())[:limit].strip("-") or ""
+
+
+def _cut_download_filename(cut: Cut, *, kind: str = "") -> str:
+    """Human-readable attachment name from station + clip title.
+
+    e.g. ``KXYZ-Flooding-hits-Houston-vertical.mp4`` instead of a YouTube id.
+    """
+    title = (cut.clip_title or cut.calendar_name or "").strip()
+    if not title and cut.candidate:
+        title = (cut.candidate.title or "").strip()
+    base = _safe_download_stem(title) or f"clip-{cut.id}"
+    station = ""
+    if cut.candidate and cut.candidate.channel:
+        station = _safe_download_stem(cut.candidate.channel.call_sign or "", limit=20)
+    stem = f"{station}-{base}" if station else base
+    if kind:
+        stem = f"{stem}-{kind}"
+    return f"{stem}.mp4"
+
+
 @app.get("/cut/{cut_id}/download-clip")
 def download_clip(cut_id: int, captioned: int = 1):
     """Serve the exported clip as a file attachment so the operator can save it
     locally and post it manually elsewhere. Defaults to the captioned version
     (matching the preview default); pass ``captioned=0`` for the original."""
     with session_scope() as session:
-        cut = session.get(Cut, cut_id)
+        cut = session.execute(
+            select(Cut)
+            .options(selectinload(Cut.candidate).selectinload(Candidate.channel))
+            .where(Cut.id == cut_id)
+        ).scalar_one_or_none()
         if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
             return JSONResponse({"error": "no clip"}, status_code=404)
         use_subs = bool(captioned) and bool(cut.subtitled_clip_path) \
             and Path(cut.subtitled_clip_path).exists()
         path = cut.subtitled_clip_path if use_subs else cut.trimmed_clip_path
-        vid = cut.candidate.video_id if cut.candidate else None
-        suffix = "-captioned" if use_subs else ""
+        kind = "captioned" if use_subs else ""
         return FileResponse(path, media_type="video/mp4",
-                            filename=f"{vid or 'clip'}-cut{cut.id}{suffix}.mp4")
+                            filename=_cut_download_filename(cut, kind=kind))
 
 
 @app.get("/cut/{cut_id}/download-vertical")
 def download_vertical(cut_id: int):
     """The vertical Reels composite as an attachment (for manual posting)."""
     with session_scope() as session:
-        cut = session.get(Cut, cut_id)
+        cut = session.execute(
+            select(Cut)
+            .options(selectinload(Cut.candidate).selectinload(Candidate.channel))
+            .where(Cut.id == cut_id)
+        ).scalar_one_or_none()
         if cut is None or not cut.vertical_clip_path or not Path(cut.vertical_clip_path).exists():
             return JSONResponse({"error": "no vertical composite"}, status_code=404)
-        vid = cut.candidate.video_id if cut.candidate else None
         return FileResponse(cut.vertical_clip_path, media_type="video/mp4",
-                            filename=f"{vid or 'clip'}-cut{cut.id}-vertical.mp4")
+                            filename=_cut_download_filename(cut, kind="vertical"))
 
 
 @app.get("/post/{post_id}/download-clip")
 def download_post_clip(post_id: int):
     """Download the clip attached to a post (used from the Posts page)."""
     with session_scope() as session:
-        p = session.get(ThreadsPost, post_id)
+        p = session.execute(
+            select(ThreadsPost)
+            .options(
+                selectinload(ThreadsPost.cut)
+                .selectinload(Cut.candidate)
+                .selectinload(Candidate.channel),
+            )
+            .where(ThreadsPost.id == post_id)
+        ).scalar_one_or_none()
         if p is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         path = p.clip_local_path
@@ -1461,8 +1503,12 @@ def download_post_clip(post_id: int):
             path = p.cut.trimmed_clip_path
         if not path or not Path(path).exists():
             return JSONResponse({"error": "no clip"}, status_code=404)
-        return FileResponse(path, media_type="video/mp4",
-                            filename=f"threads-post-{p.id}.mp4")
+        if p.cut:
+            kind = "captioned" if path and str(path).endswith("_subs.mp4") else ""
+            name = _cut_download_filename(p.cut, kind=kind)
+        else:
+            name = f"threads-post-{p.id}.mp4"
+        return FileResponse(path, media_type="video/mp4", filename=name)
 
 
 # --- Trim / export ----------------------------------------------------------------
@@ -1677,16 +1723,14 @@ def generate_vertical(cut_id: int, hook_text: str = Form("")):
 
 
 @app.post("/cut/{cut_id}/ig-copy")
-def save_ig_copy(cut_id: int, hook_text: str = Form(None), ig_caption: str = Form(None)):
-    """Autosave the Instagram-side copy (hook text and/or reel caption)."""
+def save_ig_copy(cut_id: int, hook_text: str = Form(None)):
+    """Autosave the Instagram hook text (reel caption reuses the Threads caption)."""
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         if hook_text is not None:
             cut.hook_text = hook_text.strip()
-        if ig_caption is not None:
-            cut.ig_draft_caption = ig_caption.strip()
         cut.updated_at = utcnow()
     return {"ok": True}
 
@@ -1885,6 +1929,44 @@ def suggest_caption(cut_id: int):
             return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.post("/cut/{cut_id}/suggest-hook")
+def suggest_hook(cut_id: int):
+    """Draft short on-video hook text for the Instagram vertical composite."""
+    settings = load_settings()
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        c = cut.candidate
+        if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+            return JSONResponse(
+                {"error": "Export the clip first — the hook is drafted "
+                          "from what is said in the trimmed clip."},
+                status_code=409)
+        _lines, clip_text = _ensure_whisper_clip_transcript(cut)
+        if not clip_text.strip():
+            return JSONResponse(
+                {"error": "No speech detected in the clip — nothing to draft "
+                          "a hook from."},
+                status_code=409)
+        excerpt = " ".join(clip_text.split())[:3000]
+        try:
+            hook = suggest_hook_text(
+                settings.get("engagement.draft_model", "claude-sonnet-5"),
+                c.title, c.channel.call_sign, c.channel.market, excerpt,
+            )
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        if not hook:
+            return JSONResponse(
+                {"error": "The model returned an empty hook — try again."},
+                status_code=500)
+        # Persist so a regenerate / leave-and-return keeps the draft.
+        cut.hook_text = hook
+        cut.updated_at = utcnow()
+        return {"hook": hook, "transcript": clip_text}
+
+
 @app.get("/cut/{cut_id}/transcript")
 def cut_transcript(cut_id: int):
     """Plain Whisper transcript of the exported clip (for Copy transcript).
@@ -1968,7 +2050,7 @@ def _drop_pending_reels(session, cut: Cut) -> None:
 @app.post("/cut/{cut_id}/post")
 def post_to_threads(cut_id: int, caption: str = Form(...),
                     use_subtitles: str = Form(""), attribution: str = Form(""),
-                    include_instagram: str = Form(""), ig_caption: str = Form("")):
+                    include_instagram: str = Form("")):
     """Operator-confirmed publish of the exported clip (Threads, and the paired
     Instagram reel when the toggle is on)."""
     caption = caption.strip()
@@ -1996,9 +2078,9 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
                                _chosen_clip_path(cut, use_subtitles), caption,
                                status="draft", cut=cut, attribution=attribution)
             if want_ig:
-                cut.ig_draft_caption = ig_caption.strip()
+                # Reel caption is the Threads caption — one copy for both.
                 record_instagram_post(session, cut, post, cut.vertical_clip_path,
-                                      ig_caption.strip() or caption)
+                                      caption)
             post = publish_post(session, post)
             # Keep the clip's caption in sync with what was actually posted.
             cut.draft_caption = caption
@@ -2031,7 +2113,7 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
 @app.post("/cut/{cut_id}/queue")
 def queue_to_threads(cut_id: int, caption: str = Form(...),
                      use_subtitles: str = Form(""), attribution: str = Form(""),
-                     include_instagram: str = Form(""), ig_caption: str = Form("")):
+                     include_instagram: str = Form("")):
     """Add the exported clip to the adaptive FIFO queue (no immediate post).
     With the Instagram toggle on, the same action queues the paired reel —
     queueing stays the operator-approval step for both platforms."""
@@ -2087,9 +2169,9 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                 post = queue_clip(session, cut.candidate, clip_path, caption, cut=cut,
                                   attribution=attribution)
             if want_ig:
-                cut.ig_draft_caption = ig_caption.strip()
+                # Reel caption is the Threads caption — one copy for both.
                 record_instagram_post(session, cut, post, cut.vertical_clip_path,
-                                      ig_caption.strip() or caption)
+                                      caption)
             else:
                 # Toggle round-trips: un-ticking removes the pending reel.
                 _drop_pending_reels(session, cut)
@@ -2201,6 +2283,16 @@ def queue_existing_post(post_id: int, caption: str = Form(""),
                 cut = session.get(Cut, p.cut_pk)
                 if cut is not None:
                     cut.draft_caption = caption.strip()
+            # Paired reel uses the same caption — keep it in sync while still
+            # editable (queued/draft/failed).
+            ig = session.execute(
+                select(InstagramPost).where(
+                    InstagramPost.threads_post_pk == p.id,
+                    InstagramPost.status.in_(["queued", "draft", "failed"]),
+                ).order_by(InstagramPost.created_at.desc()).limit(1)
+            ).scalar_one_or_none()
+            if ig is not None:
+                ig.caption = caption.strip()
         p.status = "queued"
         p.scheduled_at = None
         p.error = ""
