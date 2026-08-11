@@ -266,10 +266,9 @@
   <h2>{{ "Results" if filtering else "New matches" }}
     ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})</h2>
   <div class="panel-head-actions">
-    <div class="monitor-status">
+    <div class="monitor-status"{% if monitor_running %} data-monitor-watch{% endif %}>
       {% if monitor_running %}
         <span class="badge info"><span class="dot"></span> monitor running</span>
-        <script>setTimeout(() => location.reload(), 10000);</script>
       {% else %}
         <span class="meta" title="{{ monitor_result }}">Monitor {{ 'never run' if monitor_last_refreshed == 'never' else 'last refreshed ' + monitor_last_refreshed }}</span>
         <form method="post" action="/monitor/run">
@@ -430,5 +429,34 @@ async function deleteRow(cid, btn, confirmMsg) {
     btn.disabled = false;
   }
 }
+
+// Watch a running monitor pass without reloading the page. A pass takes
+// minutes, and re-rendering the dashboard on a timer made the page unusable
+// for the whole of it; poll a tiny JSON endpoint instead and reload exactly
+// once, when the pass is actually done and there are new matches to show.
+(function watchMonitor() {
+  if (!document.querySelector('[data-monitor-watch]')) return;
+  const POLL_MS = 5000;
+  const timer = setInterval(async () => {
+    // Nothing to see while the tab is in the background; the check on return
+    // is what matters, and this keeps a long pass off the database.
+    if (document.hidden) return;
+    let running;
+    try {
+      running = (await (await fetch('/monitor/status', {
+        headers: { 'Accept': 'application/json' },
+      })).json()).running;
+    } catch (e) {
+      return;  // transient: keep polling
+    }
+    if (running) return;
+    clearInterval(timer);
+    // Drop the "Monitor started" flash on the way, so finishing doesn't
+    // re-announce the start.
+    const url = new URL(location.href);
+    url.searchParams.delete('msg');
+    location.replace(url);
+  }, POLL_MS);
+})();
 </script>
 {% endblock %}

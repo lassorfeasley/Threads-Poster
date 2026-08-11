@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import logging
 import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
@@ -19,7 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from .. import instagram_api, spend, threads_api, youtube
 from ..analytics import generate_report, latest_metrics_bulk, snapshot_metrics
@@ -144,43 +145,46 @@ def _thumb_for(candidate) -> str:
 templates.env.globals["thumb_for"] = _thumb_for
 
 
+# The bell renders on every page, so this is on the critical path of every
+# render: both counts go out as ONE query, and the answer is cached briefly.
+# Against a remote DB each saved round trip is real page latency.
+_ATTENTION_CACHE_TTL_SECONDS = 20.0
+_attention_cache: tuple[float, int] | None = None
+
+
+def invalidate_attention_cache() -> None:
+    global _attention_cache
+    _attention_cache = None
+
+
+def _unacknowledged(model):
+    return (
+        select(func.count()).select_from(model)
+        .where(model.status == "failed", model.attention_dismissed_at.is_(None))
+        .scalar_subquery()
+    )
+
+
 def _attention_count() -> int:
     """Number of unacknowledged failed posts (Threads + Instagram reels).
-    Rendered on every page (the sidebar notification bell), so it must never
-    raise — return 0 on any error."""
+    Rendered on every page, so it must never raise — fall back to the last
+    known count (or 0) on any error."""
+    global _attention_cache
+    now = time.monotonic()
+    if _attention_cache is not None and now - _attention_cache[0] < _ATTENTION_CACHE_TTL_SECONDS:
+        return _attention_cache[1]
     try:
         with session_scope() as session:
-            threads_failed = int(session.execute(
-                select(func.count()).select_from(ThreadsPost).where(
-                    ThreadsPost.status == "failed",
-                    ThreadsPost.attention_dismissed_at.is_(None),
-                )
+            total = int(session.execute(
+                select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost))
             ).scalar_one())
-            ig_failed = int(session.execute(
-                select(func.count()).select_from(InstagramPost).where(
-                    InstagramPost.status == "failed",
-                    InstagramPost.attention_dismissed_at.is_(None),
-                )
-            ).scalar_one())
-            return threads_failed + ig_failed
     except Exception:
-        return 0
+        return _attention_cache[1] if _attention_cache else 0
+    _attention_cache = (now, total)
+    return total
 
 
 templates.env.globals["attention_count"] = _attention_count
-
-
-def _nav_scheduler_status() -> dict:
-    """Slim scheduler snapshot for the persistent sidebar widget. Rendered on
-    every page, so it must never raise — return an empty dict on any error."""
-    try:
-        with session_scope() as session:
-            return scheduler_status(session)
-    except Exception:
-        return {}
-
-
-templates.env.globals["nav_scheduler"] = _nav_scheduler_status
 
 
 def _threads_authenticated() -> bool:
@@ -216,6 +220,9 @@ start_scheduler_thread()
 
 
 def _flash(url: str, msg: str) -> RedirectResponse:
+    # Every mutating action ends here, which makes it the one place that can
+    # keep the cached bell count honest without sprinkling invalidation calls.
+    invalidate_attention_cache()
     sep = "&" if "?" in url else "?"
     return RedirectResponse(f"{url}{sep}msg={msg}", status_code=303)
 
@@ -317,6 +324,31 @@ def _post_statuses_by_candidate(session, candidate_ids: list[int]) -> dict[int, 
     return out
 
 
+# A Candidate row carries the video's whole description and transcript (the
+# biggest here is ~1 MB on its own). List pages draw a title, a channel and a
+# thumbnail from it and nothing else, so leaving those columns in the SELECT is
+# pure transfer time — which is what dominates a page load against a remote DB.
+# ``raiseload`` makes a missed column a loud error rather than a silent
+# per-row refetch. Detail pages (video, archive, triage) load normally.
+_CANDIDATE_LIST_ONLY = (
+    defer(Candidate.description, raiseload=True),
+    defer(Candidate.transcript_text, raiseload=True),
+    defer(Candidate.relevance_rationale, raiseload=True),
+    defer(Candidate.category_rationale, raiseload=True),
+    defer(Candidate.visual_rationale, raiseload=True),
+)
+
+# Same idea for a post: the library tile shows the caption and the status, not
+# the LLM's original draft or the footage annotations.
+_POST_LIST_ONLY = (
+    defer(ThreadsPost.suggested_caption, raiseload=True),
+    defer(ThreadsPost.footage_traits, raiseload=True),
+    defer(ThreadsPost.footage_rationale, raiseload=True),
+    defer(ThreadsPost.attribution_text, raiseload=True),
+    defer(ThreadsPost.first_reply_text, raiseload=True),
+)
+
+
 def _exported_cut_candidate_ids(session, candidate_ids: list[int]) -> set[int]:
     """Candidate ids that have at least one cut with an exported clip (one query)."""
     if not candidate_ids:
@@ -380,7 +412,10 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
     # On a bare visit (no query string), default the view to today + yesterday by
     # publish date. Any filter interaction submits a query string and is respected
     # as-is, so the operator can widen the window or clear it entirely.
-    date_defaulted = not request.query_params
+    # A flash redirect lands here as "/?msg=…", which is not a filter
+    # interaction: counting it as one drops the window and re-queries the whole
+    # backlog after every action.
+    date_defaulted = not (set(request.query_params) - {"msg"})
     if date_defaulted:
         window_days = settings.get("monitor.default_lookback_days", 2)
         today = dt.datetime.now(dt.timezone.utc).date()
@@ -392,7 +427,7 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
         # top-ranked candidates (not just the most relevant).
         query = (
             select(Candidate)
-            .options(selectinload(Candidate.channel))
+            .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
             .order_by(order_expr(settings).desc(), Candidate.published_at.desc())
         )
         if status != "all":
@@ -452,7 +487,7 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
         if not filtering:
             in_progress = session.execute(
                 select(Candidate)
-                .options(selectinload(Candidate.channel))
+                .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
                 .where(Candidate.status.in_([STATUS_APPROVED, STATUS_ARCHIVED, "failed"]))
                 .order_by(Candidate.approved_at.desc())
                 .limit(30)
@@ -597,7 +632,18 @@ def monitor_now(lookback_days: str = Form("")):
     _monitor_running.set()
     threading.Thread(target=_monitor_in_thread, args=(run_id, days), daemon=True).start()
     verb = f"backfilling {days} days" if days else "checking since last run"
-    return _flash("/", f"Monitor started ({verb}) — running in the background, refresh for updates")
+    return _flash("/", f"Monitor started ({verb}) — running in the background")
+
+
+@app.get("/monitor/status")
+def monitor_status():
+    """Just enough for the dashboard to watch a pass without re-rendering itself.
+    A pass runs for minutes; polling this costs one query, where reloading the
+    page costs a full render against a remote DB."""
+    with session_scope() as session:
+        running, result, last_refreshed = _monitor_view_state(session)
+    return JSONResponse({"running": running, "result": result,
+                         "last_refreshed": last_refreshed})
 
 
 # --- Triage mode (one at a time, keyboard-driven) --------------------------------
@@ -2812,7 +2858,7 @@ def library_page(request: Request, section: str = "videos", msg: str = ""):
         # --- Videos (downloaded/archived source clips) ---
         videos = session.execute(
             select(Candidate)
-            .options(selectinload(Candidate.channel))
+            .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
             .where(Candidate.status == STATUS_ARCHIVED)
             .order_by(Candidate.archived_at.desc())
         ).scalars().all()
@@ -2837,7 +2883,8 @@ def library_page(request: Request, section: str = "videos", msg: str = ""):
         # --- Cuts (first-class trimmed clips) ---
         cuts = session.execute(
             select(Cut)
-            .options(selectinload(Cut.candidate).selectinload(Candidate.channel))
+            .options(selectinload(Cut.candidate).options(
+                selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY))
             .order_by(Cut.created_at.desc())
         ).scalars().all()
         published_cut_pks = {
@@ -2859,9 +2906,11 @@ def library_page(request: Request, section: str = "videos", msg: str = ""):
         posts = session.execute(
             select(ThreadsPost)
             .options(
-                selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
-                selectinload(ThreadsPost.cut)
-                .selectinload(Cut.candidate).selectinload(Candidate.channel),
+                selectinload(ThreadsPost.candidate).options(
+                    selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY),
+                selectinload(ThreadsPost.cut).selectinload(Cut.candidate).options(
+                    selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY),
+                *_POST_LIST_ONLY,
             )
             .order_by(ThreadsPost.created_at.desc()).limit(100)
         ).scalars().all()
