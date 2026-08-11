@@ -10,7 +10,8 @@ from sqlalchemy.orm import selectinload
 
 from .config import load_settings
 from .llm import write_digest
-from .models import Candidate, MetricSnapshot, ThreadsComment, ThreadsPost, TraitWeight, utcnow
+from .models import (AnalyticsDigest, Candidate, MetricSnapshot, ThreadsComment, ThreadsPost,
+                     TraitWeight, utcnow)
 from .threads_api import fetch_insights
 
 log = logging.getLogger("analytics")
@@ -543,32 +544,74 @@ def learn_trait_weights(session, rows: list[dict] | None = None, metric: str = "
     return results
 
 
-def generate_report(session) -> dict:
-    """Full analytics payload: per-post rows, attribute slices, and LLM digest."""
-    settings = load_settings()
-    rows = build_post_rows(session)
-    slices = slice_summaries(rows)
-    timeseries = daily_timeseries(rows)
-    summary = summary_kpis(rows)
-    trait_weights = learn_trait_weights(session, rows)
-    payload = {
+def _digest_payload(rows: list[dict], slices: dict, trait_weights: list[dict]) -> dict:
+    return {
         "total_posts": len(rows),
         "posts": rows,
         "attribute_slices": slices,
         "visual_trait_performance": trait_weights,
         "note": "All slice comparisons are correlational; small samples likely.",
     }
-    digest = ""
-    if rows:
-        try:
-            digest = write_digest(
-                settings.get("analytics.digest_model", "claude-sonnet-5"),
-                payload,
-                settings.get("analytics.min_sample_size", 8),
-            )
-        except Exception as exc:
-            log.warning("Digest generation failed: %s", exc)
-            digest = f"(digest generation failed: {exc})"
-    return {"rows": rows, "slices": slices, "digest": digest,
+
+
+_NO_DIGEST = {"text": "", "model": "", "generated_at": None, "post_count": 0, "new_posts": 0}
+
+
+def stored_digest(session, post_count: int = 0) -> dict:
+    """The digest as last written, with enough context for the page to say how
+    old it is and whether the numbers have moved since."""
+    row = session.get(AnalyticsDigest, 1)
+    if row is None or not row.text:
+        return _NO_DIGEST
+    return {
+        "text": row.text,
+        "model": row.model,
+        "generated_at": row.generated_at,
+        "post_count": row.post_count,
+        "new_posts": max(0, post_count - row.post_count),
+    }
+
+
+def write_and_store_digest(session) -> dict:
+    """Write a fresh digest and keep it. The only place that spends an LLM call
+    on analytics — deliberately, because the operator asked for it."""
+    settings = load_settings()
+    rows = build_post_rows(session)
+    if not rows:
+        return _NO_DIGEST
+    model = settings.get("analytics.digest_model", "claude-sonnet-5")
+    text = write_digest(
+        model,
+        _digest_payload(rows, slice_summaries(rows), learn_trait_weights(session, rows)),
+        settings.get("analytics.min_sample_size", 8),
+    )
+    row = session.get(AnalyticsDigest, 1)
+    if row is None:
+        row = AnalyticsDigest(id=1)
+        session.add(row)
+    row.text = text
+    row.model = model
+    row.post_count = len(rows)
+    row.generated_at = utcnow()
+    session.flush()
+    log.info("Digest written from %d posts (%s)", len(rows), model)
+    return {"text": text, "model": model, "generated_at": row.generated_at,
+            "post_count": row.post_count, "new_posts": 0}
+
+
+def generate_report(session) -> dict:
+    """Full analytics payload: per-post rows, attribute slices, and whichever
+    digest was last written.
+
+    Deliberately free of LLM calls. Building this runs whenever the page is
+    opened cold, and writing a digest here cost a Claude call (and about thirty
+    seconds) for every one of those.
+    """
+    rows = build_post_rows(session)
+    slices = slice_summaries(rows)
+    timeseries = daily_timeseries(rows)
+    summary = summary_kpis(rows)
+    trait_weights = learn_trait_weights(session, rows)
+    return {"rows": rows, "slices": slices, "digest": stored_digest(session, len(rows)),
             "timeseries": timeseries, "summary": summary,
             "trait_weights": trait_weights}

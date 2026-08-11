@@ -12,7 +12,7 @@ Usage:
   python run.py backfill-categories # auto-tag programming categories for untagged videos
   python run.py metrics            # snapshot Threads metrics for published posts
   python run.py comments           # sync comments on own posts
-  python run.py digest             # print the analytics digest to stdout
+  python run.py digest             # write a fresh analytics digest (one LLM call)
   python run.py cleanup            # apply the retention setting (never automatic)
   python run.py scheduler          # one adaptive-scheduler tick (windows + metrics)
   python run.py scheduler --loop   # keep the adaptive scheduler running
@@ -416,13 +416,13 @@ def cmd_comments(_args) -> None:
 
 
 def cmd_digest(_args) -> None:
-    from app.analytics import generate_report
+    from app.analytics import write_and_store_digest
     from app.db import init_db, session_scope
 
     init_db()
     with session_scope() as session:
-        report = generate_report(session)
-    print(report["digest"] or "(no published posts yet)")
+        result = write_and_store_digest(session)
+    print(result["text"] or "(no published posts yet)")
 
 
 def cmd_scheduler(args) -> None:
@@ -552,7 +552,7 @@ def main() -> None:
 
     sub.add_parser("metrics", help="snapshot Threads post metrics").set_defaults(func=cmd_metrics)
     sub.add_parser("comments", help="sync comments on own posts").set_defaults(func=cmd_comments)
-    sub.add_parser("digest", help="print the analytics digest").set_defaults(func=cmd_digest)
+    sub.add_parser("digest", help="write a fresh analytics digest").set_defaults(func=cmd_digest)
     sub.add_parser("cleanup", help="apply retention setting to downloaded segments").set_defaults(func=cmd_cleanup)
 
     args = parser.parse_args()

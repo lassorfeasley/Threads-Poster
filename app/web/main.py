@@ -22,7 +22,8 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import defer, selectinload
 
 from .. import instagram_api, spend, threads_api, youtube
-from ..analytics import generate_report, latest_metrics_bulk, snapshot_metrics
+from ..analytics import (generate_report, latest_metrics_bulk, snapshot_metrics,
+                         write_and_store_digest)
 from ..categories import category_by_slug, category_options
 from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
 from ..config import (
@@ -408,6 +409,22 @@ def _relative_time_ago(when: dt.datetime | None) -> str:
     if weeks < 5:
         return f"{weeks} week{'s' if weeks != 1 else ''} ago"
     return when.strftime("%b %-d")
+
+
+def _digest_meta(digest: dict) -> str:
+    """The line under the digest: when it was written and what from. The page
+    and the write action both render it, so it reads the same either way."""
+    if not digest or not digest.get("text"):
+        return "Not written yet"
+    line = (f"Written {_relative_time_ago(digest.get('generated_at'))} "
+            f"from {digest.get('post_count', 0)} posts")
+    new = digest.get("new_posts") or 0
+    if new:
+        line += f" · {new} post{'s' if new != 1 else ''} published since"
+    return line
+
+
+templates.env.globals["digest_meta"] = _digest_meta
 
 
 def _default_date_window(settings) -> tuple[str, str]:
@@ -3331,10 +3348,10 @@ def _analytics_report() -> dict:
         return generate_report(session)
 
 
-# Half a minute to build, and only new metric snapshots change what it says —
-# so it isn't built on spec, and approving a video doesn't throw it away. The
-# TTL covers the scheduler's own metric polls; taking a snapshot by hand drops
-# it outright.
+# Seconds to build, and only new metric snapshots change what it says — so it
+# isn't built on spec, and approving a video doesn't throw it away. The TTL
+# covers the scheduler's own metric polls; taking a snapshot by hand drops it
+# outright.
 pagecache.register("analytics", _analytics_report, background=False, volatile=False)
 
 
@@ -3365,6 +3382,33 @@ def analytics_body(request: Request):
         request, "components/analytics_body.html",
         _analytics_view(pagecache.read("analytics")),
     )
+
+
+@app.post("/analytics/digest")
+def analytics_digest():
+    """Write a fresh digest — the one analytics action that spends an LLM call,
+    so it happens because the operator asked, never because a page was opened.
+
+    Synchronous: it's a deliberate click that takes about half a minute, and the
+    button spins for it rather than the page inventing a progress protocol."""
+    if not spend.within_budget():
+        return JSONResponse(
+            {"error": f"Daily LLM budget of ${spend.daily_budget():.2f} is used up"},
+            status_code=429)
+    try:
+        with session_scope() as session:
+            result = write_and_store_digest(session)
+    except Exception as exc:
+        log.warning("Digest generation failed: %s", exc)
+        return JSONResponse({"error": f"Could not write the digest: {exc}"}, status_code=502)
+    pagecache.drop("analytics")   # the report carries the digest with it
+    if not result["text"]:
+        return JSONResponse({"error": "No published posts to write about"}, status_code=400)
+    return JSONResponse({
+        "ok": True,
+        "text": result["text"],
+        "meta": _digest_meta(result),
+    })
 
 
 @app.post("/analytics/snapshot")

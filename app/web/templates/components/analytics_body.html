@@ -55,10 +55,44 @@
     post. Click a bar to open its post.</div>
 </div>
 
-{% if digest %}
-<h2>Digest</h2>
-<pre class="digest">{{ digest }}</pre>
+{# The digest is the one thing here that costs an LLM call, so it's written on
+   request and kept, rather than rewritten every time this page is opened. #}
+<div class="panel-head" style="margin-top: 20px;">
+  <h2>Digest <span class="meta" id="digest-meta">{{ digest_meta(digest) }}</span></h2>
+  <div class="panel-head-actions">
+    <form method="post" action="/analytics/digest" class="inline"
+          data-async="Digest written" data-async-then="onDigestWritten"
+          data-confirm="This sends your post stats to {{ digest.model or 'Claude' }} and takes about half a minute."
+          data-confirm-title="Write a new digest" data-confirm-ok="Write it">
+      <button class="sm">{{ "Rewrite digest" if digest.text else "Write digest" }}</button>
+    </form>
+  </div>
+</div>
+{% if digest.text %}
+<pre class="digest" id="digest-text">{{ digest.text }}</pre>
+{% else %}
+<div class="empty" id="digest-text"><strong>No digest yet</strong>
+  An LLM read of what's working across your posts — written when you ask for one.</div>
 {% endif %}
+
+<script>
+// Swap the new text in rather than reloading: the report around it hasn't
+// changed, and rebuilding the page would re-read every post to say so.
+function onDigestWritten(form, data) {
+  const meta = document.getElementById('digest-meta');
+  if (meta && data.meta) meta.textContent = data.meta;
+  const box = document.getElementById('digest-text');
+  if (box && data.text) {
+    const pre = document.createElement('pre');
+    pre.className = 'digest';
+    pre.id = 'digest-text';
+    pre.textContent = data.text;
+    box.replaceWith(pre);
+  }
+  const btn = form.querySelector('button');
+  if (btn) btn.textContent = 'Rewrite digest';
+}
+</script>
 
 {# ---- Attribute slices ---- #}
 <h2>Attribute slices <span class="meta">(correlational — small samples, read with care)</span></h2>

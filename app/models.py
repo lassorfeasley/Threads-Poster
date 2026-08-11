@@ -465,6 +465,27 @@ class MonitorRun(Base):
     finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AnalyticsDigest(Base):
+    """The written performance digest — stored because it costs an LLM call.
+
+    Singleton row. The Analytics page used to write a fresh digest every time
+    the report was rebuilt, which spent real money on a page view and quietly
+    reworded the analysis between visits. It's now written only when the
+    operator asks for one, and read from here in between.
+
+    ``post_count`` records what it was written from, so the page can say when
+    the numbers have moved on from what the text describes.
+    """
+
+    __tablename__ = "analytics_digests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    text: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(60), default="")
+    post_count: Mapped[int] = mapped_column(Integer, default=0)
+    generated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class MetricSnapshot(Base):
     __tablename__ = "metric_snapshots"
 
