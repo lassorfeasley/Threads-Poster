@@ -138,7 +138,7 @@ def poll_recent_metrics(session) -> int:
     return taken
 
 
-def _latest_metrics_bulk(session, post_ids: list[int]) -> dict[int, dict]:
+def latest_metrics_bulk(session, post_ids: list[int]) -> dict[int, dict]:
     """post_pk -> {metric: value} from each post's newest snapshot.
 
     One window-function query instead of one query per post — essential against
@@ -190,7 +190,7 @@ def build_post_rows(session) -> list[dict]:
     ).scalars().all()
 
     post_ids = [p.id for p in posts]
-    metrics_by_post = _latest_metrics_bulk(session, post_ids)
+    metrics_by_post = latest_metrics_bulk(session, post_ids)
     outcomes_by_post = _comment_outcomes_bulk(session, post_ids)
 
     rows = []

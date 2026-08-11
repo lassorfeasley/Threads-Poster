@@ -22,7 +22,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from .. import instagram_api, spend, threads_api, youtube
-from ..analytics import generate_report, snapshot_metrics
+from ..analytics import generate_report, latest_metrics_bulk, snapshot_metrics
 from ..categories import category_by_slug, category_options
 from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
 from ..config import (
@@ -1941,6 +1941,7 @@ def suggest_caption(cut_id: int):
                 c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
                 examples=voice["examples"], style_guide=voice["style_guide"],
                 operator_guide=render_caption_guide(),
+                max_chars=int(settings.get("engagement.caption_max_chars", 220)),
             )
             # Not persisted: the suggestion is only a proposal until the
             # operator explicitly accepts it (/cut/{id}/caption).
@@ -2865,6 +2866,19 @@ def library_page(request: Request, section: str = "videos", msg: str = ""):
             .order_by(ThreadsPost.created_at.desc()).limit(100)
         ).scalars().all()
 
+        # Newest counts per post, so the Posts tab can show and sort on reach.
+        # `engagement` is the interaction total (views excluded — it's the
+        # denominator, not an interaction); None until at least one is known.
+        snaps = latest_metrics_bulk(session, [p.id for p in posts])
+        post_metrics: dict[int, dict] = {}
+        for p in posts:
+            snap = snaps.get(p.id) or {}
+            row = {m: snap.get(m) for m in ("views", "likes", "replies", "reposts")}
+            interactions = [row[m] for m in ("likes", "replies", "reposts")
+                            if row[m] is not None]
+            row["engagement"] = sum(interactions) if interactions else None
+            post_metrics[p.id] = row
+
         # --- Filter vocabularies, drawn from what's actually on the page so the
         # dropdowns never offer a choice that matches nothing. ---
         def _call_sign(candidate) -> str:
@@ -2887,7 +2901,7 @@ def library_page(request: Request, section: str = "videos", msg: str = ""):
     return templates.TemplateResponse(
         request, "library.html",
         {"video_rows": video_rows, "cut_rows": cut_rows, "posts": posts,
-         "section": section,
+         "post_metrics": post_metrics, "section": section,
          "counts": {"videos": len(video_rows), "cuts": len(cut_rows), "posts": len(posts)},
          "channel_choices": sorted(cs for cs in call_signs if cs),
          "category_choices": category_choices,

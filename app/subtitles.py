@@ -158,13 +158,128 @@ def group_words(words: list[dict], max_words: int = 4, max_gap: float = 0.8) -> 
     return groups
 
 
+def _fonts_at_px(font_path: str | Path, px: int) -> tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
+    px = max(12, int(px))
+    base = ImageFont.truetype(str(font_path), px)
+    big = ImageFont.truetype(str(font_path), int(px * 1.08))  # active-word "pop"
+    return base, big
+
+
 def _load_fonts(px: int, font_name: str) -> tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
     font_file = FONT_DIR / font_name
     if not font_file.exists():
         raise SubtitleError(f"Caption font missing: {font_file}")
-    base = ImageFont.truetype(str(font_file), px)
-    big = ImageFont.truetype(str(font_file), int(px * 1.08))  # active-word "pop"
-    return base, big
+    return _fonts_at_px(font_file, px)
+
+
+def _measure_slots(texts: list[str], fonts: tuple,
+                   active: int) -> tuple[list[float], float, int]:
+    """Horizontal room each word needs, the inter-word space, and box padding.
+
+    The active word is set in the larger font and sits on a rounded box, so it
+    claims its own width plus padding on both sides."""
+    base_f, big_f = fonts
+    pad_x = int(base_f.size * 0.22)
+    slots = [
+        (big_f if i == active else base_f).getlength(t) + (2 * pad_x if i == active else 0)
+        for i, t in enumerate(texts)
+    ]
+    return slots, base_f.getlength(" ") * 1.15, pad_x
+
+
+def _line_width(line: list[int], slots: list[float], space: float) -> float:
+    return sum(slots[i] for i in line) + space * max(0, len(line) - 1)
+
+
+def _layout_lines(slots: list[float], space: float, max_w: float,
+                  max_lines: int, align: str) -> list[list[int]]:
+    """Group word indices into display lines.
+
+    ``align="left"`` wraps greedily, filling each line to ``max_w``.
+    ``align="center"`` keeps one line, split into two balanced ones on overflow.
+
+    Neither mode can always honor ``max_w``: once the line budget is spent the
+    remaining words have nowhere to go but the final line. Callers size the font
+    with ``fit_fonts`` first so that case doesn't arise."""
+    if align == "left":
+        lines: list[list[int]] = [[]]
+        acc = 0.0
+        for i in range(len(slots)):
+            add = slots[i] if not lines[-1] else slots[i] + space
+            if lines[-1] and acc + add > max_w and len(lines) < max_lines:
+                lines.append([i])
+                acc = slots[i]
+            else:
+                lines[-1].append(i)
+                acc += add
+        return lines
+
+    lines = [list(range(len(slots)))]
+    total = _line_width(lines[0], slots, space)
+    if total > max_w and len(slots) > 1:
+        split, acc = 1, slots[0]
+        for i in range(1, len(slots)):
+            if acc + space + slots[i] > total / 2:
+                split = i
+                break
+            acc += space + slots[i]
+        lines = [list(range(split)), list(range(split, len(slots)))]
+    return lines
+
+
+def _block_height(n_lines: int, base_f: ImageFont.FreeTypeFont) -> float:
+    """Ink height of an ``n_lines`` block, matching _render_state's baselines."""
+    ascent, descent = base_f.getmetrics()
+    line_h = (ascent + descent) * 1.06
+    return line_h * 0.55 + ascent + (n_lines - 1) * line_h
+
+
+def _phrase_fits(texts: list[str], fonts: tuple, max_w: float, strip_h: int,
+                 max_lines: int, align: str) -> bool:
+    """True when every state of the phrase stays inside the strip.
+
+    Checked for all active words, not just one: the highlight box widens
+    whichever word is current, so a phrase can fit early in its animation and
+    overflow later."""
+    for active in range(len(texts)):
+        slots, space, _pad = _measure_slots(texts, fonts, active)
+        lines = _layout_lines(slots, space, max_w, max_lines, align)
+        if _block_height(len(lines), fonts[0]) > strip_h:
+            return False
+        if any(_line_width(ln, slots, space) > max_w for ln in lines):
+            return False
+    return True
+
+
+def fit_fonts(texts: list[str], fonts: tuple, *, width: int, strip_h: int,
+              max_lines: int, align: str, safe_frac: float,
+              min_frac: float = 0.62) -> tuple:
+    """Shrink the caption font until the whole phrase fits the safe rail.
+
+    Without this a long phrase silently runs off the side of the frame, because
+    wrapping can only break a line while lines remain in the budget. Returns the
+    configured ``fonts`` untouched whenever the phrase already fits — most do —
+    and never shrinks past ``min_frac`` of the configured size, since unreadably
+    small text is a worse outcome than a slight overhang.
+
+    Callers apply the result per phrase, so the size holds steady while a phrase
+    animates word by word.
+    """
+    if not texts:
+        return fonts
+    base_f = fonts[0]
+    max_w = width * max(0.4, min(1.0, safe_frac))
+    start_px = base_f.size
+    min_px = max(18, int(start_px * min_frac))
+    px = start_px
+    while True:
+        trial = fonts if px == start_px else _fonts_at_px(base_f.path, px)
+        if px <= min_px or _phrase_fits(texts, trial, max_w, strip_h, max_lines, align):
+            if px != start_px:
+                log.debug("captions: shrank %dpx -> %dpx to fit %r", start_px, px,
+                          " ".join(texts)[:60])
+            return trial
+        px = max(min_px, int(px * 0.94))
 
 
 def _render_state(texts: list[str], active: int, width: int, strip_h: int,
@@ -192,40 +307,11 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
         return big_f if i == active else base_f
 
     ascent, descent = base_f.getmetrics()
-    pad_x = int(base_f.size * 0.22)   # box side padding around the active word
     pad_y = int(base_f.size * 0.10)
-    space = draw.textlength(" ", font=base_f) * 1.15
-    widths = [draw.textlength(t, font=word_font(i)) for i, t in enumerate(texts)]
-    # The box makes the active word occupy extra horizontal room.
-    slots = [w + (2 * pad_x if i == active else 0) for i, w in enumerate(widths)]
+    slots, space, pad_x = _measure_slots(texts, fonts, active)
 
     max_w = width * max(0.4, min(1.0, safe_frac))
-    if align == "left":
-        # Greedy ragged-right wrap: fill each line to the safe width, break
-        # where the text naturally overflows. The last line absorbs any
-        # remainder beyond max_lines (groups are sized to make that rare).
-        lines: list[list[int]] = [[]]
-        acc = 0.0
-        for i in range(len(texts)):
-            add = slots[i] if not lines[-1] else slots[i] + space
-            if lines[-1] and acc + add > max_w and len(lines) < max_lines:
-                lines.append([i])
-                acc = slots[i]
-            else:
-                lines[-1].append(i)
-                acc += add
-    else:
-        # Centered: one line, split into two balanced lines only on overflow.
-        lines = [[i for i in range(len(texts))]]
-        total = sum(slots) + space * (len(texts) - 1)
-        if total > max_w and len(texts) > 1:
-            split, acc = 1, slots[0]
-            for i in range(1, len(texts)):
-                if acc + space + slots[i] > total / 2:
-                    split = i
-                    break
-                acc += space + slots[i]
-            lines = [list(range(split)), list(range(split, len(texts)))]
+    lines = _layout_lines(slots, space, max_w, max_lines, align)
 
     line_h = (ascent + descent) * 1.06
     if position == "top":
@@ -244,7 +330,7 @@ def _render_state(texts: list[str], active: int, width: int, strip_h: int,
     sdraw = ImageDraw.Draw(shadow)
 
     for line, base_y in zip(lines, baselines):
-        line_w = sum(slots[i] for i in line) + space * (len(line) - 1)
+        line_w = _line_width(line, slots, space)
         x = (width - max_w) / 2 if align == "left" else (width - line_w) / 2
         for i in line:
             f = word_font(i)
@@ -285,6 +371,10 @@ def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
     n_png = 0
     for gi, group in enumerate(groups):
         texts = [w["word"].upper() if uppercase else w["word"] for w in group]
+        # Size the phrase once, then hold it for every state: a font chosen per
+        # state would resize the text as the highlight moves along the line.
+        g_fonts = fit_fonts(texts, fonts, width=width, strip_h=strip_h,
+                            max_lines=max_lines, align=align, safe_frac=safe_frac)
         g_start, g_end = group[0]["start"], group[-1]["end"]
         if g_start > t + 0.01:
             entries.append((blank, g_start - t))
@@ -294,7 +384,7 @@ def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
             end = group[i + 1]["start"] if i + 1 < len(group) else g_end
             dur = max(0.05, end - w["start"])
             png = tmpdir / f"s{n_png:04d}.png"
-            _render_state(texts, i, width, strip_h, fonts, colors, position,
+            _render_state(texts, i, width, strip_h, g_fonts, colors, position,
                           max_lines=max_lines, align=align,
                           safe_frac=safe_frac).save(png)
             entries.append((png, dur))

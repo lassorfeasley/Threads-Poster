@@ -266,46 +266,71 @@ def score_visuals(model: str, images: list[bytes], desirable_traits: list[str],
     return {"visual_score": None, "traits": result["traits"], "why": result["why"]}
 
 
+def _tidy_caption(text: str) -> str:
+    """Flatten a drafted caption to tight, single-spaced lines.
+
+    Models sometimes answer a style guide with a multi-paragraph essay; blank
+    lines and stray indentation are the tell. Collapsing them keeps the proposal
+    readable in the review card. An overlong draft is left whole rather than cut
+    mid-sentence — the operator sees the real draft and trims it themselves.
+    """
+    lines = [" ".join(ln.split()) for ln in text.strip().splitlines()]
+    return "\n".join(ln for ln in lines if ln)[:500]
+
+
 def suggest_post_caption(model: str, title: str, station: str, market: str,
                          excerpt: str, clip_seconds: float | None,
                          examples: list[str] | None = None,
-                         style_guide: str = "", operator_guide: str = "") -> str:
+                         style_guide: str = "", operator_guide: str = "",
+                         max_chars: int = 220) -> str:
     """Recommend Threads post text for the operator's trimmed clip. The operator
     reviews/edits before posting — this is a DRAFT, never auto-posted.
 
     ``examples``/``style_guide`` come from ``app/voice.py``: real captions the
     operator wrote, so the draft matches their voice instead of a generic one.
     ``operator_guide`` is the hand-written style guide from the Configure page —
-    explicit instructions that take priority over the auto-learned voice.
+    a menu of preferred moves, deliberately framed so the model picks one rather
+    than stacking them into a template-shaped caption.
+
+    ``max_chars`` is stated as the ceiling. It is deliberately tight: the clip
+    carries the story, and a generous limit gets treated as a target to fill.
     """
     system = (
         "You draft a Threads caption for a short local-TV climate news clip. The "
-        "operator will edit it before posting. Hard constraints: do not invent "
-        "facts not in the excerpt, mention the place, under 350 characters. "
+        "operator will edit it before posting.\n\n"
+        "LENGTH IS THE CONSTRAINT THAT MATTERS MOST: one or two short lines, two "
+        f"sentences at the absolute most, under {max_chars} characters. No "
+        "paragraphs, no blank lines, no lists. The video carries the story — the "
+        "caption only has to make someone stop and watch it. When torn between "
+        "two good sentences, keep one.\n\n"
+        "Also hard: do not invent facts not in the excerpt, and mention the place. "
     )
     if examples:
         system += (
             "\n\nVOICE: Write in the operator's own voice. Below are real captions "
             "they published — study the sentence rhythm, openings, punctuation, "
             "emoji/hashtag habits, and attitude, then write the new caption as if "
-            "they wrote it. Match voice, never reuse their facts.\n\n"
+            "they wrote it. Match their voice and diction, not their length: some "
+            "of these run long, and yours must not. Never reuse their facts.\n\n"
             + "\n".join(f"<example>\n{e[:500]}\n</example>" for e in examples)
         )
         if style_guide:
             system += "\n\nStyle notes distilled from their full history:\n" + style_guide[:2000]
     else:
         system += (
-            "Style: concrete and human, lead with the most striking fact from the "
-            "excerpt, no hype, no emojis unless truly fitting, at most one question."
+            "Style: concrete and human, lead with the single most striking fact "
+            "from the excerpt and stop there, no hype, no emojis unless truly "
+            "fitting, at most one question."
         )
     if operator_guide:
         system += (
-            "\n\nOPERATOR STYLE GUIDE — the operator's preferred way of writing. "
-            "Treat these as guidance, not rigid rules: apply each one when it fits "
-            "this clip's transcript and context, and skip or adapt any that would "
-            "feel forced or don't suit the material. Favor them over the general "
-            "style notes above, but never over the hard constraints. Above all, the "
-            "caption must read naturally for this specific clip:\n" + operator_guide[:2000]
+            "\n\nOPERATOR STYLE GUIDE — a MENU of moves the operator likes, not a "
+            "checklist. Choose the ONE that best suits this clip (a second only if "
+            "the two genuinely fit in a single short caption) and ignore the rest "
+            "on purpose. Trying to satisfy several at once is the most common "
+            "failure here: it produces a padded, template-shaped caption. These "
+            "outrank the general style notes above, but never the length limit or "
+            "the hard constraints:\n" + operator_guide[:2000]
         )
     system += "\nJSON shape: {\"caption\": \"...\"}"
     user = json.dumps({
@@ -315,8 +340,8 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
         "clip_length_seconds": clip_seconds,
         "transcript_excerpt_of_clip": excerpt[:3000],
     })
-    data = _json_chat(model, system, user, max_tokens=1500)
-    return str(data.get("caption", "")).strip()[:500]
+    data = _json_chat(model, system, user, max_tokens=600)
+    return _tidy_caption(str(data.get("caption", "")))
 
 
 def suggest_hook_text(model: str, title: str, station: str, market: str,
@@ -448,6 +473,10 @@ def suggest_caption_rules(model: str, strong_captions: list[str],
         "- Lead with a one-line pull quote from the transcript.\n"
         "- End with a short, wry question.\n"
         "- Frame climate-denial perspectives impartially, without editorializing.\n\n"
+        "Captions are only one or two short lines, and the drafter applies just "
+        "one rule per caption — so each rule must stand on its own inside that "
+        "space. Never propose a rule that requires extra sentences or a "
+        "multi-part structure (e.g. 'open with X, then Y, then close with Z').\n\n"
         "Avoid vague advice ('be engaging'), do NOT restate hard constraints "
         "(don't invent facts, mention the place, length limit), and do NOT "
         "duplicate the operator's existing rules. Base them only on patterns "

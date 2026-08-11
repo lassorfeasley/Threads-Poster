@@ -86,9 +86,12 @@ def render_hook_png(text: str, width: int, max_height: int, *, font_name: str,
         ascent, descent = font.getmetrics()
         line_h = int((ascent + descent) * 1.12)
         block_h = line_h * len(lines)
-        if block_h <= max_height or px <= 24:
+        # A word longer than the rail can't be wrapped, only shrunk.
+        too_wide = any(probe.textlength(ln, font=font) > max_w for ln in lines)
+        if (block_h <= max_height and not too_wide) or px <= 24:
             break
-        # Too tall for the space above the video: step the size down and rewrap.
+        # Too tall for the space above the video, or too wide for the safe
+        # rail: step the size down and rewrap.
         px = max(24, int(px * 0.92))
 
     img = Image.new("RGBA", (width, block_h), (0, 0, 0, 0))

@@ -119,11 +119,12 @@ CAPTION_STYLE_HEADER = """\
 # Operator style guide for AI-drafted post captions — a list of `rules`.
 # Editable via the Style guide page under Configure; no code changes needed.
 #
-# Each rule: { text, enabled, priority }. Enabled rules are injected into the
-# caption-drafting prompt as authoritative style instructions (high-priority
-# ones first). Hard safety rules still apply — the model won't invent facts,
-# always mentions the place, and stays under Threads' character limit — so an
-# aggressive rule can't override those.
+# Each rule: { text, enabled, priority }. Enabled rules go into the drafting
+# prompt as a MENU (high-priority ones first), not a checklist: the drafter
+# picks the one that fits the clip and skips the rest, so rules never stack into
+# a padded caption. Hard rules still win — the model won't invent facts, always
+# mentions the place, and keeps the caption to one or two short lines
+# (`engagement.caption_max_chars` in settings.yaml).
 
 """
 

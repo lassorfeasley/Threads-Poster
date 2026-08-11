@@ -29,8 +29,20 @@
   </span>
   {{ ui.daterange("date_from", "date_to", label="Date", submit=false,
                   filter_target=LIB, filter_key="date") }}
-  {{ ui.sort(LIB, [("date-desc", "Newest first"), ("date-asc", "Oldest first"),
-                   ("title-asc", "Title A–Z"), ("title-desc", "Title Z–A")]) }}
+  <span class="tb-slot" data-lib-tab="videos cuts">
+    {{ ui.sort(LIB, [("date-desc", "Newest first"), ("date-asc", "Oldest first"),
+                     ("title-asc", "Title A–Z"), ("title-desc", "Title Z–A")]) }}
+  </span>
+  {# Posts get their own sort: the engagement keys only exist on those cards,
+     and only once a metrics snapshot has been taken. #}
+  <span class="tb-slot" data-lib-tab="posts">
+    {{ ui.sort(LIB, [("date-desc", "Newest first"), ("date-asc", "Oldest first"),
+                     ("likes-desc", "Most likes"), ("views-desc", "Most views"),
+                     ("replies-desc", "Most replies"), ("reposts-desc", "Most reposts"),
+                     ("engagement-desc", "Most engagement"),
+                     ("engagement-asc", "Least engagement"),
+                     ("title-asc", "Caption A–Z"), ("title-desc", "Caption Z–A")]) }}
+  </span>
   {{ ui.clear_filters(LIB) }}
 {% endset %}
 {% set lib_crumbs %}
@@ -186,11 +198,17 @@
     {% set thumb = thumb_for(cand) %}
     {% set post_channel = cand.channel.call_sign if (cand and cand.channel) else "" %}
     {% set posted_on = p.created_at.strftime("%Y-%m-%d") if p.created_at else "" %}
+    {% set m = post_metrics[p.id] %}
     <a class="media-card" href="/post/{{ p.id }}"
        data-filter-row data-search="{{ ((p.caption or '') ~ ' ' ~ (p.cut.clip_title if (p.cut and p.cut.clip_title) else '') ~ ' ' ~ post_channel ~ ' ' ~ p.status) | lower }}"
        data-channel="{{ post_channel }}" data-status="{{ p.status }}"
        data-date="{{ posted_on }}" data-sort-date="{{ posted_on }}"
-       data-sort-title="{{ p.caption or '' }}">
+       data-sort-title="{{ p.caption or '' }}"
+       {# Left off entirely when unknown, so posts without a snapshot sink to
+          the bottom of an engagement sort instead of ranking as zero. #}
+       {% for key in ["views", "likes", "replies", "reposts", "engagement"] %}
+       {%- if m[key] is not none %} data-sort-{{ key }}="{{ m[key] }}"{% endif %}
+       {%- endfor %}>
       <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
         {% if thumb %}
         <img src="{{ thumb }}" alt="" loading="lazy"
@@ -206,6 +224,22 @@
       </div>
       <div class="mc-body">
         <div class="item-title">{{ p.caption or "(untitled)" }}</div>
+        {% if m.views is not none or m.engagement is not none %}
+        <div class="mc-stats mc-foot">
+          {% if m.likes is not none %}
+          <span title="Likes"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>{{ "{:,}".format(m.likes) }}</span>
+          {% endif %}
+          {% if m.replies is not none %}
+          <span title="Replies"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>{{ "{:,}".format(m.replies) }}</span>
+          {% endif %}
+          {% if m.reposts is not none %}
+          <span title="Reposts"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>{{ "{:,}".format(m.reposts) }}</span>
+          {% endif %}
+          {% if m.views is not none %}
+          <span title="Views"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>{{ "{:,}".format(m.views) }}</span>
+          {% endif %}
+        </div>
+        {% endif %}
       </div>
     </a>
     {% endfor %}
@@ -230,9 +264,11 @@ function setLibTab(tab) {
     btn.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   // Swap in this tab's filters. Each tab keeps whatever it had selected, but
-  // only the visible controls take part in the match.
+  // only the visible controls take part in the match. A slot can serve several
+  // tabs: data-lib-tab="videos cuts".
   document.querySelectorAll('[data-lib-tab]').forEach(slot => {
-    slot.classList.toggle('tb-hidden', slot.dataset.libTab !== tab);
+    const tabs = slot.dataset.libTab.split(/\s+/);
+    slot.classList.toggle('tb-hidden', !tabs.includes(tab));
   });
   if (window.refreshToolbarFilters) window.refreshToolbarFilters();
   try { localStorage.setItem('libTab', tab); } catch (e) {}

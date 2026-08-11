@@ -245,6 +245,11 @@ engagement:
   max_replies_per_day: 250
   # Shared default LLM model id (captions, attribution drafts, etc.).
   draft_model: claude-sonnet-5
+  # Ceiling given to the caption drafter. Kept tight on purpose: the clip
+  # carries the story, so a caption should read as one or two short lines, and
+  # models treat whatever limit they're given as a length to fill. Raise this
+  # only if drafts are coming back clipped rather than merely brief.
+  caption_max_chars: 220
 
 scheduler:
   # Publish the FIFO queue at the fixed ET windows below, one post per window.

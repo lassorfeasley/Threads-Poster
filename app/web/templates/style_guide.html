@@ -9,7 +9,7 @@
 
   <div class="card">
     <div class="card-title" style="margin-bottom: 4px;">Your rules</div>
-    <p class="meta" style="margin: 0 0 14px;">Short instructions on tone, voice, and formatting. Toggle any off to pause it; High-priority rules are emphasized first in the prompt.</p>
+    <p class="meta" style="margin: 0 0 14px;">Short instructions on tone, voice, and formatting. These are a menu, not a checklist — the AI picks the one that suits each clip rather than applying them all. Toggle any off to pause it; High-priority rules are offered first.</p>
 
     <div id="rules-list"></div>
 
@@ -33,8 +33,8 @@
 
 <div class="card" style="margin-top: 14px;">
   <div class="card-title" style="margin-bottom: 6px;">How this is used</div>
-  <p class="meta" style="margin: 0 0 8px;">Enabled rules are injected into the caption-drafting prompt as authoritative style instructions (High-priority first), on top of the voice the AI already learns from your published captions.</p>
-  <p class="meta" style="margin: 0;">Safety rules always hold regardless of what you write: the AI won't invent facts that aren't in the clip's transcript, it mentions the place, and it stays under the Threads character limit.</p>
+  <p class="meta" style="margin: 0 0 8px;">Enabled rules go into the caption-drafting prompt as a menu of moves you like (High-priority first), on top of the voice the AI already learns from your published captions. It chooses the single rule that fits the clip — stacking several is what makes a caption read like a template.</p>
+  <p class="meta" style="margin: 0;">Hard rules always hold regardless of what you write: the AI won't invent facts that aren't in the clip's transcript, it mentions the place, and it keeps the caption to one or two short lines.</p>
 </div>
 
 <p class="meta" style="margin-top: 12px;">Stored in <code>config/caption_style.yaml</code> if you'd rather edit it by hand.</p>

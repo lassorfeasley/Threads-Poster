@@ -153,12 +153,14 @@
   //   [data-filter-clear="#c"]     reset every control (hides itself when idle)
   //   [data-filter-active]         inside a clear button: count of live filters
   //   [data-sort-target="#c"]      reorder rows; values are "<key>-asc|desc"
-  //                                and read data-sort-<key> off each row
+  //                                and read data-sort-<key> off each row. A
+  //                                tabbed page may render one per tab — the
+  //                                first live one sorts.
   //   [data-filter-section="name"] scope for counts + a filtered-empty notice
   //   [data-filter-count="name"]   live count of matching rows in that section
   //   [data-filter-empty]          shown when a non-empty section filters to 0
   var filterGroups = {};   // target selector -> controls
-  var sortControls = {};   // target selector -> select
+  var sortControls = {};   // target selector -> selects
 
   function initClientFilters() {
     document.querySelectorAll('[data-filter-input]').forEach(function (control) {
@@ -189,7 +191,7 @@
       if (select.__toolbarSort) return;
       select.__toolbarSort = true;
       var target = select.getAttribute('data-sort-target');
-      sortControls[target] = select;
+      (sortControls[target] = sortControls[target] || []).push(select);
       select.addEventListener('change', function () { applyFilter(target); });
     });
 
@@ -256,7 +258,7 @@
       row.classList.toggle(HIDE, !ok);
     });
 
-    applySort(container, sortControls[targetSel]);
+    applySort(container, (sortControls[targetSel] || []).filter(isLive)[0]);
 
     var sections = [].slice.call(container.querySelectorAll('[data-filter-section]'));
     if (container.matches('[data-filter-section]')) sections.unshift(container);
@@ -283,7 +285,7 @@
   }
 
   function applySort(container, select) {
-    if (!select || !isLive(select)) return;
+    if (!select) return;
     var parts = (select.value || '').split('-');
     var key = parts[0];
     var dir = parts[1] === 'asc' ? 1 : -1;

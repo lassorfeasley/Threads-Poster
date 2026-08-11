@@ -3959,6 +3959,14 @@ details.panel > .panel-body { padding: 14px 18px; }
 .media-card:hover .item-title { color: var(--blue); }
 .media-card .mc-body .meta { line-height: 1.5; }
 .media-card .mc-foot { margin-top: auto; }
+/* Engagement counts on Posts tiles — present only once a snapshot exists. */
+.media-card .mc-stats {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  padding-top: 2px;
+  color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+.media-card .mc-stats span { display: inline-flex; align-items: center; gap: 4px; }
+.media-card .mc-stats svg { flex: none; }
 .media-card.is-clickable { cursor: pointer; }
 .media-card.is-clickable:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 1px; }
 .media-card .clip-title { font-style: italic; }
