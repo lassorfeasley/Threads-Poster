@@ -54,7 +54,8 @@
             <input type="hidden" name="next" value="/notifications">
             <button class="sm">Retry reel</button></form>
           {% if ig.cut %}<a class="sm" href="/cut/{{ ig.cut.id }}?step=post">Open clip</a>{% endif %}
-          <form class="inline" method="post" action="/igpost/{{ ig.id }}/dismiss">
+          <form class="inline" method="post" action="/igpost/{{ ig.id }}/dismiss"
+                data-async="Dismissed" data-async-remove=".post-card">
             <input type="hidden" name="next" value="/notifications">
             <button class="reject sm" title="Acknowledge and remove from notifications (kept in history)"
                     data-confirm="Dismiss this notification? It stays in your history but leaves this list."
@@ -93,7 +94,8 @@
             <input type="hidden" name="next" value="/notifications">
             <button class="sm">Retry now</button></form>
           <a class="sm" href="/post/{{ p.id }}/download-clip" download>Clip</a>
-          <form class="inline" method="post" action="/post/{{ p.id }}/dismiss">
+          <form class="inline" method="post" action="/post/{{ p.id }}/dismiss"
+                data-async="Dismissed" data-async-remove=".post-card">
             <input type="hidden" name="next" value="/notifications">
             <button class="reject sm" title="Acknowledge and remove from notifications (kept in history)"
                     data-confirm="Dismiss this notification? It stays in your history but leaves this list."

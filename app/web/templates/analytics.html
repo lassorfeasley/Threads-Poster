@@ -9,339 +9,46 @@
 {% set an_sub %}Post performance pulled from Threads — every post charted individually with a rolling 7-day median trend — plus an LLM digest of what's working.{% endset %}
 {{ ui.pagebar("Analytics", sub=an_sub, actions=an_actions) }}
 
-{% if not rows %}
-  <div class="empty"><span class="icon">▁▃▅</span><strong>No published posts yet</strong>
-    Metrics appear once you've posted clips or imported your Threads history.</div>
-{% else %}
-
-{# ---- KPI cards ---- #}
-<div class="kpi-grid">
-  <div class="kpi"><div class="kpi-label">Posts</div>
-    <div class="kpi-value">{{ summary.total_posts }}</div>
-    <div class="kpi-sub">{{ summary.posts_with_metrics }} with metrics</div></div>
-  <div class="kpi"><div class="kpi-label">Total views</div>
-    <div class="kpi-value">{{ "{:,}".format(summary.total_views) }}</div>
-    <div class="kpi-sub">{{ summary.avg_views if summary.avg_views is not none else "—" }} avg / post</div></div>
-  <div class="kpi"><div class="kpi-label">Total likes</div>
-    <div class="kpi-value">{{ "{:,}".format(summary.total_likes) }}</div>
-    <div class="kpi-sub">{{ summary.avg_likes if summary.avg_likes is not none else "—" }} avg / post</div></div>
-  <div class="kpi"><div class="kpi-label">Total replies</div>
-    <div class="kpi-value">{{ "{:,}".format(summary.total_replies) }}</div>
-    <div class="kpi-sub">{{ summary.avg_replies if summary.avg_replies is not none else "—" }} avg / post</div></div>
-  <div class="kpi"><div class="kpi-label">Reposts + quotes</div>
-    <div class="kpi-value">{{ "{:,}".format(summary.total_reposts + summary.total_quotes) }}</div>
-    <div class="kpi-sub">amplification</div></div>
-</div>
-
-{# ---- Engagement over time ---- #}
-<div class="chart-card">
-  <div class="chart-head">
-    <div class="card-title">Engagement over time</div>
-    <div style="display: flex; align-items: center; gap: 16px;">
-      <div class="view-toggle" id="chart-view" role="group" aria-label="Chart view">
-        <button type="button" class="view-seg text is-active" data-view="days">Days</button>
-        <button type="button" class="view-seg text" data-view="posts">Posts</button>
-        <button type="button" class="view-seg text" data-view="trend">Trend</button>
-      </div>
-      <div class="view-toggle" role="group" aria-label="LLM spend">
-        <button type="button" class="view-seg text" data-view="spend">LLM spend</button>
-      </div>
-      <label class="meta" id="log-label" style="display: inline-flex; align-items: center; gap: 6px;">
-        <input type="checkbox" id="log-scale" style="width: auto;"> Log scale
-      </label>
-      <label class="meta" id="metric-label">Metric
-        <select id="metric-select">
-          <option value="views">Views</option>
-          <option value="likes">Likes</option>
-          <option value="replies">Replies</option>
-          <option value="reposts">Reposts</option>
-          <option value="quotes">Quotes</option>
-          <option value="shares">Shares</option>
-        </select>
-      </label>
-    </div>
-  </div>
-  <div class="chart-wrap"><canvas id="engagementChart"></canvas></div>
-  <div class="meta" id="chart-note" style="margin-top: 6px;">One bar per day: that day's average per
-    post. Click a bar to open its post.</div>
-</div>
-
-{% if digest %}
-<h2>Digest</h2>
-<pre class="digest">{{ digest }}</pre>
-{% endif %}
-
-{# ---- Attribute slices ---- #}
-<h2>Attribute slices <span class="meta">(correlational — small samples, read with care)</span></h2>
-<div class="slice-grid">
-{% for attr, groups in slices.items() %}
-  {% if groups %}
-  <div class="card">
-    <div class="card-title">{{ attr }}</div>
-    <table style="margin-top: 8px;">
-      <tr><th>value</th><th>posts</th><th>views</th><th>likes</th><th>replies</th></tr>
-      {% for key, s in groups.items() %}
-      <tr><td>{{ key }}</td><td>{{ s.n_posts }}</td>
-          <td>{{ s.views if s.views is not none else "—" }}</td>
-          <td>{{ s.likes if s.likes is not none else "—" }}</td>
-          <td>{{ s.replies if s.replies is not none else "—" }}</td></tr>
-      {% endfor %}
-    </table>
-  </div>
-  {% endif %}
-{% endfor %}
-</div>
-
-{# ---- Per-post table (collapsed) ---- #}
-<details style="margin-top: 20px;">
-  <summary><strong>All posts ({{ rows|length }})</strong></summary>
-  <div class="table-wrap" style="margin-top: 10px;">
-  <table>
-    <tr><th>Published</th><th>Caption</th><th>Keywords</th><th>Region</th><th>Len (s)</th>
-        <th>Tone</th><th>Q?</th><th>Views</th><th>Likes</th><th>Replies</th><th>Reposts</th>
-        <th>Our replies</th></tr>
-    {% for r in rows %}
-    <tr>
-      <td class="meta" style="white-space: nowrap;">{{ r.published_at[:10] if r.published_at else "—" }} {{ r.day_of_week }} {{ r.hour_local }}h</td>
-      <td>{% if r.permalink %}<a href="{{ r.permalink }}" target="_blank">{{ r.caption[:60] }}</a>{% else %}{{ r.caption[:60] }}{% endif %}</td>
-      <td>{{ r.matched_keywords or "—" }}</td>
-      <td>{{ r.region or "—" }}</td>
-      <td>{{ r.clip_length_seconds or "—" }}</td>
-      <td>{{ r.caption_tone or "—" }}</td>
-      <td>{{ "✓" if r.caption_has_question }}</td>
-      <td>{{ r.views if r.views is not none else "—" }}</td>
-      <td>{{ r.likes if r.likes is not none else "—" }}</td>
-      <td>{{ r.replies if r.replies is not none else "—" }}</td>
-      <td>{{ r.reposts if r.reposts is not none else "—" }}</td>
-      <td>{{ r.replies_posted }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-  </div>
-</details>
-
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+{# The report reads every post's full metric history, which is the heaviest
+   read in the app. When it isn't already built, the page arrives without it
+   and fetches the body separately — a page that draws immediately and fills
+   in beats a blank tab for the better part of a minute. #}
+<div id="analytics-body"{% if not ready %} data-analytics-pending{% endif %}>
+{% if ready %}
+  {% include "components/analytics_body.html" %}
+{% else %}
+  <div class="empty">
+    <strong>Building the report</strong>
+    <span class="meta busy">Reading the metric history for every post…</span>
+  </div>
+{% endif %}
+</div>
+
+{% if not ready %}
 <script>
-const TS = {{ timeseries | tojson }};
-// Oldest-first daily LLM spend (route sends newest-first).
-const SPEND = ({{ spend_recent | tojson }}).slice().reverse();
-const SPEND_BUDGET = {{ spend_budget }};
-const SPEND_TODAY = {{ spend_today }};
-const METRIC_LABELS = { views: 'Views', likes: 'Likes', replies: 'Replies',
-                        reposts: 'Reposts', quotes: 'Quotes', shares: 'Shares' };
-
-function cssVar(name, fallback) {
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return v || fallback;
-}
-
-if (window.Chart && TS.days && TS.days.length) {
-  const text = cssVar('--text-dim', '#b7c2cd');
-  const grid = cssVar('--border', '#27313d');
-  const accent = cssVar('--accent', '#3ecf8e');
-  const blue = '#5aa9f0';
-  const accentFill = /^#[0-9a-fA-F]{6}$/.test(accent) ? accent + '22' : 'rgba(62,207,142,0.13)';
-  Chart.defaults.color = text;
-  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
-
-  const fmt = new Intl.NumberFormat();
-  // ISO dates are unreadable as axis labels; show "Jul 9" on the axis and
-  // "Wed, Jul 9" in tooltips.
-  const shortDate = (iso) => {
-    const d = new Date(iso + 'T00:00:00');
-    return isNaN(d) ? iso : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  };
-  const longDate = (iso) => {
-    const d = new Date(iso + 'T00:00:00');
-    return isNaN(d) ? iso : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
-  };
-  const POINTS = TS.points || [];
-  const pointsFor = (m) => POINTS
-    .filter((p) => p[m] != null)
-    .map((p) => ({ x: p.date, y: p[m], caption: p.caption, pk: p.pk }));
-
-  const pksByDay = {};
-  POINTS.forEach((p) => {
-    if (p.pk != null) (pksByDay[p.date] = pksByDay[p.date] || []).push(p.pk);
-  });
-
-  // A lone viral post makes a linear axis useless (everything else flattens to
-  // zero), so default to log when the top post dwarfs the median post.
-  const spreadIsWide = (m) => {
-    const vals = POINTS.map((p) => p[m]).filter((v) => v > 0).sort((a, b) => a - b);
-    if (vals.length < 5) return false;
-    return vals[vals.length - 1] / vals[Math.floor(vals.length / 2)] > 20;
-  };
-
-  const logToggle = document.getElementById('log-scale');
-  logToggle.checked = spreadIsWide('views');
-
-  const dollars = (v) => '$' + Number(v).toFixed(2);
-  const yScale = () => {
-    if (view === 'spend') {
-      return { type: 'linear', beginAtZero: true, grid: { color: grid },
-               ticks: { color: text, callback: dollars } };
-    }
-    return logToggle.checked
-      ? { type: 'logarithmic', grid: { color: grid },
-          ticks: { color: text, callback: (v) => fmt.format(v) } }
-      : { type: 'linear', beginAtZero: true, grid: { color: grid },
-          ticks: { color: text, callback: (v) => fmt.format(v) } };
-  };
-
-  // One representation at a time, switched with the Days / Posts / Trend
-  // segmented control (all in per-post units) — plus the separate LLM spend
-  // toggle, which swaps the chart to the cost ledger.
-  const amber = '#d9a03f';
-  const VIEWS = {
-    days: {
-      note: "One bar per day: that day's average per post. Click a bar to open its post.",
-      labels: () => TS.days,
-      datasets: (m) => [{
-        type: 'bar', label: `Daily avg ${METRIC_LABELS[m].toLowerCase()} / post`,
-        data: TS.metrics[m].daily_avg,
-        backgroundColor: blue + '99', hoverBackgroundColor: blue, borderRadius: 3,
-      }],
-    },
-    posts: {
-      note: 'One dot per post on its publish day — hover for the caption, click to open the post.',
-      labels: () => TS.days,
-      datasets: (m) => [{
-        type: 'scatter', label: METRIC_LABELS[m],
-        data: pointsFor(m),
-        backgroundColor: blue + 'cc', borderColor: blue,
-        pointRadius: 4, pointHoverRadius: 6,
-      }],
-    },
-    trend: {
-      note: 'Trailing 7-day median per post — robust to a single viral outlier.',
-      labels: () => TS.days,
-      datasets: (m) => [{
-        type: 'line', label: `7-day median ${METRIC_LABELS[m].toLowerCase()} / post`,
-        data: TS.metrics[m].rolling_median,
-        borderColor: accent, backgroundColor: accentFill, fill: 'origin',
-        borderWidth: 2.5, tension: 0.3, pointRadius: 0, spanGaps: true,
-      }],
-    },
-    spend: {
-      note: `Estimated LLM cost per UTC day, from token usage. Today: ${dollars(SPEND_TODAY)}`
-        + ` of the ${dollars(SPEND_BUDGET)} daily budget (dashed line).`,
-      labels: () => SPEND.map((d) => d.date),
-      datasets: () => [
-        { type: 'bar', label: 'LLM spend', isSpend: true,
-          data: SPEND.map((d) => d.spend_usd),
-          backgroundColor: amber + 'b3', hoverBackgroundColor: amber, borderRadius: 3 },
-        { type: 'line', label: 'Daily budget',
-          data: SPEND.map(() => SPEND_BUDGET),
-          borderColor: '#e05252', borderWidth: 1.5, borderDash: [6, 4],
-          pointRadius: 0, fill: false },
-      ],
-    },
-  };
-
-  let view = 'days';
-  try { view = localStorage.getItem('analyticsChartView') || 'days'; } catch (e) {}
-  if (!VIEWS[view]) view = 'days';
-
-  const engCtx = document.getElementById('engagementChart');
-  const engChart = new Chart(engCtx, {
-    type: 'bar',
-    data: { labels: TS.days, datasets: [] },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'nearest', intersect: false },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            title(items) {
-              return items.length ? longDate(engChart.data.labels[items[0].dataIndex]) : '';
-            },
-            label(ctx) {
-              if (ctx.dataset.isSpend) {
-                const d = SPEND[ctx.dataIndex] || {};
-                return `${dollars(ctx.parsed.y)}${d.calls ? ` · ${d.calls} call${d.calls === 1 ? '' : 's'}` : ''}`;
-              }
-              if (view === 'spend') return `${ctx.dataset.label}: ${dollars(ctx.parsed.y)}`;
-              const m = document.getElementById('metric-select').value;
-              const v = fmt.format(ctx.parsed.y);
-              if (ctx.raw && ctx.raw.caption) {
-                return `${v} ${METRIC_LABELS[m].toLowerCase()} — “${ctx.raw.caption}”`;
-              }
-              if (ctx.dataset.type === 'bar') {
-                const n = (TS.posts_per_day || [])[ctx.dataIndex];
-                return `${ctx.dataset.label}: ${v}${n > 1 ? ` (${n} posts)` : ''}`;
-              }
-              return `${ctx.dataset.label}: ${v}`;
-            },
-          },
-        },
-      },
-      scales: {
-        x: { grid: { color: grid },
-             ticks: { color: text, maxRotation: 0, autoSkip: true, maxTicksLimit: 10,
-                      callback(value) { return shortDate(this.getLabelForValue(value)); } } },
-        y: yScale(),
-      },
-    },
-  });
-
-  function applyView() {
-    const m = document.getElementById('metric-select').value;
-    engChart.data.labels = VIEWS[view].labels();
-    engChart.data.datasets = VIEWS[view].datasets(m);
-    engChart.options.scales.y = yScale();
-    engChart.update();
-    document.getElementById('chart-note').textContent = VIEWS[view].note;
-    document.querySelectorAll('.chart-head [data-view]').forEach((btn) => {
-      btn.classList.toggle('is-active', btn.dataset.view === view);
-    });
-    // Log scale and the metric picker only make sense for engagement views.
-    // (style.display, not the hidden attribute: the inline display on the
-    // log label would override [hidden].)
-    document.getElementById('log-label').style.display = view === 'spend' ? 'none' : 'inline-flex';
-    document.getElementById('metric-label').style.display = view === 'spend' ? 'none' : '';
+(async function loadAnalyticsBody() {
+  const box = document.getElementById('analytics-body');
+  if (!box || !box.hasAttribute('data-analytics-pending')) return;
+  try {
+    const r = await fetch('/analytics/body', { headers: { 'X-Requested-With': 'fetch' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    box.innerHTML = await r.text();
+  } catch (e) {
+    box.innerHTML = '<div class="empty"><strong>Could not load the report</strong>' +
+      '<span class="meta">Reload the page to try again.</span></div>';
+    return;
   }
-  applyView();
-
-  document.querySelector('.chart-head').addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-view]');
-    if (!btn || btn.dataset.view === view) return;
-    view = btn.dataset.view;
-    try { localStorage.setItem('analyticsChartView', view); } catch (e2) {}
-    applyView();
+  box.removeAttribute('data-analytics-pending');
+  // A <script> inserted as HTML never runs, so re-create the fragment's own
+  // to draw the chart. Chart.js itself is already loaded by the page above.
+  box.querySelectorAll('script').forEach(function (old) {
+    const s = document.createElement('script');
+    s.textContent = old.textContent;
+    old.replaceWith(s);
   });
-
-  document.getElementById('metric-select').addEventListener('change', applyView);
-
-  logToggle.addEventListener('change', () => {
-    engChart.options.scales.y = yScale();
-    engChart.update();
-  });
-
-  // Click-through to the post page: dots map 1:1; a bar maps to its day's
-  // post when the day has exactly one (multi-post days are ambiguous).
-  function postTarget(el) {
-    if (!el || view === 'spend') return null;
-    const ds = engChart.data.datasets[el.datasetIndex];
-    if (ds.type === 'scatter') return (ds.data[el.index] || {}).pk ?? null;
-    if (ds.type === 'bar') {
-      const pks = pksByDay[engChart.data.labels[el.index]] || [];
-      return pks.length === 1 ? pks[0] : null;
-    }
-    return null;
-  }
-  function elementAt(e) {
-    return engChart.getElementsAtEventForMode(e, 'nearest', { intersect: true }, true)[0];
-  }
-  engCtx.addEventListener('click', (e) => {
-    const pk = postTarget(elementAt(e));
-    if (pk != null) location.href = `/post/${pk}`;
-  });
-  engCtx.addEventListener('mousemove', (e) => {
-    engCtx.style.cursor = postTarget(elementAt(e)) != null ? 'pointer' : '';
-  });
-}
+})();
 </script>
 {% endif %}
 {% endblock %}

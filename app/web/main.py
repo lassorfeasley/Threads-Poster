@@ -12,7 +12,6 @@ import datetime as dt
 import json
 import logging
 import threading
-import time
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
@@ -99,6 +98,7 @@ from ..scrape import PASTED_CHANNEL_URL, archive_candidate, fetch_video_metadata
 from ..vision import annotate_post_footage, tag_candidate_storyboard
 from ..voice import voice_context
 from ..youtube import YouTubeAPIError, parse_video_url
+from . import pagecache
 
 log = logging.getLogger("web")
 
@@ -145,18 +145,6 @@ def _thumb_for(candidate) -> str:
 templates.env.globals["thumb_for"] = _thumb_for
 
 
-# The bell renders on every page, so this is on the critical path of every
-# render: both counts go out as ONE query, and the answer is cached briefly.
-# Against a remote DB each saved round trip is real page latency.
-_ATTENTION_CACHE_TTL_SECONDS = 20.0
-_attention_cache: tuple[float, int] | None = None
-
-
-def invalidate_attention_cache() -> None:
-    global _attention_cache
-    _attention_cache = None
-
-
 def _unacknowledged(model):
     return (
         select(func.count()).select_from(model)
@@ -165,23 +153,21 @@ def _unacknowledged(model):
     )
 
 
+def _load_attention_count() -> int:
+    """Unacknowledged failed posts (Threads + Instagram reels), as one query."""
+    with session_scope() as session:
+        return int(session.execute(
+            select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost))
+        ).scalar_one())
+
+
+pagecache.register("attention", _load_attention_count)
+
+
 def _attention_count() -> int:
-    """Number of unacknowledged failed posts (Threads + Instagram reels).
-    Rendered on every page, so it must never raise — fall back to the last
-    known count (or 0) on any error."""
-    global _attention_cache
-    now = time.monotonic()
-    if _attention_cache is not None and now - _attention_cache[0] < _ATTENTION_CACHE_TTL_SECONDS:
-        return _attention_cache[1]
-    try:
-        with session_scope() as session:
-            total = int(session.execute(
-                select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost))
-            ).scalar_one())
-    except Exception:
-        return _attention_cache[1] if _attention_cache else 0
-    _attention_cache = (now, total)
-    return total
+    """The bell's count. It renders on every page, so it's kept warm in the
+    background and must never raise."""
+    return pagecache.read_or_last("attention", 0)
 
 
 templates.env.globals["attention_count"] = _attention_count
@@ -217,14 +203,41 @@ with session_scope() as _s:
 # without it the scheduler's own log output has nowhere to go.
 setup_logging()
 start_scheduler_thread()
+# Keeps the list pages' datasets warm, so a page render doesn't wait on the
+# database (see pagecache: only pages in active use are refreshed).
+pagecache.start_refresher()
+
+
+@app.middleware("http")
+async def _drop_cached_reads_after_writes(request: Request, call_next):
+    """Any successful write invalidates the cached reads.
+
+    Hooking the request instead of ``_flash`` covers the endpoints that answer
+    JSON to an in-page action, which don't redirect — and will cover the next
+    one added without anyone having to remember.
+    """
+    response = await call_next(request)
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and response.status_code < 400:
+        pagecache.invalidate()
+    return response
 
 
 def _flash(url: str, msg: str) -> RedirectResponse:
-    # Every mutating action ends here, which makes it the one place that can
-    # keep the cached bell count honest without sprinkling invalidation calls.
-    invalidate_attention_cache()
     sep = "&" if "?" in url else "?"
     return RedirectResponse(f"{url}{sep}msg={msg}", status_code=303)
+
+
+def _in_background(fn, *args) -> None:
+    """Run a worker off the request path, dropping the cached reads when it's
+    done. These threads change what the list pages show but never touch HTTP,
+    so the write-invalidating middleware can't see them finish."""
+    def _run() -> None:
+        try:
+            fn(*args)
+        finally:
+            pagecache.invalidate()
+
+    threading.Thread(target=_run, daemon=True, name=getattr(fn, "__name__", "worker")).start()
 
 
 def _scrape_in_thread(candidate_id: int) -> None:
@@ -253,7 +266,7 @@ def _resume_stalled_scrapes() -> None:
         ).scalars().all()
     for cid in stalled:
         log.info("Resuming stalled scrape for candidate %s", cid)
-        threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
+        _in_background(_scrape_in_thread, cid)
 
 
 _resume_stalled_scrapes()
@@ -397,31 +410,18 @@ def _relative_time_ago(when: dt.datetime | None) -> str:
     return when.strftime("%b %-d")
 
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, q: str = "", channel_id: int = 0,
-              keyword: list[str] = Query(default=[]),
-              region: str = "", country: str = "", scope: str = "",
-              status: str = "new", date_from: str = "", date_to: str = "",
-              show_hidden: int = 0, msg: str = ""):
-    settings = load_settings()
-    threshold = settings.get("matching.score_threshold", 0.5)
-    keyword = [k for k in keyword if k.strip()]
-    filtering = bool(q or channel_id or keyword or region or country or scope
-                     or date_from or date_to or status != "new")
+def _default_date_window(settings) -> tuple[str, str]:
+    """Today + yesterday by publish date — what a bare visit to "/" shows."""
+    window_days = settings.get("monitor.default_lookback_days", 2)
+    today = dt.datetime.now(dt.timezone.utc).date()
+    return ((today - dt.timedelta(days=max(window_days, 1) - 1)).isoformat(),
+            today.isoformat())
 
-    # On a bare visit (no query string), default the view to today + yesterday by
-    # publish date. Any filter interaction submits a query string and is respected
-    # as-is, so the operator can widen the window or clear it entirely.
-    # A flash redirect lands here as "/?msg=…", which is not a filter
-    # interaction: counting it as one drops the window and re-queries the whole
-    # backlog after every action.
-    date_defaulted = not (set(request.query_params) - {"msg"})
-    if date_defaulted:
-        window_days = settings.get("monitor.default_lookback_days", 2)
-        today = dt.datetime.now(dt.timezone.utc).date()
-        date_from = (today - dt.timedelta(days=max(window_days, 1) - 1)).isoformat()
-        date_to = today.isoformat()
 
+def _dashboard_data(settings, threshold, q="", channel_id=0, keyword=(),
+                    region="", country="", scope="", status="new",
+                    date_from="", date_to="", show_hidden=0, filtering=False) -> dict:
+    """The dashboard's reads: matching candidates plus the in-progress buckets."""
     with session_scope() as session:
         # Order by the blended relevance+visual ranking so the row cap keeps the
         # top-ranked candidates (not just the most relevant).
@@ -526,19 +526,65 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
 
         monitor_running, monitor_result, monitor_last_refreshed = _monitor_view_state(session)
 
+    return {
+        "candidates": candidates, "total_matches": total_matches, "row_cap": row_cap,
+        "in_progress": in_progress_rows, "trimmed": trimmed_rows,
+        "keywords_options": keywords_options,
+        "monitor_running": monitor_running,
+        "monitor_result": monitor_result,
+        "monitor_last_refreshed": monitor_last_refreshed,
+        "date_from": date_from, "date_to": date_to,
+    }
+
+
+def _default_dashboard_data() -> dict:
+    """The bare "/" view. Every action redirects here, so it's the one worth
+    keeping warm; a filtered view is a one-off and goes straight to the DB."""
+    settings = load_settings()
+    date_from, date_to = _default_date_window(settings)
+    return _dashboard_data(settings, settings.get("matching.score_threshold", 0.5),
+                           date_from=date_from, date_to=date_to)
+
+
+pagecache.register("dashboard", _default_dashboard_data)
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard(request: Request, q: str = "", channel_id: int = 0,
+              keyword: list[str] = Query(default=[]),
+              region: str = "", country: str = "", scope: str = "",
+              status: str = "new", date_from: str = "", date_to: str = "",
+              show_hidden: int = 0, msg: str = ""):
+    settings = load_settings()
+    threshold = settings.get("matching.score_threshold", 0.5)
+    keyword = [k for k in keyword if k.strip()]
+    filtering = bool(q or channel_id or keyword or region or country or scope
+                     or date_from or date_to or status != "new")
+
+    # On a bare visit (no query string), default the view to today + yesterday by
+    # publish date. Any filter interaction submits a query string and is respected
+    # as-is, so the operator can widen the window or clear it entirely.
+    # A flash redirect lands here as "/?msg=…", which is not a filter
+    # interaction: counting it as one drops the window and re-queries the whole
+    # backlog after every action.
+    date_defaulted = not (set(request.query_params) - {"msg"})
+    if date_defaulted:
+        data = pagecache.read("dashboard")
+        date_from, date_to = data["date_from"], data["date_to"]
+    else:
+        data = _dashboard_data(settings, threshold, q=q, channel_id=channel_id,
+                               keyword=keyword, region=region, country=country,
+                               scope=scope, status=status, date_from=date_from,
+                               date_to=date_to, show_hidden=show_hidden,
+                               filtering=filtering)
+
     return templates.TemplateResponse(
         request, "dashboard.html",
-        {"candidates": candidates, "total_matches": total_matches, "row_cap": row_cap,
-         "in_progress": in_progress_rows, "trimmed": trimmed_rows, "threshold": threshold,
+        {**data, "threshold": threshold,
          "date_defaulted": date_defaulted,
          "show_hidden": show_hidden, "filtering": filtering,
          "q": q, "channel_id": channel_id, "keyword": keyword, "region": region,
          "country": country, "scope": scope, "status": status,
-         "date_from": date_from, "date_to": date_to,
-         "keywords_options": keywords_options,
-         "monitor_running": monitor_running,
-         "monitor_result": monitor_result,
-         "monitor_last_refreshed": monitor_last_refreshed,
          "msg": msg, "active": "dashboard"},
     )
 
@@ -614,9 +660,11 @@ def _monitor_view_state(session) -> tuple[bool, str, str]:
 
 
 @app.post("/monitor/run")
-def monitor_now(lookback_days: str = Form("")):
+def monitor_now(request: Request, lookback_days: str = Form("")):
+    wants_json = "application/json" in request.headers.get("accept", "")
     if _monitor_running.is_set():
-        return _flash("/", "A monitor pass is already running — refresh to see progress")
+        msg = "A monitor pass is already running — refresh to see progress"
+        return JSONResponse({"ok": True, "msg": msg}) if wants_json else _flash("/", msg)
     days: int | None = None
     if lookback_days.strip():
         try:
@@ -630,20 +678,28 @@ def monitor_now(lookback_days: str = Form("")):
         session.flush()
         run_id = run.id
     _monitor_running.set()
-    threading.Thread(target=_monitor_in_thread, args=(run_id, days), daemon=True).start()
+    _in_background(_monitor_in_thread, run_id, days)
     verb = f"backfilling {days} days" if days else "checking since last run"
-    return _flash("/", f"Monitor started ({verb}) — running in the background")
+    msg = f"Monitor started ({verb}) — running in the background"
+    # Starting a pass changes nothing on screen except the badge, so the
+    # dashboard swaps that itself rather than reloading to be told.
+    return JSONResponse({"ok": True, "msg": msg}) if wants_json else _flash("/", msg)
 
 
 @app.get("/monitor/status")
 def monitor_status():
     """Just enough for the dashboard to watch a pass without re-rendering itself.
     A pass runs for minutes; polling this costs one query, where reloading the
-    page costs a full render against a remote DB."""
+    page costs a full render against a remote DB.
+
+    ``ready`` says whether reloading would actually be cheap: a finished pass
+    invalidates the dashboard's cached rows, and waiting the extra beat for the
+    refresher beats making the operator watch a cold render."""
     with session_scope() as session:
         running, result, last_refreshed = _monitor_view_state(session)
     return JSONResponse({"running": running, "result": result,
-                         "last_refreshed": last_refreshed})
+                         "last_refreshed": last_refreshed,
+                         "ready": pagecache.is_warm("dashboard")})
 
 
 # --- Triage mode (one at a time, keyboard-driven) --------------------------------
@@ -1044,13 +1100,15 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
 
 
 @app.post("/cut/{cut_id}/delete")
-def delete_cut(cut_id: int):
+def delete_cut(request: Request, cut_id: int):
     """Delete a cut and any of its not-yet-published posts. Published posts are
     detached (kept for history) rather than removed."""
+    wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None:
-            return _flash("/", "Clip not found")
+            return (JSONResponse({"error": "Clip not found"}, status_code=404)
+                    if wants_json else _flash("/", "Clip not found"))
         candidate_id = cut.candidate_pk
         reels = session.execute(
             select(InstagramPost).where(InstagramPost.cut_pk == cut.id)
@@ -1075,6 +1133,10 @@ def delete_cut(cut_id: int):
             else:
                 p.cut_pk = None  # keep published history, drop the link
         session.delete(cut)
+    # Callers that show the clip in a list drop the row themselves rather than
+    # re-rendering the whole list to lose one row.
+    if wants_json:
+        return JSONResponse({"ok": True})
     return _flash(f"/video/{candidate_id}", "Clip deleted")
 
 
@@ -1151,7 +1213,7 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
         session.add(c)
         session.flush()
         cid = c.id
-    threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
+    _in_background(_scrape_in_thread, cid)
     return _flash(f"/video/{cid}", "Uploaded — transcribing now")
 
 
@@ -1259,7 +1321,7 @@ def upload_url(urls: str = Form(...)):
             queued.append(c.id)
 
     for cid in queued:
-        threading.Thread(target=_scrape_in_thread, args=(cid,), daemon=True).start()
+        _in_background(_scrape_in_thread, cid)
 
     bits = []
     if queued:
@@ -1304,7 +1366,7 @@ def approve(request: Request, candidate_id: int):
         c.status = STATUS_APPROVED
         c.approved_at = utcnow()
         _log_triage_decision(session, c, "approve")
-    threading.Thread(target=_scrape_in_thread, args=(candidate_id,), daemon=True).start()
+    _in_background(_scrape_in_thread, candidate_id)
     # AJAX callers transition the page in place (no full reload); others redirect.
     if wants_json:
         return JSONResponse({"ok": True, "status": "approved"})
@@ -1367,7 +1429,7 @@ def retry(candidate_id: int):
         c = session.get(Candidate, candidate_id)
         if c:
             c.status = STATUS_APPROVED
-    threading.Thread(target=_scrape_in_thread, args=(candidate_id,), daemon=True).start()
+    _in_background(_scrape_in_thread, candidate_id)
     return _flash(f"/video/{candidate_id}", "Retrying scrape")
 
 
@@ -2519,7 +2581,7 @@ def publish_scheduled_now(request: Request, post_id: int, next: str = Form("/cal
     # Register before spawning so a scheduler tick in the gap between here and
     # the thread starting doesn't mistake this for an orphaned publish.
     mark_publishing(post_id)
-    threading.Thread(target=_publish_in_thread, args=(post_id,), daemon=True).start()
+    _in_background(_publish_in_thread, post_id)
     if wants_json:
         return JSONResponse({"ok": True, "status": "publishing"})
     return _flash(next, "Publishing now — video can take a minute to process.")
@@ -2848,12 +2910,10 @@ def archive_redirect(section: str = ""):
                             status_code=307)
 
 
-@app.get("/library", response_class=HTMLResponse)
-def library_page(request: Request, section: str = "videos", msg: str = ""):
-    """The content library: Videos → Cuts → Posts, the three types that cascade
-    into each other, shown as a toggle group. ``section`` selects the open tab."""
-    if section not in ("videos", "cuts", "posts"):
-        section = "videos"
+def _library_dataset() -> dict:
+    """Everything the Library page draws. The page takes no server-side filters
+    (it ships the whole library and narrows it in the browser), so this is one
+    cacheable dataset rather than one per view."""
     with session_scope() as session:
         # --- Videos (downloaded/archived source clips) ---
         videos = session.execute(
@@ -2947,15 +3007,29 @@ def library_page(request: Request, section: str = "videos", msg: str = ""):
         ]
         post_statuses = sorted({p.status for p in posts if p.status})
 
+    return {
+        "video_rows": video_rows, "cut_rows": cut_rows, "posts": posts,
+        "post_metrics": post_metrics,
+        "counts": {"videos": len(video_rows), "cuts": len(cut_rows), "posts": len(posts)},
+        "channel_choices": sorted(cs for cs in call_signs if cs),
+        "category_choices": category_choices,
+        "post_status_choices": post_statuses,
+    }
+
+
+pagecache.register("library", _library_dataset)
+
+
+@app.get("/library", response_class=HTMLResponse)
+def library_page(request: Request, section: str = "videos", msg: str = ""):
+    """The content library: Videos → Cuts → Posts, the three types that cascade
+    into each other, shown as a toggle group. ``section`` selects the open tab."""
+    if section not in ("videos", "cuts", "posts"):
+        section = "videos"
     return templates.TemplateResponse(
         request, "library.html",
-        {"video_rows": video_rows, "cut_rows": cut_rows, "posts": posts,
-         "post_metrics": post_metrics, "section": section,
-         "counts": {"videos": len(video_rows), "cuts": len(cut_rows), "posts": len(posts)},
-         "channel_choices": sorted(cs for cs in call_signs if cs),
-         "category_choices": category_choices,
-         "post_status_choices": post_statuses,
-         "msg": msg, "active": "library"},
+        {**pagecache.read("library"),
+         "section": section, "msg": msg, "active": "library"},
     )
 
 
@@ -2978,10 +3052,11 @@ def threads_import_history(next: str = Form("/calendar")):
         try:
             with session_scope() as s:
                 snapshot_metrics(s)
+            pagecache.drop("analytics")   # new numbers: the report is now wrong
         except Exception as exc:  # pragma: no cover - background best-effort
             logging.getLogger("history").warning("Post-import snapshot failed: %s", exc)
 
-    threading.Thread(target=_pull_insights, daemon=True).start()
+    _in_background(_pull_insights)
     return _flash(
         next,
         f"Imported {result['imported']} posts ({result['skipped']} already known) — "
@@ -2989,19 +3064,8 @@ def threads_import_history(next: str = Form("/calendar")):
     )
 
 
-@app.get("/calendar", response_class=HTMLResponse)
-def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""):
-    """Month grid of window slots + linear posting queue (local time)."""
-    import calendar as _cal
-
-    now_local = dt.datetime.now()
-    y = year or now_local.year
-    m = month or now_local.month
-    if m < 1:
-        y, m = y - 1, 12
-    elif m > 12:
-        y, m = y + 1, 1
-
+def _calendar_data(y: int, m: int) -> dict:
+    """The reads behind one month of the calendar: slots, queue and counts."""
     first_local = dt.datetime(y, m, 1)
     next_first_local = dt.datetime(y + 1, 1, 1) if m == 12 else dt.datetime(y, m + 1, 1)
 
@@ -3042,6 +3106,37 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
     for day in events:
         events[day].sort(key=lambda e: e["sort"])
 
+    return {"events": events, "drafts_count": drafts_count, "queue_count": queue_count,
+            "linear": linear, "windows_et": windows_et, "year": y, "month": m}
+
+
+def _current_month_calendar_data() -> dict:
+    now_local = dt.datetime.now()
+    return _calendar_data(now_local.year, now_local.month)
+
+
+pagecache.register("calendar", _current_month_calendar_data)
+
+
+@app.get("/calendar", response_class=HTMLResponse)
+def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""):
+    """Month grid of window slots + linear posting queue (local time)."""
+    import calendar as _cal
+
+    now_local = dt.datetime.now()
+    y = year or now_local.year
+    m = month or now_local.month
+    if m < 1:
+        y, m = y - 1, 12
+    elif m > 12:
+        y, m = y + 1, 1
+
+    # Only this month is kept warm; paging back through history is rare enough
+    # to read directly (and the cached month self-corrects after a rollover).
+    data = pagecache.read("calendar")
+    if (data["year"], data["month"]) != (y, m):
+        data = _calendar_data(y, m)
+
     cal = _cal.Calendar(firstweekday=6)  # Sunday-first
     weeks = cal.monthdayscalendar(y, m)
     today = now_local.day if (y == now_local.year and m == now_local.month) else 0
@@ -3051,12 +3146,10 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
 
     return templates.TemplateResponse(
         request, "calendar.html",
-        {"weeks": weeks, "events": events, "today": today,
-         "year": y, "month": m, "month_name": _cal.month_name[m],
+        {**data, "weeks": weeks, "today": today,
+         "month_name": _cal.month_name[m],
          "prev_y": prev_y, "prev_m": prev_m, "next_y": next_y, "next_m": next_m,
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
-         "drafts_count": drafts_count, "queue_count": queue_count,
-         "linear": linear, "windows_et": windows_et,
          "windows_local": window_time_labels(),
          "msg": msg, "active": "calendar"},
     )
@@ -3070,10 +3163,8 @@ def posts_page(msg: str = ""):
     return RedirectResponse("/calendar" + (f"?msg={msg}" if msg else ""), status_code=307)
 
 
-@app.get("/notifications", response_class=HTMLResponse)
-def notifications_page(request: Request, msg: str = ""):
-    """Operator alerts — currently failed posts that dropped out of the queue and
-    need a decision (retry, re-queue, or dismiss)."""
+def _notifications_data() -> dict:
+    """Failed posts and reels awaiting a decision."""
     with session_scope() as session:
         failed = session.execute(
             select(ThreadsPost)
@@ -3091,21 +3182,33 @@ def notifications_page(request: Request, msg: str = ""):
                    InstagramPost.attention_dismissed_at.is_(None))
             .order_by(InstagramPost.created_at.desc())
         ).scalars().all()
+    return {"failed": failed, "ig_failed": ig_failed}
+
+
+pagecache.register("notifications", _notifications_data)
+
+
+@app.get("/notifications", response_class=HTMLResponse)
+def notifications_page(request: Request, msg: str = ""):
+    """Operator alerts — currently failed posts that dropped out of the queue and
+    need a decision (retry, re-queue, or dismiss)."""
     return templates.TemplateResponse(
         request, "notifications.html",
-        {"failed": failed, "ig_failed": ig_failed, "msg": msg, "active": "notifications"},
+        {**pagecache.read("notifications"), "msg": msg, "active": "notifications"},
     )
 
 
 @app.post("/post/{post_id}/dismiss")
-def dismiss_attention(post_id: int, next: str = Form("/notifications")):
+def dismiss_attention(request: Request, post_id: int, next: str = Form("/notifications")):
     """Acknowledge a failed post so it leaves the notifications list (kept in history)."""
+    wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None:
-            return _flash("/notifications", "Post not found")
+            return (JSONResponse({"error": "Post not found"}, status_code=404)
+                    if wants_json else _flash("/notifications", "Post not found"))
         p.attention_dismissed_at = utcnow()
-    return _flash(next, "Dismissed")
+    return JSONResponse({"ok": True}) if wants_json else _flash(next, "Dismissed")
 
 
 @app.post("/igpost/{ig_id}/retry")
@@ -3126,14 +3229,17 @@ def retry_instagram_post(ig_id: int, next: str = Form("/notifications")):
 
 
 @app.post("/igpost/{ig_id}/dismiss")
-def dismiss_instagram_attention(ig_id: int, next: str = Form("/notifications")):
+def dismiss_instagram_attention(request: Request, ig_id: int,
+                                next: str = Form("/notifications")):
     """Acknowledge a failed reel so it leaves the notifications list."""
+    wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
         ig = session.get(InstagramPost, ig_id)
         if ig is None:
-            return _flash("/notifications", "Reel not found")
+            return (JSONResponse({"error": "Reel not found"}, status_code=404)
+                    if wants_json else _flash("/notifications", "Reel not found"))
         ig.attention_dismissed_at = utcnow()
-    return _flash(next, "Dismissed")
+    return JSONResponse({"ok": True}) if wants_json else _flash(next, "Dismissed")
 
 
 @app.post("/igpost/{ig_id}/cancel")
@@ -3218,17 +3324,46 @@ def giphy_search(q: str = "", limit: int = 24):
 
 # --- Analytics -----------------------------------------------------------------
 
+def _analytics_report() -> dict:
+    """The whole report. It reads every post's metric history, which is by far
+    the heaviest read in the app, and it takes no parameters."""
+    with session_scope() as session:
+        return generate_report(session)
+
+
+# Half a minute to build, and only new metric snapshots change what it says —
+# so it isn't built on spec, and approving a video doesn't throw it away. The
+# TTL covers the scheduler's own metric polls; taking a snapshot by hand drops
+# it outright.
+pagecache.register("analytics", _analytics_report, background=False, volatile=False)
+
+
+def _analytics_view(report: dict) -> dict:
+    return {"rows": report["rows"], "slices": report["slices"], "digest": report["digest"],
+            "timeseries": report["timeseries"], "summary": report["summary"],
+            "spend_today": spend.today_spend(), "spend_budget": spend.daily_budget(),
+            "spend_recent": spend.recent(30)}
+
+
 @app.get("/analytics", response_class=HTMLResponse)
 def analytics_page(request: Request, msg: str = ""):
-    with session_scope() as session:
-        report = generate_report(session)
+    # Only wait for the report if it's already built. Otherwise the page draws
+    # without it and asks for the body separately, so a cold report costs a
+    # placeholder rather than a blank tab.
+    report = pagecache.peek("analytics")
     return templates.TemplateResponse(
         request, "analytics.html",
-        {"rows": report["rows"], "slices": report["slices"], "digest": report["digest"],
-         "timeseries": report["timeseries"], "summary": report["summary"],
-         "spend_today": spend.today_spend(), "spend_budget": spend.daily_budget(),
-         "spend_recent": spend.recent(30),
-         "msg": msg, "active": "analytics"},
+        {**(_analytics_view(report) if report else {}),
+         "ready": report is not None, "msg": msg, "active": "analytics"},
+    )
+
+
+@app.get("/analytics/body", response_class=HTMLResponse)
+def analytics_body(request: Request):
+    """The report on its own, as a fragment the page swaps in once it's built."""
+    return templates.TemplateResponse(
+        request, "components/analytics_body.html",
+        _analytics_view(pagecache.read("analytics")),
     )
 
 
@@ -3237,6 +3372,7 @@ def analytics_snapshot():
     with session_scope() as session:
         try:
             n = snapshot_metrics(session)
+            pagecache.drop("analytics")   # new numbers: the report is now wrong
             return _flash("/analytics", f"Took {n} metric snapshots")
         except Exception as exc:
             return _flash("/analytics", f"Snapshot failed: {exc}")
@@ -3565,7 +3701,7 @@ def traits_annotate_posts():
     if _post_annotate_running.is_set():
         return _flash("/traits", "A backfill is already running")
     _post_annotate_running.set()
-    threading.Thread(target=_annotate_posts_in_thread, daemon=True).start()
+    _in_background(_annotate_posts_in_thread)
     return _flash("/traits", "Backfill started — annotating published clips in the background")
 
 

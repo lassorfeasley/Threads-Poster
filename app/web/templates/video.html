@@ -225,6 +225,7 @@
            href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
           {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Edit →") }}</a>
         <form method="post" action="/cut/{{ row.cut.id }}/delete"
+              data-async="Clip deleted" data-async-remove=".video-clip"
               data-confirm="Delete this clip? Its draft/queued posts are removed; published posts are kept."
               data-confirm-ok="Delete" data-confirm-variant="danger">
           <button class="reject sm icon-btn" title="Delete this clip" aria-label="Delete clip">✕</button>

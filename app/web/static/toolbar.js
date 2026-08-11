@@ -426,6 +426,51 @@
     });
   }
 
+  // ---- Actions that don't need a page load ---------------------------------
+  // A form marked data-async posts in the background instead of navigating.
+  // The page its redirect would land on is usually the one already on screen,
+  // and re-rendering it costs a full round of database reads for a change the
+  // operator can already see. Composes with data-confirm (dialogs.js re-submits
+  // through the form, so this handler still sees it).
+  //
+  //   data-async="Queued"           what to confirm with, as a toast
+  //   data-async-remove="selector"  ancestor of the form to drop on success
+  //   data-async-then="fnName"      window function called with (form, data)
+  //
+  // The endpoint must answer JSON to an Accept: application/json request —
+  // otherwise fetch follows the redirect and re-renders the page anyway.
+  function initAsyncForms() {
+    document.addEventListener('submit', function (e) {
+      var form = e.target;
+      if (!form.hasAttribute || !form.hasAttribute('data-async')) return;
+      e.preventDefault();
+      var btn = e.submitter || form.querySelector('button:not([type="button"])');
+      setButtonBusy(btn, true);
+      fetch(form.action, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        body: new FormData(form),
+      }).then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+          return d;
+        });
+      }).then(function (d) {
+        setButtonBusy(btn, false);
+        var sel = form.getAttribute('data-async-remove');
+        var gone = sel && form.closest(sel);
+        if (gone) gone.remove();
+        var then = form.getAttribute('data-async-then');
+        if (then && typeof window[then] === 'function') window[then](form, d);
+        var msg = form.getAttribute('data-async') || d.msg;
+        if (msg) showToast(msg);
+      }).catch(function (err) {
+        setButtonBusy(btn, false);
+        showToast(String((err && err.message) || err), { variant: 'error' });
+      });
+    });
+  }
+
   ready(function () {
     updateScrollbarWidth();
     initCombos();
@@ -434,6 +479,7 @@
     restoreSearchFocus();
     initToasts();
     initSubmitPending();
+    initAsyncForms();
     document.addEventListener('click', function (e) { closeCombos(e.target); });
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') closeCombos(null);
