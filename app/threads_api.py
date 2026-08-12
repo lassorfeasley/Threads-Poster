@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 
 import requests
 
+from . import meta_errors
 from .config import ROOT, env, load_settings
 
 log = logging.getLogger("threads")
@@ -38,7 +39,17 @@ _TOKEN_CACHE_TTL = 60.0
 
 
 class ThreadsError(RuntimeError):
-    pass
+    """A Graph API failure, carrying Meta's numeric codes when it had any.
+
+    The codes let callers distinguish a retryable hiccup from a real rejection
+    without re-parsing the message text.
+    """
+
+    def __init__(self, message: str, *, code: int | None = None,
+                 subcode: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.subcode = subcode
 
 
 # --- Token storage (DB-first, file fallback) ---------------------------------
@@ -230,16 +241,71 @@ def account_username() -> str:
 def _api(method: str, path: str, **params) -> dict:
     access_token, user_id = _auth()
     params["access_token"] = access_token
-    path = path.replace("{user_id}", user_id)
-    url = f"{GRAPH}/{path}"
+    url = f"{GRAPH}/{path.replace('{user_id}', user_id)}"
     resp = requests.request(method, url, params=params if method == "GET" else None,
                             data=None if method == "GET" else params, timeout=60)
     if resp.status_code != 200:
-        raise ThreadsError(f"{method} {path} failed: {resp.text[:400]}")
+        # ``path`` stays un-substituted here so the account id never lands in a
+        # message the operator reads; the full body goes to the log instead.
+        message, code, subcode = meta_errors.describe(method, path, resp)
+        log.warning("Threads API %s %s -> %s: %s", method, path, resp.status_code,
+                    meta_errors.raw_body(resp))
+        raise ThreadsError(message, code=code, subcode=subcode)
     return resp.json()
 
 
 # --- Publishing --------------------------------------------------------------
+
+def _await_container(container_id: str, *, timeout: float, interval: float) -> str:
+    """Poll ``container_id`` until Meta reports it FINISHED; returns the last
+    status seen.
+
+    Raises only when Meta says the container itself failed. A container that
+    hasn't settled by ``timeout`` is left for the publish call to accept or
+    reject, so a slow-but-fine container never becomes a hard failure here.
+    """
+    deadline = time.time() + timeout
+    while True:
+        try:
+            status = _api("GET", container_id, fields="status,error_message")
+        except ThreadsError as exc:
+            # A container can 404 for a moment before Meta registers it — that
+            # is the very race being waited out, so keep polling through it.
+            if (exc.code, exc.subcode) != meta_errors.MISSING_RESOURCE:
+                raise
+            status = {}
+        state = status.get("status", "")
+        if state == "FINISHED":
+            return state
+        if state == "ERROR":
+            raise ThreadsError(f"Media container failed: {status.get('error_message')}")
+        if time.time() >= deadline:
+            return state
+        time.sleep(interval)
+
+
+def _publish_container(creation_id: str, *, attempts: int = 3,
+                       delay: float = 5.0) -> dict:
+    """Publish a finished container, retrying while Meta says it doesn't exist.
+
+    Retrying is safe for that response and only that response: 24/4279009 means
+    Meta never found the container, so nothing was published and a second
+    attempt cannot duplicate a post.
+    """
+    last: ThreadsError | None = None
+    for attempt in range(attempts):
+        try:
+            return _api("POST", "{user_id}/threads_publish", creation_id=creation_id)
+        except ThreadsError as exc:
+            if (exc.code, exc.subcode) != meta_errors.MISSING_RESOURCE:
+                raise
+            last = exc
+            log.warning("Container %s not registered yet (attempt %d/%d): %s",
+                        creation_id, attempt + 1, attempts, exc)
+            if attempt < attempts - 1:
+                time.sleep(delay)
+    raise last
+
 
 def publish_video(video_url: str, caption: str, reply_to_id: str | None = None,
                   poll_timeout_seconds: int | None = None) -> dict:
@@ -274,7 +340,7 @@ def publish_video(video_url: str, caption: str, reply_to_id: str | None = None,
             f"longer; you can also raise threads.publish_poll_timeout_seconds."
         )
 
-    published = _api("POST", "{user_id}/threads_publish", creation_id=container_id)
+    published = _publish_container(container_id)
     media_id = published["id"]
     info = _api("GET", media_id, fields="id,permalink")
     return {"media_id": media_id, "permalink": info.get("permalink", "")}
@@ -297,7 +363,17 @@ def publish_text_reply(text: str, reply_to_id: str, *, gif_id: str | None = None
     if "text" not in params and "gif_attachment" not in params:
         raise ThreadsError("Reply needs text or a GIF")
     container = _api("POST", "{user_id}/threads", **params)
-    published = _api("POST", "{user_id}/threads_publish", creation_id=container["id"])
+    container_id = container["id"]
+    # A text container needs no encoding, but it still has to be registered
+    # before it can be published. Publishing back-to-back raced that and lost
+    # first comments to 24/4279009 — wait the way the video path always has.
+    settings = load_settings()
+    _await_container(
+        container_id,
+        timeout=settings.get("threads.reply_ready_timeout_seconds", 45),
+        interval=max(1, settings.get("threads.reply_ready_interval_seconds", 3)),
+    )
+    published = _publish_container(container_id)
     return {"media_id": published["id"]}
 
 

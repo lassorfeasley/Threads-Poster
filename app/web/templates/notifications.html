@@ -1,14 +1,19 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
+{% set n_stranded = (ig_stranded|length if ig_stranded else 0) %}
 {% set n_failed = (failed|length) + (ig_failed|length if ig_failed else 0) %}
-{% if n_failed %}
-  {% set ntitle %}<span class="badge hostile">{{ n_failed }} failed</span>{% endset %}
+{% set n_total = n_failed + n_stranded %}
+{% if n_total %}
+  {% set ntitle %}
+    {% if n_failed %}<span class="badge hostile">{{ n_failed }} failed</span>{% endif %}
+    {% if n_stranded %}<span class="badge hostile">{{ n_stranded }} never posted</span>{% endif %}
+  {% endset %}
 {% endif %}
-{{ ui.pagebar("Notifications", title_extra=(ntitle if n_failed else ''),
-              sub="Failed posts that dropped out of the queue. Fix the issue (see the error), then re-queue or retry — or dismiss once you're OK with it.") }}
+{{ ui.pagebar("Notifications", title_extra=(ntitle if n_total else ''),
+              sub="Posts and reels that dropped out of the queue or never made it out. Fix the issue (see the error), then re-queue or retry — or dismiss once you're OK with it.") }}
 
-{% if not n_failed %}
+{% if not n_total %}
   <div class="empty">
     <span class="icon">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
@@ -18,6 +23,54 @@
   </div>
 {% else %}
   <div class="post-list">
+    {#- Reels whose Threads post already went live. Nothing retries these on
+        its own, so they need a nudge rather than a fix. -#}
+    {% for ig in ig_stranded or [] %}
+    {% set cand = (ig.cut.candidate if (ig.cut and ig.cut.candidate) else None) %}
+    {% set thumb = thumb_for(cand) %}
+    <div class="post-card is-alert">
+      {% if thumb %}
+      <img class="pc-thumb" src="{{ thumb }}" alt="" loading="lazy"
+           onerror="this.classList.add('is-broken')">
+      {% else %}
+      <div class="pc-thumb is-empty" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+      </div>
+      {% endif %}
+      <div class="pc-body">
+        {% if ig.threads_post_pk %}
+        <a class="item-title" href="/post/{{ ig.threads_post_pk }}">{{ ig.caption[:140] or "(open post)" }}</a>
+        {% else %}
+        <span class="item-title">{{ ig.caption[:140] or "(reel)" }}</span>
+        {% endif %}
+        <div class="badges">
+          <span class="badge hostile">reel never posted</span>
+          <span class="badge">Instagram</span>
+          <span class="meta">Added {{ ig.created_at.strftime("%b %-d %H:%M") if ig.created_at else "—" }}</span>
+        </div>
+        <div class="meta">
+          The Threads post went live{% if ig.threads_post and ig.threads_post.published_at %} {{ ig.threads_post.published_at.strftime("%b %-d") }}{% endif %}, but the reel never went out with it. It won't retry on its own.
+        </div>
+        <div class="pc-actions">
+          <form class="inline" method="post" action="/igpost/{{ ig.id }}/retry"
+                data-confirm="Publish this reel to Instagram now? Meta's processing can take a minute or two."
+                data-confirm-ok="Publish reel">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="sm">Post reel now</button></form>
+          {% if ig.cut %}<a class="sm" href="/cut/{{ ig.cut.id }}?step=post">Open clip</a>{% endif %}
+          <form class="inline" method="post" action="/igpost/{{ ig.id }}/dismiss"
+                data-async="Dismissed" data-async-remove=".post-card">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="reject sm" title="Acknowledge and remove from notifications (kept in history)"
+                    data-confirm="Dismiss this notification? The reel stays queued but leaves this list."
+                    data-confirm-ok="Dismiss" data-confirm-variant="danger">Dismiss</button></form>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+
     {% for ig in ig_failed or [] %}
     {% set cand = (ig.cut.candidate if (ig.cut and ig.cut.candidate) else None) %}
     {% set thumb = thumb_for(cand) %}

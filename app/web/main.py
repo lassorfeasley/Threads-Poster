@@ -154,11 +154,40 @@ def _unacknowledged(model):
     )
 
 
+def stranded_reel_filters() -> tuple:
+    """Criteria for a reel that got left behind: its Threads post is live, but
+    the reel never went out and nothing will ever try again.
+
+    The paired publish is best-effort and fires exactly once, immediately after
+    the Threads post commits. A reel that missed that moment — a scheduler build
+    predating reels, a crash in the gap — keeps the ``queued`` status it was
+    born with, so every screen reports it as healthy and waiting while the
+    window it was waiting for is long gone.
+    """
+    return (
+        InstagramPost.status.in_(("queued", "draft")),
+        InstagramPost.attention_dismissed_at.is_(None),
+        select(ThreadsPost.id).where(
+            ThreadsPost.id == InstagramPost.threads_post_pk,
+            ThreadsPost.status == "published",
+        ).exists(),
+    )
+
+
+def _stranded_reels():
+    return (
+        select(func.count()).select_from(InstagramPost)
+        .where(*stranded_reel_filters()).scalar_subquery()
+    )
+
+
 def _load_attention_count() -> int:
-    """Unacknowledged failed posts (Threads + Instagram reels), as one query."""
+    """Unacknowledged failed posts, failed reels, and reels stranded behind an
+    already-published post — as one query."""
     with session_scope() as session:
         return int(session.execute(
-            select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost))
+            select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost)
+                   + _stranded_reels())
         ).scalar_one())
 
 
@@ -3181,7 +3210,7 @@ def posts_page(msg: str = ""):
 
 
 def _notifications_data() -> dict:
-    """Failed posts and reels awaiting a decision."""
+    """Failed posts and reels awaiting a decision, plus reels left behind."""
     with session_scope() as session:
         failed = session.execute(
             select(ThreadsPost)
@@ -3199,7 +3228,14 @@ def _notifications_data() -> dict:
                    InstagramPost.attention_dismissed_at.is_(None))
             .order_by(InstagramPost.created_at.desc())
         ).scalars().all()
-    return {"failed": failed, "ig_failed": ig_failed}
+        ig_stranded = session.execute(
+            select(InstagramPost)
+            .options(selectinload(InstagramPost.cut).selectinload(Cut.candidate),
+                     selectinload(InstagramPost.threads_post))
+            .where(*stranded_reel_filters())
+            .order_by(InstagramPost.created_at.desc())
+        ).scalars().all()
+    return {"failed": failed, "ig_failed": ig_failed, "ig_stranded": ig_stranded}
 
 
 pagecache.register("notifications", _notifications_data)

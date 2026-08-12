@@ -180,6 +180,12 @@ threads:
   publish_poll_timeout_seconds: 600
   # How often to poll the media container's processing status (seconds).
   publish_poll_interval_seconds: 10
+  # A first-comment container carries no video, but Meta still has to register
+  # it before it can be published — publishing immediately loses replies to
+  # "the requested resource does not exist". Shorter than the video wait since
+  # there is nothing to encode.
+  reply_ready_timeout_seconds: 45
+  reply_ready_interval_seconds: 3
 
 instagram:
   # Instagram Reels publishing (Instagram API with Instagram Login: professional

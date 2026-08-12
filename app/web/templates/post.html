@@ -329,6 +329,10 @@
 
   {% if ig %}
   {# ---- Paired Instagram reel: publishes right after this post's window. ---- #}
+  {#- Stranded: the post is live but the reel still says "queued". The paired
+      publish fires once, right after the post commits, and nothing retries it
+      later — so this needs to read as a problem, not as "waiting". -#}
+  {% set reel_stranded = status == "published" and ig.status in ("queued", "draft") %}
   <div class="thread-actions">
     <span class="ta-note">
       Instagram Reel ·
@@ -338,17 +342,20 @@
       {% elif ig.status == "failed" %}
         <span class="badge hostile">failed</span>
         {% if ig.error %}<span class="meta" style="color: var(--danger);">{{ ig.error[:160] }}</span>{% endif %}
+      {% elif reel_stranded %}
+        <span class="badge hostile">never posted</span>
+        <span class="meta">this post is live, but the reel never went out with it</span>
       {% else %}
         <span class="badge">{{ ig.status }}</span>
         <span class="meta">publishes with this post</span>
       {% endif %}
     </span>
-    {% if ig.status == "failed" %}
+    {% if ig.status == "failed" or reel_stranded %}
     <form class="inline" method="post" action="/igpost/{{ ig.id }}/retry"
           data-confirm="Publish this reel to Instagram now? Meta's processing can take a minute or two."
           data-confirm-ok="Publish reel">
       <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="sm">Retry reel</button>
+      <button class="sm">{{ "Post reel now" if reel_stranded else "Retry reel" }}</button>
     </form>
     {% endif %}
     {% if ig.status in ("queued", "draft", "failed") %}

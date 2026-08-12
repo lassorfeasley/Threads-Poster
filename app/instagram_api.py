@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 
 import requests
 
+from . import meta_errors
 from .config import ROOT, env, load_settings
 
 log = logging.getLogger("instagram")
@@ -43,7 +44,17 @@ _TOKEN_CACHE_TTL = 60.0
 
 
 class InstagramError(RuntimeError):
-    pass
+    """A Graph API failure, carrying Meta's numeric codes when it had any.
+
+    Mirrors ``ThreadsError`` so callers can tell a retryable hiccup from a real
+    rejection without re-parsing the message text.
+    """
+
+    def __init__(self, message: str, *, code: int | None = None,
+                 subcode: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.subcode = subcode
 
 
 # --- Token storage (DB-first, file fallback) ---------------------------------
@@ -244,16 +255,43 @@ def account_username() -> str:
 def _api(method: str, path: str, **params) -> dict:
     access_token, user_id = _auth()
     params["access_token"] = access_token
-    path = path.replace("{user_id}", user_id)
-    url = f"{GRAPH}/{path}"
+    url = f"{GRAPH}/{path.replace('{user_id}', user_id)}"
     resp = requests.request(method, url, params=params if method == "GET" else None,
                             data=None if method == "GET" else params, timeout=60)
     if resp.status_code != 200:
-        raise InstagramError(f"{method} {path} failed: {resp.text[:400]}")
+        # ``path`` stays un-substituted here so the account id never lands in a
+        # message the operator reads; the full body goes to the log instead.
+        message, code, subcode = meta_errors.describe(method, path, resp)
+        log.warning("Instagram API %s %s -> %s: %s", method, path, resp.status_code,
+                    meta_errors.raw_body(resp))
+        raise InstagramError(message, code=code, subcode=subcode)
     return resp.json()
 
 
 # --- Publishing --------------------------------------------------------------
+
+def _publish_container(creation_id: str, *, attempts: int = 3,
+                       delay: float = 5.0) -> dict:
+    """Publish a finished container, retrying while Meta says it doesn't exist.
+
+    Retrying is safe for that response and only that response: 24/4279009 means
+    Meta never found the container, so nothing was published and a second
+    attempt cannot duplicate a reel.
+    """
+    last: InstagramError | None = None
+    for attempt in range(attempts):
+        try:
+            return _api("POST", "{user_id}/media_publish", creation_id=creation_id)
+        except InstagramError as exc:
+            if (exc.code, exc.subcode) != meta_errors.MISSING_RESOURCE:
+                raise
+            last = exc
+            log.warning("Container %s not registered yet (attempt %d/%d): %s",
+                        creation_id, attempt + 1, attempts, exc)
+            if attempt < attempts - 1:
+                time.sleep(delay)
+    raise last
+
 
 def publishing_quota_usage() -> int | None:
     """API posts published in the current rolling 24h window (None if the
@@ -306,7 +344,7 @@ def publish_reel(video_url: str, caption: str,
             f"instagram.publish_poll_timeout_seconds."
         )
 
-    published = _api("POST", "{user_id}/media_publish", creation_id=container_id)
+    published = _publish_container(container_id)
     media_id = published["id"]
     permalink = ""
     try:
