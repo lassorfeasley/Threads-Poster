@@ -26,10 +26,24 @@
       </div>
     </li>
     <li>
+      <span class="badge supportive">Done</span>
+      <div>
+        <strong>Configuration IA: Configure vs Optimize</strong>
+        <span class="meta">Configure is the pipeline in setup order — Brand &amp; audience, Channels, Keywords, Connections (who you are, what you watch, what you catch, where you publish). Optimize is the ongoing loop — Analytics, Style guide, Traits. “Threads account” became <strong>Connections</strong>: it manages Instagram too, and Threads is an integration, not the product identity. Open IA questions: first reply, triage, and categories still have no sidebar home.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge supportive">Done</span>
+      <div>
+        <strong>Brand &amp; audience in-app</strong>
+        <span class="meta">Entity name, mission, audience, topic scope, voice notes — editable on the Brand &amp; audience page (<code>config/brand.yaml</code>), plus white-label app name and logo for the sidebar/title. Fields are stored but not yet consumed by prompts; see the next item.</span>
+      </div>
+    </li>
+    <li>
       <span class="badge info">Next</span>
       <div>
-        <strong>Configurable workspace / brand in-app</strong>
-        <span class="meta">Entity name, mission/topic, audience, voice notes, keywords, categories, brand colors/fonts, standing first-reply — editable in the UI. Parameterize LLM prompts instead of hardcoding climate / local-TV / Renewables.org. Improves today’s use even before selling.</span>
+        <strong>Parameterize LLM prompts from brand config</strong>
+        <span class="meta">The larger half: every prompt still hardcodes climate / local-TV / Renewables.org — relevance scoring, categories, clip window, caption draft, Reel hook, editorial coach, clip title, digest. Feed them from Brand &amp; audience instead. Improves today’s use even before selling.</span>
       </div>
     </li>
     <li>
@@ -56,8 +70,15 @@
     <li>
       <span class="badge">Later</span>
       <div>
-        <strong>Auto-update</strong>
-        <span class="meta">Electron-updater, Tauri updater, or Sparkle (if py2app). Customers get new UX without git. Direct download (site / Gumroad / etc.), not App Store as the default.</span>
+        <strong>Auto-update (in the very first distributed build)</strong>
+        <span class="meta">Electron-updater, Tauri updater, or Sparkle (if py2app). Non-negotiable from build one: retrofitting an updater onto installs that lack it is the real nightmare scenario. With it, the fleet converges on a fix in hours-to-days — the closest a distributed app gets to a web deploy. Direct download (site / Gumroad / etc.), not App Store as the default.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Release discipline (the actual cost of being an app)</strong>
+        <span class="meta">The dev loop stays the browser app — packaging is a distribution artifact, not a dev environment. One-time: signing, notarization, and a build pipeline. Per release: smoke-test the signed artifact on a clean machine (bundled-Python paths, Gatekeeper, arm64 + Intel), and keep DB migrations additive / forward-safe (already the <code>_ensure_new_columns</code> habit) since updates run against customers’ existing <code>app.db</code>. Add a log-export / diagnostics button once there are users on machines we can’t see.</span>
       </div>
     </li>
     <li>
@@ -65,6 +86,13 @@
       <div>
         <strong>Licensing / seats (solo first)</strong>
         <span class="meta">Simple paid license is enough for v1. Multi-seat collaboration waits on Phase 2.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>White-label the clip output</strong>
+        <span class="meta">App name and logo already ship on Brand &amp; audience; what remains is the clip’s look — subtitle colors and the bundled Funnel font are still the Renewables.org look, hardcoded in <code>settings.yaml</code> / <code>app/subtitles.py</code>. Per-workspace colors and fonts only pay off when someone else runs the app, so this sits with distribution, not Phase 0.</span>
       </div>
     </li>
     <li>
@@ -79,22 +107,25 @@
 
 <div class="card roadmap-card" style="margin-top: 14px;">
   <div class="card-title" style="margin-bottom: 4px;">Meta / Threads for customers (prerequisite for anyone else’s account)</div>
+  <p class="meta" style="margin: 0 0 10px;">
+    Today’s flow is single-operator + tester invite + paste OAuth code from <code>https://localhost/…</code>. Productized, that admin stays with us once; customers only do OAuth consent. <strong>Sequencing decision:</strong> stay in tester mode and improve the product solo; trigger App Review when a real second user appears. Approval is likely — these scopes are the textbook third-party publishing bundle, and review judges permission usage shown in a working demo, not where the content comes from — but budget one resubmission cycle.
+  </p>
   <p class="meta" style="margin: 0 0 12px;">
-    Today’s flow is single-operator + tester invite + paste OAuth code from <code>https://localhost/…</code>. Productized, that admin stays with us once; customers only do OAuth consent. Can start before or alongside Mac packaging.
+    Bigger risk than review: posting broadcasters’ footage is an account-level IP exposure (complaints / strikes against the Threads or Instagram account), independent of API approval — and amplified once customers pick the source channels. Also: Reels require the customer’s Instagram account to be a (free) <em>professional</em> account; Threads takes any normal account.
   </p>
   <ul class="roadmap-list">
     <li>
       <span class="badge">Later</span>
       <div>
         <strong>One product Meta app + App Review + publish</strong>
-        <span class="meta">Leave “testers only.” Get Advanced Access / review for the scopes we already use: <code>threads_basic</code>, <code>threads_content_publish</code>, <code>threads_manage_replies</code>, <code>threads_read_replies</code>, <code>threads_manage_insights</code>. Use the Threads app ID/secret (not the generic Meta app ID). Platform checklist: privacy policy URL, data-deletion callback/instructions, deauthorize callback, app icon. After publish, any Threads user can authorize — no tester role.</span>
+        <span class="meta">Leave “testers only.” Get Advanced Access / review for the scopes we already use: <code>threads_basic</code>, <code>threads_content_publish</code>, <code>threads_manage_replies</code>, <code>threads_read_replies</code>, <code>threads_manage_insights</code>. Use the Threads app ID/secret (not the generic Meta app ID). Platform checklist: privacy policy URL, data-deletion callback/instructions, deauthorize callback, app icon, plus a demo/screencast showing every permission in use. Business Verification has weeks of lead time (documents, possibly an entity) — start that paperwork one step earlier than feels necessary; it parallelizes for free. After publish, any Threads user can authorize — no tester role.</span>
       </div>
     </li>
     <li>
-      <span class="badge">Later</span>
+      <span class="badge info">Next</span>
       <div>
         <strong>Real HTTPS OAuth callback (kill paste-code)</strong>
-        <span class="meta">Replace “authorize → broken localhost page → paste <code>?code=</code>” with a hosted redirect (e.g. <code>https://yourproduct.com/threads/callback</code>) that exchanges the code server-side. Mac app still needs this: Meta wants HTTPS redirects, so a small cloud OAuth broker (or license backend) completes the handshake and returns the token to the local app — customers still never configure Meta.</span>
+        <span class="meta">Pulled forward: it’s a small, independent cloud endpoint with a solo payoff today — it kills the paste-the-<code>?code=</code> ritual on Connections — and App Review needs it anyway for a reviewable demo. Replace “authorize → broken localhost page → paste <code>?code=</code>” with a hosted redirect (e.g. <code>https://yourproduct.com/threads/callback</code>) that exchanges the code server-side. Mac app still needs this: Meta wants HTTPS redirects, so a small cloud OAuth broker (or license backend) completes the handshake and returns the token to the local app — customers still never configure Meta.</span>
       </div>
     </li>
     <li>

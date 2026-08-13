@@ -15,6 +15,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from .config import load_first_reply, load_settings, scheduler_timezone
+from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
 from .instagram_api import publish_reel
 from .llm import caption_attributes, suggest_attribution
 from .models import Candidate, Cut, InstagramPost, ThreadsPost, utcnow
@@ -73,19 +74,10 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         raise FileNotFoundError(f"Clip not found: {clip}")
     if candidate is None and cut is not None:
         candidate = cut.candidate
-    # Freeze the LLM draft as it stood, so the diff against the operator's final
-    # caption survives as a voice signal (see app/voice.py). Prefer the cut's
-    # own draft, falling back to the video-level seed.
-    draft = ""
-    if cut is not None:
-        draft = cut.draft_caption or ""
-    if not draft and candidate is not None:
-        draft = candidate.draft_caption or ""
     post = ThreadsPost(
         candidate_pk=candidate.id if candidate else None,
         cut_pk=cut.id if cut else None,
         caption=caption,
-        suggested_caption=draft,
         clip_local_path=str(clip),
         clip_object_path=_object_key(clip),
         status=status,
@@ -97,6 +89,16 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
     )
     session.add(post)
     session.flush()
+    # Freeze the LLM draft, so the diff against the operator's final caption
+    # survives as a voice signal (see app/voice.py). It comes from the caption
+    # ledger, NOT from ``Cut.draft_caption``: that field holds whatever the
+    # operator last typed, so reading it here recorded every hand-written
+    # caption as a draft the model had nailed — the exact inverse of the truth.
+    try:
+        post.suggested_caption = attach_draft_proposal(
+            session, cut.id if cut else None, caption, post_pk=post.id)
+    except Exception:
+        log.exception("Caption proposal resolution failed for post %s", post.id)
     # Attribution first-comment: only ever the operator's own text (typed or an
     # accepted "Suggest" draft). Nothing is auto-drafted here — an empty field
     # means this post gets no attribution comment.
@@ -315,6 +317,16 @@ def record_instagram_post(session, cut: Cut | None, threads_post: ThreadsPost | 
     ig.status = "queued"
     ig.error = ""
     session.flush()
+    # Resolve the drafted hook against the one actually burned into the reel.
+    # The hook has no accept/dismiss card — the draft lands straight in
+    # ``Cut.hook_text`` and the operator types over it — so this diff is the
+    # only place that rewrite is ever recorded.
+    if cut is not None:
+        try:
+            attach_draft_proposal(session, cut.id, cut.hook_text or "",
+                                  kind=KIND_HOOK, ig_post_pk=ig.id)
+        except Exception:
+            log.exception("Hook proposal resolution failed for reel %s", ig.id)
     return ig
 
 

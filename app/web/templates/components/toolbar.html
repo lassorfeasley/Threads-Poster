@@ -2,7 +2,8 @@
   Reusable page toolbar component.
 
   A single cohesive band at the top of the content area:
-    Row 1  header  — title (+ count / sub) on the left, key actions on the right
+    Row 1  header  — crumbs / view tabs + title (+ count / sub) on the left,
+                     key actions on the right
     Row 2  tabs    — optional segmented control that scopes the view
     Row 3  tools   — optional search + filter controls + view toggle
 
@@ -26,14 +27,15 @@
 {# `count_key` makes the headline count live: client-side filtering rewrites it
    to the number of matching rows in the [data-filter-section] of that name. #}
 {% macro pagebar(title, count=none, sub=none, actions='', tabs='', filters='',
-                 filter_action=none, sticky=true, crumbs='', title_extra='',
+                 filter_action=none, sticky=true, crumbs='', views='', title_extra='',
                  count_key=none) %}
 <div class="pagebar{{ ' is-sticky' if sticky }}">
   <div class="pagebar-inner">
     <div class="pagebar-head">
       <div class="pagebar-title">
-        {% if crumbs %}<div class="pagebar-crumbs{{ ' only-child' if not title }}">{{ crumbs|safe }}</div>{% endif %}
-        {# No title -> compact one-row bar: just crumbs + actions. #}
+        {% if crumbs %}<div class="pagebar-crumbs{{ ' only-child' if not title and not views }}">{{ crumbs|safe }}</div>{% endif %}
+        {% if views %}<div class="pagebar-views{{ ' only-child' if not title and not crumbs }}">{{ views|safe }}</div>{% endif %}
+        {# No title -> compact one-row bar: just crumbs/views + actions. #}
         {% if title %}
         <h1>{{ title }}{% if count is not none %} <span class="pagebar-count"{% if count_key %} data-filter-count="{{ count_key }}"{% endif %}>{{ count }}</span>{% endif %}{% if title_extra %} {{ title_extra|safe }}{% endif %}</h1>
         {% endif %}
@@ -104,6 +106,38 @@
                'Post' if (post_id or current == 'post') else 'No post yet') }}
   {% if extra %}{{ extra|safe }}{% endif %}
 </nav>
+{% endmacro %}
+
+
+{# ---- View tabs: swap which list the page shows, in place ----
+
+   Peer views of one page, not steps of a journey — nobody works Candidates ->
+   Selected to trim -> Trimmed in order, they pick the bucket they need. So
+   these render as a tab strip; the crumb trail above stays reserved for
+   navigation that actually leaves the page.
+
+   `items` is a list of (key, label, count). Each key names both the tab's panel
+   (id "<key>-panel", which must carry role="tabpanel") and, with live_counts,
+   the [data-filter-section] whose live count fills the badge.
+
+   `store` is the localStorage key remembering the last choice and `param` the
+   query param that addresses the view, so a view can be linked to and survives
+   a reload. toolbar.js drives the rest — panel swapping, arrow keys, history.
+   Render `active` from that same param server-side to avoid a flash. #}
+{% macro view_tabs(items, store, param, active=none, label='Switch view', live_counts=false) %}
+<div class="segmented sm view-tabs" role="tablist" aria-label="{{ label }}"
+     data-view-tabs="{{ store }}" data-view-param="{{ param }}">
+  {% for key, text, count in items %}
+  {% set on = (key == active) if active else loop.first %}
+  <button type="button" class="seg-btn{{ ' is-active' if on }}" role="tab"
+          id="{{ key }}-tab" aria-controls="{{ key }}-panel"
+          aria-selected="{{ 'true' if on else 'false' }}"
+          tabindex="{{ 0 if on else -1 }}" data-tab="{{ key }}">
+    {{ text }}
+    <span class="seg-count"{% if live_counts %} data-filter-count="{{ key }}"{% endif %}>{{ count }}</span>
+  </button>
+  {% endfor %}
+</div>
 {% endmacro %}
 
 

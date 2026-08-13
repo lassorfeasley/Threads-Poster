@@ -146,6 +146,10 @@ class Cut(Base):
     # supercut file produced from them.
     trim_segments: Mapped[str] = mapped_column(Text, default="")
     trimmed_clip_path: Mapped[str] = mapped_column(Text, default="")
+    # Background export job: "" | "exporting" | "failed". The Post step shows a
+    # skeleton while exporting so Save can navigate immediately.
+    export_status: Mapped[str] = mapped_column(String(20), default="")
+    export_error: Mapped[str] = mapped_column(Text, default="")
     # Optional stylized-caption variant of the exported clip (Funnel font,
     # word-by-word highlight). Cleared on re-export; posting uses it only when
     # ``use_subtitles`` is on.
@@ -424,6 +428,73 @@ class TriageDecision(Base):
     visual_traits: Mapped[str] = mapped_column(Text, default="")  # comma-separated
     undone: Mapped[bool] = mapped_column(Boolean, default=False)
     decided_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DraftProposal(Base):
+    """Every AI-written draft and what the operator did with it.
+
+    Covers both drafted texts: the Threads caption and the Instagram Reel hook
+    (``kind``). They are the same shape — a draft, an edit, a final — and one
+    table means "how often does the operator keep what we wrote" is a single
+    query rather than a per-feature reimplementation.
+
+    The loop only improves if a rejection is recorded as a rejection. Before
+    this table neither draft was persisted: for captions, dismissing the
+    proposal discarded it and ``record_post`` copied ``Cut.draft_caption`` —
+    the operator's OWN text — into ``ThreadsPost.suggested_caption``, so every
+    hand-written caption was filed as "the model got it right, no edits," the
+    single least informative outcome. Hooks were worse: the draft overwrote
+    ``Cut.hook_text`` directly, with no accept/dismiss step at all. Rows are
+    written at draft time, before the operator can act, so the verdict is real.
+
+    ``policy_version`` fingerprints what produced the draft (model, ceiling,
+    length target, style guide, enabled rules). Without it a year of
+    proposals is a blend of prompt regimes that can't be told apart, and
+    "did that change help?" is unanswerable.
+    """
+
+    __tablename__ = "draft_proposals"
+
+    KIND_CAPTION = "caption"
+    KIND_HOOK = "hook"
+
+    # Operator action on the draft, recorded when it happens. Hooks have no
+    # accept/dismiss card, so they resolve straight from pending at post time.
+    VERDICT_PENDING = "pending"          # drafted, not yet acted on
+    VERDICT_ACCEPTED = "accepted"        # "Use this caption"
+    VERDICT_DISMISSED = "dismissed"      # "Dismiss" — the rejection signal
+    VERDICT_SUPERSEDED = "superseded"    # redrafted before acting on this one
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), default=KIND_CAPTION)
+    cut_pk: Mapped[int] = mapped_column(ForeignKey("cuts.id"))
+    # Which post this draft ended up behind, filled in when the post/reel is
+    # recorded. Captions resolve against a Threads post, hooks against a reel.
+    post_pk: Mapped[int | None] = mapped_column(ForeignKey("threads_posts.id"), nullable=True)
+    ig_post_pk: Mapped[int | None] = mapped_column(ForeignKey("instagram_posts.id"), nullable=True)
+
+    proposed: Mapped[str] = mapped_column(Text, default="")
+    proposed_chars: Mapped[int] = mapped_column(Integer, default=0)
+    proposed_words: Mapped[int] = mapped_column(Integer, default=0)
+
+    verdict: Mapped[str] = mapped_column(String(20), default=VERDICT_PENDING)
+    # What actually shipped, and how close it stayed to the draft (0..1).
+    # Resolved at post time; the pair is the voice signal app/voice.py reads.
+    final_text: Mapped[str] = mapped_column(Text, default="")
+    final_chars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    final_words: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    model: Mapped[str] = mapped_column(String(60), default="")
+    policy_version: Mapped[str] = mapped_column(String(40), default="")
+    # The ceiling and learned target in force for this draft, so a later
+    # analysis can tell whether tightening them actually shortened the output.
+    max_chars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_words: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    voice_examples: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AppToken(Base):

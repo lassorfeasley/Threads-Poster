@@ -2,26 +2,15 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 
-{# The three views are stages of the same pipeline, so they read as a
-   breadcrumb trail (matching the Video › Edit › Clip nav) — but each stage is
-   clickable and swaps the list below rather than navigating away. #}
-{% set dash_crumbs %}
-  <div class="crumbs dash-views" role="tablist" aria-label="Switch list view">
-    <button type="button" class="crumb crumb-current" role="tab" aria-selected="true"
-            data-tab="candidates" onclick="setDashTab('candidates')">
-      Candidates <span class="crumb-count">{{ total_matches }}</span>
-    </button>
-    <span class="crumb-sep" aria-hidden="true">›</span>
-    <button type="button" class="crumb" role="tab" aria-selected="false"
-            data-tab="inprogress" onclick="setDashTab('inprogress')">
-      Selected to trim <span class="crumb-count">{{ in_progress|length }}</span>
-    </button>
-    <span class="crumb-sep" aria-hidden="true">›</span>
-    <button type="button" class="crumb" role="tab" aria-selected="false"
-            data-tab="trimmed" onclick="setDashTab('trimmed')">
-      Trimmed, not posted <span class="crumb-count">{{ trimmed|length }}</span>
-    </button>
-  </div>
+{# Three buckets of the same pipeline. They keep pipeline order left to right,
+   but they are peer views rather than a trail you walk: each one swaps the
+   list below instead of navigating away. #}
+{% set dash_views %}
+  {{ ui.view_tabs([("candidates", "Candidates", total_matches),
+                   ("inprogress", "Selected to trim", in_progress|length),
+                   ("trimmed", "Trimmed, not posted", trimmed|length)],
+                  store="dashTab", param="view", active=view,
+                  label="Switch list view") }}
 {% endset %}
 
 {% set dash_filters %}
@@ -31,7 +20,7 @@
   {% if filtering %}{{ ui.clear("/") }}{% endif %}
 {% endset %}
 
-{{ ui.pagebar("", crumbs=dash_crumbs) }}
+{{ ui.pagebar("", views=dash_views) }}
 
 {# Filters live under the bar, scoping whichever view is active. #}
 <form class="pagebar-tools below-bar" method="get" action="/" data-toolbar-form>
@@ -172,7 +161,8 @@
   </script>
 </dialog>
 
-<div id="inprogress-panel" class="list-panel" hidden>
+<div id="inprogress-panel" class="list-panel" role="tabpanel"
+     aria-labelledby="inprogress-tab" {{ 'hidden' if view != 'inprogress' }}>
 {% if in_progress %}
 <div id="in-progress-section" class="card-grid">
 {% for c, state in in_progress %}
@@ -220,7 +210,8 @@
 {% endif %}
 </div>
 
-<div id="trimmed-panel" class="list-panel" hidden>
+<div id="trimmed-panel" class="list-panel" role="tabpanel"
+     aria-labelledby="trimmed-tab" {{ 'hidden' if view != 'trimmed' }}>
 {% if trimmed %}
 <div id="trimmed-section" class="card-grid">
 {% for c, state in trimmed %}
@@ -261,7 +252,8 @@
 {% endif %}
 </div>
 
-<div id="candidates-panel" class="list-panel">
+<div id="candidates-panel" class="list-panel" role="tabpanel"
+     aria-labelledby="candidates-tab" {{ 'hidden' if view != 'candidates' }}>
 <div class="panel-head">
   <h2>{{ "Results" if filtering else "New matches" }}
     ({% if total_matches > candidates|length %}showing {{ candidates|length }} of {{ total_matches }}{% else %}{{ total_matches }}{% endif %})</h2>
@@ -379,33 +371,6 @@
 </div>
 
 <script>
-// Segmented toggle: switch between the Candidates list, the clips-to-trim
-// list, and the trimmed-but-not-posted list. The chosen tab is persisted in
-// localStorage so it survives the periodic 10s auto-reload while monitoring.
-const DASH_PANELS = {
-  candidates: 'candidates-panel',
-  inprogress: 'inprogress-panel',
-  trimmed: 'trimmed-panel',
-};
-function setDashTab(tab) {
-  if (!DASH_PANELS[tab]) tab = 'candidates';
-  for (const [name, id] of Object.entries(DASH_PANELS)) {
-    const panel = document.getElementById(id);
-    if (panel) panel.hidden = name !== tab;
-  }
-  document.querySelectorAll('.dash-views [data-tab]').forEach(btn => {
-    const active = btn.dataset.tab === tab;
-    btn.classList.toggle('crumb-current', active);
-    btn.setAttribute('aria-selected', active ? 'true' : 'false');
-  });
-  try { localStorage.setItem('dashTab', tab); } catch (e) {}
-}
-(function restoreDashTab() {
-  let tab = 'candidates';
-  try { tab = localStorage.getItem('dashTab') || 'candidates'; } catch (e) {}
-  setDashTab(tab);
-})();
-
 // Remove a clip in place (no full-page reload). Rejected clips can be
 // restored from Archive. Uses the shared styled confirm from dialogs.js.
 async function deleteRow(cid, btn, confirmMsg) {

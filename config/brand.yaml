@@ -1,0 +1,12 @@
+# Who this workspace is: identity + audience fields that will parameterize the
+# LLM prompts (today they hardcode climate / local-TV / Renewables.org), plus
+# white-label appearance for the app chrome. Editable via the Brand & audience
+# page under Configure; no code changes needed.
+
+name: Renewables.org
+mission: ''
+audience: ''
+voice_notes: ''
+topic: ''
+app_name: climate archive
+logo_file: ''

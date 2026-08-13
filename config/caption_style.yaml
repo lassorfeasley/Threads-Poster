@@ -6,14 +6,21 @@
 # ones first). Hard safety rules still apply — the model won't invent facts,
 # always mentions the place, and stays under Threads' character limit — so an
 # aggressive rule can't override those.
+#
+# WATCH THE LENGTH COST. Every rule that mandates a second move ("...then
+# explain", "end with a question") adds a sentence, and several enabled at once
+# compound into exactly the padded, template-shaped caption these are meant to
+# prevent. The drafter is told to pick one move and skip any that don't fit the
+# learned length target, but the cheapest fix for verbose drafts is still to
+# disable rules rather than to add more.
 
 rules:
-- text: Open with a punchy quoted line or vivid image before any context, then explain it
-    in the following sentence
+- text: Open with a punchy quoted line or vivid image, and let it stand on its own
+    without a follow-up sentence explaining it
   enabled: true
-  priority: normal
+  priority: high
 - text: End with a direct rhetorical question that challenges the reader's assumption
-  enabled: true
+  enabled: false
   priority: normal
 - text: Use short, staccato sentences or fragments to build rhythm, especially when listing
     escalating facts or locations

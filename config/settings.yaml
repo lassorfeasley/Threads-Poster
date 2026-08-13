@@ -120,10 +120,37 @@ voice:
   min_captions: 3
   # How many example captions to include with each suggestion request.
   examples: 8
+  # Example hooks shown when drafting an Instagram Reel hook. Sourced only from
+  # hooks the operator rewrote (there is no published hook history to learn
+  # from — the hook is burned into the video, never posted as text).
+  hook_examples: 6
+  # Most of the example slots that captions imported from Threads history may
+  # occupy. Imported posts are hand-written (so they score highest on voice)
+  # AND the oldest material there is — uncapped they took every slot, and the
+  # drafter never saw a caption written in the app. The rest of the slots go to
+  # the operator's recent captions, which carry the current style.
+  history_example_share: 0.5
   # Rebuild the cached style guide after this many new published captions.
   refresh_every: 5
   # Model used to distill the style guide (cheap; runs rarely).
   model: claude-sonnet-5
+  # Learn the caption LENGTH the operator actually posts and give the drafter
+  # that as its target. This is what keeps drafts short without hand-tuning a
+  # limit: as the operator's own captions get shorter, so does the target.
+  learn_length: true
+  # Recent operator-written captions the target is the median of.
+  length_sample: 8
+  # Below this many, fall back to the generic length instruction (too few
+  # captions to infer a preference from).
+  length_min_sample: 4
+  # Once there are `length_min_sample` captions written in the app, learn
+  # length from those alone and ignore imported Threads history. History is
+  # hand-written but predates the current strategy and runs much longer, so
+  # leaving it in holds the target high for a dozen posts.
+  length_prefer_app_captions: true
+  # Clamps, so one outlier caption can't drive the target somewhere absurd.
+  length_min_words: 3
+  length_max_words: 40
 
 llm:
   # Budget guardrail. Total Anthropic spend per day (UTC) is tracked in
@@ -251,11 +278,12 @@ engagement:
   max_replies_per_day: 250
   # Shared default LLM model id (captions, attribution drafts, etc.).
   draft_model: claude-sonnet-5
-  # Ceiling given to the caption drafter. Kept tight on purpose: the clip
-  # carries the story, so a caption should read as one or two short lines, and
-  # models treat whatever limit they're given as a length to fill. Raise this
-  # only if drafts are coming back clipped rather than merely brief.
-  caption_max_chars: 220
+  # Hard ceiling given to the caption drafter — a backstop, not the goal. The
+  # real instruction is the learned word target under `voice.learn_length`,
+  # which follows the operator's recent captions. A ceiling alone doesn't work:
+  # models spend whatever they're given, which is how drafts drifted long.
+  # Raise this only if drafts come back clipped rather than merely brief.
+  caption_max_chars: 140
 
 scheduler:
   # Publish the FIFO queue at the fixed ET windows below, one post per window.

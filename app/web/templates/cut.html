@@ -5,7 +5,7 @@
 {{ ui.workflow_crumbs('edit' if step == 'trim' else 'clip',
      video_id=c.id, video_title=c.title,
      cut_id=cut.id, clip_title=cut.clip_title or '',
-     clip_exported=state.exported,
+     clip_exported=state.exported or state.exporting,
      post_id=posts[0].id if posts else none) }}
 {% endset %}
 {% set cut_actions %}
@@ -106,7 +106,7 @@
     </div>
     <div id="segments"></div>
     <div id="export-panel" hidden>
-    <form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return prepExport(this)">
+    <form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return startExport(event)">
       <input type="hidden" name="segments_json" value="">
       <div class="btn-group export-actions" style="margin-top: 8px;">
         <button class="approve" name="as_new" value="0"
@@ -1480,10 +1480,30 @@ function updateTotal() {
   el.innerHTML = `<span class="clip-total-value${over ? ' is-over' : ''}"`
     + ` title="${over ? 'Threads max is 300s' : 'Total clip length'}">${secs}s</span>`;
 }
-function prepExport(form) {
+function startExport(ev) {
+  ev.preventDefault();
+  const form = ev.target;
   if (!segments.length) { alert('Add at least one segment.'); return false; }
   form.segments_json.value = JSON.stringify(segments);
-  return true;
+  const fd = new FormData(form);
+  const submitter = ev.submitter;
+  if (submitter && submitter.name === 'as_new') fd.set('as_new', submitter.value);
+  else if (!fd.get('as_new')) fd.set('as_new', '0');
+  const buttons = form.querySelectorAll('button');
+  buttons.forEach(b => { b.disabled = true; b.classList.add('is-loading'); });
+  fetch(form.action, {
+    method: 'POST',
+    body: fd,
+    headers: { 'Accept': 'application/json' },
+  }).then(async r => {
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Could not start save');
+    window.location = j.redirect || ('/cut/{{ cut.id }}?step=post');
+  }).catch(err => {
+    alert(err.message || 'Could not start save');
+    buttons.forEach(b => { b.disabled = false; b.classList.remove('is-loading'); });
+  });
+  return false;
 }
 renderSegments();
 initSegDnd();
@@ -1492,7 +1512,143 @@ initSegDnd();
 
 {# ============ STEP 2: POST ============ #}
 {% if step == "post" %}
-{% if not state.exported %}
+{% if state.exporting or state.export_failed %}
+{# Skeleton while ffmpeg runs (or after a failed save). Optimistic nav lands
+   here immediately so Trim never sits frozen waiting on encode. #}
+<div class="post-layout no-side">
+<div class="post-main">
+<div class="post-preview">
+<div class="export-stage" id="export-stage"
+     data-status="{{ 'failed' if state.export_failed else 'exporting' }}"
+     data-error="{{ export_error|e }}">
+  <div class="export-stage-card">
+    <div class="export-stage-visual" aria-hidden="true">
+      <div class="export-skel-avatar skel-shimmer"></div>
+      <div class="export-skel-body">
+        <div class="export-skel-line skel-shimmer" style="width: 38%"></div>
+        <div class="export-skel-line skel-shimmer" style="width: 92%"></div>
+        <div class="export-skel-line skel-shimmer" style="width: 74%"></div>
+        <div class="export-skel-media skel-shimmer">
+          <div class="export-skel-play"></div>
+        </div>
+      </div>
+    </div>
+    <div class="export-stage-copy" id="export-stage-copy">
+      {% if state.export_failed %}
+      <div class="badges" style="margin-bottom: 8px;">
+        <span class="badge hostile"><span class="dot"></span> save failed</span>
+      </div>
+      <h2 class="export-stage-title">Couldn't save this clip</h2>
+      <p class="meta export-stage-msg" id="export-stage-msg">{{ export_error or "Export failed." }}</p>
+      <div class="btn-group" style="margin-top: 14px;">
+        <a class="approve" href="/cut/{{ cut.id }}?step=trim">Back to edit</a>
+        <button type="button" class="ghost" id="export-retry-btn" onclick="retryExport()">Retry save</button>
+      </div>
+      {% else %}
+      <div class="badges" style="margin-bottom: 8px;">
+        <span class="badge info"><span class="dot"></span> saving clip</span>
+      </div>
+      <h2 class="export-stage-title" id="export-stage-title">Building your clip</h2>
+      <p class="meta export-stage-msg" id="export-stage-msg">Cutting segments and encoding…</p>
+      <div class="export-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow="8" aria-labelledby="export-stage-title">
+        <div class="export-progress-track">
+          <i id="export-progress-bar" style="width: 8%"></i>
+        </div>
+      </div>
+      <p class="meta export-stage-hint">You can leave this page — it picks up when the file is ready.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+</div>
+</div>
+</div>
+<script>
+(function bootExportStage() {
+  const stage = document.getElementById('export-stage');
+  if (!stage) return;
+  const status0 = stage.dataset.status;
+  if (status0 === 'failed') return;
+
+  const phases = [
+    { at: 0,  pct: 8,  title: 'Building your clip', msg: 'Cutting segments…' },
+    { at: 3,  pct: 28, title: 'Building your clip', msg: 'Encoding video…' },
+    { at: 8,  pct: 52, title: 'Almost there', msg: 'Joining the supercut…' },
+    { at: 16, pct: 72, title: 'Finishing up', msg: 'Writing the clip file…' },
+    { at: 28, pct: 88, title: 'Finishing up', msg: 'Still encoding — large clips take a bit…' },
+  ];
+  const started = Date.now();
+  const titleEl = document.getElementById('export-stage-title');
+  const msgEl = document.getElementById('export-stage-msg');
+  const bar = document.getElementById('export-progress-bar');
+  const track = bar && bar.closest('[role="progressbar"]');
+
+  function applyPhase() {
+    const elapsed = (Date.now() - started) / 1000;
+    let phase = phases[0];
+    for (const p of phases) if (elapsed >= p.at) phase = p;
+    if (titleEl) titleEl.textContent = phase.title;
+    if (msgEl) msgEl.textContent = phase.msg;
+    if (bar) bar.style.width = phase.pct + '%';
+    if (track) track.setAttribute('aria-valuenow', String(phase.pct));
+  }
+  applyPhase();
+  const phaseTimer = setInterval(applyPhase, 900);
+
+  async function poll() {
+    try {
+      const r = await fetch('/cut/{{ cut.id }}/export-status');
+      const s = await r.json();
+      if (s.status === 'ready') {
+        clearInterval(phaseTimer);
+        if (bar) bar.style.width = '100%';
+        if (titleEl) titleEl.textContent = 'Clip ready';
+        if (msgEl) msgEl.textContent = 'Opening the post editor…';
+        const params = new URLSearchParams();
+        params.set('step', 'post');
+        if (s.autosubs) params.set('autosubs', '1');
+        if (s.autocaption) params.set('autocaption', '1');
+        if (s.askmulti) params.set('askmulti', String(s.askmulti));
+        location.replace(location.pathname + '?' + params.toString());
+        return;
+      }
+      if (s.status === 'failed') {
+        clearInterval(phaseTimer);
+        location.reload();
+        return;
+      }
+    } catch (e) { /* keep polling */ }
+    setTimeout(poll, 1200);
+  }
+  poll();
+})();
+
+async function retryExport() {
+  const btn = document.getElementById('export-retry-btn');
+  if (btn) { btn.disabled = true; btn.classList.add('is-loading'); }
+  try {
+    const segments = {{ saved_segments | tojson }};
+    if (!segments || !segments.length) {
+      location.href = '/cut/{{ cut.id }}?step=trim';
+      return;
+    }
+    const fd = new FormData();
+    fd.set('segments_json', JSON.stringify(segments));
+    fd.set('as_new', '0');
+    const r = await fetch('/cut/{{ cut.id }}/export', {
+      method: 'POST', body: fd, headers: { 'Accept': 'application/json' },
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Retry failed');
+    location.replace(j.redirect || location.pathname + '?step=post');
+  } catch (e) {
+    alert(e.message || 'Retry failed');
+    if (btn) { btn.disabled = false; btn.classList.remove('is-loading'); }
+  }
+}
+</script>
+{% elif not state.exported %}
   <div class="empty"><strong>No exported clip yet</strong>
     <a href="/cut/{{ cut.id }}?step=trim">Edit and export</a> the clip first.</div>
 {% else %}
@@ -1596,7 +1752,14 @@ initSegDnd();
         </button>
         {% endif %}
       </div>
-      <div class="meta" id="subs-status" aria-live="polite"></div>
+      <div class="subs-progress" id="subs-status" aria-live="polite" hidden>
+        <div class="meta" id="subs-status-msg"></div>
+        <div class="export-progress-track subs-progress-track" role="progressbar"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="10"
+             aria-labelledby="subs-status-msg">
+          <i id="subs-progress-bar" style="width: 10%"></i>
+        </div>
+      </div>
 
       {# Instagram controls live in this same card (not a second stacked panel).
          setPlatformPreview() flips visibility with the Threads/Instagram toggle. #}
@@ -1669,7 +1832,7 @@ initSegDnd();
     </label>
     {% if not instagram_ok %}
     <p class="field-hint">Instagram isn't connected —
-      <a href="/threads-account">connect it</a> to queue reels alongside Threads posts.</p>
+      <a href="/connections">connect it</a> to queue reels alongside Threads posts.</p>
     {% endif %}
   </div>
   {# ---- Ship: buttons submit form#post-form via the form= attribute; JS
@@ -1956,17 +2119,56 @@ initSegDnd();
 
     async function generateSubtitles(position, after) {
       const status = document.getElementById('subs-status');
+      const msgEl = document.getElementById('subs-status-msg');
+      const bar = document.getElementById('subs-progress-bar');
+      const track = bar && bar.closest('[role="progressbar"]');
       const line = document.getElementById('subs-line');
       line.querySelectorAll('button').forEach(b => b.disabled = true);
       line.classList.add('is-disabled');
-      status.classList.add('busy');
-      status.textContent = 'Transcribing + rendering… this can take a minute.';
+      status.hidden = false;
+      status.classList.add('is-busy');
+      status.classList.remove('is-error');
+
+      const phases = [
+        { at: 0,  pct: 10, msg: 'Transcribing audio…' },
+        { at: 4,  pct: 32, msg: 'Aligning word timestamps…' },
+        { at: 12, pct: 55, msg: 'Rendering burned-in captions…' },
+        { at: 25, pct: 74, msg: 'Encoding captioned clip…' },
+        { at: 45, pct: 88, msg: 'Still rendering — this can take a minute…' },
+      ];
+      const started = Date.now();
+      function applyPhase() {
+        const elapsed = (Date.now() - started) / 1000;
+        let phase = phases[0];
+        for (const p of phases) if (elapsed >= p.at) phase = p;
+        if (msgEl) msgEl.textContent = phase.msg;
+        if (bar) bar.style.width = phase.pct + '%';
+        if (track) track.setAttribute('aria-valuenow', String(phase.pct));
+      }
+      applyPhase();
+      const phaseTimer = setInterval(applyPhase, 900);
+
+      function finishStatus(ok, text) {
+        clearInterval(phaseTimer);
+        if (ok) {
+          if (bar) bar.style.width = '100%';
+          if (track) track.setAttribute('aria-valuenow', '100');
+          if (msgEl) msgEl.textContent = text || 'Captions ready';
+          return;
+        }
+        status.classList.remove('is-busy');
+        status.classList.add('is-error');
+        if (msgEl) msgEl.textContent = text;
+        if (bar) bar.style.width = '0%';
+      }
+
       try {
         const fd = new FormData();
         fd.append('position', position || subsPos || 'bottom');
         const r = await fetch('/cut/{{ cut.id }}/subtitles', { method: 'POST', body: fd });
         const d = await r.json();
         if (d.url) {
+          finishStatus(true, 'Captions ready — refreshing…');
           // Reload so Copy transcript + Suggest caption see the Whisper sidecar
           // written during this pass. Preserve autocaption so the draft runs
           // after the transcript exists (not against empty YouTube captions).
@@ -1978,9 +2180,11 @@ initSegDnd();
           location.href = location.pathname + '?' + params.toString();
           return;
         }
-        status.textContent = d.error || 'Caption generation failed';
-      } catch (e) { status.textContent = 'Caption generation failed: ' + e; }
-      status.classList.remove('busy');
+        finishStatus(false, d.error || 'Caption generation failed');
+      } catch (e) {
+        finishStatus(false, 'Caption generation failed: ' + e);
+      }
+      status.classList.remove('is-busy');
       line.querySelectorAll('button').forEach(b => b.disabled = false);
       line.classList.remove('is-disabled');
       // Nothing rendered — snap the toggle back to what's actually in effect.
@@ -2154,6 +2358,20 @@ initSegDnd();
       // The suggestion is only ever a PROPOSAL: it renders in a review card
       // and touches the caption field/DB only when the operator accepts it.
       let proposedCaption = '';
+      // Ledger row for the draft on screen. Accepting or dismissing stamps a
+      // verdict on it — dismissals are the signal the caption loop learns
+      // most from, so they have to be reported, not just hidden.
+      let proposalId = null;
+      function reportVerdict(verdict) {
+        if (!proposalId) return;
+        const body = new FormData();
+        body.append('proposal_id', String(proposalId));
+        body.append('verdict', verdict);
+        // Fire and forget: telemetry must never delay or block captioning.
+        fetch('/cut/{{ cut.id }}/caption-verdict', { method: 'POST', body })
+          .catch(() => {});
+        proposalId = null;
+      }
       function suggestTitle(text) {
         const btn = document.getElementById('suggest-btn');
         if (!btn) return;
@@ -2170,7 +2388,7 @@ initSegDnd();
             const box = document.getElementById('clip-transcript-plain');
             if (box) box.value = d.transcript;
           }
-          if (d.caption) showProposal(d.caption);
+          if (d.caption) showProposal(d.caption, d.proposal_id);
           else if (!silent) alert(d.error || 'No caption returned');
         } catch (e) { if (!silent) alert('Suggestion failed: ' + e); }
         btn.disabled = false;
@@ -2178,24 +2396,30 @@ initSegDnd();
         suggestTitle(document.getElementById('caption').value.trim()
           ? 'Regenerate caption' : 'Suggest caption');
       }
-      function showProposal(text) {
+      function showProposal(text, id) {
         proposedCaption = text;
+        proposalId = id || null;
         document.getElementById('caption-proposal-text').textContent = text;
         document.getElementById('caption-proposal').hidden = false;
       }
-      function dismissProposal() {
+      function hideProposal() {
         proposedCaption = '';
         document.getElementById('caption-proposal').hidden = true;
       }
+      function dismissProposal() {
+        reportVerdict('dismissed');
+        hideProposal();
+      }
       function acceptProposal() {
         if (!proposedCaption) return;
+        reportVerdict('accepted');
         const ta = document.getElementById('caption');
         ta.value = proposedCaption;
         ta.dispatchEvent(new Event('input')); // re-grow to the new text
-        dismissProposal();
+        hideProposal();
         suggestTitle('Regenerate caption');
-        // Persist the accepted draft so it survives leaving the page (and so
-        // the voice-signal diff records what the AI proposed vs what posted).
+        // Persist the accepted draft so it survives leaving the page. The
+        // proposed-vs-posted diff lives in the caption ledger, not here.
         saveCaptionNow();
       }
 

@@ -15,6 +15,12 @@
  *     <details class="combo" data-filter-input …>              (any-of match)
  *     <select  data-sort-target="#list">                       (reorder rows)
  *     <ul id="list"> <li data-filter-row data-search="…" data-country="…">
+ *
+ *   View tabs (peer views of one page — see initViewTabs below):
+ *     <div role="tablist" data-view-tabs="storeKey" data-view-param="view">
+ *       <button role="tab" data-tab="a" id="a-tab" aria-controls="a-panel">
+ *     <div id="a-panel" role="tabpanel" aria-labelledby="a-tab">
+ *     <span data-view-slot="a b">          controls only view a and b offer
  */
 (function () {
   'use strict';
@@ -317,6 +323,122 @@
     Object.keys(filterGroups).forEach(applyFilter);
   };
 
+  // ---- View tabs: peer views of one page, swapped in place ----
+  //
+  //   <div role="tablist" data-view-tabs="dashTab" data-view-param="view">
+  //     <button role="tab" data-tab="candidates" id="candidates-tab"
+  //             aria-controls="candidates-panel">
+  //   <div id="candidates-panel" role="tabpanel" aria-labelledby="candidates-tab">
+  //
+  // A tab owns its panel through aria-controls, so there is no separate map to
+  // keep in sync. Elements marked data-view-slot="videos cuts" show only for
+  // the views they name, which is how a page offers filters that apply to the
+  // open view alone.
+  //
+  // The open view is addressable: it resolves from the query param first (so a
+  // link or a reload wins), then the last choice in localStorage, then whatever
+  // the server rendered as selected. Switching pushes a history entry, so back
+  // and forward step between views.
+  function viewTabs(strip) {
+    return [].slice.call(strip.querySelectorAll('[role="tab"][data-tab]'));
+  }
+
+  function viewKey(tab) {
+    return tab.getAttribute('data-tab');
+  }
+
+  function showView(strip, key, opts) {
+    opts = opts || {};
+    var tabs = viewTabs(strip);
+    var keys = tabs.map(viewKey);
+    if (keys.indexOf(key) === -1) key = keys[0];
+    if (!key) return;
+
+    tabs.forEach(function (tab) {
+      var on = viewKey(tab) === key;
+      tab.classList.toggle('is-active', on);
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      // Roving tabindex: the strip is one stop, arrows move inside it.
+      tab.tabIndex = on ? 0 : -1;
+      var panel = document.getElementById(tab.getAttribute('aria-controls') || '');
+      if (panel) panel.hidden = !on;
+      if (on && opts.focus) tab.focus();
+    });
+
+    document.querySelectorAll('[data-view-slot]').forEach(function (slot) {
+      var views = slot.getAttribute('data-view-slot').split(/\s+/);
+      slot.classList.toggle(HIDE, views.indexOf(key) === -1);
+    });
+
+    var store = strip.getAttribute('data-view-tabs');
+    if (store) { try { localStorage.setItem(store, key); } catch (e) {} }
+
+    var param = strip.getAttribute('data-view-param');
+    if (param) {
+      var url = new URL(location.href);
+      if (url.searchParams.get(param) !== key) {
+        url.searchParams.set(param, key);
+        history[opts.push ? 'pushState' : 'replaceState']({}, '', url);
+      }
+    }
+
+    // Filters belonging to the view that just closed must stop constraining.
+    window.refreshToolbarFilters();
+  }
+
+  function initialView(strip) {
+    var keys = viewTabs(strip).map(viewKey);
+    var param = strip.getAttribute('data-view-param');
+    if (param) {
+      var linked = new URLSearchParams(location.search).get(param);
+      if (linked && keys.indexOf(linked) !== -1) return linked;
+    }
+    var store = strip.getAttribute('data-view-tabs');
+    if (store) {
+      var saved = null;
+      try { saved = localStorage.getItem(store); } catch (e) {}
+      if (saved && keys.indexOf(saved) !== -1) return saved;
+    }
+    var marked = strip.querySelector('[role="tab"][data-tab][aria-selected="true"]');
+    return marked ? viewKey(marked) : keys[0];
+  }
+
+  function initViewTabs() {
+    document.querySelectorAll('[data-view-tabs]').forEach(function (strip) {
+      if (strip.__viewTabsInit) return;
+      strip.__viewTabsInit = true;
+
+      strip.addEventListener('click', function (e) {
+        var tab = e.target.closest('[role="tab"][data-tab]');
+        if (tab) showView(strip, viewKey(tab), { push: true });
+      });
+
+      strip.addEventListener('keydown', function (e) {
+        var tabs = viewTabs(strip);
+        var i = tabs.indexOf(document.activeElement);
+        if (i === -1) return;
+        var to = null;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') to = tabs[(i + 1) % tabs.length];
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') to = tabs[(i - 1 + tabs.length) % tabs.length];
+        else if (e.key === 'Home') to = tabs[0];
+        else if (e.key === 'End') to = tabs[tabs.length - 1];
+        if (!to) return;
+        e.preventDefault();
+        showView(strip, viewKey(to), { push: true, focus: true });
+      });
+
+      showView(strip, initialView(strip));
+    });
+
+    window.addEventListener('popstate', function () {
+      document.querySelectorAll('[data-view-tabs]').forEach(function (strip) {
+        var param = strip.getAttribute('data-view-param');
+        var key = param && new URLSearchParams(location.search).get(param);
+        if (key) showView(strip, key);
+      });
+    });
+  }
+
   // ---- Toast flash messages: auto-dismiss + manual close ----
   var TOAST_ICON_OK =
     '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
@@ -475,6 +597,9 @@
     updateScrollbarWidth();
     initCombos();
     initServerForms();
+    // Before the filters: opening a view hides the slots belonging to the
+    // others, and hidden controls have to be settled before the first pass.
+    initViewTabs();
     initClientFilters();
     restoreSearchFocus();
     initToasts();

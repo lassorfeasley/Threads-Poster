@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{#
+  Shell for the configuration pages — one door in the sidebar, a grouped rail
+  in here. Each settings page keeps its own pagebar, content and scripts; it
+  only swaps `content` for `settings_content` and inherits this layout.
+
+  The rail highlights from `active`, which every settings route already passes
+  (active == "brand", "channels", …), so adding a page here is a two-line
+  change: extend this template, and add a row to SETTINGS_GROUPS below.
+#}
+
+{% set SETTINGS_GROUPS = [
+  ('Voice', [
+    ('brand', 'Brand & audience', '/brand'),
+    ('style_guide', 'Style guide', '/style-guide'),
+    ('traits', 'Traits', '/traits'),
+  ]),
+  ('Sources', [
+    ('channels', 'Monitored channels', '/channels'),
+    ('keywords', 'Keywords', '/keywords'),
+  ]),
+  ('Accounts', [
+    ('connections', 'Connected accounts', '/connections'),
+  ]),
+] %}
+
+{% block main_class %}main-settings{% endblock %}
+
+{% block content %}
+<div class="settings-shell">
+  <nav class="settings-rail" aria-label="Settings sections">
+    {% for group, items in SETTINGS_GROUPS %}
+    <div class="settings-group">{{ group }}</div>
+    {% for key, label, href in items %}
+    {% set on = (active == key) %}
+    <a class="settings-link{{ ' is-active' if on }}" href="{{ href }}"
+       {% if on %}aria-current="page"{% endif %}>
+      <span>{{ label }}</span>
+      {% if key == 'connections' and not threads_authenticated() %}
+      <span class="settings-dot" title="Threads is not connected"></span>
+      {% endif %}
+    </a>
+    {% endfor %}
+    {% endfor %}
+  </nav>
+
+  <div class="settings-body">
+    {% block settings_content %}{% endblock %}
+  </div>
+</div>
+{% endblock %}

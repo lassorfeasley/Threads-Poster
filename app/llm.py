@@ -282,7 +282,8 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
                          excerpt: str, clip_seconds: float | None,
                          examples: list[str] | None = None,
                          style_guide: str = "", operator_guide: str = "",
-                         max_chars: int = 220) -> str:
+                         max_chars: int = 220,
+                         target_words: int | None = None) -> str:
     """Recommend Threads post text for the operator's trimmed clip. The operator
     reviews/edits before posting — this is a DRAFT, never auto-posted.
 
@@ -292,19 +293,47 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     a menu of preferred moves, deliberately framed so the model picks one rather
     than stacking them into a template-shaped caption.
 
-    ``max_chars`` is stated as the ceiling. It is deliberately tight: the clip
-    carries the story, and a generous limit gets treated as a target to fill.
+    ``target_words`` is the length the operator has actually been posting
+    lately (``voice.length_target``), and is the instruction that does the real
+    work. ``max_chars`` is only a backstop: stated alone it behaves as a target
+    to fill, which is how drafts drifted long enough that the operator rewrote
+    nearly all of them.
     """
     system = (
         "You draft a Threads caption for a short local-TV climate news clip. The "
         "operator will edit it before posting.\n\n"
-        "LENGTH IS THE CONSTRAINT THAT MATTERS MOST: one or two short lines, two "
-        f"sentences at the absolute most, under {max_chars} characters. No "
-        "paragraphs, no blank lines, no lists. The video carries the story — the "
-        "caption only has to make someone stop and watch it. When torn between "
-        "two good sentences, keep one.\n\n"
-        "Also hard: do not invent facts not in the excerpt, and mention the place. "
     )
+    if target_words:
+        # Framed as a goal to land on, with permission to go shorter. A ceiling
+        # on its own reads as an allowance and gets spent.
+        system += (
+            f"LENGTH IS THE CONSTRAINT THAT MATTERS MOST. Aim for about "
+            f"{target_words} words — that is the length this operator actually "
+            f"posts, measured from their recent captions, not a guess. Coming in "
+            f"UNDER it is always safe; going over is the single most common way "
+            f"to get this wrong. A caption of just a few words is a success, not "
+            f"an unfinished draft. Hard ceiling {max_chars} characters, but treat "
+            f"{target_words} words as the goal and stop as soon as the line "
+            f"lands.\n\n"
+        )
+    else:
+        system += (
+            "LENGTH IS THE CONSTRAINT THAT MATTERS MOST: one or two short lines, "
+            f"two sentences at the absolute most, under {max_chars} characters. "
+            "Coming in well under is always safe. A caption of just a few words "
+            "is a success, not an unfinished draft.\n\n"
+        )
+    system += (
+        "No paragraphs, no blank lines, no lists. The video carries the story — "
+        "the caption only has to make someone stop and watch it. When torn "
+        "between two good sentences, keep one.\n\n"
+        "Also hard: do not invent facts not in the excerpt. "
+    )
+    # A mandatory place name can consume most of a very short caption, so it
+    # becomes a preference once the target is tight.
+    system += ("Mention the place when it fits the length.\n"
+               if target_words and target_words <= 14
+               else "Mention the place.\n")
     if examples:
         system += (
             "\n\nVOICE: Write in the operator's own voice. Below are real captions "
@@ -325,12 +354,13 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     if operator_guide:
         system += (
             "\n\nOPERATOR STYLE GUIDE — a MENU of moves the operator likes, not a "
-            "checklist. Choose the ONE that best suits this clip (a second only if "
-            "the two genuinely fit in a single short caption) and ignore the rest "
-            "on purpose. Trying to satisfy several at once is the most common "
-            "failure here: it produces a padded, template-shaped caption. These "
-            "outrank the general style notes above, but never the length limit or "
-            "the hard constraints:\n" + operator_guide[:2000]
+            "checklist. Choose the ONE that best suits this clip and ignore the "
+            "rest on purpose; if a move does not fit the length, skip it. Trying "
+            "to satisfy several at once is the most common failure here: it "
+            "produces a padded, template-shaped caption. A move that adds a "
+            "sentence is not worth the sentence. These outrank the general style "
+            "notes above, but never the length target or the hard "
+            "constraints:\n" + operator_guide[:2000]
         )
     system += "\nJSON shape: {\"caption\": \"...\"}"
     user = json.dumps({
@@ -345,11 +375,16 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
 
 
 def suggest_hook_text(model: str, title: str, station: str, market: str,
-                      excerpt: str) -> str:
+                      excerpt: str, examples: list[str] | None = None) -> str:
     """Draft short on-video hook text for an Instagram Reel vertical composite.
 
     Rendered large in the brand font at the top of the 9:16 frame — so it must
     stay brief. DRAFT ONLY: the operator edits before regenerating the reel.
+
+    ``examples`` are hooks the operator rewrote for themselves, taken from the
+    draft ledger (``app/draft_proposals.operator_written``). The hook has no
+    other voice source: unlike captions there is no published history to learn
+    from, because the hook is burned into the video rather than posted as text.
     """
     system = (
         "You write a short HOOK line that appears as large on-screen text at the "
@@ -359,8 +394,17 @@ def suggest_hook_text(model: str, title: str, station: str, market: str,
         "- No hashtags, no URLs, no emojis, no quotation marks around the whole hook.\n"
         "- Do not invent facts not in the excerpt; mention the place when it matters.\n"
         "- Punchy and concrete — not a full caption, not a question unless irresistible.\n"
-        "JSON shape: {\"hook\": \"...\"}"
     )
+    if examples:
+        system += (
+            "\nVOICE: hooks the operator WROTE THEMSELVES after discarding a "
+            "draft like the one you're about to write. Each one is a correction "
+            "toward how they actually write — study the rhythm, capitalisation, "
+            "and how much they leave unsaid, then write as if they wrote it. "
+            "Never reuse their facts.\n"
+            + "\n".join(f"<example>{e[:120]}</example>" for e in examples) + "\n"
+        )
+    system += "JSON shape: {\"hook\": \"...\"}"
     user = json.dumps({
         "video_title": title,
         "station": station,

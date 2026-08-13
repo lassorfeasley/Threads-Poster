@@ -1,5 +1,5 @@
-{% extends "base.html" %}
-{% block content %}
+{% extends "settings_base.html" %}
+{% block settings_content %}
 {% import "components/toolbar.html" as ui %}
 {% set sg_sub %}Rules the AI follows when it drafts a post caption, plus patterns learned from how your posts actually perform. You still review and edit every caption before posting.{% endset %}
 {{ ui.pagebar("Style guide", sub=sg_sub) }}
@@ -32,9 +32,132 @@
 </div>
 
 <div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Caption length &amp; what you keep</div>
+  <p class="meta" style="margin: 0 0 12px;">
+    Every draft the AI writes is recorded along with what you did with it. Dismissing a draft and writing your own is the strongest correction you can give — this is where it lands.
+  </p>
+
+  <div class="sg-loop-grid">
+    <div class="sg-loop-stat">
+      <div class="sg-loop-value">
+        {% if target_words %}{{ target_words }} words{% else %}—{% endif %}
+      </div>
+      <div class="meta">
+        Length target the AI is given
+        {% if not target_words %}<br>Not enough captions you wrote yourself yet — using the generic short-caption instruction.{% endif %}
+      </div>
+    </div>
+    <div class="sg-loop-stat">
+      <div class="sg-loop-value">
+        {% if caption_loop.total %}{{ caption_loop.total }}{% else %}0{% endif %}
+      </div>
+      <div class="meta">Drafts written{% if caption_loop.total %} · {{ caption_loop.resolved or 0 }} posted{% endif %}</div>
+    </div>
+    <div class="sg-loop-stat">
+      <div class="sg-loop-value">
+        {% if caption_loop.kept_rate is not none %}{{ (caption_loop.kept_rate * 100)|round|int }}%{% else %}—{% endif %}
+      </div>
+      <div class="meta">
+        Drafts you kept largely intact
+        {% if caption_loop.recent_kept_rate is not none and caption_loop.recent_n %}<br>Last {{ caption_loop.recent_n }}: {{ (caption_loop.recent_kept_rate * 100)|round|int }}%{% endif %}
+      </div>
+    </div>
+    <div class="sg-loop-stat">
+      <div class="sg-loop-value">
+        {% if caption_loop.median_draft_words and caption_loop.median_posted_words %}
+          {{ caption_loop.median_draft_words|round|int }} → {{ caption_loop.median_posted_words|round|int }}
+        {% else %}—{% endif %}
+      </div>
+      <div class="meta">Median words: drafted → posted{% if caption_loop.median_draft_words and caption_loop.median_posted_words and caption_loop.median_posted_words < caption_loop.median_draft_words %}<br>You are still cutting length out of every draft.{% endif %}</div>
+    </div>
+  </div>
+
+  {% if pairs %}
+  <details style="margin-top: 14px;">
+    <summary class="meta" style="cursor: pointer;">Recent drafts vs. what you posted ({{ pairs|length }})</summary>
+    <div style="margin-top: 10px;">
+      {% for p in pairs %}
+      <div class="insight-row">
+        <div class="insight-body">
+          <div class="meta" style="margin-bottom: 4px;">
+            AI draft · {{ p.proposed_words }} words
+            {% if p.kept %}<span class="badge supportive">kept</span>{% else %}<span class="badge">rewritten</span>{% endif %}
+          </div>
+          <div class="meta" style="opacity: .75;">{{ p.proposed }}</div>
+          <div class="insight-label" style="margin-top: 8px;">{{ p.final }}</div>
+          <div class="meta">You posted · {{ p.final_words }} words</div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+  {% elif caption_loop.total %}
+  <p class="meta" style="margin: 12px 0 0;">Drafts are being recorded — the comparison fills in once those clips post.</p>
+  {% endif %}
+
+  <p class="meta" style="margin: 12px 0 0;">
+    The target is the median length of captions you wrote yourself, over your most recent ones — so it tightens on its own as you keep writing short. Hard ceiling is {{ max_chars }} characters, set in <code>config/settings.yaml</code>.
+  </p>
+</div>
+
+<div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Instagram Reel hooks</div>
+  <p class="meta" style="margin: 0 0 12px;">
+    The on-video hook has no review card — a draft lands straight in the field and you type over it. Those rewrites are now recorded too, and the ones you write yourself become the examples the next draft learns from.
+  </p>
+
+  <div class="sg-loop-grid">
+    <div class="sg-loop-stat">
+      <div class="sg-loop-value">{{ hook_loop.total or 0 }}</div>
+      <div class="meta">Hooks drafted{% if hook_loop.total %} · {{ hook_loop.resolved or 0 }} on posted reels{% endif %}</div>
+    </div>
+    <div class="sg-loop-stat">
+      <div class="sg-loop-value">
+        {% if hook_loop.kept_rate is not none %}{{ (hook_loop.kept_rate * 100)|round|int }}%{% else %}—{% endif %}
+      </div>
+      <div class="meta">Hooks you kept largely intact</div>
+    </div>
+    <div class="sg-loop-stat">
+      <div class="sg-loop-value">
+        {% if hook_loop.median_draft_words and hook_loop.median_posted_words %}
+          {{ hook_loop.median_draft_words|round|int }} → {{ hook_loop.median_posted_words|round|int }}
+        {% else %}—{% endif %}
+      </div>
+      <div class="meta">Median words: drafted → used</div>
+    </div>
+  </div>
+
+  {% if hook_pairs %}
+  <details style="margin-top: 14px;">
+    <summary class="meta" style="cursor: pointer;">Recent hooks: drafted vs. used ({{ hook_pairs|length }})</summary>
+    <div style="margin-top: 10px;">
+      {% for p in hook_pairs %}
+      <div class="insight-row">
+        <div class="insight-body">
+          <div class="meta" style="margin-bottom: 4px;">
+            AI draft · {{ p.proposed_words }} words
+            {% if p.kept %}<span class="badge supportive">kept</span>{% else %}<span class="badge">rewritten</span>{% endif %}
+          </div>
+          <div class="meta" style="opacity: .75;">{{ p.proposed }}</div>
+          <div class="insight-label" style="margin-top: 8px;">{{ p.final }}</div>
+          <div class="meta">You used · {{ p.final_words }} words</div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+
+  <p class="meta" style="margin: 12px 0 0;">
+    Hooks are already capped at 3–12 words, so there's no length target here. Note that Instagram performance isn't tracked yet — unlike Threads posts, reels have no metrics coming back, so this measures what you keep, not what works.
+  </p>
+</div>
+
+<div class="card" style="margin-top: 14px;">
   <div class="card-title" style="margin-bottom: 6px;">How this is used</div>
   <p class="meta" style="margin: 0 0 8px;">Enabled rules go into the caption-drafting prompt as a menu of moves you like (High-priority first), on top of the voice the AI already learns from your published captions. It chooses the single rule that fits the clip — stacking several is what makes a caption read like a template.</p>
-  <p class="meta" style="margin: 0;">Hard rules always hold regardless of what you write: the AI won't invent facts that aren't in the clip's transcript, it mentions the place, and it keeps the caption to one or two short lines.</p>
+  <p class="meta" style="margin: 0 0 8px;">Hard rules always hold regardless of what you write: the AI won't invent facts that aren't in the clip's transcript, and length outranks every rule here — a move that costs an extra sentence gets skipped rather than stretching the caption.</p>
+  <p class="meta" style="margin: 0;">Watch the length cost of your own rules. Anything phrased as “…then explain it” or “end with a question” mandates a second sentence, and a few of those enabled together are what produce a long, template-shaped caption. If drafts are coming back too wordy, turning rules off works better than adding more.</p>
 </div>
 
 <p class="meta" style="margin-top: 12px;">Stored in <code>config/caption_style.yaml</code> if you'd rather edit it by hand.</p>

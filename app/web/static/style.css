@@ -202,17 +202,6 @@ aside.sidebar {
   letter-spacing: 0.3px;
 }
 
-.nav-section {
-  display: none;
-  font-size: 10.5px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--muted);
-  padding: 14px 12px 6px;
-  white-space: nowrap;
-}
-
 a.nav {
   position: relative;
   display: flex;
@@ -277,6 +266,39 @@ a.nav .count {
   padding: 1px 8px;
 }
 a.nav.active .count { color: var(--text-dim); background: var(--panel3); }
+
+/* Create content is an action, not a peer destination, so it borrows the
+   outlined-blue treatment of button.primary rather than reading as another row.
+   It stays legible in the collapsed rail, where the label is hidden. */
+a.nav.nav-create {
+  color: var(--blue);
+  background: var(--blue-soft);
+  border-color: var(--blue-border);
+  font-weight: 650;
+  margin-bottom: 12px;
+}
+a.nav.nav-create svg { opacity: 1; }
+a.nav.nav-create:hover {
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 18%, transparent);
+  border-color: var(--blue);
+}
+a.nav.nav-create.active {
+  color: var(--blue);
+  background: var(--blue-soft);
+  border-color: var(--blue);
+}
+a.nav.nav-create.active svg { color: var(--blue); }
+a.nav.nav-create.active::before { display: none; }
+
+/* Settings + theme toggle + footnote, pinned below the daily-loop links. */
+.nav-bottom {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  padding-top: 10px;
+}
+.nav-bottom .theme-toggle { margin-top: 0; }
 
 /* Persistent posting-queue status widget, shown on every page (calendar + queue view alike). */
 .nav-status {
@@ -385,6 +407,8 @@ a.nav.active .count { color: var(--text-dim); background: var(--panel3); }
   border-top: 1px solid var(--border);
   white-space: nowrap;
 }
+.sidebar .foot a { color: var(--text-dim); text-decoration: none; }
+.sidebar .foot a:hover { color: var(--text); text-decoration: underline; }
 
 /* Expand as overlay — body padding stays on the rail width. */
 aside.sidebar:hover,
@@ -401,8 +425,6 @@ aside.sidebar:focus-within .brand {
 }
 aside.sidebar:hover .brand .name,
 aside.sidebar:focus-within .brand .name,
-aside.sidebar:hover .nav-section,
-aside.sidebar:focus-within .nav-section,
 aside.sidebar:hover a.nav .label,
 aside.sidebar:focus-within a.nav .label,
 aside.sidebar:hover a.nav .count,
@@ -438,6 +460,98 @@ main {
   margin: 0 auto;
   padding: 30px 34px 110px;
   max-width: var(--canvas-wide);
+}
+
+/* ------------------------------------------------------------
+   Settings shell — one door in the sidebar, a grouped rail in the page
+   ------------------------------------------------------------ */
+/* The rail is paid for out of the canvas, not out of the page: widening main by
+   exactly the rail leaves each settings page the content width it had when it
+   was a top-level page, so wide tables (Monitored channels) still fit. */
+main.main-settings {
+  --settings-rail-w: 196px;
+  --settings-rail-gap: 34px;
+  max-width: calc(var(--canvas-wide) + var(--settings-rail-w) + var(--settings-rail-gap));
+}
+
+.settings-shell {
+  display: grid;
+  grid-template-columns: var(--settings-rail-w) minmax(0, 1fr);
+  gap: var(--settings-rail-gap);
+  align-items: start;
+}
+.settings-rail {
+  position: sticky;
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.settings-group {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  padding: 16px 10px 6px;
+}
+.settings-group:first-child { padding-top: 2px; }
+.settings-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.settings-link:hover { color: var(--text); background: var(--panel2); }
+.settings-link.is-active {
+  color: var(--text);
+  background: var(--panel2);
+  border-color: var(--border);
+  font-weight: 650;
+}
+.settings-dot {
+  flex: none;
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+.settings-body { min-width: 0; }
+
+/* A sticky pagebar breaks out to span the viewport, which would ride over the
+   rail on scroll. In here the page header stays in its column instead. */
+.settings-body .pagebar.is-sticky {
+  position: static;
+  width: auto;
+  margin: 0 0 22px;
+  background: transparent;
+  border-bottom: none;
+}
+.settings-body .pagebar.is-sticky .pagebar-inner { padding: 0; }
+
+@media (max-width: 980px) {
+  .settings-shell { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  main.main-settings { max-width: var(--canvas-wide); }
+  .settings-rail {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-group { padding: 0 2px 0 10px; }
+  .settings-group:first-child { padding-left: 0; }
+  .settings-dot { margin-left: 0; }
 }
 
 .page-head {
@@ -485,17 +599,22 @@ main {
   flex-wrap: wrap;
 }
 .pagebar-title { flex: 1; min-width: 220px; }
-.pagebar-crumbs { margin-bottom: 8px; }
-/* Title-less pagebar (e.g. the post page): crumbs alone make the row, centered
-   against the action buttons so the band stays one compact line. */
-.pagebar-crumbs.only-child {
+.pagebar-crumbs,
+.pagebar-views { margin-bottom: 8px; }
+/* Title-less pagebar (post-page crumbs, dashboard/library view tabs): that one
+   element makes the row, centered against the action buttons so the band stays
+   one compact line. */
+.pagebar-crumbs.only-child,
+.pagebar-views.only-child {
   margin-bottom: 0;
   display: flex;
   align-items: center;
   min-height: 30px;
 }
-.pagebar-head:has(.pagebar-crumbs.only-child) { align-items: center; }
-.pagebar.is-sticky:has(.pagebar-crumbs.only-child) .pagebar-inner {
+.pagebar-head:has(.pagebar-crumbs.only-child),
+.pagebar-head:has(.pagebar-views.only-child) { align-items: center; }
+.pagebar.is-sticky:has(.pagebar-crumbs.only-child) .pagebar-inner,
+.pagebar.is-sticky:has(.pagebar-views.only-child) .pagebar-inner {
   padding-top: 10px;
   padding-bottom: 10px;
 }
@@ -1208,6 +1327,20 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(
 .insight-actions { flex: none; display: flex; gap: 6px; }
 .sg-learned-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .sg-learned-head > button { flex: none; }
+
+/* Caption loop health (Style guide): draft length target, keep rate, drift. */
+.sg-loop-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+.sg-loop-stat {
+  background: var(--bg, transparent);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.sg-loop-value { font-size: 20px; font-weight: 650; line-height: 1.15; margin-bottom: 4px; }
 
 
 /* New-cut source-video picker (Library → Cuts). */
@@ -2143,6 +2276,135 @@ kbd {
   width: 140px;
 }
 
+/* ---- Optimistic clip-save skeleton (Post step while ffmpeg runs) ---- */
+.export-stage {
+  padding: 8px 0 24px;
+}
+.export-stage-card {
+  display: grid;
+  gap: 22px;
+  max-width: 560px;
+}
+.export-stage-visual {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  gap: 12px;
+  align-items: start;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+.export-skel-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+.export-skel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.export-skel-line {
+  height: 11px;
+  border-radius: 6px;
+}
+.export-skel-media {
+  position: relative;
+  margin-top: 4px;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.export-skel-play {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  border: 2px solid color-mix(in srgb, var(--text) 22%, transparent);
+}
+.export-skel-play::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 13px;
+  border-style: solid;
+  border-width: 8px 0 8px 12px;
+  border-color: transparent transparent transparent
+    color-mix(in srgb, var(--text) 45%, transparent);
+}
+.skel-shimmer {
+  background: linear-gradient(
+    110deg,
+    var(--panel2) 0%,
+    var(--panel2) 35%,
+    var(--shimmer) 50%,
+    var(--panel2) 65%,
+    var(--panel2) 100%
+  );
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.35s ease-in-out infinite;
+}
+@keyframes skel-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+.export-stage-title {
+  margin: 0 0 6px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.export-stage-msg {
+  margin: 0;
+  font-size: 13.5px;
+}
+.export-stage-hint {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+}
+.export-progress {
+  margin-top: 14px;
+}
+.export-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--panel3);
+  overflow: hidden;
+  position: relative;
+}
+.export-progress-track > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 70%, white)
+  );
+  transition: width 0.7s ease;
+  position: relative;
+}
+.export-progress-track > i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, white 35%, transparent),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.1s linear infinite;
+}
+
 /* Filmstrip */
 #filmstrip, .filmstrip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
 #filmstrip::-webkit-scrollbar, .filmstrip::-webkit-scrollbar { height: 8px; }
@@ -2519,15 +2781,18 @@ a.cal-event:hover { background: var(--panel3); }
 }
 
 /* =========================================================================
-   Dashboard list-view segmented control (Candidates / Selected clips to trim /
-   Trimmed, not posted). Rounded pill container; the active button is highlighted.
+   Segmented control — peer views of one page (dashboard and library list
+   tabs, calendar's Calendar/Queue). Rounded pill container; the active button
+   is highlighted.
    ========================================================================= */
+/* The track is a step up from the raised band it sits on, so the group reads as
+   one control instead of loose buttons — on --panel it is near-invisible. */
 .segmented {
   display: inline-flex;
   gap: 4px;
   padding: 4px;
   margin: 4px 0 18px;
-  background: var(--panel);
+  background: var(--panel2);
   border: 1px solid var(--border);
   border-radius: 999px;
 }
@@ -2542,7 +2807,7 @@ a.cal-event:hover { background: var(--panel3); }
   transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 .segmented .seg-btn:hover {
-  background: var(--panel2);
+  background: var(--panel3);
   color: var(--text);
   border-color: transparent;
 }
@@ -2568,6 +2833,32 @@ a.cal-event:hover { background: var(--panel3); }
 .segmented .seg-btn.is-active .seg-count {
   background: var(--blue-border);
   color: var(--text);
+}
+/* Hover fills the button to --panel3, the badge's own colour, so step the badge
+   back down a shade to keep it a legible chip. The active badge keeps its blue. */
+.segmented .seg-btn:not(.is-active):hover .seg-count { background: var(--panel2); }
+/* Compact variant, sized to ride inside the sticky pagebar band without
+   thickening it. Long label sets scroll rather than bursting the pill. */
+.segmented.sm {
+  gap: 2px;
+  padding: 3px;
+  margin: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.segmented.sm::-webkit-scrollbar { display: none; }
+.segmented.sm .seg-btn {
+  padding: 4px 12px;
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+.segmented.sm .seg-count {
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  margin-left: 5px;
+  font-size: 10.5px;
 }
 
 /* ------------------------------------------------------------
@@ -2713,21 +3004,6 @@ body.cal-committing #cal-layout {
 }
 .crumbs .crumb-current svg { color: var(--accent); }
 .crumbs .crumb-sep { color: var(--muted); opacity: 0.55; font-size: 13px; }
-/* View-switcher crumbs (dashboard): <button>s dressed as crumbs so pipeline
-   stages read like the Video › Edit › Clip trail but swap panels in place. */
-.crumbs button.crumb {
-  background: none;
-  border: 1px solid transparent;
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.crumbs button.crumb:hover { color: var(--text); background: var(--panel2); }
-.crumbs button.crumb-current {
-  color: var(--text);
-  background: var(--accent-soft);
-  border-color: var(--accent-border);
-}
 .crumbs .crumb-count {
   display: inline-flex;
   align-items: center;
@@ -3517,9 +3793,44 @@ body.cal-committing #cal-layout {
 }
 
 /* Re-render status sits on its own line under the caption-position toggle so
-   long messages never crowd the section title. Empty = takes no space. */
-#recap-status, #subs-status { margin: 8px 2px 0; font-size: 12px; }
-#recap-status:empty, #subs-status:empty { display: none; }
+   long messages never crowd the section title. Hidden when idle. */
+#recap-status { margin: 8px 2px 0; font-size: 12px; }
+#recap-status:empty { display: none; }
+.subs-progress {
+  margin: 10px 2px 0;
+  display: grid;
+  gap: 8px;
+  max-width: 420px;
+}
+.subs-progress[hidden] { display: none; }
+.subs-progress #subs-status-msg {
+  margin: 0;
+  font-size: 12.5px;
+}
+.subs-progress.is-busy #subs-status-msg {
+  color: var(--accent);
+}
+.subs-progress.is-busy #subs-status-msg::before {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  border: 2px solid var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin 0.8s linear infinite;
+}
+.subs-progress.is-error #subs-status-msg {
+  color: var(--danger);
+}
+.subs-progress-track {
+  max-width: 280px;
+}
+.subs-progress:not(.is-busy) .subs-progress-track {
+  display: none;
+}
 
 /* Caption editor is its own surface — no card-inside-a-card. The .wf-body.plain
    wrapper strips the section card so the textarea is the only box. */

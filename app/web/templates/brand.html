@@ -1,0 +1,70 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+{% import "components/toolbar.html" as ui %}
+{% set br_sub %}Who this account is and who it talks to. These fields will drive the AI prompts once they're parameterized — today they're stored and shown here so the setup lives in one place.{% endset %}
+{{ ui.pagebar("Brand & audience", sub=br_sub) }}
+
+<form method="post" action="/brand" enctype="multipart/form-data">
+  <div class="card">
+    <div class="card-title" style="margin-bottom: 4px;">Who you are</div>
+    <p class="meta" style="margin: 0 0 14px;">
+      Nothing consumes these yet: the drafting, scoring, and digest prompts still
+      hardcode climate / local-TV / Renewables.org. Filling this in now means the
+      prompts can switch over without re-entering anything.
+    </p>
+
+    <label for="brand-name" class="card-title" style="display:block; margin-bottom: 6px;">Name</label>
+    <input type="text" id="brand-name" name="name" value="{{ brand.name }}"
+           placeholder="e.g. Renewables.org" style="max-width: 460px;">
+
+    <label for="brand-mission" class="card-title" style="display:block; margin: 14px 0 6px;">Mission</label>
+    <textarea id="brand-mission" name="mission" rows="2"
+              placeholder="What this account exists to do, in a sentence or two.">{{ brand.mission }}</textarea>
+
+    <label for="brand-audience" class="card-title" style="display:block; margin: 14px 0 6px;">Audience</label>
+    <textarea id="brand-audience" name="audience" rows="2"
+              placeholder="Who you're talking to — the people the captions should land with.">{{ brand.audience }}</textarea>
+
+    <label for="brand-topic" class="card-title" style="display:block; margin: 14px 0 6px;">Topic scope</label>
+    <textarea id="brand-topic" name="topic" rows="2"
+              placeholder="What counts as relevant coverage, in plain language. This is what eventually replaces the hardcoded climate scope.">{{ brand.topic }}</textarea>
+
+    <label for="brand-voice" class="card-title" style="display:block; margin: 14px 0 6px;">Voice notes</label>
+    <textarea id="brand-voice" name="voice_notes" rows="3"
+              placeholder="Tone, phrases to favor or avoid, point of view. Caption style rules live on the Style guide page — this is broader.">{{ brand.voice_notes }}</textarea>
+  </div>
+
+  <div class="card" style="margin-top: 14px;">
+    <div class="card-title" style="margin-bottom: 4px;">Appearance</div>
+    <p class="meta" style="margin: 0 0 14px;">
+      White label the app itself: the name and logo shown in the sidebar and window
+      title. Clip caption colors and fonts are separate — they're the clip's look,
+      not the app's (see <code>subtitles</code> in <code>config/settings.yaml</code>).
+    </p>
+
+    <label for="brand-app-name" class="card-title" style="display:block; margin-bottom: 6px;">App name</label>
+    <input type="text" id="brand-app-name" name="app_name" value="{{ brand.app_name }}"
+           placeholder="{{ default_app_name }}" style="max-width: 460px;">
+
+    <label for="brand-logo" class="card-title" style="display:block; margin: 14px 0 6px;">Logo</label>
+    {% if brand.logo_file %}
+      <p class="meta" style="margin: 0 0 10px; display:flex; align-items:center; gap:12px;">
+        <img src="/static/brand/{{ brand.logo_file }}" alt="Current logo"
+             style="height: 28px; width: 28px; object-fit: contain; border-radius: 6px;">
+        <span><code>{{ brand.logo_file }}</code> — upload a new file to replace it.</span>
+        <button class="sm" type="submit" form="logo-remove-form">Remove</button>
+      </p>
+    {% endif %}
+    <input type="file" id="brand-logo" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp,.gif">
+    <p class="meta" style="margin: 6px 0 0;">Square works best; shown at sidebar size. PNG, JPG, SVG, WebP, or GIF up to 2 MB.</p>
+  </div>
+
+  <div class="btn-group" style="margin-top: 16px;">
+    <button class="primary" type="submit">Save</button>
+  </div>
+</form>
+
+<form id="logo-remove-form" method="post" action="/brand/logo/remove"></form>
+
+<p class="meta" style="margin-top: 12px;">Stored in <code>config/brand.yaml</code> if you'd rather edit it by hand.</p>
+{% endblock %}

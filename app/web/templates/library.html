@@ -5,37 +5,38 @@
 {% set LIB = "#lib-panels" %}
 {# Everything here filters client-side: the whole library is already on the
    page, so narrowing it is instant and needs no round trip. Filters that only
-   make sense for one tab live in a .tb-slot that setLibTab() shows or hides —
-   a hidden slot's controls sit out of the match entirely. #}
+   make sense for one tab live in a .tb-slot marked data-view-slot, which
+   toolbar.js shows or hides — a hidden slot's controls sit out of the match
+   entirely. #}
 {% set lib_filters %}
   {{ ui.search(name="q", placeholder="title, channel, caption…", debounce=false, filter_target=LIB) }}
   {{ ui.combo("channel", channel_choices, all_label="All channels",
               filter_target=LIB, filter_key="channel") }}
-  <span class="tb-slot" data-lib-tab="videos">
+  <span class="tb-slot" data-view-slot="videos">
     {{ ui.combo("category", category_choices, all_label="All categories",
                 filter_target=LIB, filter_key="category") }}
     {{ ui.select("video_status", [("posted", "Posted"), ("clips", "Has clips"), ("none", "No clips yet")],
                  submit=false, filter_target=LIB, filter_key="status", all_label="Any status") }}
   </span>
-  <span class="tb-slot" data-lib-tab="cuts">
+  <span class="tb-slot" data-view-slot="cuts">
     {{ ui.select("cut_status", [("posted", "Posted"), ("exported", "Exported, not posted"), ("untrimmed", "Not trimmed yet")],
                  submit=false, filter_target=LIB, filter_key="status", all_label="Any status") }}
     {{ ui.select("captioned", [("yes", "Captioned"), ("no", "No captions")],
                  submit=false, filter_target=LIB, filter_key="captioned", all_label="Captions: any") }}
   </span>
-  <span class="tb-slot" data-lib-tab="posts">
+  <span class="tb-slot" data-view-slot="posts">
     {{ ui.select("post_status", post_status_choices, submit=false,
                  filter_target=LIB, filter_key="status", all_label="Any status") }}
   </span>
   {{ ui.daterange("date_from", "date_to", label="Date", submit=false,
                   filter_target=LIB, filter_key="date") }}
-  <span class="tb-slot" data-lib-tab="videos cuts">
+  <span class="tb-slot" data-view-slot="videos cuts">
     {{ ui.sort(LIB, [("date-desc", "Newest first"), ("date-asc", "Oldest first"),
                      ("title-asc", "Title A–Z"), ("title-desc", "Title Z–A")]) }}
   </span>
   {# Posts get their own sort: the engagement keys only exist on those cards,
      and only once a metrics snapshot has been taken. #}
-  <span class="tb-slot" data-lib-tab="posts">
+  <span class="tb-slot" data-view-slot="posts">
     {{ ui.sort(LIB, [("date-desc", "Newest first"), ("date-asc", "Oldest first"),
                      ("likes-desc", "Most likes"), ("views-desc", "Most views"),
                      ("replies-desc", "Most replies"), ("reposts-desc", "Most reposts"),
@@ -45,25 +46,16 @@
   </span>
   {{ ui.clear_filters(LIB) }}
 {% endset %}
-{% set lib_crumbs %}
-  <div class="crumbs dash-views" role="tablist" aria-label="Switch library view">
-    <button type="button" class="crumb crumb-current" role="tab" aria-selected="true"
-            data-tab="videos" onclick="setLibTab('videos')">
-      Videos <span class="crumb-count" data-filter-count="videos">{{ counts.videos }}</span>
-    </button>
-    <span class="crumb-sep" aria-hidden="true">›</span>
-    <button type="button" class="crumb" role="tab" aria-selected="false"
-            data-tab="cuts" onclick="setLibTab('cuts')">
-      Clips <span class="crumb-count" data-filter-count="cuts">{{ counts.cuts }}</span>
-    </button>
-    <span class="crumb-sep" aria-hidden="true">›</span>
-    <button type="button" class="crumb" role="tab" aria-selected="false"
-            data-tab="posts" onclick="setLibTab('posts')">
-      Posts <span class="crumb-count" data-filter-count="posts">{{ counts.posts }}</span>
-    </button>
-  </div>
+{# Tab keys double as the [data-filter-section] names, so live_counts keeps each
+   badge in step with client-side filtering. #}
+{% set lib_views %}
+  {{ ui.view_tabs([("videos", "Videos", counts.videos),
+                   ("cuts", "Clips", counts.cuts),
+                   ("posts", "Posts", counts.posts)],
+                  store="libTab", param="section", active=section,
+                  label="Switch library view", live_counts=true) }}
 {% endset %}
-{{ ui.pagebar("", crumbs=lib_crumbs) }}
+{{ ui.pagebar("", views=lib_views) }}
 
 <div class="pagebar-tools below-bar" data-toolbar>
   {{ lib_filters }}
@@ -71,7 +63,8 @@
 
 <div id="lib-panels">
 {# ============ VIDEOS ============ #}
-<div id="videos-panel" class="lib-panel" data-filter-section="videos">
+<div id="videos-panel" class="lib-panel" data-filter-section="videos"
+     role="tabpanel" aria-labelledby="videos-tab" {{ 'hidden' if section != 'videos' }}>
   {% if not video_rows %}
     <div class="empty"><span class="icon">▤</span><strong>Nothing downloaded yet</strong>
       Approve videos from <a href="/">Create content</a> to download them.</div>
@@ -109,7 +102,8 @@
 </div>
 
 {# ============ CUTS ============ #}
-<div id="cuts-panel" class="lib-panel" data-filter-section="cuts" hidden>
+<div id="cuts-panel" class="lib-panel" data-filter-section="cuts"
+     role="tabpanel" aria-labelledby="cuts-tab" {{ 'hidden' if section != 'cuts' }}>
   <div class="lib-toolbar">
     {% if video_rows %}
       <button type="button" class="btn primary"
@@ -186,7 +180,8 @@
 </dialog>
 
 {# ============ POSTS ============ #}
-<div id="posts-panel" class="lib-panel" data-filter-section="posts" hidden>
+<div id="posts-panel" class="lib-panel" data-filter-section="posts"
+     role="tabpanel" aria-labelledby="posts-tab" {{ 'hidden' if section != 'posts' }}>
   {% if not posts %}
     <div class="empty"><span class="icon">✦</span><strong>No posts yet</strong>
       Post a clip to Threads and it'll show up here.</div>
@@ -248,41 +243,4 @@
 </div>
 </div>{# /lib-panels #}
 
-<script>
-// Library view toggle: Videos / Cuts / Posts. Persist the choice, but honour
-// an explicit ?section= from a link (e.g. "back to cuts") on first load.
-const LIB_PANELS = { videos: 'videos-panel', cuts: 'cuts-panel', posts: 'posts-panel' };
-function setLibTab(tab) {
-  if (!LIB_PANELS[tab]) tab = 'videos';
-  for (const [name, id] of Object.entries(LIB_PANELS)) {
-    const panel = document.getElementById(id);
-    if (panel) panel.hidden = name !== tab;
-  }
-  document.querySelectorAll('.dash-views [data-tab]').forEach(btn => {
-    const active = btn.dataset.tab === tab;
-    btn.classList.toggle('crumb-current', active);
-    btn.setAttribute('aria-selected', active ? 'true' : 'false');
-  });
-  // Swap in this tab's filters. Each tab keeps whatever it had selected, but
-  // only the visible controls take part in the match. A slot can serve several
-  // tabs: data-lib-tab="videos cuts".
-  document.querySelectorAll('[data-lib-tab]').forEach(slot => {
-    const tabs = slot.dataset.libTab.split(/\s+/);
-    slot.classList.toggle('tb-hidden', !tabs.includes(tab));
-  });
-  if (window.refreshToolbarFilters) window.refreshToolbarFilters();
-  try { localStorage.setItem('libTab', tab); } catch (e) {}
-}
-(function restoreLibTab() {
-  const requested = "{{ section }}";
-  const explicit = {{ 'true' if request.query_params.get('section') else 'false' }};
-  let tab = 'videos';
-  if (explicit && LIB_PANELS[requested]) {
-    tab = requested;
-  } else {
-    try { tab = localStorage.getItem('libTab') || 'videos'; } catch (e) {}
-  }
-  setLibTab(tab);
-})();
-</script>
 {% endblock %}

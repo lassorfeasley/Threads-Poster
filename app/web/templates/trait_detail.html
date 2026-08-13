@@ -1,5 +1,5 @@
-{% extends "base.html" %}
-{% block content %}
+{% extends "settings_base.html" %}
+{% block settings_content %}
 {% import "components/toolbar.html" as ui %}
 {% set td_sub %}Published posts tagged with this footage trait
   {% if weight and weight.n_posts %}· {{ weight.n_posts }} with metrics

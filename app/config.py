@@ -115,6 +115,37 @@ def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = Tr
     (CONFIG_DIR / "first_reply.yaml").write_text(FIRST_REPLY_HEADER + body)
 
 
+BRAND_HEADER = """\
+# Who this workspace is: identity + audience fields that will parameterize the
+# LLM prompts (today they hardcode climate / local-TV / Renewables.org), plus
+# white-label appearance for the app chrome. Editable via the Brand & audience
+# page under Configure; no code changes needed.
+
+"""
+
+# White-label defaults: what the sidebar/title show when brand.yaml is unset.
+DEFAULT_APP_NAME = "Climate Clip Monitor"
+
+_BRAND_TEXT_FIELDS = ("name", "mission", "audience", "voice_notes", "topic",
+                      "app_name", "logo_file")
+
+
+def load_brand() -> dict[str, str]:
+    """Brand & audience config as ``{field: str}`` with every field present."""
+    data = _load_yaml(CONFIG_DIR / "brand.yaml")
+    return {f: str(data.get(f) or "").strip() for f in _BRAND_TEXT_FIELDS}
+
+
+def save_brand(values: dict[str, str]) -> None:
+    current = load_brand()
+    for f in _BRAND_TEXT_FIELDS:
+        if f in values:
+            current[f] = str(values[f] or "").strip()
+    body = yaml.safe_dump(current, default_flow_style=False, allow_unicode=True,
+                          width=88, sort_keys=False)
+    (CONFIG_DIR / "brand.yaml").write_text(BRAND_HEADER + body)
+
+
 CAPTION_STYLE_HEADER = """\
 # Operator style guide for AI-drafted post captions — a list of `rules`.
 # Editable via the Style guide page under Configure; no code changes needed.

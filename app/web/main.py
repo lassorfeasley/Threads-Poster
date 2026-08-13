@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import defer, selectinload
+from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import instagram_api, spend, threads_api, youtube
 from ..analytics import (generate_report, latest_metrics_bulk, snapshot_metrics,
@@ -27,8 +27,9 @@ from ..analytics import (generate_report, latest_metrics_bulk, snapshot_metrics,
 from ..categories import category_by_slug, category_options
 from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
 from ..config import (
-    env, load_caption_rules, load_first_reply, load_keywords, load_settings,
-    render_caption_guide, save_caption_rules, save_first_reply, save_keywords,
+    DEFAULT_APP_NAME, env, load_brand, load_caption_rules, load_first_reply,
+    load_keywords, load_settings, render_caption_guide, save_brand,
+    save_caption_rules, save_first_reply, save_keywords,
 )
 from ..db import (
     SessionLocal,
@@ -39,6 +40,11 @@ from ..db import (
     sync_channels_from_config,
     sync_traits_from_config,
 )
+from ..draft_proposals import KIND_CAPTION, KIND_HOOK
+from ..draft_proposals import log_proposal as log_draft_proposal
+from ..draft_proposals import operator_written as operator_written_drafts
+from ..draft_proposals import policy_version as draft_policy_version
+from ..draft_proposals import record_verdict as record_draft_verdict
 from ..engagement import PacingLimitError, post_approved_reply, sync_comments
 from ..giphy import is_configured as giphy_configured
 from ..history import import_history
@@ -213,6 +219,33 @@ def _threads_authenticated() -> bool:
 
 templates.env.globals["threads_authenticated"] = _threads_authenticated
 
+
+def _brand_name() -> str:
+    """White-label app name for the sidebar/title. Renders on every page, so it
+    must never raise."""
+    try:
+        return load_brand().get("app_name") or DEFAULT_APP_NAME
+    except Exception:
+        return DEFAULT_APP_NAME
+
+
+def _brand_logo() -> str:
+    """URL of the uploaded white-label logo, or "" for the default mark.
+    mtime query busts the browser cache when a new logo replaces the old."""
+    try:
+        fn = load_brand().get("logo_file") or ""
+        if not fn:
+            return ""
+        path = _STATIC_DIR / "brand" / fn
+        return f"/static/brand/{fn}?v={int(path.stat().st_mtime)}"
+    except Exception:
+        return ""
+
+
+templates.env.globals["brand_name"] = _brand_name
+templates.env.globals["brand_logo"] = _brand_logo
+templates.env.globals["default_app_name"] = DEFAULT_APP_NAME
+
 init_db()
 with session_scope() as _s:
     sync_channels_from_config(_s)
@@ -227,6 +260,14 @@ with session_scope() as _s:
         _run.finished_at = utcnow()
         if not _run.result:
             _run.result = "Interrupted — the server restarted while the pass was running."
+    # In-process export threads die with the server; leave cuts marked exporting
+    # looking stuck forever. Flip them to failed so the Post step can retry.
+    for _cut in _s.execute(
+        select(Cut).where(Cut.export_status == "exporting")
+    ).scalars().all():
+        _cut.export_status = "failed"
+        _cut.export_error = "Interrupted — the server restarted while saving. Try again."
+        _cut.updated_at = utcnow()
 
 # Adaptive window scheduler (queue + hotness + metrics poll) while the dashboard runs.
 # Configure logging first: this module is the uvicorn worker's entry point, so
@@ -600,20 +641,24 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
               keyword: list[str] = Query(default=[]),
               region: str = "", country: str = "", scope: str = "",
               status: str = "new", date_from: str = "", date_to: str = "",
-              show_hidden: int = 0, msg: str = ""):
+              show_hidden: int = 0, msg: str = "", view: str = "candidates"):
     settings = load_settings()
     threshold = settings.get("matching.score_threshold", 0.5)
     keyword = [k for k in keyword if k.strip()]
     filtering = bool(q or channel_id or keyword or region or country or scope
                      or date_from or date_to or status != "new")
+    # Which of the three lists is open. Rendering it server-side keeps a linked
+    # view from flashing the default one first.
+    if view not in ("candidates", "inprogress", "trimmed"):
+        view = "candidates"
 
     # On a bare visit (no query string), default the view to today + yesterday by
     # publish date. Any filter interaction submits a query string and is respected
     # as-is, so the operator can widen the window or clear it entirely.
-    # A flash redirect lands here as "/?msg=…", which is not a filter
-    # interaction: counting it as one drops the window and re-queries the whole
-    # backlog after every action.
-    date_defaulted = not (set(request.query_params) - {"msg"})
+    # A flash redirect lands here as "/?msg=…", and "?view=" only picks a list,
+    # so neither is a filter interaction: counting them as one drops the window
+    # and re-queries the whole backlog after every action.
+    date_defaulted = not (set(request.query_params) - {"msg", "view"})
     if date_defaulted:
         data = pagecache.read("dashboard")
         date_from, date_to = data["date_from"], data["date_to"]
@@ -631,7 +676,7 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
          "show_hidden": show_hidden, "filtering": filtering,
          "q": q, "channel_id": channel_id, "keyword": keyword, "region": region,
          "country": country, "scope": scope, "status": status,
-         "msg": msg, "active": "dashboard"},
+         "msg": msg, "view": view, "active": "dashboard"},
     )
 
 
@@ -1057,20 +1102,24 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         c = cut.candidate
 
         exported = bool(cut.trimmed_clip_path) and Path(cut.trimmed_clip_path).exists()
+        exporting = cut.export_status == "exporting"
+        export_failed = cut.export_status == "failed"
         posts = session.execute(
             select(ThreadsPost).where(ThreadsPost.cut_pk == cut.id)
             .order_by(ThreadsPost.created_at.desc())
         ).scalars().all()
         posted = any(p.status == "published" for p in posts)
         cut_state = {"exported": exported, "posted": posted,
-                     "captioned": bool(cut.subtitled_clip_path)}
+                     "captioned": bool(cut.subtitled_clip_path),
+                     "exporting": exporting, "export_failed": export_failed}
         # A not-yet-published post pins the exact clip file it was queued with,
         # so re-exporting won't change it — warn before the operator assumes it will.
         pending = next((p for p in posts if p.status in ("queued", "draft", "failed")), None)
         pending_post_status = pending.status if pending else ""
         pending_post_id = pending.id if pending else None
 
-        active_step = step if step in ("trim", "post") else ("post" if exported else "trim")
+        active_step = step if step in ("trim", "post") else (
+            "post" if (exported or exporting or export_failed) else "trim")
 
         segments = []
         if cut.trim_segments:
@@ -1135,6 +1184,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "account_name": threads_api.account_username(),
          "pending_post_status": pending_post_status,
          "pending_post_id": pending_post_id,
+         "export_error": (cut.export_error or "") if export_failed else "",
          # Attribution first-comment, editable before the post even exists:
          # prefill from the pending post so requeueing round-trips cleanly.
          "attribution_text": (pending.attribution_text or "") if pending else "",
@@ -1693,20 +1743,36 @@ def _delete_if_unreferenced(session, paths: list[str]) -> None:
 
 
 @app.post("/cut/{cut_id}/export")
-def export_clip(cut_id: int, segments_json: str = Form(...), as_new: str = Form("0")):
+def export_clip(request: Request, cut_id: int, segments_json: str = Form(...),
+                as_new: str = Form("0")):
+    """Persist segments and kick off the supercut in the background.
+
+    Returns immediately so the Trim step can navigate to Post with a skeleton;
+    the Post page polls ``/cut/{id}/export-status`` until the file is ready.
+    """
+    wants_json = "application/json" in request.headers.get("accept", "")
     try:
         segments = json.loads(segments_json)
         assert isinstance(segments, list) and segments
     except Exception:
-        return _flash(f"/cut/{cut_id}?step=trim", "No segments to export")
+        msg = "No segments to export"
+        return (JSONResponse({"error": msg}, status_code=400) if wants_json
+                else _flash(f"/cut/{cut_id}?step=trim", msg))
     save_as_new = as_new in ("1", "true", "on", "yes")
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None:
-            return _flash("/", "Clip not found")
+            return (JSONResponse({"error": "Clip not found"}, status_code=404) if wants_json
+                    else _flash("/", "Clip not found"))
         c = cut.candidate
         if c is None or not c.local_video_path:
-            return _flash("/", "Video not found or not downloaded")
+            return (JSONResponse({"error": "Video not found or not downloaded"}, status_code=404)
+                    if wants_json else _flash("/", "Video not found or not downloaded"))
+        if cut.export_status == "exporting" and not save_as_new:
+            dest = f"/cut/{cut.id}?step=post"
+            return (JSONResponse({"ok": True, "cut_id": cut.id, "redirect": dest,
+                                  "msg": "Export already in progress"})
+                    if wants_json else _flash(dest, "Export already in progress"))
         # "Save as new clip": keep the open cut untouched and write the
         # marked segments into a fresh sibling cut on the same video.
         if save_as_new:
@@ -1715,68 +1781,156 @@ def export_clip(cut_id: int, segments_json: str = Form(...), as_new: str = Form(
             session.flush()
         else:
             target = cut
-        try:
-            # Version every export. Re-exporting a cut must never overwrite the
-            # file a queued post already points at — that would silently swap the
-            # video under a scheduled post.
-            stamp = utcnow().strftime("%Y%m%dT%H%M%S")
-            previous = ([] if save_as_new else
-                        [target.trimmed_clip_path, target.subtitled_clip_path,
-                         target.vertical_clip_path, target.clip_transcript_path])
-            out = export_supercut(c.local_video_path, segments,
-                                  f"{c.video_id}_cut{target.id}_{stamp}")
-            target.trim_segments = json.dumps(segments)
-            target.trimmed_clip_path = str(out)
-            target.updated_at = utcnow()
-            # Any previously generated captions/composites no longer match the new cut.
-            target.subtitled_clip_path = ""
-            target.vertical_clip_path = ""
-            target.clip_transcript_path = ""
-            target.use_subtitles = False
+        target.trim_segments = json.dumps(segments)
+        target.updated_at = utcnow()
+        # Keep existing trimmed/captioned files until the worker swaps them —
+        # a failed export must not orphan an already-good clip. The Post step
+        # shows a skeleton while export_status is "exporting".
+        target.export_status = "exporting"
+        target.export_error = ""
+        target_id = target.id
+        n = len(segments)
+
+    _in_background(_export_cut_in_thread, target_id)
+    verb = "Saving new clip" if save_as_new else "Saving"
+    dest = f"/cut/{target_id}?step=post"
+    msg = f"{verb} — {n} segment{'s' if n != 1 else ''}…"
+    if wants_json:
+        return JSONResponse({"ok": True, "cut_id": target_id, "redirect": dest, "msg": msg})
+    return _flash(dest, msg)
+
+
+def _export_cut_in_thread(cut_id: int) -> None:
+    """ffmpeg supercut + optional title draft for a cut marked ``exporting``."""
+    try:
+        with session_scope() as session:
+            cut = session.get(Cut, cut_id)
+            if cut is None:
+                return
+            c = cut.candidate
+            if c is None or not c.local_video_path:
+                cut.export_status = "failed"
+                cut.export_error = "Video not found or not downloaded"
+                cut.updated_at = utcnow()
+                return
+            try:
+                segments = json.loads(cut.trim_segments or "[]")
+                assert isinstance(segments, list) and segments
+            except Exception:
+                cut.export_status = "failed"
+                cut.export_error = "No segments to export"
+                cut.updated_at = utcnow()
+                return
+            source = c.local_video_path
+            video_id = c.video_id
+            previous = [cut.trimmed_clip_path, cut.subtitled_clip_path,
+                        cut.vertical_clip_path, cut.clip_transcript_path]
+            need_title = not (cut.clip_title or "").strip()
+            draft_caption = cut.draft_caption or ""
+            video_title = c.title or ""
+            candidate_pk = c.id
+
+        stamp = utcnow().strftime("%Y%m%dT%H%M%S")
+        out = export_supercut(source, segments, f"{video_id}_cut{cut_id}_{stamp}")
+
+        title = ""
+        calendar = ""
+        if need_title:
+            try:
+                settings = load_settings()
+                model = settings.get("engagement.draft_model", "claude-sonnet-5")
+                with session_scope() as session:
+                    c = session.get(Candidate, candidate_pk)
+                    excerpt = _transcript_excerpt(c, segments) if c else ""
+                title = suggest_title(model, video_title, excerpt, draft_caption or None) or ""
+                if title:
+                    calendar = suggest_calendar_name(
+                        model, title, draft_caption or None) or ""
+            except Exception:
+                log.exception("Auto-title failed for cut %s", cut_id)
+
+        with session_scope() as session:
+            cut = session.get(Cut, cut_id)
+            if cut is None:
+                return
+            cut.trimmed_clip_path = str(out)
+            cut.updated_at = utcnow()
+            cut.subtitled_clip_path = ""
+            cut.vertical_clip_path = ""
+            cut.clip_transcript_path = ""
+            cut.use_subtitles = False
+            cut.export_status = ""
+            cut.export_error = ""
+            if title and not (cut.clip_title or "").strip():
+                cut.clip_title = title
+                if calendar:
+                    cut.calendar_name = calendar
             if previous:
                 _delete_if_unreferenced(session, previous)
-            # Auto-title the fresh clip from its own transcript, but only when the
-            # operator hasn't already set one (regeneration stays available in the
-            # Post step). A titling failure must never block the export.
-            if not (target.clip_title or "").strip():
-                try:
-                    settings = load_settings()
-                    model = settings.get("engagement.draft_model", "claude-sonnet-5")
-                    excerpt = _transcript_excerpt(c, segments)
-                    title = suggest_title(model, c.title, excerpt, target.draft_caption or None)
-                    if title:
-                        target.clip_title = title
-                        target.calendar_name = suggest_calendar_name(
-                            model, title, target.draft_caption or None)
-                except Exception:
-                    pass
-            n = len(segments)
-            # Now that the clip's own transcript exists (trim_segments is
-            # saved), have the Post step draft a caption from it — shown as a
-            # proposal the operator must accept, never written into the field.
-            # Cuts whose caption was already edited by the operator (or legacy
-            # cuts still carrying the old video-level seed) skip the auto-run
-            # only when the text is genuinely theirs.
-            seed = (c.draft_caption or "").strip()
-            current = (target.draft_caption or "").strip()
-            autocaption = "&autocaption=1" if (not current or current == seed) else ""
-            # From the second exported clip onwards, a multi-clip video prompts
-            # the operator (on the Post step) to consider turning the marker off.
-            askmulti = ""
-            if c.multi_clip_potential:
-                exported_cuts = session.execute(
-                    select(func.count()).select_from(Cut).where(
-                        Cut.candidate_pk == c.id, Cut.trimmed_clip_path != "")
-                ).scalar() or 0
-                if exported_cuts >= 2:
-                    askmulti = f"&askmulti={exported_cuts}"
-            # autosubs=1 makes the Post step kick off caption generation
-            # immediately, so the captioned variant is the default.
-            verb = "Saved new clip" if save_as_new else "Saved"
-            return _flash(f"/cut/{target.id}?step=post&autosubs=1{autocaption}{askmulti}",
-                          f"{verb} — {n} segment{'s' if n > 1 else ''} — generating captions…")
-        except ClipExportError as exc:
-            return _flash(f"/cut/{cut_id}?step=trim", f"Export failed: {exc}")
+    except ClipExportError as exc:
+        log.warning("Background export failed for cut %s: %s", cut_id, exc)
+        with session_scope() as session:
+            cut = session.get(Cut, cut_id)
+            if cut is None:
+                return
+            cut.export_status = "failed"
+            cut.export_error = str(exc)[:500]
+            cut.updated_at = utcnow()
+    except Exception as exc:
+        log.exception("Background export crashed for cut %s", cut_id)
+        with session_scope() as session:
+            cut = session.get(Cut, cut_id)
+            if cut is None:
+                return
+            cut.export_status = "failed"
+            cut.export_error = f"Export failed: {exc}"[:500]
+            cut.updated_at = utcnow()
+
+
+@app.get("/cut/{cut_id}/export-status")
+def cut_export_status(cut_id: int):
+    """Polled by the Post-step skeleton while a background save is running."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        c = cut.candidate
+        exported = bool(cut.trimmed_clip_path) and Path(cut.trimmed_clip_path).exists()
+        status = cut.export_status or ("ready" if exported else "idle")
+        if status == "exporting":
+            return {
+                "status": "exporting",
+                "exported": exported,
+                "error": "",
+                "updated_at": cut.updated_at.isoformat() if cut.updated_at else "",
+            }
+        if status == "failed":
+            return {
+                "status": "failed",
+                "exported": exported,
+                "error": cut.export_error or "Export failed",
+            }
+        # Ready (or idle-but-exported): include the Post-step boot flags the
+        # sync redirect used to carry.
+        seed = (c.draft_caption or "").strip() if c else ""
+        current = (cut.draft_caption or "").strip()
+        autocaption = bool(exported and (not current or current == seed))
+        askmulti = 0
+        if c and c.multi_clip_potential and exported:
+            exported_cuts = session.execute(
+                select(func.count()).select_from(Cut).where(
+                    Cut.candidate_pk == c.id, Cut.trimmed_clip_path != "")
+            ).scalar() or 0
+            if exported_cuts >= 2:
+                askmulti = exported_cuts
+        return {
+            "status": "ready" if exported else "idle",
+            "exported": exported,
+            "error": "",
+            "autosubs": exported,
+            "autocaption": autocaption,
+            "askmulti": askmulti,
+        }
 
 
 @app.post("/cut/{cut_id}/subtitles")
@@ -2088,21 +2242,58 @@ def suggest_caption(cut_id: int):
             voice = voice_context(session, settings)
         except Exception as exc:
             log.warning("Voice context failed (drafting generic): %s", exc)
-            voice = {"examples": [], "style_guide": ""}
+            voice = {"examples": [], "style_guide": "", "target_words": None}
+        model = settings.get("engagement.draft_model", "claude-sonnet-5")
+        max_chars = int(settings.get("engagement.caption_max_chars", 220))
+        operator_guide = render_caption_guide()
+        target_words = voice.get("target_words")
         try:
             caption = suggest_post_caption(
-                settings.get("engagement.draft_model", "claude-sonnet-5"),
+                model,
                 c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
                 examples=voice["examples"], style_guide=voice["style_guide"],
-                operator_guide=render_caption_guide(),
-                max_chars=int(settings.get("engagement.caption_max_chars", 220)),
+                operator_guide=operator_guide,
+                max_chars=max_chars,
+                target_words=target_words,
             )
-            # Not persisted: the suggestion is only a proposal until the
-            # operator explicitly accepts it (/cut/{id}/caption).
+            # The caption field itself is left untouched — this is a proposal
+            # until the operator accepts it (/cut/{id}/caption). The DRAFT is
+            # persisted here regardless, so dismissing it records a rejection
+            # instead of discarding the most informative event in the loop.
+            proposal_id = log_draft_proposal(
+                session, cut_id, caption, kind=KIND_CAPTION,
+                model=model,
+                policy=draft_policy_version(
+                    model=model, max_chars=max_chars, target_words=target_words,
+                    style_guide=voice["style_guide"], operator_guide=operator_guide,
+                    examples=len(voice["examples"]),
+                ),
+                max_chars=max_chars,
+                target_words=target_words,
+                voice_examples=len(voice["examples"]),
+            )
             return {"caption": caption, "voice_examples": len(voice["examples"]),
+                    "proposal_id": proposal_id, "target_words": target_words,
                     "transcript": clip_text}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/cut/{cut_id}/caption-verdict")
+def caption_verdict(cut_id: int, proposal_id: int = Form(...),
+                    verdict: str = Form(...)):
+    """Record what the operator did with a drafted caption (used / dismissed).
+
+    Best-effort telemetry: a failure here must never block captioning, so the
+    response is always OK-shaped and the caller doesn't wait on it.
+    """
+    try:
+        with session_scope() as session:
+            ok = record_draft_verdict(session, proposal_id, verdict)
+        return JSONResponse({"ok": bool(ok)})
+    except Exception:
+        log.exception("Caption verdict logging failed (cut %s)", cut_id)
+        return JSONResponse({"ok": False})
 
 
 def _draft_hook_for_cut(cut: Cut, settings) -> tuple[str, str]:
@@ -2112,6 +2303,10 @@ def _draft_hook_for_cut(cut: Cut, settings) -> tuple[str, str]:
     can't support a hook at all (not exported yet, or nothing is said in it) and
     ``RuntimeError`` when the model round trip fails — callers treat the first
     as settled and the second as worth retrying. Must run inside a session.
+
+    Logs the draft to the ledger before returning. The hook has no accept /
+    dismiss card — it lands directly in ``Cut.hook_text`` and the operator types
+    over it — so without this row the rewrite would leave no trace at all.
     """
     if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
         raise ValueError("Export the clip first — the hook is drafted from "
@@ -2121,13 +2316,33 @@ def _draft_hook_for_cut(cut: Cut, settings) -> tuple[str, str]:
         raise ValueError("No speech detected in the clip — nothing to draft "
                          "a hook from.")
     c = cut.candidate
+    session = object_session(cut)
+    model = settings.get("engagement.draft_model", "claude-sonnet-5")
+    # Voice for hooks comes only from hooks the operator rewrote: they're burned
+    # into the video rather than published as text, so there's no post history.
+    examples: list[str] = []
+    if session is not None and settings.get("voice.enabled", True):
+        try:
+            examples = operator_written_drafts(
+                session, KIND_HOOK, limit=int(settings.get("voice.hook_examples", 6)))
+        except Exception:
+            log.exception("Hook voice examples failed (drafting generic)")
     hook = suggest_hook_text(
-        settings.get("engagement.draft_model", "claude-sonnet-5"),
-        c.title, c.channel.call_sign, c.channel.market,
-        " ".join(clip_text.split())[:3000],
+        model, c.title, c.channel.call_sign, c.channel.market,
+        " ".join(clip_text.split())[:3000], examples=examples,
     )
     if not hook:
         raise RuntimeError("The model returned an empty hook — try again.")
+    if session is not None:
+        try:
+            log_draft_proposal(
+                session, cut.id, hook, kind=KIND_HOOK, model=model,
+                policy=draft_policy_version(
+                    model=model, max_chars=80, target_words=None,
+                    style_guide="", operator_guide="", examples=len(examples)),
+                max_chars=80, target_words=None, voice_examples=len(examples))
+        except Exception:
+            log.exception("Hook proposal logging failed for cut %s", cut.id)
     return hook, clip_text
 
 
@@ -2408,8 +2623,8 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                 # Toggle round-trips: un-ticking removes the pending reel.
                 _drop_pending_reels(session, cut)
             # Persist the queued caption back onto the clip so the clip reflects
-            # what was scheduled, not the original generated draft. (Done after
-            # record_post has frozen the AI draft as suggested_caption.)
+            # what was scheduled. Safe to overwrite now: the AI draft lives in
+            # the caption ledger, not in this field.
             cut.draft_caption = caption
             updated = bool(existing)
         except Exception as exc:
@@ -2918,7 +3133,7 @@ def threads_connect(code: str = Form(...), next: str = Form("/calendar")):
 
 
 @app.post("/instagram/connect")
-def instagram_connect(code: str = Form(...), next: str = Form("/threads-account")):
+def instagram_connect(code: str = Form(...), next: str = Form("/connections")):
     try:
         instagram_api.exchange_code(_clean_auth_code(code))
         return _flash(next, "Instagram connected")
@@ -2926,8 +3141,8 @@ def instagram_connect(code: str = Form(...), next: str = Form("/threads-account"
         return _flash(next, f"Instagram auth failed: {exc}")
 
 
-@app.get("/threads-account", response_class=HTMLResponse)
-def threads_account_page(request: Request, msg: str = ""):
+@app.get("/connections", response_class=HTMLResponse)
+def connections_page(request: Request, msg: str = ""):
     """Threads + Instagram OAuth connection status (Configure area)."""
     authenticated = threads_api.is_authenticated()
     ig_authenticated = instagram_api.is_authenticated()
@@ -2936,15 +3151,21 @@ def threads_account_page(request: Request, msg: str = ""):
     except Exception:  # missing .env keys shouldn't 500 the page
         ig_auth_url = ""
     return templates.TemplateResponse(
-        request, "threads_account.html",
+        request, "connections.html",
         {"authenticated": authenticated,
          "auth_url": threads_api.authorize_url() if not authenticated else "",
          "ig_authenticated": ig_authenticated,
          "ig_auth_url": ig_auth_url,
          "ig_username": instagram_api.account_username() if ig_authenticated else "",
          "ig_configured": bool(env("INSTAGRAM_APP_ID")),
-         "msg": msg, "active": "threads_account"},
+         "msg": msg, "active": "connections"},
     )
+
+
+@app.get("/threads-account")
+def threads_account_redirect():
+    """Back-compat: the Threads account page is now Connections."""
+    return RedirectResponse("/connections", status_code=303)
 
 
 # --- Archive -----------------------------------------------------------------
@@ -3506,6 +3727,67 @@ def suggest_post_attribution(post_id: int):
     return {"text": text}
 
 
+# --- Settings ----------------------------------------------------------------
+
+@app.get("/settings")
+def settings_index():
+    """The sidebar's one door to configuration; the rail lives in settings_base.html.
+
+    Every settings page keeps its own top-level URL, so this only has to land on
+    the first one.
+    """
+    return RedirectResponse("/brand", status_code=307)
+
+
+# --- Brand & audience ----------------------------------------------------------
+
+_BRAND_LOGO_DIR = _STATIC_DIR / "brand"
+_ALLOWED_LOGO_EXTS = (".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif")
+
+
+@app.get("/brand", response_class=HTMLResponse)
+def brand_page(request: Request, msg: str = ""):
+    """Workspace identity + white-label appearance (Configure area)."""
+    return templates.TemplateResponse(
+        request, "brand.html",
+        {"brand": load_brand(), "default_app_name": DEFAULT_APP_NAME,
+         "msg": msg, "active": "brand"},
+    )
+
+
+@app.post("/brand")
+async def brand_save(
+    name: str = Form(""), mission: str = Form(""), audience: str = Form(""),
+    topic: str = Form(""), voice_notes: str = Form(""), app_name: str = Form(""),
+    logo: UploadFile | None = File(None),
+):
+    values = {"name": name, "mission": mission, "audience": audience,
+              "topic": topic, "voice_notes": voice_notes, "app_name": app_name}
+    if logo is not None and (logo.filename or "").strip():
+        ext = Path(logo.filename).suffix.lower()
+        if ext not in _ALLOWED_LOGO_EXTS:
+            return _flash("/brand", "Logo must be a PNG, JPG, SVG, WebP, or GIF")
+        data = await logo.read()
+        if len(data) > 2 * 1024 * 1024:
+            return _flash("/brand", "Logo is too large — keep it under 2 MB")
+        _BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
+        # One canonical file: a new upload replaces the old, whatever its type.
+        for old in _BRAND_LOGO_DIR.glob("logo.*"):
+            old.unlink(missing_ok=True)
+        (_BRAND_LOGO_DIR / f"logo{ext}").write_bytes(data)
+        values["logo_file"] = f"logo{ext}"
+    save_brand(values)
+    return _flash("/brand", "Brand & audience saved")
+
+
+@app.post("/brand/logo/remove")
+def brand_logo_remove():
+    for old in _BRAND_LOGO_DIR.glob("logo.*"):
+        old.unlink(missing_ok=True)
+    save_brand({"logo_file": ""})
+    return _flash("/brand", "Logo removed")
+
+
 # --- Keywords ----------------------------------------------------------------
 
 @app.get("/keywords", response_class=HTMLResponse)
@@ -3586,14 +3868,34 @@ def first_reply_redirect():
 @app.get("/style-guide", response_class=HTMLResponse)
 def style_guide_page(request: Request, msg: str = ""):
     from ..caption_insights import has_generated, load_suggestions
+    from ..draft_proposals import recent_pairs
+    from ..draft_proposals import stats as draft_loop_stats
+    from ..voice import collect_voice_captions, length_target
 
+    settings = load_settings()
     with session_scope() as session:
         suggestions = load_suggestions(session)
         generated = has_generated(session)
+        # Not "loop": Jinja shadows that name inside every {% for %} block.
+        caption_loop = draft_loop_stats(session, KIND_CAPTION)
+        hook_loop = draft_loop_stats(session, KIND_HOOK)
+        pairs = recent_pairs(session, KIND_CAPTION)
+        hook_pairs = recent_pairs(session, KIND_HOOK)
+        # Read the target directly rather than through voice_context: that
+        # would distill the style guide, and a page view must not spend an
+        # LLM call.
+        try:
+            target_words = length_target(collect_voice_captions(session), settings)
+        except Exception:
+            log.exception("Caption length target failed")
+            target_words = None
     return templates.TemplateResponse(
         request, "style_guide.html",
         {"rules": load_caption_rules(), "suggestions": suggestions,
-         "has_generated": generated, "msg": msg, "active": "style_guide"},
+         "has_generated": generated, "msg": msg, "active": "style_guide",
+         "caption_loop": caption_loop, "pairs": pairs, "target_words": target_words,
+         "hook_loop": hook_loop, "hook_pairs": hook_pairs,
+         "max_chars": int(settings.get("engagement.caption_max_chars", 220))},
     )
 
 

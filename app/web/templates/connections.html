@@ -1,8 +1,8 @@
-{% extends "base.html" %}
-{% block content %}
+{% extends "settings_base.html" %}
+{% block settings_content %}
 {% import "components/toolbar.html" as ui %}
 {% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel.{% endset %}
-{{ ui.pagebar("Accounts", sub=ta_sub) }}
+{{ ui.pagebar("Connected accounts", sub=ta_sub) }}
 
 <div class="card">
   <div class="card-title" style="margin-bottom: 8px;">Threads</div>
@@ -14,7 +14,7 @@
        2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
        Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
     <form method="post" action="/threads/connect">
-      <input type="hidden" name="next" value="/threads-account">
+      <input type="hidden" name="next" value="/connections">
       <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
       <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
     </form>
@@ -40,7 +40,7 @@
        2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
        Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
     <form method="post" action="/instagram/connect">
-      <input type="hidden" name="next" value="/threads-account">
+      <input type="hidden" name="next" value="/connections">
       <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
       <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
     </form>
@@ -53,7 +53,7 @@
   <form method="post" action="/threads/import-history"
         data-confirm="Import your account's existing Threads posts (made outside this app) so analytics can include them? This does not post anything."
         data-confirm-ok="Import">
-    <input type="hidden" name="next" value="/threads-account">
+    <input type="hidden" name="next" value="/connections">
     <button class="sm">Import Threads history</button>
   </form>
 </div>

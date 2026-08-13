@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "20"
+SCHEMA_VERSION = "23"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -59,6 +59,7 @@ def init_db() -> None:
     # inspection and additive migrations (each is a remote round trip).
     if _schema_is_current():
         return
+    _rename_legacy_tables()  # before create_all, or the rename target exists
     Base.metadata.create_all(engine)
     _ensure_new_columns()
     _migrate_cuts()          # must run before old candidate clip columns are dropped
@@ -111,7 +112,9 @@ _SCHEMA_SENTINELS = (
     "SELECT attribution_skipped FROM threads_posts LIMIT 0",
     "SELECT hook_text FROM cuts LIMIT 0",
     "SELECT hook_autodrafted FROM cuts LIMIT 0",
+    "SELECT export_status FROM cuts LIMIT 0",
     "SELECT id FROM instagram_posts LIMIT 0",
+    "SELECT kind FROM draft_proposals LIMIT 0",
 )
 
 
@@ -160,6 +163,25 @@ def _set_schema_version() -> None:
             )
 
 
+def _rename_legacy_tables() -> None:
+    """Table renames, applied before ``create_all`` so it can't win the race by
+    creating an empty table under the new name first.
+
+    ``caption_proposals`` became ``draft_proposals`` when the Instagram Reel
+    hook started sharing the same ledger — the rows are the same shape, so a
+    second parallel table would have meant reimplementing every query.
+    """
+    from sqlalchemy import inspect, text
+
+    renames = [("caption_proposals", "draft_proposals")]
+    insp = inspect(engine)
+    names = set(insp.get_table_names())
+    with engine.begin() as conn:
+        for old, new in renames:
+            if old in names and new not in names:
+                conn.execute(text(f"ALTER TABLE {old} RENAME TO {new}"))
+
+
 def _ensure_new_columns() -> None:
     """Lightweight additive migration for columns added after first release."""
     from sqlalchemy import inspect, text
@@ -203,6 +225,11 @@ def _ensure_new_columns() -> None:
             "country": "VARCHAR(60) DEFAULT ''",
             "scope": "VARCHAR(20) DEFAULT 'local'",
         },
+        "draft_proposals": {
+            "kind": "VARCHAR(20) DEFAULT 'caption'",
+            "ig_post_pk": "INTEGER",
+            "final_text": "TEXT DEFAULT ''",
+        },
         "cuts": {
             "subs_position": "VARCHAR(10) DEFAULT 'bottom'",
             "calendar_name": "TEXT DEFAULT ''",
@@ -211,6 +238,8 @@ def _ensure_new_columns() -> None:
             "hook_autodrafted": "BOOLEAN DEFAULT FALSE",
             "vertical_clip_path": "TEXT DEFAULT ''",
             "ig_draft_caption": "TEXT DEFAULT ''",
+            "export_status": "VARCHAR(20) DEFAULT ''",
+            "export_error": "TEXT DEFAULT ''",
         },
     }
     added: list[tuple[str, str]] = []
@@ -228,6 +257,14 @@ def _ensure_new_columns() -> None:
         if ("channels", "country") in added:
             conn.execute(text(
                 "UPDATE channels SET country='United States' WHERE country='' OR country IS NULL"
+            ))
+        # ``final_caption`` became ``final_text`` when hooks joined the ledger.
+        # Carry the values over before _drop_removed_columns retires the old one.
+        if ("draft_proposals", "final_text") in added and "final_caption" in {
+            c["name"] for c in insp.get_columns("draft_proposals")
+        }:
+            conn.execute(text(
+                "UPDATE draft_proposals SET final_text = COALESCE(final_caption, '')"
             ))
 
 
@@ -275,10 +312,13 @@ def _migrate_cuts() -> None:
                 "INSERT INTO cuts (candidate_pk, clip_title, calendar_name, "
                 "draft_caption, trim_segments, trimmed_clip_path, "
                 "subtitled_clip_path, use_subtitles, subs_position, "
-                "clip_transcript_path, created_at, updated_at) VALUES "
+                "clip_transcript_path, export_status, export_error, "
+                "hook_text, hook_autodrafted, vertical_clip_path, "
+                "ig_draft_caption, created_at, updated_at) VALUES "
                 "(:cid, :title, '', :draft, :segs, :clip, :subs, :use_subs, "
-                "'bottom', '', :now, :now)"
+                "'bottom', '', '', '', '', :false, '', '', :now, :now)"
             ), {
+                "false": False,
                 "cid": cid,
                 "title": r[1] or "",
                 "draft": r[6] or "",
@@ -351,6 +391,9 @@ def _drop_removed_columns() -> None:
         # Trim columns promoted to the ``cuts`` table (see _migrate_cuts).
         "candidates": ["climate_topic", "clip_title", "trim_segments",
                        "trimmed_clip_path", "subtitled_clip_path", "use_subtitles"],
+        # Renamed to final_text when hooks joined the ledger (value copied in
+        # _ensure_new_columns first).
+        "draft_proposals": ["final_caption"],
     }
     with engine.begin() as conn:
         for table, columns in removed.items():

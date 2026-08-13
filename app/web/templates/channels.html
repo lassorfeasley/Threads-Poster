@@ -1,5 +1,5 @@
-{% extends "base.html" %}
-{% block content %}
+{% extends "settings_base.html" %}
+{% block settings_content %}
 {% import "components/toolbar.html" as ui %}
 
 {% set ch_actions %}
@@ -18,7 +18,8 @@
                   ("checked-desc", "Recently checked"), ("checked-asc", "Least recently checked")]) }}
   {{ ui.clear_filters(CH) }}
 {% endset %}
-{{ ui.pagebar("Channels", count=channels|length, actions=ch_actions, filters=ch_filters) }}
+{{ ui.pagebar("Monitored channels", count=channels|length, sub="YouTube sources the monitor pulls candidates from — not the accounts you publish to.",
+              actions=ch_actions, filters=ch_filters) }}
 
 <dialog id="add-channel-dialog" class="modal modal-wide">
   <div class="modal-head">
