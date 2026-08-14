@@ -57,6 +57,9 @@
   {{ other_cut_segments | map(attribute="title") | unique | join(", ") }}
 </div>
 {% endif %}
+<div class="meta" id="suggested-legend" style="margin-top: 4px;" hidden>
+  <span style="color: rgba(167,139,250,0.95);">▧ violet</span> = suggested clip — nothing is applied until you accept it
+</div>
 <div id="detail-strip" class="detail-strip" hidden>
   <div class="seg-pill detail-pill">
     <span class="seg-len" id="detail-strip-len">0s</span>
@@ -93,6 +96,28 @@
 
   {# Narrow: clip list + save. #}
   <div class="trim-rail">
+    {# Clips the model proposed. Nothing here touches the clip until accepted —
+       accepting appends the segments above, where the normal editing tools
+       (edge drag, reorder, delete, undo) take over. #}
+    {% if transcript_segments %}
+    <div id="clip-proposals" class="clip-proposals">
+      <div class="clip-proposals-head">
+        <span class="clip-proposals-title" id="clip-proposals-title">Suggested clips</span>
+        <div class="clip-proposals-tools">
+          <button type="button" class="ghost sm" id="clip-proposals-toggle"
+                  onclick="toggleClipProposals()" hidden>Show</button>
+          <button type="button" class="ghost sm" id="clip-proposals-reroll"
+                  onclick="rerollClipProposals()"
+                  title="Ask the model to read the transcript and propose clips">Suggest</button>
+          <button type="button" class="ghost sm" id="clip-proposals-dismiss-all"
+                  onclick="dismissAllClipProposals()"
+                  title="Reject every suggestion for this video" hidden>None of these</button>
+        </div>
+      </div>
+      <div id="clip-proposals-list"></div>
+    </div>
+    {% endif %}
+
     <div id="segments-bar" class="segments-bar" hidden>
       <div id="total-len" class="clip-total" aria-live="polite"></div>
       <button type="button" class="sm icon-btn" id="preview-mode-btn"
@@ -151,6 +176,11 @@ let segments = {{ saved_segments | tojson }};
 // Segments already claimed by this video's other clips — drawn as dashed
 // outlines on the main waveform (display-only, never draggable).
 const otherSegments = {{ other_cut_segments | tojson }};
+// Clips the model proposed for this video that haven't been ruled on yet.
+// Display-only: accepting one copies its segments into `segments`, where every
+// normal editing tool already works. There is deliberately no second editor.
+let suggestedClips = {{ suggested_clips | tojson }};
+let hoveredProposal = null;   // proposal id emphasized on the waveform
 // Source transcript (YouTube captions or upload Whisper) — drives the
 // focused 3-line view and keyword search under the player.
 const transcriptLines = {{ transcript_segments | tojson }};
@@ -174,7 +204,11 @@ async function toggleMultiClip(cb) {
 // ---- Undo stack (Cmd/Ctrl+Z) ----
 let undoStack = [];
 function pushUndo() {
-  undoStack.push(JSON.stringify({ segments, pending }));
+  // Suggested clips ride along so undoing an accept puts the proposal back in
+  // the panel instead of leaving it gone with its segments removed. The server
+  // verdict stays "accepted" — that's an intent, and the export-time overlap
+  // score is what actually measures the proposal.
+  undoStack.push(JSON.stringify({ segments, pending, suggestedClips }));
   if (undoStack.length > 100) undoStack.shift();
 }
 function undoEdit() {
@@ -183,6 +217,7 @@ function undoEdit() {
   const st = JSON.parse(snap);
   segments = st.segments;
   pending = st.pending;
+  if (st.suggestedClips) suggestedClips = st.suggestedClips;
   if (selectedSeg !== null && selectedSeg >= segments.length) selectedSeg = null;
   renderPending();
   renderSegments();
@@ -930,6 +965,26 @@ function drawWave() {
     wctx.setLineDash([]);
   });
 
+  // Model proposals awaiting a verdict: violet on a finer dash, so a suggestion
+  // never reads as material already used (dashed amber) or as a real segment
+  // (solid green). Hovering a panel row brightens its clip here, which is how
+  // the list and the timeline point at each other.
+  suggestedClips.forEach(clip => {
+    const hot = hoveredProposal === clip.id;
+    // Only the part not already claimed by a clip — the violet overlay and the
+    // dashed "already clipped" one can never describe the same seconds.
+    visibleProposal(clip).segments.forEach(s => {
+      const x0 = xOf(s.start), x1 = xOf(s.end);
+      wctx.fillStyle = hot ? 'rgba(167,139,250,0.26)' : 'rgba(167,139,250,0.09)';
+      wctx.fillRect(x0, 0, x1 - x0, H);
+      wctx.strokeStyle = hot ? 'rgba(167,139,250,0.95)' : 'rgba(167,139,250,0.5)';
+      wctx.lineWidth = hot ? 2 : 1.5;
+      wctx.setLineDash([2 * dpr, 6 * dpr]);
+      wctx.strokeRect(x0 + 1, 1, (x1 - x0) - 2, H - 2);
+      wctx.setLineDash([]);
+    });
+  });
+
   segments.forEach((s, i) => {
     const x0 = xOf(s.start), x1 = xOf(s.end);
     const sel = i === selectedSeg;
@@ -1200,6 +1255,221 @@ function renderSegments() {
   updateTotal();
   drawWave();
   syncDetailStrip();
+  renderClipProposals();
+}
+
+// ---- Suggested clips ---------------------------------------------------
+// The model proposes a PARTITION of the video: N clips, each one or more
+// segments of the same story. A proposal is never applied on load — that would
+// make "accepted" and "never looked at it" indistinguishable in the ledger, so
+// every clip here waits for a click.
+// Once real segments exist the panel collapses on its own; this remembers an
+// explicit "Show" so it doesn't snap shut again on the next render.
+let userExpandedProposals = false;
+
+function clipProposalById(id) {
+  return suggestedClips.find(c => c.id === id) || null;
+}
+
+// Mirror of clip_proposals.subtract / visible_segments on the server. A
+// proposal must never offer footage a clip already claims. The server filters
+// on page load; this keeps the panel honest while you edit, so marking a
+// segment yourself immediately shrinks any proposal that covered it.
+const PROPOSAL_MIN_FRAGMENT = 1.5;   // a shorter sliver isn't a usable shot
+const PROPOSAL_MIN_REMAINING = 5;    // less than this left isn't a clip
+
+function normalizeRanges(list) {
+  const sorted = (list || [])
+    .map(s => ({ start: +s.start, end: +s.end }))
+    .filter(s => s.end > s.start)
+    .sort((a, b) => a.start - b.start);
+  const merged = [];
+  sorted.forEach(s => {
+    const last = merged[merged.length - 1];
+    if (last && s.start <= last.end) last.end = Math.max(last.end, s.end);
+    else merged.push({ start: s.start, end: s.end });
+  });
+  return merged;
+}
+
+// Every claim on this video's timeline: the other clips' material plus what
+// this clip already holds.
+function claimedRanges() {
+  return normalizeRanges(otherSegments.concat(segments));
+}
+
+function visibleProposal(clip) {
+  const original = clip.segments.reduce((n, s) => n + (s.end - s.start), 0);
+  let pieces = normalizeRanges(clip.segments);
+  claimedRanges().forEach(u => {
+    const next = [];
+    pieces.forEach(p => {
+      if (u.end <= p.start || u.start >= p.end) { next.push(p); return; }
+      if (u.start > p.start) next.push({ start: p.start, end: u.start });
+      if (u.end < p.end) next.push({ start: u.end, end: p.end });
+    });
+    pieces = next;
+  });
+  pieces = pieces.filter(p => p.end - p.start >= PROPOSAL_MIN_FRAGMENT);
+  const seconds = pieces.reduce((n, p) => n + (p.end - p.start), 0);
+  if (seconds < PROPOSAL_MIN_REMAINING) return { segments: [], seconds: 0, trimmed: true };
+  return { segments: pieces, seconds, trimmed: seconds < original - 0.05 };
+}
+
+function renderClipProposals() {
+  const panel = document.getElementById('clip-proposals');
+  const legend = document.getElementById('suggested-legend');
+  if (!panel) return;
+  const list = document.getElementById('clip-proposals-list');
+  const title = document.getElementById('clip-proposals-title');
+  const toggle = document.getElementById('clip-proposals-toggle');
+  const reroll = document.getElementById('clip-proposals-reroll');
+  const dismissAll = document.getElementById('clip-proposals-dismiss-all');
+  // A proposal with nothing left after already-clipped material is removed is
+  // not offered at all; it stays pending server-side and resolves on export.
+  const live = suggestedClips
+    .map(clip => ({ clip, view: visibleProposal(clip) }))
+    .filter(x => x.view.segments.length > 0);
+  const n = live.length;
+
+  // Collapse once there are real segments: past that point the operator is
+  // editing, and the panel must not compete with the work.
+  const collapsed = segments.length > 0 && !userExpandedProposals;
+  if (legend) legend.hidden = !n || collapsed;
+
+  title.textContent = n
+    ? `${n} suggested clip${n === 1 ? '' : 's'}`
+    : 'Suggested clips';
+  reroll.textContent = n ? 'Re-roll' : 'Suggest';
+  dismissAll.hidden = !n;
+  toggle.hidden = !n || segments.length === 0;
+  toggle.textContent = collapsed ? 'Show' : 'Hide';
+
+  if (!n) {
+    list.innerHTML = '<div class="meta">Nothing proposed yet — Suggest reads the '
+      + 'transcript and proposes the clips this video holds.</div>';
+    return;
+  }
+  if (collapsed) { list.innerHTML = ''; return; }
+
+  list.innerHTML = '';
+  live.forEach(({ clip, view }) => {
+    const row = document.createElement('div');
+    row.className = 'proposal-row' + (hoveredProposal === clip.id ? ' hot' : '');
+    const segs = view.segments.length;
+    const conf = (clip.confidence || clip.confidence === 0)
+      ? ` · ${Math.round(clip.confidence * 100)}% confident` : '';
+    row.innerHTML = `
+      <div class="proposal-story">${escapeHtml(clip.story || 'Suggested clip')}</div>
+      <div class="proposal-meta meta">${segs} segment${segs === 1 ? '' : 's'}
+        · ${Math.round(view.seconds)}s${conf}</div>
+      ${view.trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
+      ${clip.why ? `<div class="proposal-why meta">${escapeHtml(clip.why)}</div>` : ''}
+      <div class="proposal-actions">
+        <button type="button" class="ghost sm proposal-play" data-act="play"
+                title="Play this clip without applying it">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+        <button type="button" class="approve sm" data-act="use"
+                title="Add these segments to the clip you're editing">Use</button>
+        <button type="button" class="ghost sm" data-act="new"
+                title="Open this as its own clip on the same video">New clip</button>
+        <button type="button" class="ghost sm" data-act="dismiss">Dismiss</button>
+      </div>`;
+    row.addEventListener('mouseenter', () => { hoveredProposal = clip.id; row.classList.add('hot'); });
+    row.addEventListener('mouseleave', () => { hoveredProposal = null; row.classList.remove('hot'); });
+    row.querySelectorAll('[data-act]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const act = btn.dataset.act;
+        if (act === 'play') previewClipProposal(clip.id);
+        else if (act === 'use') useClipProposal(clip.id);
+        else if (act === 'new') clipProposalToNewCut(clip.id);
+        else if (act === 'dismiss') dismissClipProposal(clip.id);
+      });
+    });
+    list.appendChild(row);
+  });
+}
+
+function toggleClipProposals() {
+  userExpandedProposals = !userExpandedProposals;
+  renderClipProposals();
+}
+
+// Audition a proposal without committing it. Judging a clip by reading two
+// timestamps isn't realistic; this is what makes the panel usable.
+function previewClipProposal(id) {
+  const clip = clipProposalById(id);
+  if (clip) playSegments(visibleProposal(clip).segments);
+}
+
+// Accept = append into the live segments, then edit with the normal tools.
+// Only the unclaimed part is appended, so accepting can never duplicate
+// footage that's already in another clip.
+function useClipProposal(id) {
+  const clip = clipProposalById(id);
+  if (!clip) return;
+  const view = visibleProposal(clip);
+  if (!view.segments.length) return;
+  pushUndo();
+  view.segments.forEach(s => segments.push({
+    start: +Number(s.start).toFixed(2), end: +Number(s.end).toFixed(2),
+  }));
+  selectedSeg = segments.length - 1;
+  suggestedClips = suggestedClips.filter(c => c.id !== id);
+  renderSegments();
+  fetch(`/clip-proposal/${id}/accept`, {
+    method: 'POST',
+    body: new URLSearchParams({ cut_id: '{{ cut.id }}' }),
+  }).catch(() => {});
+}
+
+async function clipProposalToNewCut(id) {
+  try {
+    const r = await fetch(`/clip-proposal/${id}/new-cut`, { method: 'POST' });
+    const d = await r.json();
+    if (d.redirect) location.href = d.redirect;
+    else alert(d.error || 'Could not open that as a new clip');
+  } catch (e) { alert('Could not open that as a new clip: ' + e); }
+}
+
+function dismissClipProposal(id) {
+  suggestedClips = suggestedClips.filter(c => c.id !== id);
+  if (hoveredProposal === id) hoveredProposal = null;
+  renderClipProposals();
+  fetch(`/clip-proposal/${id}/dismiss`, { method: 'POST' }).catch(() => {});
+}
+
+// "None of these" is one click on purpose: a three-clip miss that costs three
+// clicks to reject is a miss that stops getting recorded.
+function dismissAllClipProposals() {
+  if (!suggestedClips.length) return;
+  suggestedClips = [];
+  hoveredProposal = null;
+  renderClipProposals();
+  fetch('/video/{{ c.id }}/dismiss-clip-proposals', { method: 'POST' }).catch(() => {});
+}
+
+async function rerollClipProposals() {
+  const btn = document.getElementById('clip-proposals-reroll');
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  try {
+    const r = await fetch('/video/{{ c.id }}/suggest-clips', { method: 'POST' });
+    const d = await r.json();
+    if (d.clips) {
+      suggestedClips = d.clips;
+      userExpandedProposals = true;
+      renderClipProposals();
+      const toggle = document.getElementById('multi-clip-toggle');
+      if (toggle) toggle.checked = !!d.multi_clip;
+      if (!d.clips.length) alert('The model found nothing worth clipping here.');
+    } else {
+      alert(d.error || 'No clips returned');
+    }
+  } catch (e) { alert('Suggestion failed: ' + e); }
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
 }
 
 function selectSegment(i) {

@@ -1,4 +1,4 @@
-"""LLM helpers: relevance scoring, highlight suggestion, analytics digest.
+"""LLM helpers: relevance scoring, clip suggestion, analytics digest.
 All calls go through Anthropic's API.
 """
 from __future__ import annotations
@@ -189,28 +189,155 @@ def suggest_category(model: str, categories: list[dict], title: str, description
     return {"category": slug, "rationale": str(data.get("rationale", ""))[:500]}
 
 
-def suggest_highlight(model: str, title: str, transcript_segments: list[dict]) -> dict:
-    """Given timestamped transcript segments, suggest the strongest 15-40s window
-    and a draft caption. Returns {start, end, why, draft_caption}. DRAFT ONLY."""
-    compact = [
-        {"start": round(s["start"], 1), "end": round(s["end"], 1), "text": s["text"][:200]}
-        for s in transcript_segments[:400]
-    ]
+def _clean_clip_segments(raw, horizon: float, cap: int,
+                         opening_hold: float = 0.0) -> list[dict]:
+    """Coerce, clamp, order and merge one proposed clip's windows.
+
+    Overlapping windows would play the same audio twice in the supercut, so
+    they're merged here rather than left for the operator to discover after an
+    export. Caption timings occasionally arrive as strings, hence the coercion.
+
+    ``opening_hold`` enforces a minimum length on the FIRST segment so the
+    clip's opening image stays on screen instead of cutting away immediately.
+    The prompt asks for this too, but asking is not enforcing — the fix here
+    extends the first segment forward (never backward, which would drag in the
+    tail of whatever came before) and merges into the next segment if the
+    extension would collide with it.
+    """
+    windows: list[dict] = []
+    for item in (raw or []):
+        try:
+            start = max(0.0, float(item["start"]))
+            end = min(horizon, float(item["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end - start < 0.5:
+            continue
+        windows.append({"start": round(start, 2), "end": round(end, 2)})
+    windows.sort(key=lambda w: w["start"])
+    merged: list[dict] = []
+    for w in windows:
+        if merged and w["start"] <= merged[-1]["end"]:
+            merged[-1]["end"] = max(merged[-1]["end"], w["end"])
+        else:
+            merged.append(dict(w))
+    merged = merged[:cap]
+
+    if opening_hold > 0 and merged:
+        first = merged[0]
+        if first["end"] - first["start"] < opening_hold:
+            first["end"] = round(min(first["start"] + opening_hold, horizon), 2)
+            while len(merged) > 1 and merged[1]["start"] <= first["end"]:
+                first["end"] = round(max(first["end"], merged[1]["end"]), 2)
+                merged.pop(1)
+    return merged
+
+
+def suggest_clips(model: str, title: str, transcript_segments: list[dict],
+                  max_clips: int = 3, max_segments_per_clip: int = 4,
+                  min_seconds: int = 15, max_seconds: int = 40,
+                  opening_hold: float = 3.0,
+                  used_ranges: list[dict] | None = None) -> list[dict]:
+    """Propose the clips worth cutting from one video. DRAFTS ONLY.
+
+    The output is a partition, not a window, because clipping happens on two
+    levels that the model has to keep apart:
+
+    - Several SEGMENTS in one clip: the same story, compressed. Most clips are
+      cut this way — the filler comes out and the vivid beats are joined.
+    - Several CLIPS: separate stories that can't share a caption, each its own
+      post and its own ``Cut`` row.
+
+    ``used_ranges`` are windows already claimed by other clips from this video.
+    They're shown to the model so it spends its proposals on fresh material;
+    the caller still subtracts them afterwards, because a proposal made at
+    archive time goes stale as soon as the next clip is cut.
+
+    Returns ``[{segments, story, why, confidence, draft_caption}]`` where each
+    ``segments`` list is already clamped to the transcript, chronological, and
+    non-overlapping — i.e. droppable straight into ``Cut.trim_segments``. An
+    empty list means the model found nothing worth clipping.
+    """
+    compact = []
+    for s in transcript_segments[:400]:
+        try:
+            compact.append({"start": round(float(s["start"]), 1),
+                            "end": round(float(s["end"]), 1),
+                            "text": str(s.get("text", ""))[:200]})
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not compact:
+        return []
+    horizon = max(w["end"] for w in compact)
+
+    used = [{"start": round(float(r["start"]), 1), "end": round(float(r["end"]), 1)}
+            for r in (used_ranges or [])]
+
     system = (
-        "You find the single strongest 15-40 second window of a local TV news climate "
-        "segment for a short social clip: the most vivid, concrete, human moment. "
-        "Also draft a short caption (under 300 chars) the operator will rewrite. "
-        "JSON shape: {\"start_seconds\": n, \"end_seconds\": n, \"why\": \"one line\", "
-        "\"draft_caption\": \"...\"}"
+        "You cut short social clips out of local TV news climate segments. "
+        "Given a full timestamped transcript, propose the clips worth making.\n"
+        "\n"
+        "Two levels, and they are NOT the same thing:\n"
+        "- SEGMENTS within one clip: one story, compressed. Cut the anchor's "
+        "set-up, filler, repetition and dead air; keep the vivid, concrete, "
+        "human beats. Most good clips are 2-4 segments joined together, not "
+        "one continuous take.\n"
+        "- Separate CLIPS: separate stories that could not share a single "
+        "caption. Only split when the video genuinely covers more than one "
+        "story. Most videos yield exactly one clip.\n"
+        "\n"
+        "THE OPENING SHOT decides whether anyone watches the rest. Start on "
+        "something worth looking at, and hold it: the first segment must run "
+        f"at least {opening_hold:g} seconds without a cut. You can't see the "
+        "footage, so infer it from what is being said — on-scene reporting, "
+        "described action, someone in the field, a witness speaking. Do NOT "
+        "open on an anchor reading at the desk, a studio toss ('X is live, "
+        "X?'), a sign-off ('back to you'), a greeting, or a headline read. "
+        "Those are the weakest frames in any newscast.\n"
+        "\n"
+        f"Each clip totals {min_seconds}-{max_seconds} seconds across at most "
+        f"{max_segments_per_clip} segments. Segments must be chronological and "
+        f"must not overlap. Propose at most {max_clips} clips, best first, and "
+        "return an empty list if nothing here is worth clipping.\n"
+        + ("Some of this video is ALREADY published in other clips — the "
+           "used_ranges below. Do not propose any of that material again, and "
+           "do not build a clip that merely straddles it. Find fresh moments "
+           "or return fewer clips.\n" if used else "")
+        + "Also draft a short caption (under 300 chars) the operator will "
+        "rewrite, and rate your own confidence in the clip.\n"
+        "JSON shape: {\"clips\": [{\"story\": \"one line\", \"segments\": "
+        "[{\"start\": n, \"end\": n}], \"why\": \"one line\", "
+        "\"confidence\": 0.0-1.0, \"draft_caption\": \"...\"}]}"
     )
-    user = json.dumps({"title": title, "segments": compact})
-    data = _json_chat(model, system, user)
-    return {
-        "start": float(data.get("start_seconds", 0)),
-        "end": float(data.get("end_seconds", 0)),
-        "why": str(data.get("why", ""))[:300],
-        "draft_caption": str(data.get("draft_caption", ""))[:400],
-    }
+    payload = {"title": title, "segments": compact}
+    if used:
+        payload["used_ranges"] = used
+    user = json.dumps(payload)
+    data = _json_chat(model, system, user, max_tokens=2000)
+
+    clips: list[dict] = []
+    for raw in (data.get("clips") or [])[:max_clips]:
+        if not isinstance(raw, dict):
+            continue
+        segments = _clean_clip_segments(raw.get("segments"), horizon,
+                                        max_segments_per_clip, opening_hold)
+        if not segments:
+            continue
+        # A "clip" of a couple of seconds is a parse artifact, not a proposal.
+        if sum(s["end"] - s["start"] for s in segments) < 3.0:
+            continue
+        try:
+            confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.0))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        clips.append({
+            "segments": segments,
+            "story": str(raw.get("story", ""))[:200],
+            "why": str(raw.get("why", ""))[:300],
+            "confidence": confidence,
+            "draft_caption": str(raw.get("draft_caption", ""))[:400],
+        })
+    return clips
 
 
 def tag_footage(model: str, images: list[bytes], traits: list[str],
@@ -254,6 +381,95 @@ def tag_footage(model: str, images: list[bytes], traits: list[str],
         "traits": found,
         "why": str(data.get("why", ""))[:300],
     }
+
+
+def pick_opening_frame(model: str, frames: list[tuple[float, bytes]],
+                       latest_index: int, hold_seconds: float = 3.0,
+                       title: str = "", story: str = "") -> dict:
+    """Choose which sampled frame makes the strongest opening image.
+
+    The transcript pass picks a start from the words alone, which is how clips
+    end up opening on an anchor at a desk — the sentence is right and the frame
+    is dead. This looks at the actual footage around that start and moves it.
+
+    ``frames`` are ``(timestamp, jpeg)`` in chronological order. Only frames at
+    or before ``latest_index`` may be chosen: earlier means adding lead-in
+    footage ahead of the speech, while later would cut into the first sentence.
+    The frames after it are still sent, because the model needs them to check
+    that the shot HOLDS rather than cutting away half a second later.
+
+    Returns ``{"index": int|None, "why": str}``; None means leave the start
+    alone.
+    """
+    if not frames or latest_index < 0:
+        return {"index": None, "why": ""}
+
+    interval = round(frames[1][0] - frames[0][0], 2) if len(frames) > 1 else 0.5
+    system = (
+        "You choose the opening frame of a short social video cut from local TV "
+        "news. The first image decides whether anyone watches the rest.\n"
+        f"The frames are consecutive stills, in order, {interval:g}s apart. "
+        f"Frame {latest_index} is where the clip currently starts — where the "
+        "speech begins.\n"
+        f"Choose a frame at or BEFORE frame {latest_index}. Choosing an earlier "
+        "one opens the clip on footage that runs before the talking starts; "
+        "later frames are shown only so you can see what happens next, and must "
+        "never be chosen.\n"
+        "\n"
+        "STRONG openings: on-scene footage, action in progress, fire, flood, "
+        "storm damage, wreckage, rescue crews, crowds, aerial or sweeping "
+        "shots, weather in motion, a person visibly reacting in the field.\n"
+        "WEAK openings: an anchor or reporter at a studio desk, station "
+        "graphics, charts, maps, slates, walls of lower-third text, a frame "
+        "caught mid-transition or mid-dissolve, motion blur, black frames.\n"
+        "\n"
+        f"The image must HOLD: the shot you pick should still be the same shot "
+        f"about {hold_seconds:g}s later. Use the frames that follow yours to "
+        "check. If it cuts away almost immediately, pick a different frame "
+        "even if that one image is prettier.\n"
+        "\n"
+        f"If nothing beats frame {latest_index} itself, answer {latest_index}. "
+        "If the frames are unusable, answer null.\n"
+        "JSON shape: {\"index\": n or null, \"why\": \"one line\"}"
+    )
+
+    blocks: list = [{
+        "type": "text",
+        "text": (f"Story: {story}\n" if story else "")
+        + (f"Video: {title}\n" if title else "")
+        + "Frames follow, each labelled with its index.",
+    }]
+    for i, (ts, image) in enumerate(frames):
+        marker = " <- clip currently starts here" if i == latest_index else ""
+        suffix = " (context only, not selectable)" if i > latest_index else ""
+        blocks.append({"type": "text",
+                       "text": f"Frame {i} (t={ts:.1f}s){marker}{suffix}"})
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(image).decode("ascii"),
+            },
+        })
+
+    resp = _create(model, system + "\nRespond with a single JSON object only — "
+                                   "no prose, no code fences.",
+                   blocks, max_tokens=300, temperature=0.2)
+    data = _parse_json(_text_from(resp))
+    raw = data.get("index")
+    why = str(data.get("why", ""))[:300]
+    if raw is None:
+        return {"index": None, "why": why}
+    try:
+        idx = int(raw)
+    except (TypeError, ValueError):
+        return {"index": None, "why": why}
+    # A model that answers past the cutoff has ignored the one hard rule here;
+    # trusting it would truncate the opening sentence.
+    if idx < 0 or idx > latest_index:
+        return {"index": None, "why": why}
+    return {"index": idx, "why": why}
 
 
 def score_visuals(model: str, images: list[bytes], desirable_traits: list[str],

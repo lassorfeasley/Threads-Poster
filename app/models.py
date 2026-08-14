@@ -85,6 +85,10 @@ class Candidate(Base):
     # the video pinned in the dashboard's "Selected to trim" bucket (even after
     # exports/posts) until the operator toggles it off.
     multi_clip_potential: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Set by the clip suggester rather than the operator, so the marker can be
+    # shown as a suggestion and audited later. Cleared the moment the operator
+    # touches the toggle themselves.
+    multi_clip_auto: Mapped[bool] = mapped_column(Boolean, default=False)
 
     status: Mapped[str] = mapped_column(String(20), default=STATUS_NEW)
     approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -96,10 +100,10 @@ class Candidate(Base):
     transcript_text: Mapped[str] = mapped_column(Text, default="")
     transcription_method: Mapped[str] = mapped_column(String(20), default="")  # captions | "" (none)
 
-    # Optional LLM assists (clearly drafts). ``draft_caption`` is a video-level
-    # seed suggestion; each Cut gets its own editable ``draft_caption`` copied
-    # from this when the cut is created.
-    suggested_highlight: Mapped[str] = mapped_column(Text, default="")  # e.g. "00:42-01:10: ..."
+    # Video-level caption seed written by the clip-suggestion pass. Deliberately
+    # NOT copied into ``Cut.draft_caption`` — captions are drafted per cut from
+    # the trimmed clip's own transcript. It survives as the "still the untouched
+    # seed" comparison the export poll makes before autocaptioning.
     draft_caption: Mapped[str] = mapped_column(Text, default="")
 
     # Vision scoring: how engaging the FOOTAGE looks, judged from YouTube's
@@ -492,6 +496,76 @@ class DraftProposal(Base):
     max_chars: Mapped[int | None] = mapped_column(Integer, nullable=True)
     target_words: Mapped[int | None] = mapped_column(Integer, nullable=True)
     voice_examples: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ClipProposal(Base):
+    """Every clip the model proposed and what the operator actually cut.
+
+    Separate from ``DraftProposal`` on purpose. That table resolves one text
+    against another with a character-overlap ratio; this one resolves a set of
+    time ranges against another set, and half its columns (chars, words, voice
+    examples) are meaningless here. Its ``cut_pk`` is also non-nullable, while
+    a proposed clip has no cut until the operator accepts it.
+
+    A proposal is a PARTITION of one video: ``run_id`` groups the clips from a
+    single suggestion pass, so the row set answers three different questions
+    that a single blended score would hide:
+
+    - Partition: did the model find the right number of stories? Compare
+      ``clips_in_run`` against the cuts actually made on the candidate.
+    - Compression: did it cut filler, or propose one continuous take? Compare
+      ``proposed_segment_count`` / ``proposed_duration_s`` against the final.
+      Most real clips join 2-4 segments, so a single-segment proposal is a
+      miss even when its boundaries look reasonable.
+    - Boundaries: ``iou`` over the union of intervals, plus SIGNED
+      ``start_delta_s`` / ``end_delta_s``. The signed pair is the actionable
+      half — "starts two seconds late, consistently" is a prompt fix, while an
+      IoU of 0.7 says only that something was off.
+
+    Rows are written the moment a pass runs, before the operator can act, so a
+    rejection persists as a rejection instead of vanishing.
+    """
+
+    __tablename__ = "clip_proposals"
+
+    VERDICT_PENDING = "pending"          # proposed, not yet acted on
+    VERDICT_ACCEPTED = "accepted"        # loaded into a cut's segments
+    VERDICT_DISMISSED = "dismissed"      # rejected outright — the real signal
+    VERDICT_SUPERSEDED = "superseded"    # re-rolled before acting on this one
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    candidate_pk: Mapped[int] = mapped_column(ForeignKey("candidates.id"))
+    # Groups the clips proposed by one pass, so partition accuracy is a query
+    # rather than a reconstruction from timestamps.
+    run_id: Mapped[str] = mapped_column(String(40), default="")
+    clip_index: Mapped[int] = mapped_column(Integer, default=0)
+    clips_in_run: Mapped[int] = mapped_column(Integer, default=0)
+
+    # JSON [{start, end}, ...] in the same shape as ``Cut.trim_segments``.
+    proposed_segments: Mapped[str] = mapped_column(Text, default="")
+    proposed_segment_count: Mapped[int] = mapped_column(Integer, default=0)
+    proposed_duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    story: Mapped[str] = mapped_column(Text, default="")
+    why: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    verdict: Mapped[str] = mapped_column(String(20), default=VERDICT_PENDING)
+    # Filled when the proposal is accepted into a cut (existing or new).
+    cut_pk: Mapped[int | None] = mapped_column(ForeignKey("cuts.id"), nullable=True)
+
+    # What actually shipped, resolved at export time.
+    final_segments: Mapped[str] = mapped_column(Text, default="")
+    final_segment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    final_duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    iou: Mapped[float | None] = mapped_column(Float, nullable=True)
+    start_delta_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_delta_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    model: Mapped[str] = mapped_column(String(60), default="")
+    policy_version: Mapped[str] = mapped_column(String(40), default="")
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

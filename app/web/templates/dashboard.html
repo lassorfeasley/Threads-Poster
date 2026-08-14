@@ -184,7 +184,7 @@
       {% elif state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
-      {% if c.multi_clip_potential %}<span class="badge info" title="Marked as having more clips — stays here until turned off">multi-clip</span>{% endif %}
+      {% if c.multi_clip_potential %}<span class="badge info" title="{{ 'The clip suggester found more than one story here — stays until you turn it off' if c.multi_clip_auto else 'Marked as having more clips — stays here until turned off' }}">multi-clip{% if c.multi_clip_auto %} (suggested){% endif %}</span>{% endif %}
     </span>
     {% if c.duration_seconds %}
     <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>

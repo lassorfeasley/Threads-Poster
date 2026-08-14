@@ -50,6 +50,34 @@ categories:
         Throwback clips, archival footage, history segments, climate in fiction,
         television, film and other media moments.
 
+clips:
+  # The clip suggester: reads a video's transcript and proposes the clips it
+  # holds. A proposal is a PARTITION — several clips when the video covers
+  # several stories, each clip several segments of the same story with the
+  # filler cut out. Drafts only; nothing is applied until you accept it.
+  model: claude-haiku-4-5
+  max_clips: 3
+  max_segments: 4
+  min_seconds: 15
+  max_seconds: 40
+  # Minimum length of a clip's FIRST segment, so the opening image holds on
+  # screen instead of cutting away immediately. Enforced after the model
+  # answers, not just asked for: a short first segment is extended forward
+  # (never backward, which would drag in the end of the previous story).
+  opening_hold_seconds: 3.0
+  # A transcript picks the opening SENTENCE, which is how clips end up starting
+  # on an anchor at a desk. With this on, the frames just before each proposed
+  # start are sampled from the downloaded file and a vision model picks the one
+  # worth opening on — the start then moves back to it. One extra call per
+  # proposed clip; turn off to suggest from the transcript alone.
+  opening_vision: true
+  opening_model: claude-haiku-4-5
+  # How far back the start may move, and how finely that window is sampled.
+  # The start only ever moves EARLIER (onto lead-in footage before the speech)
+  # and never into footage another clip already uses.
+  opening_lead_seconds: 4.0
+  opening_frame_interval: 0.5
+
 vision:
   # Optionally tag candidates from YouTube storyboard stills (metadata-only —
   # nothing downloaded). Neutral labels only; no visual "punch" score. Ranking

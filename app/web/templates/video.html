@@ -198,7 +198,8 @@
            {% if c.multi_clip_potential %}checked{% endif %}
            onchange="toggleMultiClip(this)">
     <span class="switch-track"><span class="switch-thumb"></span></span>
-    <span style="margin-left: 10px;">Bookmark for additional clips</span>
+    <span style="margin-left: 10px;">Bookmark for additional clips{% if c.multi_clip_auto %}
+      <span class="meta">(suggested)</span>{% endif %}</span>
   </label>
 
   {% if not cut_rows %}

@@ -13,8 +13,9 @@ import re
 import time
 from pathlib import Path
 
+from . import clip_proposals, spend
 from .config import ROOT, load_settings
-from .llm import suggest_highlight, suggest_title_from_transcript
+from .llm import suggest_title_from_transcript
 from .models import STATUS_ARCHIVED, STATUS_FAILED, Candidate, utcnow
 
 log = logging.getLogger("scrape")
@@ -332,7 +333,7 @@ def _wants_transcript_title(candidate: Candidate) -> bool:
     return bool(channel and channel.url == PASTED_CHANNEL_URL)
 
 
-def archive_candidate(session, candidate: Candidate, with_highlight: bool = True) -> None:
+def archive_candidate(session, candidate: Candidate, with_suggestions: bool = True) -> None:
     """Full post-approval pipeline for one approved candidate.
 
     Idempotent for a *successful* archive. A re-run after failure (or after
@@ -394,7 +395,7 @@ def archive_candidate(session, candidate: Candidate, with_highlight: bool = True
         candidate.transcription_method = method
 
         # 4. Retitle pasted clips from what is actually said. Runs before the
-        # highlight pass so the caption draft is written against the corrected
+        # clip pass so the caption draft is written against the corrected
         # title. Best-effort: any failure leaves the ingest-time title standing.
         if segments and _wants_transcript_title(candidate):
             try:
@@ -410,19 +411,18 @@ def archive_candidate(session, candidate: Candidate, with_highlight: bool = True
             except Exception as exc:
                 log.warning("Transcript title failed for %s: %s", candidate.video_id, exc)
 
-        # 5. Optional LLM highlight suggestion + draft caption (clearly drafts).
-        if with_highlight and segments:
-            try:
-                hl = suggest_highlight(
-                    settings.get("matching.model", "claude-haiku-4-5"), candidate.title, segments
-                )
-                if hl["end"] > hl["start"]:
-                    candidate.suggested_highlight = (
-                        f"{_fmt(hl['start'])}-{_fmt(hl['end'])}: {hl['why']}"
-                    )
-                    candidate.draft_caption = hl["draft_caption"]
-            except Exception as exc:
-                log.warning("Highlight suggestion failed for %s: %s", candidate.video_id, exc)
+        # 5. Clip suggestions: which clips this video holds and where they run
+        # (clearly drafts). Budget-gated because this runs unattended over a
+        # whole monitor pass; the operator's on-demand re-roll is not.
+        if with_suggestions and segments:
+            if not spend.within_budget():
+                log.info("Skipping clip suggestions for %s: daily LLM budget reached",
+                         candidate.video_id)
+            else:
+                try:
+                    clip_proposals.propose(session, candidate, settings, segments)
+                except Exception as exc:
+                    log.warning("Clip suggestion failed for %s: %s", candidate.video_id, exc)
 
         candidate.status = STATUS_ARCHIVED
         candidate.archived_at = utcnow()
@@ -434,7 +434,3 @@ def archive_candidate(session, candidate: Candidate, with_highlight: bool = True
         log.error("Scrape failed for %s: %s", candidate.video_id, exc)
     finally:
         session.flush()
-
-
-def _fmt(seconds: float) -> str:
-    return f"{int(seconds // 60):02d}:{int(seconds % 60):02d}"

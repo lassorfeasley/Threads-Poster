@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 
 import requests
@@ -173,6 +174,44 @@ def clip_contact_sheet(path: str | Path, frames: int = 12, tile: str = "4x3",
     except Exception as exc:
         log.info("Contact sheet failed for %s: %s", clip, exc)
         return None
+
+
+def frames_between(path: str | Path, start: float, end: float,
+                   interval: float = 0.5, width: int = 320) -> list[tuple[float, bytes]]:
+    """Evenly sampled stills from ``[start, end)`` as ``(timestamp, jpeg)``.
+
+    Separate images rather than one tiled sheet: the model has to answer with
+    *which* frame it picked, and reading an index out of a grid is a guess it
+    can get wrong. Individual frames in message order cost about the same and
+    leave nothing to misread. Returns [] when ffmpeg fails or the file is gone.
+    """
+    clip = Path(path).expanduser()
+    if not clip.exists() or end <= start or interval <= 0:
+        return []
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                 "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(clip),
+                 "-vf", f"fps=1/{interval},scale={width}:-2", "-q:v", "5",
+                 str(Path(tmp) / "f_%03d.jpg")],
+                capture_output=True, timeout=120,
+            )
+        except Exception as exc:
+            log.info("Frame sampling failed for %s: %s", clip, exc)
+            return []
+        if proc.returncode != 0:
+            log.info("Frame sampling failed for %s: %s", clip,
+                     proc.stderr.decode(errors="replace")[-300:])
+            return []
+        frames: list[tuple[float, bytes]] = []
+        for image in sorted(Path(tmp).glob("f_*.jpg")):
+            try:
+                idx = int(image.stem.split("_")[1]) - 1
+            except (IndexError, ValueError):
+                continue
+            frames.append((round(start + idx * interval, 2), image.read_bytes()))
+        return frames
 
 
 def annotate_post_footage(post: ThreadsPost, settings: Settings,

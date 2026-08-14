@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import defer, object_session, selectinload
 
-from .. import instagram_api, spend, threads_api, youtube
+from .. import clip_proposals, instagram_api, spend, threads_api, youtube
 from ..analytics import (generate_report, latest_metrics_bulk, snapshot_metrics,
                          write_and_store_digest)
 from ..categories import category_by_slug, category_options
@@ -64,6 +64,7 @@ from ..models import (
     STATUS_REJECTED,
     Candidate,
     Channel,
+    ClipProposal,
     Cut,
     InstagramPost,
     MetricSnapshot,
@@ -1052,8 +1053,130 @@ def toggle_multi_clip(candidate_id: int):
         if c is None:
             return JSONResponse({"error": "Video not found"}, status_code=404)
         c.multi_clip_potential = not bool(c.multi_clip_potential)
+        # Touching the toggle by hand makes it the operator's marker, not the
+        # suggester's — a later pass must not silently flip it back.
+        c.multi_clip_auto = False
         flag = c.multi_clip_potential
     return JSONResponse({"multi_clip": flag})
+
+
+def _proposal_payload(row, used: list[dict]) -> dict | None:
+    """One pending proposal, shaped for the trim editor's panel + overlay.
+
+    Material already claimed by another clip is cut out here rather than at
+    generation time: the archive-time pass runs before any cut exists, so a
+    proposal only becomes a duplicate later. Nothing offered can overlap a clip
+    that already exists, whatever the model asked for.
+    """
+    try:
+        proposed = json.loads(row.proposed_segments or "[]")
+    except (ValueError, TypeError):
+        return None
+    segments, trimmed = clip_proposals.visible_segments(proposed, used)
+    if not segments:
+        return None
+    return {"id": row.id, "story": row.story, "why": row.why,
+            "confidence": row.confidence, "segments": segments,
+            "seconds": clip_proposals.duration(segments), "trimmed": trimmed}
+
+
+def _pending_proposals(session, candidate_pk: int) -> list[dict]:
+    used = clip_proposals.used_ranges(session, candidate_pk)
+    rows = clip_proposals.pending_for_candidate(session, candidate_pk)
+    return [p for p in (_proposal_payload(r, used) for r in rows) if p]
+
+
+@app.post("/video/{candidate_id}/suggest-clips")
+def video_suggest_clips(candidate_id: int):
+    """Re-run the clip suggester for one video (operator-initiated).
+
+    Deliberately ungated, matching the other on-demand suggest routes: the
+    budget guard exists to stop an unattended monitor pass from spending the
+    day's allowance, not to refuse a person who just clicked a button.
+    """
+    settings = load_settings()
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        transcript = clip_proposals.load_transcript(c)
+        if not transcript:
+            return JSONResponse(
+                {"error": "No transcript for this video — clip suggestions are "
+                          "drafted from what is said in it."},
+                status_code=409)
+        try:
+            clip_proposals.propose(session, c, settings, transcript)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        clips = _pending_proposals(session, candidate_id)
+        multi_clip = bool(c.multi_clip_potential)
+    return JSONResponse({"clips": clips, "multi_clip": multi_clip})
+
+
+@app.post("/clip-proposal/{proposal_id}/accept")
+def accept_clip_proposal(proposal_id: int, cut_id: int = Form(...)):
+    """Record that a proposal was loaded into a cut's segments.
+
+    Accepting is an intent, not an outcome — the boundary metrics stay empty
+    until that cut is exported and the operator's edits are visible.
+    """
+    with session_scope() as session:
+        row = clip_proposals.accept(session, proposal_id, cut_id)
+        if row is None:
+            return JSONResponse({"error": "Proposal already decided"}, status_code=409)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/clip-proposal/{proposal_id}/dismiss")
+def dismiss_clip_proposal(proposal_id: int):
+    with session_scope() as session:
+        if not clip_proposals.dismiss(session, proposal_id):
+            return JSONResponse({"error": "Proposal already decided"}, status_code=409)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/video/{candidate_id}/dismiss-clip-proposals")
+def dismiss_clip_proposals(candidate_id: int):
+    """Reject every open proposal on a video at once — "none of these"."""
+    with session_scope() as session:
+        n = clip_proposals.dismiss_pending(session, candidate_id)
+    return JSONResponse({"ok": True, "dismissed": n})
+
+
+@app.post("/clip-proposal/{proposal_id}/new-cut")
+def clip_proposal_new_cut(proposal_id: int):
+    """Open a proposed clip as its own cut — the multi-story path.
+
+    Lands in the trim editor with the segments loaded but nothing exported, so
+    the proposal still has to survive a look before it becomes a clip.
+    """
+    with session_scope() as session:
+        row = session.get(ClipProposal, proposal_id)
+        if row is None or row.verdict != ClipProposal.VERDICT_PENDING:
+            return JSONResponse({"error": "Proposal already decided"}, status_code=409)
+        c = session.get(Candidate, row.candidate_pk)
+        if c is None or c.status != STATUS_ARCHIVED:
+            return JSONResponse({"error": "Download the video before clipping it"},
+                                status_code=409)
+        # Seed the new cut with the unclaimed part only — the stored proposal
+        # predates the clips made since, and a new cut must not re-use footage.
+        try:
+            proposed = json.loads(row.proposed_segments or "[]")
+        except (ValueError, TypeError):
+            proposed = []
+        segments, _ = clip_proposals.visible_segments(
+            proposed, clip_proposals.used_ranges(session, c.id))
+        if not segments:
+            return JSONResponse(
+                {"error": "Your other clips already cover this suggestion."},
+                status_code=409)
+        cut = Cut(candidate_pk=c.id, trim_segments=json.dumps(segments))
+        session.add(cut)
+        session.flush()
+        clip_proposals.accept(session, proposal_id, cut.id)
+        cut_id = cut.id
+    return JSONResponse({"ok": True, "redirect": f"/cut/{cut_id}?step=trim"})
 
 
 @app.get("/video/{candidate_id}/cut")
@@ -1149,6 +1272,12 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
                     {"start": s["start"], "end": s["end"],
                      "cut_id": sib.id, "title": title})
 
+        # Clips the model proposed and the operator hasn't ruled on, with any
+        # material this video's cuts already claim removed. What survives is
+        # always fresh footage — the dashed overlay and the violet one can
+        # never describe the same seconds.
+        suggested_clips = _pending_proposals(session, c.id)
+
         transcript_segments = []
         if c.transcript_path and Path(c.transcript_path).exists():
             try:
@@ -1175,6 +1304,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         {"cut": cut, "c": c, "state": cut_state, "step": active_step,
          "transcript_segments": transcript_segments, "saved_segments": segments,
          "other_cut_segments": other_cut_segments,
+         "suggested_clips": suggested_clips,
          "clip_transcript": clip_transcript,
          "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
@@ -1783,6 +1913,13 @@ def export_clip(request: Request, cut_id: int, segments_json: str = Form(...),
             target = cut
         target.trim_segments = json.dumps(segments)
         target.updated_at = utcnow()
+        # Score the model's proposal against what actually shipped. Best-effort:
+        # a ledger failure must never cost the operator an export.
+        try:
+            clip_proposals.resolve_for_cut(session, target.id, c.id, segments,
+                                           from_cut_pk=cut.id)
+        except Exception as exc:
+            log.warning("Clip proposal resolve failed for cut %s: %s", target.id, exc)
         # Keep existing trimmed/captioned files until the worker swaps them —
         # a failed export must not orphan an already-good clip. The Post step
         # shows a skeleton while export_status is "exporting".

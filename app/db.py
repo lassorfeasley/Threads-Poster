@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "23"
+SCHEMA_VERSION = "24"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -115,6 +115,8 @@ _SCHEMA_SENTINELS = (
     "SELECT export_status FROM cuts LIMIT 0",
     "SELECT id FROM instagram_posts LIMIT 0",
     "SELECT kind FROM draft_proposals LIMIT 0",
+    "SELECT id FROM clip_proposals LIMIT 0",
+    "SELECT multi_clip_auto FROM candidates LIMIT 0",
 )
 
 
@@ -195,6 +197,7 @@ def _ensure_new_columns() -> None:
             "category": "VARCHAR(30) DEFAULT ''",
             "category_rationale": "TEXT DEFAULT ''",
             "multi_clip_potential": "BOOLEAN DEFAULT FALSE",
+            "multi_clip_auto": "BOOLEAN DEFAULT FALSE",
         },
         "threads_posts": {
             "cut_pk": "INTEGER",
@@ -360,6 +363,9 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_instagram_posts_threads_post_pk "
         "ON instagram_posts (threads_post_pk)",
         "CREATE INDEX IF NOT EXISTS ix_instagram_posts_cut_pk ON instagram_posts (cut_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_clip_proposals_candidate_verdict "
+        "ON clip_proposals (candidate_pk, verdict)",
+        "CREATE INDEX IF NOT EXISTS ix_clip_proposals_cut_pk ON clip_proposals (cut_pk)",
     )
     with engine.begin() as conn:
         for stmt in statements:
@@ -390,7 +396,10 @@ def _drop_removed_columns() -> None:
     removed = {
         # Trim columns promoted to the ``cuts`` table (see _migrate_cuts).
         "candidates": ["climate_topic", "clip_title", "trim_segments",
-                       "trimmed_clip_path", "subtitled_clip_path", "use_subtitles"],
+                       "trimmed_clip_path", "subtitled_clip_path", "use_subtitles",
+                       # Single-window highlight string, never read by anything;
+                       # replaced by the structured ``clip_proposals`` ledger.
+                       "suggested_highlight"],
         # Renamed to final_text when hooks joined the ledger (value copied in
         # _ensure_new_columns first).
         "draft_proposals": ["final_caption"],
