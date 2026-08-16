@@ -12,9 +12,12 @@
   {{ ui.search(name="q", placeholder="title, channel, caption…", debounce=false, filter_target=LIB) }}
   {{ ui.combo("channel", channel_choices, all_label="All channels",
               filter_target=LIB, filter_key="channel") }}
+  {# Category rides on the source video, so a clip and every post cut from it
+     inherit it — which makes this one of the few filters that means the same
+     thing in all three views. #}
+  {{ ui.combo("category", category_choices, all_label="All categories",
+              filter_target=LIB, filter_key="category") }}
   <span class="tb-slot" data-view-slot="videos">
-    {{ ui.combo("category", category_choices, all_label="All categories",
-                filter_target=LIB, filter_key="category") }}
     {{ ui.select("video_status", [("posted", "Posted"), ("clips", "Has clips"), ("none", "No clips yet")],
                  submit=false, filter_target=LIB, filter_key="status", all_label="Any status") }}
   </span>
@@ -32,7 +35,8 @@
                   filter_target=LIB, filter_key="date") }}
   <span class="tb-slot" data-view-slot="videos cuts">
     {{ ui.sort(LIB, [("date-desc", "Newest first"), ("date-asc", "Oldest first"),
-                     ("title-asc", "Title A–Z"), ("title-desc", "Title Z–A")]) }}
+                     ("title-asc", "Title A–Z"), ("title-desc", "Title Z–A"),
+                     ("category-asc", "Category A–Z")]) }}
   </span>
   {# Posts get their own sort: the engagement keys only exist on those cards,
      and only once a metrics snapshot has been taken. #}
@@ -42,7 +46,8 @@
                      ("replies-desc", "Most replies"), ("reposts-desc", "Most reposts"),
                      ("engagement-desc", "Most engagement"),
                      ("engagement-asc", "Least engagement"),
-                     ("title-asc", "Caption A–Z"), ("title-desc", "Caption Z–A")]) }}
+                     ("title-asc", "Caption A–Z"), ("title-desc", "Caption Z–A"),
+                     ("category-asc", "Category A–Z")]) }}
   </span>
   {{ ui.clear_filters(LIB) }}
 {% endset %}
@@ -78,7 +83,11 @@
        data-filter-row data-search="{{ (row.c.title ~ ' ' ~ row.c.channel.call_sign ~ ' ' ~ row.c.channel.market ~ ' ' ~ (cat.label if cat else '')) | lower }}"
        data-channel="{{ row.c.channel.call_sign }}" data-category="{{ row.c.category or '' }}"
        data-status="{{ 'posted' if row.state.posted else ('clips' if row.state.trimmed else 'none') }}"
-       data-date="{{ archived }}" data-sort-date="{{ archived }}" data-sort-title="{{ row.c.title }}">
+       data-date="{{ archived }}" data-sort-date="{{ archived }}" data-sort-title="{{ row.c.title }}"
+       {# Label, not slug: a category sort should read alphabetically the way
+          the dropdown does, and untagged rows sink to the bottom on an empty
+          value rather than sorting under their slug. #}
+       data-sort-category="{{ cat.label if cat else '' }}">
       {% set thumb = thumb_for(row.c) %}
       <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
         {% if thumb %}
@@ -120,14 +129,17 @@
   <div class="card-grid">
     {% for row in cut_rows %}
     {% set cut_channel = row.cut.candidate.channel.call_sign if (row.cut.candidate and row.cut.candidate.channel) else "" %}
+    {% set cut_category = row.cut.candidate.category if row.cut.candidate else "" %}
+    {% set cut_cat = category_by_slug(cut_category) %}
     {% set created = row.cut.created_at.strftime("%Y-%m-%d") if row.cut.created_at else "" %}
     <a class="media-card" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.exported else 'trim' }}"
-       data-filter-row data-search="{{ ((row.cut.clip_title or '') ~ ' ' ~ (row.cut.candidate.title if row.cut.candidate else '') ~ ' ' ~ cut_channel) | lower }}"
-       data-channel="{{ cut_channel }}"
+       data-filter-row data-search="{{ ((row.cut.clip_title or '') ~ ' ' ~ (row.cut.candidate.title if row.cut.candidate else '') ~ ' ' ~ cut_channel ~ ' ' ~ (cut_cat.label if cut_cat else '')) | lower }}"
+       data-channel="{{ cut_channel }}" data-category="{{ cut_category or '' }}"
        data-status="{{ 'posted' if row.posted else ('exported' if row.exported else 'untrimmed') }}"
        data-captioned="{{ 'yes' if row.captioned else 'no' }}"
        data-date="{{ created }}" data-sort-date="{{ created }}"
-       data-sort-title="{{ row.cut.clip_title or '' }}">
+       data-sort-title="{{ row.cut.clip_title or '' }}"
+       data-sort-category="{{ cut_cat.label if cut_cat else '' }}">
       {% set thumb = thumb_for(row.cut.candidate) %}
       <div class="thumb-wrap{{ '' if thumb else ' is-empty' }}">
         {% if thumb %}
@@ -192,13 +204,17 @@
     {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
     {% set thumb = thumb_for(cand) %}
     {% set post_channel = cand.channel.call_sign if (cand and cand.channel) else "" %}
+    {% set post_category = cand.category if cand else "" %}
+    {% set post_cat = category_by_slug(post_category) %}
     {% set posted_on = p.created_at.strftime("%Y-%m-%d") if p.created_at else "" %}
     {% set m = post_metrics[p.id] %}
     <a class="media-card" href="/post/{{ p.id }}"
-       data-filter-row data-search="{{ ((p.caption or '') ~ ' ' ~ (p.cut.clip_title if (p.cut and p.cut.clip_title) else '') ~ ' ' ~ post_channel ~ ' ' ~ p.status) | lower }}"
+       data-filter-row data-search="{{ ((p.caption or '') ~ ' ' ~ (p.cut.clip_title if (p.cut and p.cut.clip_title) else '') ~ ' ' ~ post_channel ~ ' ' ~ p.status ~ ' ' ~ (post_cat.label if post_cat else '')) | lower }}"
        data-channel="{{ post_channel }}" data-status="{{ p.status }}"
+       data-category="{{ post_category or '' }}"
        data-date="{{ posted_on }}" data-sort-date="{{ posted_on }}"
        data-sort-title="{{ p.caption or '' }}"
+       data-sort-category="{{ post_cat.label if post_cat else '' }}"
        {# Left off entirely when unknown, so posts without a snapshot sink to
           the bottom of an engagement sort instead of ranking as zero. #}
        {% for key in ["views", "likes", "replies", "reposts", "engagement"] %}

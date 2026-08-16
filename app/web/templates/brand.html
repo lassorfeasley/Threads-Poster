@@ -1,17 +1,12 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set br_sub %}Who this account is and who it talks to. These fields will drive the AI prompts once they're parameterized — today they're stored and shown here so the setup lives in one place.{% endset %}
+{% set br_sub %}Who this account is and who it talks to. These fields drive the AI prompts: relevance scoring, clip selection, caption drafting, titles, and the analytics digest all read them. Blank fields fall back to generic phrasing.{% endset %}
 {{ ui.pagebar("Brand & audience", sub=br_sub) }}
 
 <form method="post" action="/brand" enctype="multipart/form-data">
   <div class="card">
     <div class="card-title" style="margin-bottom: 4px;">Who you are</div>
-    <p class="meta" style="margin: 0 0 14px;">
-      Nothing consumes these yet: the drafting, scoring, and digest prompts still
-      hardcode climate / local-TV / Renewables.org. Filling this in now means the
-      prompts can switch over without re-entering anything.
-    </p>
 
     <label for="brand-name" class="card-title" style="display:block; margin-bottom: 6px;">Name</label>
     <input type="text" id="brand-name" name="name" value="{{ brand.name }}"
@@ -25,13 +20,46 @@
     <textarea id="brand-audience" name="audience" rows="2"
               placeholder="Who you're talking to — the people the captions should land with.">{{ brand.audience }}</textarea>
 
-    <label for="brand-topic" class="card-title" style="display:block; margin: 14px 0 6px;">Topic scope</label>
+    <label for="brand-topic" class="card-title" style="display:block; margin: 14px 0 6px;">Topic</label>
     <textarea id="brand-topic" name="topic" rows="2"
-              placeholder="What counts as relevant coverage, in plain language. This is what eventually replaces the hardcoded climate scope.">{{ brand.topic }}</textarea>
+              placeholder="The subject this channel covers, as a short phrase — e.g. 'climate change' or 'pilates and mindful movement'.">{{ brand.topic }}</textarea>
 
     <label for="brand-voice" class="card-title" style="display:block; margin: 14px 0 6px;">Voice notes</label>
     <textarea id="brand-voice" name="voice_notes" rows="3"
               placeholder="Tone, phrases to favor or avoid, point of view. Caption style rules live on the Style guide page — this is broader.">{{ brand.voice_notes }}</textarea>
+  </div>
+
+  <div class="card" style="margin-top: 14px;">
+    <div class="card-title" style="margin-bottom: 4px;">Prompt framing</div>
+    <p class="meta" style="margin: 0 0 14px;">
+      How the AI understands your source material. These feed the scoring, clip
+      selection, and drafting prompts directly; leave a field blank to use
+      neutral generic phrasing.
+    </p>
+
+    <label for="brand-source-kind" class="card-title" style="display:block; margin-bottom: 6px;">Source kind</label>
+    <input type="text" id="brand-source-kind" name="source_kind" value="{{ brand.source_kind }}"
+           placeholder="e.g. 'local TV news' or 'YouTube pilates class'" style="max-width: 460px;">
+
+    <label for="brand-relevance-rules" class="card-title" style="display:block; margin: 14px 0 6px;">What makes a video relevant</label>
+    <textarea id="brand-relevance-rules" name="relevance_rules" rows="3"
+              placeholder="Completes: 'A video is relevant if …' — e.g. 'it covers climate change, its impacts, clean energy, emissions, or climate policy'.">{{ brand.relevance_rules }}</textarea>
+
+    <label for="brand-false-positives" class="card-title" style="display:block; margin: 14px 0 6px;">What to exclude</label>
+    <textarea id="brand-false-positives" name="false_positives" rows="3"
+              placeholder="Completes: 'It is NOT relevant if …' — the false positives your keywords attract.">{{ brand.false_positives }}</textarea>
+
+    <label for="brand-strong-openings" class="card-title" style="display:block; margin: 14px 0 6px;">Strong openings</label>
+    <textarea id="brand-strong-openings" name="strong_openings" rows="3"
+              placeholder="What a scroll-stopping first frame looks like for this content, as a comma-separated list.">{{ brand.strong_openings }}</textarea>
+
+    <label for="brand-weak-openings" class="card-title" style="display:block; margin: 14px 0 6px;">Weak openings</label>
+    <textarea id="brand-weak-openings" name="weak_openings" rows="3"
+              placeholder="First frames to avoid — e.g. 'an anchor at a desk, station graphics' or 'an instructor still talking through setup'.">{{ brand.weak_openings }}</textarea>
+
+    <label for="brand-clip-guidance" class="card-title" style="display:block; margin: 14px 0 6px;">Clip selection guidance</label>
+    <textarea id="brand-clip-guidance" name="clip_guidance" rows="3"
+              placeholder="Extra editorial guidance for choosing clips — e.g. for a continuous class: 'the video is one session, not separate stories; pick self-contained excerpts that each demonstrate one exercise'.">{{ brand.clip_guidance }}</textarea>
   </div>
 
   <div class="card" style="margin-top: 14px;">
@@ -49,7 +77,7 @@
     <label for="brand-logo" class="card-title" style="display:block; margin: 14px 0 6px;">Logo</label>
     {% if brand.logo_file %}
       <p class="meta" style="margin: 0 0 10px; display:flex; align-items:center; gap:12px;">
-        <img src="/static/brand/{{ brand.logo_file }}" alt="Current logo"
+        <img src="/brand-static/{{ brand.logo_file }}" alt="Current logo"
              style="height: 28px; width: 28px; object-fit: contain; border-radius: 6px;">
         <span><code>{{ brand.logo_file }}</code> — upload a new file to replace it.</span>
         <button class="sm" type="submit" form="logo-remove-form">Remove</button>

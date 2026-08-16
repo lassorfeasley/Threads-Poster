@@ -103,12 +103,63 @@ def load_clip_words(transcript_path: str | Path) -> list[dict]:
     return [w for w in data if isinstance(w, dict) and (w.get("word") or "").strip()]
 
 
+def slice_source_words(source_words: list[dict],
+                       segments: list[dict]) -> list[dict]:
+    """Map the full-video Whisper word stream onto an exported trim's timeline.
+
+    ``segments`` are the cut's trim windows in LIST order — the order
+    ``export_supercut`` joins them, which the trim editor lets drift out of
+    time order — so each window's words land at the cumulative offset of the
+    windows before it. A word belongs to a window when its midpoint falls
+    inside it, so a word straddling a cut boundary lands in whichever window
+    holds most of it. Timestamps are clamped to the window so a straddler
+    can't overhang the joined clip's cut points.
+
+    This is what lets an export reuse the archive-time transcription instead
+    of running Whisper again on the trimmed file.
+    """
+    out: list[dict] = []
+    offset = 0.0
+    for seg in segments:
+        try:
+            seg_start, seg_end = float(seg["start"]), float(seg["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        length = seg_end - seg_start
+        if length <= 0:
+            continue
+        for w in source_words:
+            try:
+                w_start, w_end = float(w["start"]), float(w["end"])
+                text = str(w.get("word", "")).strip()
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not text:
+                continue
+            mid = (w_start + w_end) / 2
+            if not (seg_start <= mid < seg_end):
+                continue
+            start = max(0.0, w_start - seg_start)
+            end = min(length, w_end - seg_start)
+            if end <= start:
+                continue
+            out.append({"word": text,
+                        "start": round(offset + start, 3),
+                        "end": round(offset + end, 3)})
+        offset += length
+    return out
+
+
 def ensure_clip_words(clip_path: str | Path,
                       transcript_path: str | Path | None = None) -> tuple[list[dict], Path]:
     """Load cached Whisper words for a trim, or transcribe and cache them.
 
     ``transcript_path`` is preferred when set (the cut's stored sidecar); otherwise
     the default sidecar next to ``clip_path`` is used.
+
+    Exports of videos archived with a word sidecar write the trim's transcript
+    up front (see ``_export_cut_in_thread``), so the transcription fallback
+    here only runs for clips whose source predates archive-time word streams.
     """
     clip = Path(clip_path)
     path = Path(transcript_path) if transcript_path else clip_transcript_path_for(clip)

@@ -10,9 +10,46 @@ import re
 from anthropic import Anthropic
 
 from . import spend
-from .config import env
+from .config import env, load_brand
 
 _client: Anthropic | None = None
+
+# Generic fallbacks so every prompt stays coherent when brand.yaml is blank.
+# Each workspace overrides these on the Brand & audience page; the climate
+# workspace's values reproduce the framing that used to be hardcoded here.
+_BRAND_DEFAULTS = {
+    "topic": "the channel's topic",
+    "source_kind": "online video",
+    "relevance_rules": "it substantively covers the topic",
+    "false_positives": "the topic is only incidental to the video",
+    "strong_openings": (
+        "action in progress, people doing something concrete, a striking or "
+        "scenic shot, movement, a person visibly reacting"
+    ),
+    "weak_openings": (
+        "static graphics, title cards, logos, text-heavy frames"
+    ),
+    "clip_guidance": "",
+}
+
+
+def _brand() -> dict:
+    """Brand context for prompt framing. Missing or blank fields fall back to
+    generic phrasing, and this never raises — prompts must work with no
+    brand.yaml at all."""
+    try:
+        raw = load_brand()
+    except Exception:
+        raw = {}
+    out = dict(_BRAND_DEFAULTS)
+    for key in _BRAND_DEFAULTS:
+        value = str(raw.get(key) or "").strip()
+        if value:
+            out[key] = value
+    # No generic default makes sense for these; empty just omits the context.
+    for key in ("mission", "audience", "voice_notes"):
+        out[key] = str(raw.get(key) or "").strip()
+    return out
 
 
 def client() -> Anthropic:
@@ -81,13 +118,12 @@ def score_relevance(model: str, title: str, description: str, matched_keywords: 
     + keyword hits + visual traits already drive ranking). Kept accepting an
     optional ``rationale`` key for old cached responses.
     """
+    b = _brand()
     system = (
-        "You score local TV news videos for genuine climate-change relevance. "
-        "A video is relevant if it covers climate change, its impacts (extreme weather, "
-        "wildfire, flood, heat, drought, sea level), clean energy, emissions, or climate "
-        "policy. It is NOT relevant if the keyword is incidental ('political climate', "
-        "'business climate', a sports team name, routine weather forecasts with no "
-        "climate angle). "
+        f"You score {b['source_kind']} videos for genuine relevance to "
+        f"{b['topic']}. "
+        f"A video is relevant if {b['relevance_rules']}. "
+        f"It is NOT relevant if {b['false_positives']}. "
         "JSON shape: {\"score\": 0.0-1.0}"
     )
     user = json.dumps(
@@ -157,21 +193,23 @@ def suggest_channel_fields(model: str, url: str, title: str = "", description: s
 def suggest_category(model: str, categories: list[dict], title: str, description: str,
                      channel: str = "", matched_keywords: list[str] | None = None,
                      transcript_excerpt: str = "") -> dict:
-    """Recommend ONE programming category for a video. ``categories`` come from
-    settings ``categories.options`` ({slug, label, description}); the channel
-    aims for a roughly equal mix of them, so this is genre/framing, not topic
-    (every video is climate-related). Returns {category: slug or "", rationale};
-    an off-vocabulary answer comes back as "" so the video stays untagged
-    rather than mislabeled.
+    """Recommend ONE programming category for a video. ``categories`` is the
+    auto-taggable vocabulary ({slug, label, description}) — the caller passes
+    ``categories.auto_tag_options()``, which excludes reserved categories the
+    model cannot infer. The channel aims for a roughly equal mix, so this is
+    genre/framing, not topic (every video already matched the brand's focus).
+    Returns {category: slug or "", rationale}; an off-vocabulary answer comes
+    back as "" so the video stays untagged rather than mislabeled.
     """
     vocab = "\n".join(
         f"- {c['slug']}: {c['label']} — {c['description']}" for c in categories
     )
+    b = _brand()
     system = (
-        "You assign a programming category to a video for a climate-focused "
-        "social channel. Every video is climate-related; the category captures "
-        "the GENRE and framing of the footage, not the topic. Pick exactly one "
-        "slug from:\n" + vocab + "\n"
+        f"You assign a programming category to a video for a social channel "
+        f"focused on {b['topic']}. Every video is already relevant to that "
+        "focus; the category captures the GENRE and framing of the footage, "
+        "not the topic. Pick exactly one slug from:\n" + vocab + "\n"
         "Judge from the title, description, channel and transcript excerpt. "
         "JSON shape: {\"category\": \"slug\", \"rationale\": \"one line\"}"
     )
@@ -233,11 +271,54 @@ def _clean_clip_segments(raw, horizon: float, cap: int,
     return merged
 
 
+def _words_to_clauses(words: list[dict], max_words: int = 12,
+                      max_gap: float = 0.8) -> list[dict]:
+    """Compact a Whisper word stream into clause-sized ``{start, end, text}``.
+
+    Each entry starts and ends exactly on a word boundary, so a clip cut at an
+    entry's edge never clips a word in half — the precision the segment-level
+    transcript (YouTube captions especially) can't offer. Splits at sentence
+    punctuation, speech gaps, or ``max_words``, mirroring how the burned-in
+    captions group the same stream.
+    """
+    clauses: list[dict] = []
+    cur: list[dict] = []
+
+    def flush() -> None:
+        if cur:
+            clauses.append({
+                "start": round(float(cur[0]["start"]), 1),
+                "end": round(float(cur[-1]["end"]), 1),
+                "text": " ".join(w["word"] for w in cur),
+            })
+
+    for w in words:
+        try:
+            start, end = float(w["start"]), float(w["end"])
+            text = str(w.get("word", "")).strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not text:
+            continue
+        if cur and (
+            len(cur) >= max_words
+            or start - float(cur[-1]["end"]) > max_gap
+            or cur[-1]["word"][-1] in ".?!"
+        ):
+            flush()
+            cur = []
+        cur.append({"word": text, "start": start, "end": end})
+    flush()
+    return clauses
+
+
 def suggest_clips(model: str, title: str, transcript_segments: list[dict],
                   max_clips: int = 3, max_segments_per_clip: int = 4,
                   min_seconds: int = 15, max_seconds: int = 40,
                   opening_hold: float = 3.0,
-                  used_ranges: list[dict] | None = None) -> list[dict]:
+                  used_ranges: list[dict] | None = None,
+                  words: list[dict] | None = None,
+                  description: str = "") -> list[dict]:
     """Propose the clips worth cutting from one video. DRAFTS ONLY.
 
     The output is a partition, not a window, because clipping happens on two
@@ -253,19 +334,29 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     the caller still subtracts them afterwards, because a proposal made at
     archive time goes stale as soon as the next clip is cut.
 
+    ``words`` is the full-video Whisper word stream (``[{word, start, end}]``).
+    When present it replaces ``transcript_segments`` as the model's timeline:
+    the words are regrouped into clause-sized entries whose timestamps sit
+    exactly on word boundaries, so proposed cuts land between words instead of
+    somewhere inside a multi-second caption block.
+
     Returns ``[{segments, story, why, confidence, draft_caption}]`` where each
     ``segments`` list is already clamped to the transcript, chronological, and
     non-overlapping — i.e. droppable straight into ``Cut.trim_segments``. An
     empty list means the model found nothing worth clipping.
     """
-    compact = []
-    for s in transcript_segments[:400]:
-        try:
-            compact.append({"start": round(float(s["start"]), 1),
-                            "end": round(float(s["end"]), 1),
-                            "text": str(s.get("text", ""))[:200]})
-        except (KeyError, TypeError, ValueError):
-            continue
+    word_accurate = bool(words)
+    if words:
+        compact = _words_to_clauses(words)[:400]
+    else:
+        compact = []
+        for s in transcript_segments[:400]:
+            try:
+                compact.append({"start": round(float(s["start"]), 1),
+                                "end": round(float(s["end"]), 1),
+                                "text": str(s.get("text", ""))[:200]})
+            except (KeyError, TypeError, ValueError):
+                continue
     if not compact:
         return []
     horizon = max(w["end"] for w in compact)
@@ -273,32 +364,39 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     used = [{"start": round(float(r["start"]), 1), "end": round(float(r["end"]), 1)}
             for r in (used_ranges or [])]
 
+    b = _brand()
     system = (
-        "You cut short social clips out of local TV news climate segments. "
+        f"You cut short social clips out of {b['source_kind']} footage about "
+        f"{b['topic']}. "
         "Given a full timestamped transcript, propose the clips worth making.\n"
         "\n"
         "Two levels, and they are NOT the same thing:\n"
-        "- SEGMENTS within one clip: one story, compressed. Cut the anchor's "
-        "set-up, filler, repetition and dead air; keep the vivid, concrete, "
+        "- SEGMENTS within one clip: one story, compressed. Cut the set-up, "
+        "filler, repetition and dead air; keep the vivid, concrete, "
         "human beats. Most good clips are 2-4 segments joined together, not "
         "one continuous take.\n"
         "- Separate CLIPS: separate stories that could not share a single "
         "caption. Only split when the video genuinely covers more than one "
         "story. Most videos yield exactly one clip.\n"
         "\n"
-        "THE OPENING SHOT decides whether anyone watches the rest. Start on "
+        + (f"EDITORIAL GUIDANCE for this channel: {b['clip_guidance']}\n\n"
+           if b["clip_guidance"] else "")
+        + "THE OPENING SHOT decides whether anyone watches the rest. Start on "
         "something worth looking at, and hold it: the first segment must run "
         f"at least {opening_hold:g} seconds without a cut. You can't see the "
-        "footage, so infer it from what is being said — on-scene reporting, "
-        "described action, someone in the field, a witness speaking. Do NOT "
-        "open on an anchor reading at the desk, a studio toss ('X is live, "
-        "X?'), a sign-off ('back to you'), a greeting, or a headline read. "
-        "Those are the weakest frames in any newscast.\n"
+        "footage, so infer it from what is being said. Strong openings: "
+        f"{b['strong_openings']}. "
+        f"Do NOT open on: {b['weak_openings']}.\n"
         "\n"
         f"Each clip totals {min_seconds}-{max_seconds} seconds across at most "
         f"{max_segments_per_clip} segments. Segments must be chronological and "
         f"must not overlap. Propose at most {max_clips} clips, best first, and "
         "return an empty list if nothing here is worth clipping.\n"
+        + ("The transcript timestamps are word-accurate: every entry starts "
+           "and ends exactly on a word boundary. Cut precisely — start a "
+           "segment on the first word you want heard and end it right after "
+           "the last one, using the entry timestamps as-is.\n"
+           if word_accurate else "")
         + ("Some of this video is ALREADY published in other clips — the "
            "used_ranges below. Do not propose any of that material again, and "
            "do not build a clip that merely straddles it. Find fresh moments "
@@ -310,6 +408,8 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         "\"confidence\": 0.0-1.0, \"draft_caption\": \"...\"}]}"
     )
     payload = {"title": title, "segments": compact}
+    if description:
+        payload["source_video_description"] = description[:2000]
     if used:
         payload["used_ranges"] = used
     user = json.dumps(payload)
@@ -405,9 +505,11 @@ def pick_opening_frame(model: str, frames: list[tuple[float, bytes]],
         return {"index": None, "why": ""}
 
     interval = round(frames[1][0] - frames[0][0], 2) if len(frames) > 1 else 0.5
+    b = _brand()
     system = (
-        "You choose the opening frame of a short social video cut from local TV "
-        "news. The first image decides whether anyone watches the rest.\n"
+        f"You choose the opening frame of a short social video cut from "
+        f"{b['source_kind']} footage. The first image decides whether anyone "
+        "watches the rest.\n"
         f"The frames are consecutive stills, in order, {interval:g}s apart. "
         f"Frame {latest_index} is where the clip currently starts — where the "
         "speech begins.\n"
@@ -416,12 +518,9 @@ def pick_opening_frame(model: str, frames: list[tuple[float, bytes]],
         "later frames are shown only so you can see what happens next, and must "
         "never be chosen.\n"
         "\n"
-        "STRONG openings: on-scene footage, action in progress, fire, flood, "
-        "storm damage, wreckage, rescue crews, crowds, aerial or sweeping "
-        "shots, weather in motion, a person visibly reacting in the field.\n"
-        "WEAK openings: an anchor or reporter at a studio desk, station "
-        "graphics, charts, maps, slates, walls of lower-third text, a frame "
-        "caught mid-transition or mid-dissolve, motion blur, black frames.\n"
+        f"STRONG openings: {b['strong_openings']}.\n"
+        f"WEAK openings: {b['weak_openings']}, a frame caught mid-transition "
+        "or mid-dissolve, motion blur, black frames.\n"
         "\n"
         f"The image must HOLD: the shot you pick should still be the same shot "
         f"about {hold_seconds:g}s later. Use the frames that follow yours to "
@@ -499,7 +598,8 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
                          examples: list[str] | None = None,
                          style_guide: str = "", operator_guide: str = "",
                          max_chars: int = 220,
-                         target_words: int | None = None) -> str:
+                         target_words: int | None = None,
+                         description: str = "") -> str:
     """Recommend Threads post text for the operator's trimmed clip. The operator
     reviews/edits before posting — this is a DRAFT, never auto-posted.
 
@@ -515,10 +615,18 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     to fill, which is how drafts drifted long enough that the operator rewrote
     nearly all of them.
     """
+    b = _brand()
     system = (
-        "You draft a Threads caption for a short local-TV climate news clip. The "
-        "operator will edit it before posting.\n\n"
+        f"You draft a Threads caption for a short {b['source_kind']} clip "
+        f"about {b['topic']}. The operator will edit it before posting.\n\n"
     )
+    if b["mission"] or b["audience"]:
+        context_bits = []
+        if b["mission"]:
+            context_bits.append(f"mission — {b['mission']}")
+        if b["audience"]:
+            context_bits.append(f"audience — {b['audience']}")
+        system += "Channel context: " + "; ".join(context_bits) + ".\n\n"
     if target_words:
         # Framed as a goal to land on, with permission to go shorter. A ceiling
         # on its own reads as an allowance and gets spent.
@@ -543,13 +651,19 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
         "No paragraphs, no blank lines, no lists. The video carries the story — "
         "the caption only has to make someone stop and watch it. When torn "
         "between two good sentences, keep one.\n\n"
-        "Also hard: do not invent facts not in the excerpt. "
+        "Also hard: do not invent facts not in the excerpt or description. "
+        "When a source_video_description is provided it may name the speaker, "
+        "publisher, or topic — use it for context but the transcript is still "
+        "the primary authority on what happened. "
     )
     # A mandatory place name can consume most of a very short caption, so it
-    # becomes a preference once the target is tight.
-    system += ("Mention the place when it fits the length.\n"
-               if target_words and target_words <= 14
-               else "Mention the place.\n")
+    # becomes a preference once the target is tight. Only asked for at all
+    # when the source actually has a place (news stations do; a fitness
+    # creator's channel doesn't).
+    if station or market:
+        system += ("Mention the place when it fits the length.\n"
+                   if target_words and target_words <= 14
+                   else "Mention the place.\n")
     if examples:
         system += (
             "\n\nVOICE: Write in the operator's own voice. Below are real captions "
@@ -579,19 +693,23 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
             "constraints:\n" + operator_guide[:2000]
         )
     system += "\nJSON shape: {\"caption\": \"...\"}"
-    user = json.dumps({
+    payload: dict = {
         "video_title": title,
         "station": station,
         "market": market,
         "clip_length_seconds": clip_seconds,
         "transcript_excerpt_of_clip": excerpt[:3000],
-    })
+    }
+    if description:
+        payload["source_video_description"] = description[:2000]
+    user = json.dumps(payload)
     data = _json_chat(model, system, user, max_tokens=600)
     return _tidy_caption(str(data.get("caption", "")))
 
 
 def suggest_hook_text(model: str, title: str, station: str, market: str,
-                      excerpt: str, examples: list[str] | None = None) -> str:
+                      excerpt: str, examples: list[str] | None = None,
+                      description: str = "") -> str:
     """Draft short on-video hook text for an Instagram Reel vertical composite.
 
     Rendered large in the brand font at the top of the 9:16 frame — so it must
@@ -602,9 +720,11 @@ def suggest_hook_text(model: str, title: str, station: str, market: str,
     other voice source: unlike captions there is no published history to learn
     from, because the hook is burned into the video rather than posted as text.
     """
+    b = _brand()
     system = (
         "You write a short HOOK line that appears as large on-screen text at the "
-        "top of an Instagram Reel (climate / local-TV news clip). Hard rules:\n"
+        f"top of an Instagram Reel (a {b['source_kind']} clip about {b['topic']}). "
+        "Hard rules:\n"
         "- 3–12 words, under 80 characters, ideally one line (two max).\n"
         "- Lead with the most striking fact or tension from the excerpt.\n"
         "- No hashtags, no URLs, no emojis, no quotation marks around the whole hook.\n"
@@ -621,12 +741,15 @@ def suggest_hook_text(model: str, title: str, station: str, market: str,
             + "\n".join(f"<example>{e[:120]}</example>" for e in examples) + "\n"
         )
     system += "JSON shape: {\"hook\": \"...\"}"
-    user = json.dumps({
+    payload: dict = {
         "video_title": title,
         "station": station,
         "market": market,
         "transcript_excerpt_of_clip": excerpt[:3000],
-    })
+    }
+    if description:
+        payload["source_video_description"] = description[:2000]
+    user = json.dumps(payload)
     data = _json_chat(model, system, user, max_tokens=400)
     return str(data.get("hook", "")).strip()[:300]
 
@@ -648,9 +771,11 @@ def suggest_attribution(model: str, channel: dict, video_title: str,
     transcript (not just the clipped segments), so the model sees the whole
     broadcast when identifying programs, segments, and journalists.
     """
+    b = _brand()
     system = (
         "You write a formal source citation to be posted as the first comment "
-        "under a short news clip on Threads, crediting the original publisher. "
+        f"under a short {b['source_kind']} clip on Threads, crediting the "
+        "original publisher. "
         "The clip is a short excerpt; you are given the FULL source video's "
         "metadata and transcript — use all of it.\n\n"
         "Citation style — a formal credit line assembled from whichever of these "
@@ -719,20 +844,22 @@ def suggest_caption_rules(model: str, strong_captions: list[str],
     # so the text routinely contains quotation marks and apostrophes that break
     # strict JSON parsing. One rule per line with a rare ``:::`` delimiter sidesteps
     # all escaping issues.
+    b = _brand()
     system = (
-        "You are an editorial coach for someone who posts short local-TV climate "
-        "news clips on Threads. You are shown captions they published; when "
+        f"You are an editorial coach for someone who posts short "
+        f"{b['source_kind']} clips about {b['topic']} on Threads. "
+        "You are shown captions they published; when "
         "available they're split into higher- and lower-performing sets. Infer a "
         "short list of CONCRETE, REUSABLE composition rules that capture what makes "
         "the strong captions work — structural and editorial patterns to apply to "
         "every future caption.\n\n"
         "Focus on FORMAT and FRAMING: how to open, how to close, how to use quotes "
-        "or stats, how to frame contested/denial viewpoints, rhythm, and what to "
+        "or stats, how to frame contested viewpoints, rhythm, and what to "
         "avoid. Each rule must be ONE imperative instruction, specific and "
         "actionable. Good examples of the style and specificity wanted:\n"
         "- Lead with a one-line pull quote from the transcript.\n"
         "- End with a short, wry question.\n"
-        "- Frame climate-denial perspectives impartially, without editorializing.\n\n"
+        "- Frame contested claims impartially, without editorializing.\n\n"
         "Captions are only one or two short lines, and the drafter applies just "
         "one rule per caption — so each rule must stand on its own inside that "
         "space. Never propose a rule that requires extra sentences or a "
@@ -767,19 +894,22 @@ def suggest_caption_rules(model: str, strong_captions: list[str],
 
 def suggest_title(model: str, source_title: str, transcript_excerpt: str,
                   caption: str | None = None) -> str:
-    """Generate a concise, human-readable title for a trimmed climate news clip.
+    """Generate a concise, human-readable title for a trimmed clip.
 
     Draws on the clip's own transcript excerpt (the trimmed windows) plus the
     original source title/description and, optionally, the draft caption. Returns
     a single punchy plain-text title (no surrounding quotes), roughly <= 70 chars.
     """
+    b = _brand()
     system = (
-        "You write a short, punchy title for a local-TV climate news clip that has "
+        f"You write a short, punchy title for a {b['source_kind']} clip about "
+        f"{b['topic']} that has "
         "been trimmed to its strongest moment. Base it on what the clip actually "
         "says (the transcript excerpt), using the source title only for context. "
         "Rules: one line, plain text, no surrounding quotes, no emojis, no hashtags, "
         "at most ~70 characters, concrete and faithful to the clip — do not invent "
-        "facts. Prefer the place and the striking detail over vague phrasing. "
+        "facts. Prefer the specific subject and the striking detail over vague "
+        "phrasing. "
         "JSON shape: {\"title\": \"...\"}"
     )
     user = json.dumps({
@@ -824,8 +954,9 @@ def suggest_short_title(model: str, source_title: str, description: str = "") ->
     concise human label instead of the raw YouTube title. Faithful to the
     source — no invented facts.
     """
+    b = _brand()
     system = (
-        "You write a very short title for a news video clip, distilled from its "
+        f"You write a very short title for a {b['source_kind']} clip, distilled from its "
         "original (often long or clickbait) source title. Rules: 2 to 5 words, "
         "plain text, no surrounding quotes, no emojis, no hashtags, no trailing "
         "punctuation, title case. Keep the single most identifying subject/place "
@@ -858,11 +989,12 @@ def suggest_title_from_transcript(model: str, transcript_text: str,
     """
     if not (transcript_text or "").strip():
         return ""
+    b = _brand()
     system = (
-        "You write a very short title for a news video clip, based on what is "
+        f"You write a very short title for a {b['source_kind']} clip, based on what is "
         "actually said in its transcript. Rules: 2 to 5 words, plain text, no "
         "surrounding quotes, no emojis, no hashtags, no trailing punctuation, "
-        "title case. Name the specific subject and place the transcript "
+        "title case. Name the specific subject the transcript "
         "establishes. The transcript is the ONLY authority on the facts: where "
         "the supplied source_title disagrees with it about who, where or what, "
         "follow the transcript and ignore the source title. Use source_title "
@@ -901,12 +1033,13 @@ def caption_attributes(model: str, caption: str) -> dict:
 
 def write_digest(model: str, stats_payload: dict, min_sample_size: int) -> str:
     """Produce the periodic written performance digest (plain text/markdown)."""
+    b = _brand()
     system = (
         "You are a careful social media analyst writing a performance digest for a "
-        "single-operator Threads account posting climate news clips. Using ONLY the "
+        f"single-operator Threads account posting short {b['topic']} clips. Using ONLY the "
         "provided data: report top and bottom performers per metric; surface patterns "
         "across attribute slices (keywords, region, clip length, caption traits, day/time, "
-        "and visual/footage traits such as fire, flood, crowds, action); "
+        "and visual/footage traits); "
         "state hypotheses for WHY, clearly labeled as hypotheses, never as proven cause; "
         "label all patterns as correlational. "
         f"If total posts < {min_sample_size}, lead with a prominent small-sample caveat "

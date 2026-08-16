@@ -1,6 +1,9 @@
 # Secrets & local state
 .env
+workspaces/*/.env
 data/
+workspaces/*/data/
+workspaces/.shared/
 *.db
 threads_token.json
 

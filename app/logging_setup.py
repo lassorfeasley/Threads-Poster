@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import logging
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
+
+from .config import DATA_DIR
 
 _FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
 
-LOG_DIR = Path(__file__).resolve().parent.parent / "data" / "logs"
+LOG_DIR = DATA_DIR / "logs"
 LOG_FILE = LOG_DIR / "app.log"
 
 _configured = False

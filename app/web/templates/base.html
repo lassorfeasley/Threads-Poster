@@ -29,7 +29,8 @@
 <script src="/static/toolbar.js?v={{ static_v }}" defer></script>
 </head>
 <body>
-<aside class="sidebar">
+{% set _ws = ws_current() %}
+<aside class="sidebar"{% if _ws.accent %} style="--ws-accent: {{ _ws.accent }}"{% endif %}>
   <div class="brand">
     {% set _brand_name = brand_name() %}
     {% set _brand_logo = brand_logo() %}
@@ -40,11 +41,25 @@
     <span class="brand-mark" aria-hidden="true">{{ _brand_name[:1]|upper }}</span>
     {% endif %}
     {% if _brand_name == default_app_name %}
-    <div class="name">Climate Clip<small>Monitor &amp; Poster</small></div>
+    <div class="name">Clip Monitor<small>Monitor &amp; Poster</small></div>
     {% else %}
     <div class="name">{{ _brand_name }}</div>
     {% endif %}
   </div>
+
+  {# Workspace switcher: each entry is a separate dashboard process on its own
+     port — a fully isolated environment (config, data, database, accounts). #}
+  {% set _ws_opts = workspace_options() %}
+  {% if _ws_opts|length > 1 %}
+  <div class="ws-switch" aria-label="Workspaces">
+    {% for w in _ws_opts %}
+    <a class="nav ws-item {{ 'active' if w.current }}" href="{{ w.url }}" title="{{ w.label }}{{ ' (current)' if w.current }}">
+      <span class="ws-dot" style="background: {{ w.accent or 'var(--accent)' }}"></span>
+      <span class="label">{{ w.label }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
 
   {# Only the daily loop lives up here. Everything you set up once is behind
      Settings at the bottom — see settings_base.html for that rail. #}

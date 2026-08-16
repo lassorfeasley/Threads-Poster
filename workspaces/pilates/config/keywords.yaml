@@ -1,0 +1,21 @@
+# Keyword list for the first-pass filter on video title + description.
+# Broad on purpose: dedicated pilates channels title their uploads many ways,
+# and the LLM relevance scorer (driven by brand.yaml's relevance_rules) does
+# the real filtering after a keyword hit. Edit via the Keywords page.
+
+keywords:
+  - pilates
+  - reformer
+  - mat class
+  - mat workout
+  - core workout
+  - full body workout
+  - flow
+  - mobility
+  - flexibility
+  - stretch
+  - posture
+  - low impact
+  - beginner workout
+  - abs workout
+  - wall pilates

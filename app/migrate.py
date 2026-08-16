@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, func, insert, select, text
 from sqlalchemy.orm import Session
 
-from .config import ROOT, database_url
+from .config import DATA_DIR, database_url
 from .db import engine as dest_engine, init_db
 from .models import Candidate, Channel, MetricSnapshot, ThreadsComment, ThreadsPost
 
@@ -38,7 +38,7 @@ def migrate_sqlite_to_target(sqlite_path: str | None = None) -> dict:
             "connection string (postgresql+psycopg2://...) before migrating."
         )
 
-    src_path = sqlite_path or str(ROOT / "data" / "app.db")
+    src_path = sqlite_path or str(DATA_DIR / "app.db")
     if not Path(src_path).exists():
         raise SystemExit(f"Source SQLite DB not found at {src_path}")
     src_engine = create_engine(f"sqlite:///{src_path}", future=True)

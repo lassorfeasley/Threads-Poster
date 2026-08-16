@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Entry point for the Climate Clip Monitor.
+"""Entry point for the clip monitor & poster.
+
+Every command runs against ONE workspace (an isolated environment under
+workspaces/<slug>/ with its own config, data, database, and Meta account).
+Select it with --workspace or the WORKSPACE env var; the default is "climate".
+`dashboard` with no --workspace supervises ALL enabled workspaces at once.
 
 Usage:
-  python run.py dashboard          # local web UI at http://127.0.0.1:8321
+  python run.py dashboard          # supervisor: one dashboard per enabled workspace
+  python run.py dashboard --workspace climate   # a single workspace's dashboard
+  python run.py workspace list     # show the workspace registry
+  python run.py workspace create <slug>         # scaffold a new workspace
   python run.py monitor            # one discovery pass over all channels
   python run.py monitor --loop     # poll forever at the configured interval
   python run.py score-visuals      # backfill vision scores for unscored candidates
@@ -23,31 +31,256 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import os
+import re
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
-from app.logging_setup import setup_logging
-
-setup_logging(logging.INFO)
+# IMPORTANT: no ``app.*`` import may happen at module scope. Importing
+# ``app.config`` resolves WORKSPACE from the environment, so the --workspace
+# flag must be applied to os.environ first (see main()). Logging setup is
+# deferred for the same reason: the log file lives in the workspace data tree.
 log = logging.getLogger("run")
+
+_REPO_ROOT = Path(__file__).resolve().parent
+_REGISTRY_FILE = _REPO_ROOT / "workspaces.yaml"
+
+
+# --- Workspace registry (parsed locally: must work on a fresh clone and in the
+# --- supervisor, neither of which should import app.config) -------------------
+
+def _load_registry() -> list[dict]:
+    """Entries from workspaces.yaml as [{slug, label, port, accent, enabled}]."""
+    import yaml
+
+    if not _REGISTRY_FILE.exists():
+        return []
+    data = yaml.safe_load(_REGISTRY_FILE.read_text()) or {}
+    out = []
+    for item in data.get("workspaces", []) or []:
+        if isinstance(item, dict) and str(item.get("slug") or "").strip():
+            out.append({
+                "slug": str(item["slug"]).strip(),
+                "label": str(item.get("label") or item["slug"]),
+                "port": int(item.get("port") or 8321),
+                "accent": str(item.get("accent") or ""),
+                "enabled": bool(item.get("enabled", True)),
+            })
+    return out
 
 
 def cmd_dashboard(args) -> None:
+    if args.workspace:
+        _run_single_dashboard(args)
+    else:
+        _run_supervisor(args)
+
+
+def _run_single_dashboard(args) -> None:
     import uvicorn
 
-    from app.config import ROOT
+    from app.config import ROOT, WORKSPACE, current_workspace
 
+    port = args.port or current_workspace()["port"]
+    log.info("Dashboard for workspace %r on http://127.0.0.1:%d", WORKSPACE, port)
     # reload watches only ``app/`` so newly added routes/templates are picked
     # up without a manual restart — never ``data/`` (multi-GB downloads) or
     # ``.venv``. Disable with --no-reload for a stable run.
     uvicorn.run(
         "app.web.main:app",
         host="127.0.0.1",
-        port=args.port,
+        port=port,
         log_level="info",
         reload=args.reload,
         reload_dirs=[str(ROOT / "app")] if args.reload else None,
     )
+
+
+def _run_supervisor(args) -> None:
+    """Spawn one dashboard process per enabled workspace and stream their
+    output with a [slug] prefix. Ctrl-C stops all of them."""
+    entries = [w for w in _load_registry()
+               if w["enabled"] and (_REPO_ROOT / "workspaces" / w["slug"]).is_dir()]
+    if not entries:
+        raise SystemExit(
+            "No enabled workspaces found in workspaces.yaml. Create one with "
+            "`python run.py workspace create <slug>` or run a single dashboard "
+            "with --workspace <slug>."
+        )
+
+    procs: list[tuple[str, subprocess.Popen]] = []
+
+    def _pump(slug: str, proc: subprocess.Popen) -> None:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            sys.stdout.write(f"[{slug}] {line}")
+            sys.stdout.flush()
+
+    for ws in entries:
+        cmd = [sys.executable, str(_REPO_ROOT / "run.py"), "dashboard",
+               "--workspace", ws["slug"], "--port", str(ws["port"])]
+        if not args.reload:
+            cmd.append("--no-reload")
+        env = dict(os.environ, WORKSPACE=ws["slug"])
+        proc = subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True)
+        threading.Thread(target=_pump, args=(ws["slug"], proc), daemon=True).start()
+        procs.append((ws["slug"], proc))
+        print(f"[supervisor] {ws['label']} ({ws['slug']}) -> http://127.0.0.1:{ws['port']}")
+
+    try:
+        while True:
+            for slug, proc in procs:
+                code = proc.poll()
+                if code is not None:
+                    print(f"[supervisor] workspace {slug!r} exited with code {code}; "
+                          "stopping the rest.")
+                    raise KeyboardInterrupt
+            time.sleep(1)
+    except KeyboardInterrupt:
+        for _slug, proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+        for _slug, proc in procs:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+# --- Workspace scaffolding ----------------------------------------------------
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+# Files reset to a blank slate on create (content is per-topic); settings.yaml
+# is copied from the source workspace so tuning carries over.
+_BLANK_KEYWORDS = "# Keyword list for the first-pass filter (edit via the Keywords page).\n\nkeywords: []\n"
+_BLANK_CHANNELS = "# Monitored YouTube channels (edit via the Channels page).\n\nchannels: []\n"
+_BLANK_CAPTION_STYLE = "# Operator style rules for AI-drafted captions (edit via the Style guide page).\n\nrules: []\n"
+_BLANK_FIRST_REPLY = "# Auto first-reply settings (edit via the Replies page).\n\nenabled: false\nattribution_enabled: true\ntext: ''\n"
+
+_ENV_TEMPLATE = """\
+# Workspace-specific secrets for the '{slug}' workspace. The shared root .env
+# holds only cross-workspace keys (ANTHROPIC_API_KEY, YOUTUBE_API_KEY, ...).
+# Fill these in before connecting accounts; blank keys fall back to nothing.
+
+# Postgres for this workspace (its own Supabase project). Leave unset to use
+# local SQLite at workspaces/{slug}/data/app.db (no headless publishing).
+#DATABASE_URL=
+
+# Supabase Storage for trimmed clips (same project as DATABASE_URL).
+#SUPABASE_URL=
+#SUPABASE_SERVICE_KEY=
+
+# This workspace's own Meta app (do NOT reuse another workspace's app).
+#THREADS_APP_ID=
+#THREADS_APP_SECRET=
+#THREADS_REDIRECT_URI=https://localhost/threads-callback
+#INSTAGRAM_APP_ID=
+#INSTAGRAM_APP_SECRET=
+#INSTAGRAM_REDIRECT_URI=https://localhost/instagram-callback
+"""
+
+_REGISTRY_HEADER = """\
+# Workspace registry: every account/topic this checkout can run. Each entry is
+# a fully isolated environment under workspaces/<slug>/ with its own config/,
+# data/, database, and Meta credentials, served by its own process on `port`.
+#
+# Add a new workspace with: python run.py workspace create <slug>
+
+workspaces:
+"""
+
+
+def _registry_entry_text(ws: dict) -> str:
+    return (f"  - slug: {ws['slug']}\n"
+            f"    label: {ws['label']}\n"
+            f"    port: {ws['port']}\n"
+            f"    accent: \"{ws['accent']}\"\n"
+            f"    enabled: {'true' if ws['enabled'] else 'false'}\n")
+
+
+def cmd_workspace_list(_args) -> None:
+    entries = _load_registry()
+    if not entries:
+        print("No workspaces registered. Create one with: python run.py workspace create <slug>")
+        return
+    for ws in entries:
+        exists = (_REPO_ROOT / "workspaces" / ws["slug"]).is_dir()
+        state = "enabled" if ws["enabled"] else "disabled"
+        note = "" if exists else "  (directory missing!)"
+        print(f"{ws['slug']:<16} {ws['label']:<24} port {ws['port']}  {state}{note}")
+
+
+def cmd_workspace_create(args) -> None:
+    """Scaffold a new isolated workspace: config seeded from an existing one,
+    blank per-topic files, a .env skeleton, and a registry entry. Idempotent
+    guards: refuses to overwrite an existing slug."""
+    slug = args.slug.strip().lower()
+    if not _SLUG_RE.match(slug):
+        raise SystemExit(f"Invalid slug {slug!r}: use lowercase letters, digits, - and _")
+    ws_dir = _REPO_ROOT / "workspaces" / slug
+    if ws_dir.exists():
+        raise SystemExit(f"Workspace directory already exists: {ws_dir}")
+    entries = _load_registry()
+    if any(w["slug"] == slug for w in entries):
+        raise SystemExit(f"Workspace {slug!r} is already registered in workspaces.yaml")
+
+    # Seed settings from an existing workspace so tuning carries over.
+    source = args.copy_settings_from or (entries[0]["slug"] if entries else None)
+    source_settings = (_REPO_ROOT / "workspaces" / source / "config" / "settings.yaml"
+                       if source else None)
+
+    label = args.label or slug.replace("_", " ").replace("-", " ").title()
+    port = args.port or (max((w["port"] for w in entries), default=8320) + 1)
+    accent = args.accent or "#4A6B8A"
+
+    config_dir = ws_dir / "config"
+    config_dir.mkdir(parents=True)
+    (ws_dir / "data").mkdir()
+
+    if source_settings and source_settings.exists():
+        (config_dir / "settings.yaml").write_text(source_settings.read_text())
+        print(f"settings.yaml copied from workspace {source!r} — review the topic-specific")
+        print("sections (categories.options, vision.traits, subtitles colors) for the new topic.")
+    else:
+        print("No source workspace for settings.yaml — the app will run on built-in defaults")
+        print("until you create config/settings.yaml.")
+
+    (config_dir / "keywords.yaml").write_text(_BLANK_KEYWORDS)
+    (config_dir / "channels.yaml").write_text(_BLANK_CHANNELS)
+    (config_dir / "caption_style.yaml").write_text(_BLANK_CAPTION_STYLE)
+    (config_dir / "first_reply.yaml").write_text(_BLANK_FIRST_REPLY)
+    (config_dir / "brand.yaml").write_text(
+        f"# Who this workspace is (edit via the Brand & audience page).\n\n"
+        f"name: {label}\nmission: ''\naudience: ''\nvoice_notes: ''\ntopic: ''\n"
+        f"app_name: {label}\nlogo_file: ''\n"
+    )
+    (ws_dir / ".env").write_text(_ENV_TEMPLATE.format(slug=slug))
+
+    entry = {"slug": slug, "label": label, "port": port, "accent": accent,
+             "enabled": bool(args.enabled)}
+    if _REGISTRY_FILE.exists():
+        text = _REGISTRY_FILE.read_text()
+        if "workspaces:" not in text:
+            text += "\n" + _REGISTRY_HEADER
+        if not text.endswith("\n"):
+            text += "\n"
+        _REGISTRY_FILE.write_text(text + _registry_entry_text(entry))
+    else:
+        _REGISTRY_FILE.write_text(_REGISTRY_HEADER + _registry_entry_text(entry))
+
+    print(f"\nWorkspace {slug!r} created at {ws_dir} (port {port}, "
+          f"{'enabled' if entry['enabled'] else 'disabled'}).")
+    print("Next steps:")
+    print(f"  1. Fill in workspaces/{slug}/.env (Meta app, Supabase project)")
+    print(f"  2. python run.py dashboard --workspace {slug}   # configure + OAuth")
+    print("  3. Edit Brand & audience, Keywords, and Channels in the dashboard")
+    if not entry["enabled"]:
+        print(f"  4. Set enabled: true for {slug!r} in workspaces.yaml to include it in the supervisor")
 
 
 def _monitor_pass_with_record(lookback: int | None) -> None:
@@ -353,9 +586,10 @@ def cmd_backfill_calendar_names(args) -> None:
 
 
 def cmd_backfill_categories(args) -> None:
-    """Auto-tag the programming category (news / nature / culture) for
-    candidates that don't have one yet, newest first. Budget-guarded like the
-    other LLM backfills. Rejected candidates are skipped unless --all."""
+    """Auto-tag the programming category for candidates that don't have one
+    yet, newest first. Budget-guarded like the other LLM backfills. Rejected
+    candidates are skipped unless --all. Videos already in a reserved category
+    (promos) are left alone even under --force — see app/categories.py."""
     from sqlalchemy import select
 
     from app import spend
@@ -473,7 +707,7 @@ def cmd_cleanup(_args) -> None:
     when the operator invokes this command; nothing auto-deletes."""
     from pathlib import Path
 
-    from app.config import ROOT, load_settings
+    from app.config import load_settings, storage_dir
 
     settings = load_settings()
     retention = settings.get("storage.retention", "keep")
@@ -481,7 +715,7 @@ def cmd_cleanup(_args) -> None:
         print("storage.retention is 'keep' — nothing to prune. Set it to a number of days to enable.")
         return
     cutoff = time.time() - int(retention) * 86400
-    root = ROOT / settings.get("storage.download_dir", "data/videos")
+    root = storage_dir(settings, "storage.download_dir", "data/videos")
     removed = 0
     for path in root.rglob("*"):
         if path.is_file() and path.stat().st_mtime < cutoff:
@@ -495,30 +729,55 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("dashboard", help="run the local web dashboard")
-    p.add_argument("--port", type=int, default=8321)
+    # Shared by every command that runs against one workspace. Must be applied
+    # to os.environ before any app.* import (see the bottom of main()).
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--workspace", default=None, metavar="SLUG",
+                        help="workspace to run against (default: WORKSPACE env var, then 'climate')")
+
+    p = sub.add_parser("dashboard", parents=[common],
+                       help="run the web dashboard(s); with no --workspace, supervises all enabled workspaces")
+    p.add_argument("--port", type=int, default=None,
+                   help="override the workspace's registry port (single-workspace mode only)")
     p.add_argument("--no-reload", dest="reload", action="store_false",
                    help="disable auto-reload on source changes")
     p.set_defaults(func=cmd_dashboard, reload=True)
 
-    p = sub.add_parser("monitor", help="run channel discovery")
+    p = sub.add_parser("workspace", help="manage the workspace registry")
+    wsub = p.add_subparsers(dest="ws_command", required=True)
+    wp = wsub.add_parser("list", help="show registered workspaces")
+    wp.set_defaults(func=cmd_workspace_list)
+    wp = wsub.add_parser("create", help="scaffold a new isolated workspace")
+    wp.add_argument("slug", help="directory name under workspaces/ (lowercase)")
+    wp.add_argument("--label", default=None, help="display name (default: title-cased slug)")
+    wp.add_argument("--port", type=int, default=None, help="dashboard port (default: next free)")
+    wp.add_argument("--accent", default=None, metavar="HEX", help="sidebar accent color")
+    wp.add_argument("--copy-settings-from", default=None, metavar="SLUG",
+                    help="workspace whose settings.yaml to copy (default: first registered)")
+    wp.add_argument("--enabled", action="store_true",
+                    help="include in the supervisor immediately (default: disabled until configured)")
+    wp.set_defaults(func=cmd_workspace_create)
+
+    p = sub.add_parser("monitor", parents=[common], help="run channel discovery")
     p.add_argument("--loop", action="store_true", help="poll forever at the configured interval")
     p.add_argument("--lookback", type=int, default=None, metavar="DAYS",
                    help="scan this many days back instead of since-last-check (backfill)")
     p.set_defaults(func=cmd_monitor)
 
-    p = sub.add_parser("scheduler", help="run the adaptive posting scheduler")
+    p = sub.add_parser("scheduler", parents=[common], help="run the adaptive posting scheduler")
     p.add_argument("--loop", action="store_true", help="keep running window checks + metrics polls")
     p.add_argument("--interval", type=int, default=60, help="seconds between checks in --loop mode")
     p.set_defaults(func=cmd_scheduler)
 
-    sub.add_parser("migrate-db", help="copy local SQLite data into DATABASE_URL (e.g. Supabase)").set_defaults(func=cmd_migrate_db)
-    p = sub.add_parser("score-visuals", help="backfill vision scores for unscored candidates")
+    sub.add_parser("migrate-db", parents=[common],
+                   help="copy local SQLite data into DATABASE_URL (e.g. Supabase)").set_defaults(func=cmd_migrate_db)
+    p = sub.add_parser("score-visuals", parents=[common],
+                       help="backfill vision scores for unscored candidates")
     p.add_argument("--limit", type=int, default=None, metavar="N",
                    help="score at most N candidates this run")
     p.set_defaults(func=cmd_score_visuals)
 
-    p = sub.add_parser("annotate-posts",
+    p = sub.add_parser("annotate-posts", parents=[common],
                        help="backfill footage traits for published posts (from posted clip files)")
     p.add_argument("--limit", type=int, default=None, metavar="N",
                    help="annotate at most N posts this run")
@@ -526,13 +785,13 @@ def main() -> None:
                    help="re-annotate posts that already have footage traits")
     p.set_defaults(func=cmd_annotate_posts)
 
-    p = sub.add_parser("backfill-post-times",
+    p = sub.add_parser("backfill-post-times", parents=[common],
                        help="restate published posts' weekday/hour in the scheduler timezone")
     p.add_argument("--dry-run", action="store_true",
                    help="report what would change without writing")
     p.set_defaults(func=cmd_backfill_post_times)
 
-    p = sub.add_parser("backfill-calendar-names",
+    p = sub.add_parser("backfill-calendar-names", parents=[common],
                        help="generate short 2-5 word calendar labels for cuts titled before that field existed")
     p.add_argument("--limit", type=int, default=None, metavar="N",
                    help="name at most N cuts this run")
@@ -540,22 +799,44 @@ def main() -> None:
                    help="regenerate cuts that already have a calendar_name")
     p.set_defaults(func=cmd_backfill_calendar_names)
 
-    p = sub.add_parser("backfill-categories",
-                       help="auto-tag programming categories (news/nature/culture) for untagged videos")
+    p = sub.add_parser("backfill-categories", parents=[common],
+                       help="auto-tag programming categories for untagged videos")
     p.add_argument("--limit", type=int, default=None, metavar="N",
                    help="tag at most N videos this run")
     p.add_argument("--force", action="store_true",
-                   help="re-tag videos that already have a category")
+                   help="re-tag videos that already have a category (never promos)")
     p.add_argument("--all", action="store_true",
                    help="include rejected candidates")
     p.set_defaults(func=cmd_backfill_categories)
 
-    sub.add_parser("metrics", help="snapshot Threads post metrics").set_defaults(func=cmd_metrics)
-    sub.add_parser("comments", help="sync comments on own posts").set_defaults(func=cmd_comments)
-    sub.add_parser("digest", help="write a fresh analytics digest").set_defaults(func=cmd_digest)
-    sub.add_parser("cleanup", help="apply retention setting to downloaded segments").set_defaults(func=cmd_cleanup)
+    sub.add_parser("metrics", parents=[common],
+                   help="snapshot Threads post metrics").set_defaults(func=cmd_metrics)
+    sub.add_parser("comments", parents=[common],
+                   help="sync comments on own posts").set_defaults(func=cmd_comments)
+    sub.add_parser("digest", parents=[common],
+                   help="write a fresh analytics digest").set_defaults(func=cmd_digest)
+    sub.add_parser("cleanup", parents=[common],
+                   help="apply retention setting to downloaded segments").set_defaults(func=cmd_cleanup)
 
     args = parser.parse_args()
+
+    # Apply the workspace choice BEFORE any app.* import resolves it.
+    if getattr(args, "workspace", None):
+        os.environ["WORKSPACE"] = args.workspace
+
+    # The registry commands and the supervisor must work without any existing
+    # workspace (fresh clone), so they never import app.*; everything else gets
+    # the workspace's file logging.
+    if args.command == "workspace" or (
+        args.command == "dashboard" and not getattr(args, "workspace", None)
+    ):
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    else:
+        from app.logging_setup import setup_logging
+
+        setup_logging(logging.INFO)
+
     args.func(args)
 
 

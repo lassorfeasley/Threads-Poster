@@ -26,7 +26,7 @@ categories:
   # category; the goal is a roughly equal distribution across what gets
   # posted, so the feed reads as varied rather than as a run of one thing.
   # The LLM auto-tags a recommended category for each new candidate (operator
-  # can override on the video page). All videos are climate-related — a
+  # can override on the video page). All videos are pilates-related — a
   # category listed here captures the genre/framing of the footage.
   #
   # The app appends its own RESERVED categories (today just "promos", the
@@ -40,24 +40,24 @@ categories:
   # Tag new candidates during the monitor pass (alongside relevance scoring).
   tag_at_monitor: true
   options:
-    - slug: news
-      emoji: "📰"
-      label: News, views & politics
+    - slug: technique
+      emoji: "🎯"
+      label: Technique & form
       description: >-
-        Breaking news, cable news clips, press conferences, political coverage,
-        current-events reporting and commentary.
-    - slug: nature
-      emoji: "🌿"
-      label: Conservation, nature & exploration
+        Single-exercise tutorials and form breakdowns: how to do one movement
+        well, common mistakes, modifications, and teaching cues.
+    - slug: flow
+      emoji: "🌊"
+      label: Flows & class moments
       description: >-
-        Nature documentaries, wildlife and conservation stories, travelogues,
-        exploration and educational science content.
-    - slug: culture
-      emoji: "📼"
-      label: Pop culture, history & media
+        Flowing sequences, transitions, and satisfying excerpts from full mat
+        or reformer classes — movement to watch and follow along.
+    - slug: lifestyle
+      emoji: "✨"
+      label: Lifestyle & inspiration
       description: >-
-        Throwback clips, archival footage, history segments, climate in fiction,
-        television, film and other media moments.
+        Practice-life content: studio culture, instructor life, progress and
+        flexibility journeys, equipment, and motivation to get on the mat.
 
 clips:
   # The clip suggester: reads a video's transcript and proposes the clips it
@@ -90,7 +90,7 @@ clips:
 vision:
   # Optionally tag candidates from YouTube storyboard stills (metadata-only —
   # nothing downloaded). Neutral labels only; no visual "punch" score. Ranking
-  # uses climate relevance (+ ACTIVE learned trait verdicts once unlocked).
+  # uses topic relevance (+ ACTIVE learned trait verdicts once unlocked).
   # Ground-truth learning tags come from the published clip file, not this.
   enabled: true
   model: claude-haiku-4-5
@@ -103,27 +103,27 @@ vision:
   # Flat trait vocabulary (seeded into the Traits page on first run; page edits
   # take precedence). Observation only — performance decides good/bad later.
   traits:
-    - action
-    - people_doing_things
-    - fire
-    - flood
-    - storm_damage
-    - destruction
-    - rescue_or_emergency_response
-    - crowd
-    - dramatic_weather
-    - aerial_or_sweeping_shot
-    - talking_head_or_anchor_at_desk
-    - static_graphic_or_slideshow
-    - chart_or_data_screen
-    - text_heavy_lower_thirds
-    - press_conference_podium
-    - low_motion_studio_segment
+    - movement_in_progress
+    - flowing_sequence
+    - impressive_or_advanced_position
+    - reformer_or_equipment
+    - mat_work
+    - close_up_form_detail
+    - bright_airy_studio
+    - outdoor_or_scenic_setting
+    - props_ball_ring_or_band
+    - group_class
+    - instructor_demonstrating
+    - talking_head_no_movement
+    - static_graphic_or_title_card
+    - text_heavy_overlay
+    - setup_or_equipment_adjusting
+    - low_motion_segment
   # Frames extracted from each PUBLISHED clip for ground-truth trait annotation.
   post_frames: 12
 
 ranking:
-  # Queue order: climate relevance, optionally nudged by ACTIVE trait verdicts
+  # Queue order: topic relevance, optionally nudged by ACTIVE trait verdicts
   # (see `learning:`). Visual scores are retired.
   relevance_weight: 1.0
   # How far an ACTIVE trait verdict can move a candidate's score (0 = ignore).

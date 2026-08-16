@@ -11,8 +11,32 @@ import yaml
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG_DIR = ROOT / "config"
 
+# Which environment this process is: every workspace has its own config/,
+# data/, database, and Meta credentials under workspaces/<slug>/. One process
+# serves exactly one workspace — isolation comes from the process boundary,
+# not from in-app tenancy.
+WORKSPACE = os.environ.get("WORKSPACE", "climate")
+WORKSPACE_DIR = ROOT / "workspaces" / WORKSPACE
+if not WORKSPACE_DIR.is_dir():
+    _known = sorted(
+        p.name for p in (ROOT / "workspaces").glob("*") if p.is_dir()
+    ) if (ROOT / "workspaces").is_dir() else []
+    # Fail loudly: _load_yaml() returns {} for missing files, so a typo'd
+    # workspace would otherwise boot silently with all-default config against
+    # an empty database — and could publish with the wrong settings.
+    raise RuntimeError(
+        f"Unknown workspace {WORKSPACE!r}: {WORKSPACE_DIR} does not exist. "
+        f"Available workspaces: {', '.join(_known) or '(none)'}. "
+        f"Set WORKSPACE or pass --workspace to run.py."
+    )
+CONFIG_DIR = WORKSPACE_DIR / "config"
+DATA_DIR = WORKSPACE_DIR / "data"
+
+# Workspace .env first, root .env second: load_dotenv never overrides an
+# already-set variable, so precedence is real environment (e.g. CI) > the
+# workspace's .env > the shared root .env.
+load_dotenv(WORKSPACE_DIR / ".env")
 load_dotenv(ROOT / ".env")
 
 
@@ -116,18 +140,22 @@ def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = Tr
 
 
 BRAND_HEADER = """\
-# Who this workspace is: identity + audience fields that will parameterize the
-# LLM prompts (today they hardcode climate / local-TV / Renewables.org), plus
+# Who this workspace is: identity + audience fields that parameterize the LLM
+# prompts (relevance scoring, clip selection, captions, titles, digest), plus
 # white-label appearance for the app chrome. Editable via the Brand & audience
 # page under Configure; no code changes needed.
 
 """
 
 # White-label defaults: what the sidebar/title show when brand.yaml is unset.
-DEFAULT_APP_NAME = "Climate Clip Monitor"
+DEFAULT_APP_NAME = "Clip Monitor"
 
 _BRAND_TEXT_FIELDS = ("name", "mission", "audience", "voice_notes", "topic",
-                      "app_name", "logo_file")
+                      "app_name", "logo_file",
+                      # Prompt-framing fields consumed by app/llm.py. Blank
+                      # fields fall back to generic phrasing there.
+                      "source_kind", "relevance_rules", "false_positives",
+                      "strong_openings", "weak_openings", "clip_guidance")
 
 
 def load_brand() -> dict[str, str]:
@@ -214,6 +242,58 @@ def load_channel_seed() -> list[dict[str, Any]]:
     return data.get("channels", [])
 
 
+_WORKSPACE_DEFAULTS = {"label": "", "port": 8321, "accent": "", "enabled": True}
+
+
+def load_workspaces() -> list[dict[str, Any]]:
+    """The workspace registry from ``workspaces.yaml`` at the repo root, as
+    ``[{slug, label, port, accent, enabled}]``. Falls back to a single entry
+    for the current workspace when the registry is missing, so a checkout
+    without the file still boots."""
+    data = _load_yaml(ROOT / "workspaces.yaml")
+    out: list[dict[str, Any]] = []
+    for item in data.get("workspaces", []) or []:
+        if not isinstance(item, dict):
+            continue
+        slug = str(item.get("slug") or "").strip()
+        if not slug:
+            continue
+        entry = dict(_WORKSPACE_DEFAULTS)
+        entry.update({k: item[k] for k in _WORKSPACE_DEFAULTS if k in item})
+        entry["slug"] = slug
+        entry["label"] = str(entry["label"] or slug)
+        entry["port"] = int(entry["port"] or 8321)
+        entry["enabled"] = bool(entry["enabled"])
+        out.append(entry)
+    if not out:
+        out = [dict(_WORKSPACE_DEFAULTS, slug=WORKSPACE, label=WORKSPACE)]
+    return out
+
+
+def current_workspace() -> dict[str, Any]:
+    """This process's registry entry (or a synthesized one)."""
+    for ws in load_workspaces():
+        if ws["slug"] == WORKSPACE:
+            return ws
+    return dict(_WORKSPACE_DEFAULTS, slug=WORKSPACE, label=WORKSPACE)
+
+
+def storage_dir(settings: Settings, key: str, default: str) -> Path:
+    """Resolve a ``storage.*`` directory setting against this workspace's data
+    tree. Values are stored relative (e.g. ``data/videos``); absolute values
+    are honored as-is for operators who point storage elsewhere."""
+    value = str(settings.get(key, default))
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    # Historical settings values are prefixed "data/"; strip it so the same
+    # settings.yaml works before and after the workspace move.
+    parts = path.parts
+    if parts and parts[0] == "data":
+        path = Path(*parts[1:]) if len(parts) > 1 else Path(".")
+    return DATA_DIR / path
+
+
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
@@ -222,6 +302,5 @@ def database_url() -> str:
     url = env("DATABASE_URL")
     if url:
         return url
-    data_dir = ROOT / "data"
-    data_dir.mkdir(exist_ok=True)
-    return f"sqlite:///{data_dir / 'app.db'}"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{DATA_DIR / 'app.db'}"

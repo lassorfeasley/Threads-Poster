@@ -27,9 +27,10 @@ from ..analytics import (generate_report, latest_metrics_bulk, snapshot_metrics,
 from ..categories import category_by_slug, category_options
 from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
 from ..config import (
-    DEFAULT_APP_NAME, env, load_brand, load_caption_rules, load_first_reply,
-    load_keywords, load_settings, render_caption_guide, save_brand,
-    save_caption_rules, save_first_reply, save_keywords,
+    DATA_DIR, DEFAULT_APP_NAME, WORKSPACE, current_workspace, env, load_brand,
+    load_caption_rules, load_first_reply, load_keywords, load_settings,
+    load_workspaces, render_caption_guide, save_brand, save_caption_rules,
+    save_first_reply, save_keywords,
 )
 from ..db import (
     SessionLocal,
@@ -110,9 +111,14 @@ from . import pagecache
 
 log = logging.getLogger("web")
 
-app = FastAPI(title="Climate Clip Monitor")
+app = FastAPI(title="Clip Monitor")
 _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+# The uploaded brand logo is workspace data, not code: it lives under the
+# workspace's data tree so one workspace's upload can never erase another's.
+_BRAND_LOGO_DIR = DATA_DIR / "brand"
+_BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/brand-static", StaticFiles(directory=str(_BRAND_LOGO_DIR)), name="brand-static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 # Cache-bust static assets whenever style.css changes so browsers pick up edits.
 # Evaluated lazily on every render (via __str__) so CSS-only edits bust the cache
@@ -237,15 +243,43 @@ def _brand_logo() -> str:
         fn = load_brand().get("logo_file") or ""
         if not fn:
             return ""
-        path = _STATIC_DIR / "brand" / fn
-        return f"/static/brand/{fn}?v={int(path.stat().st_mtime)}"
+        path = _BRAND_LOGO_DIR / fn
+        return f"/brand-static/{fn}?v={int(path.stat().st_mtime)}"
     except Exception:
         return ""
+
+
+def _ws_current() -> dict:
+    """This process's workspace registry entry. Renders on every page, so it
+    must never raise."""
+    try:
+        return current_workspace()
+    except Exception:
+        return {"slug": WORKSPACE, "label": WORKSPACE, "port": 0,
+                "accent": "", "enabled": True}
+
+
+def _workspace_options() -> list[dict]:
+    """Workspaces for the sidebar switcher: every enabled registry entry plus
+    the current one, each with the absolute URL of its own dashboard process.
+    Never raises."""
+    try:
+        out = []
+        for ws in load_workspaces():
+            if not ws["enabled"] and ws["slug"] != WORKSPACE:
+                continue
+            out.append(dict(ws, current=(ws["slug"] == WORKSPACE),
+                            url=f"http://127.0.0.1:{ws['port']}/"))
+        return out
+    except Exception:
+        return []
 
 
 templates.env.globals["brand_name"] = _brand_name
 templates.env.globals["brand_logo"] = _brand_logo
 templates.env.globals["default_app_name"] = DEFAULT_APP_NAME
+templates.env.globals["ws_current"] = _ws_current
+templates.env.globals["workspace_options"] = _workspace_options
 
 init_db()
 with session_scope() as _s:
@@ -1393,7 +1427,7 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
     trim -> caption -> post like everything else."""
     import uuid
 
-    from ..config import ROOT
+    from ..config import storage_dir
 
     filename = file.filename or "upload.mp4"
     ext = Path(filename).suffix.lower()
@@ -1403,7 +1437,7 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
 
     video_id = "up" + uuid.uuid4().hex[:16]  # unique, fits String(20)
     settings = load_settings()
-    upload_dir = ROOT / settings.get("storage.download_dir", "data/videos") / "uploads"
+    upload_dir = storage_dir(settings, "storage.download_dir", "data/videos") / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     dest = upload_dir / f"{video_id}{ext}"
 
@@ -1960,6 +1994,7 @@ def _export_cut_in_thread(cut_id: int) -> None:
                 return
             source = c.local_video_path
             video_id = c.video_id
+            word_transcript_path = c.word_transcript_path or ""
             previous = [cut.trimmed_clip_path, cut.subtitled_clip_path,
                         cut.vertical_clip_path, cut.clip_transcript_path]
             need_title = not (cut.clip_title or "").strip()
@@ -1969,6 +2004,24 @@ def _export_cut_in_thread(cut_id: int) -> None:
 
         stamp = utcnow().strftime("%Y%m%dT%H%M%S")
         out = export_supercut(source, segments, f"{video_id}_cut{cut_id}_{stamp}")
+
+        # Slice the archive-time Whisper word stream to the exported windows so
+        # captions / Suggest caption never re-transcribe the trim. Best-effort:
+        # videos archived before word sidecars fall back to Whisper-on-the-clip
+        # inside ensure_clip_words, exactly as before.
+        transcript_sidecar = ""
+        if word_transcript_path and Path(word_transcript_path).exists():
+            try:
+                from ..subtitles import (
+                    load_clip_words, save_clip_transcript, slice_source_words,
+                )
+
+                clip_words = slice_source_words(
+                    load_clip_words(word_transcript_path), segments)
+                if clip_words:
+                    transcript_sidecar = str(save_clip_transcript(out, clip_words))
+            except Exception:
+                log.exception("Word-stream slice failed for cut %s", cut_id)
 
         title = ""
         calendar = ""
@@ -1994,7 +2047,7 @@ def _export_cut_in_thread(cut_id: int) -> None:
             cut.updated_at = utcnow()
             cut.subtitled_clip_path = ""
             cut.vertical_clip_path = ""
-            cut.clip_transcript_path = ""
+            cut.clip_transcript_path = transcript_sidecar
             cut.use_subtitles = False
             cut.export_status = ""
             cut.export_error = ""
@@ -2392,6 +2445,7 @@ def suggest_caption(cut_id: int):
                 operator_guide=operator_guide,
                 max_chars=max_chars,
                 target_words=target_words,
+                description=c.description,
             )
             # The caption field itself is left untouched — this is a proposal
             # until the operator accepts it (/cut/{id}/caption). The DRAFT is
@@ -2467,6 +2521,7 @@ def _draft_hook_for_cut(cut: Cut, settings) -> tuple[str, str]:
     hook = suggest_hook_text(
         model, c.title, c.channel.call_sign, c.channel.market,
         " ".join(clip_text.split())[:3000], examples=examples,
+        description=c.description,
     )
     if not hook:
         raise RuntimeError("The model returned an empty hook — try again.")
@@ -3404,7 +3459,19 @@ def _library_dataset() -> dict:
             _call_sign(p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate)
             for p in posts
         }
-        used_categories = {r["c"].category for r in video_rows if r["c"].category}
+        # Category filters all three views, so its vocabulary has to come from
+        # all three: a video archived long ago may be the only thing carrying a
+        # category that several posts on the page inherit.
+        def _category(candidate) -> str:
+            return (candidate.category or "") if candidate is not None else ""
+
+        used_categories = {_category(r["c"]) for r in video_rows}
+        used_categories |= {_category(r["cut"].candidate) for r in cut_rows}
+        used_categories |= {
+            _category(p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate)
+            for p in posts
+        }
+        used_categories.discard("")
         category_choices = [
             (opt["slug"], f"{opt['emoji']} {opt['label']}".strip())
             for opt in category_options() if opt["slug"] in used_categories
@@ -3878,7 +3945,6 @@ def settings_index():
 
 # --- Brand & audience ----------------------------------------------------------
 
-_BRAND_LOGO_DIR = _STATIC_DIR / "brand"
 _ALLOWED_LOGO_EXTS = (".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif")
 
 
@@ -3896,10 +3962,17 @@ def brand_page(request: Request, msg: str = ""):
 async def brand_save(
     name: str = Form(""), mission: str = Form(""), audience: str = Form(""),
     topic: str = Form(""), voice_notes: str = Form(""), app_name: str = Form(""),
+    source_kind: str = Form(""), relevance_rules: str = Form(""),
+    false_positives: str = Form(""), strong_openings: str = Form(""),
+    weak_openings: str = Form(""), clip_guidance: str = Form(""),
     logo: UploadFile | None = File(None),
 ):
     values = {"name": name, "mission": mission, "audience": audience,
-              "topic": topic, "voice_notes": voice_notes, "app_name": app_name}
+              "topic": topic, "voice_notes": voice_notes, "app_name": app_name,
+              "source_kind": source_kind, "relevance_rules": relevance_rules,
+              "false_positives": false_positives,
+              "strong_openings": strong_openings,
+              "weak_openings": weak_openings, "clip_guidance": clip_guidance}
     if logo is not None and (logo.filename or "").strip():
         ext = Path(logo.filename).suffix.lower()
         if ext not in _ALLOWED_LOGO_EXTS:

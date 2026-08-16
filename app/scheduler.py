@@ -13,6 +13,7 @@ import datetime as dt
 import logging
 import threading
 import time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
@@ -23,19 +24,30 @@ from .analytics import poll_recent_metrics
 from .categories import category_by_slug
 from .config import load_settings, scheduler_timezone
 from .db import session_scope
-from .models import Candidate, SchedulerState, ThreadsPost, utcnow
+from .models import Candidate, Cut, SchedulerState, ThreadsPost, utcnow
 from .publishing import (
     clear_publishing,
     is_publish_active,
     mark_publishing,
     publish_paired_reel,
     publish_post,
+    record_post,
 )
 
 log = logging.getLogger("scheduler")
 
 STATUS_QUEUED = "queued"
 STATUS_PUBLISHING = "publishing"
+
+# Reserved category whose cuts feed the promo rotation (app/categories.py).
+PROMO_CATEGORY = "promos"
+
+# How many promo cycles ahead the rotation will look for a free window. It only
+# reaches past the first one when nearer windows are already claimed by pins —
+# and pins land on promo windows often, because dragging a card pins both it and
+# the card it displaced. One cycle of lookahead would strand the rotation behind
+# a single dragged post until the window passed.
+PROMO_LOOKAHEAD_CYCLES = 4
 
 # Pins can target windows up to this many days out (pin_post_to_window's
 # horizon). Every stale-pin check must scan at least this far ahead, or valid
@@ -299,6 +311,327 @@ def pin_post_to_window(session, post_id: int, window_key: str) -> str:
     return f"Moved to {window_key}"
 
 
+# --- Promo rotation ---------------------------------------------------------
+#
+# Branded content is metered onto its own cadence rather than flowing through
+# the FIFO queue. Every ``every_days`` days one window belongs to a promo, and
+# the tick stages that promo ahead of time as an ordinary queued post pinned to
+# the window. Two things fall out of staging rather than special-casing the
+# assignment: the promo can never drift into an organic window (it is pinned
+# before it is ever a queue candidate), and it appears on the calendar as a
+# normal card the operator can edit, drag, or remove.
+#
+# The pool recycles instead of draining — a clip re-enters rotation after it
+# airs — so promo production is decoupled from promo pacing.
+
+
+def _parse_window_key(key: str) -> tuple[dt.date, int] | None:
+    """``YYYY-MM-DD#N`` -> ``(date, index)``, or None when unparseable.
+
+    Promo bookkeeping compares keys across days, so it compares parsed tuples
+    rather than raw strings: ``...#10`` sorts before ``...#2`` as text. (The
+    same-day checks elsewhere in this module are safe because they compare
+    within one date prefix.)
+    """
+    day_s, sep, idx_s = (key or "").partition("#")
+    if not sep:
+        return None
+    try:
+        return dt.date.fromisoformat(day_s), int(idx_s)
+    except ValueError:
+        return None
+
+
+def _promo_config() -> dict | None:
+    """Promo rotation settings, or None when it's off or misconfigured."""
+    settings = load_settings()
+    if not settings.get("scheduler.promos.enabled", False):
+        return None
+    every = int(settings.get("scheduler.promos.every_days", 3) or 0)
+    if every < 1:
+        return None
+    raw_anchor = str(settings.get("scheduler.promos.anchor", "") or "").strip()
+    try:
+        anchor = dt.date.fromisoformat(raw_anchor)
+    except ValueError:
+        log.warning("Invalid scheduler.promos.anchor %r; promo rotation disabled",
+                    raw_anchor)
+        return None
+    return {
+        "every_days": every,
+        "anchor": anchor,
+        "window_index": settings.get("scheduler.promos.window_index", "middle"),
+        "min_days_between_repeats": float(
+            settings.get("scheduler.promos.min_days_between_repeats", 0) or 0),
+    }
+
+
+def _promo_window_index(raw, window_count: int) -> int | None:
+    """Resolve the configured promo window to a 0-based index into the day."""
+    if window_count <= 0:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() == "middle":
+        return window_count // 2
+    try:
+        idx = int(raw)
+    except (TypeError, ValueError):
+        log.warning("Invalid scheduler.promos.window_index %r; promo rotation disabled",
+                    raw)
+        return None
+    return idx if 0 <= idx < window_count else None
+
+
+def _is_promo_window(day: dt.date, index: int, cfg: dict, window_count: int) -> bool:
+    """Whether this window belongs to the promo cadence.
+
+    Phase comes from the configured anchor date, not from stored state, so both
+    schedulers (dashboard thread and the Actions cron) agree without sharing
+    anything, and the answer survives restarts and config reloads.
+    """
+    promo_index = _promo_window_index(cfg["window_index"], window_count)
+    if promo_index is None or index != promo_index:
+        return False
+    return (day - cfg["anchor"]).days % cfg["every_days"] == 0
+
+
+def _upcoming_promo_slots(cfg: dict, now: dt.datetime,
+                          last_promo_key: str) -> list[tuple[str, dt.datetime]]:
+    """Upcoming windows the rotation may claim, earliest first.
+
+    Windows at or before ``last_promo_key`` are spent: that cycle was already
+    offered a promo, whether or not the staged post survived.
+    """
+    tz = _tz()
+    today = now.astimezone(tz).date()
+    last = _parse_window_key(last_promo_key)
+    # Several cycles, so a claimed window has somewhere to step to. Staging
+    # stays close to the calendar anyway: the caller takes the FIRST free slot,
+    # and ``_promo_pending`` stops a second promo being staged behind it.
+    horizon = today + dt.timedelta(days=cfg["every_days"] * PROMO_LOOKAHEAD_CYCLES)
+    out: list[tuple[str, dt.datetime]] = []
+    d = today
+    while d <= horizon:
+        windows = _windows_for_day(d, tz)
+        for i, win in enumerate(windows):
+            if win <= now or not _is_promo_window(d, i, cfg, len(windows)):
+                continue
+            if last is not None and (d, i) <= last:
+                continue
+            out.append((_window_key(d, i), win))
+        d += dt.timedelta(days=1)
+    return out
+
+
+def _promo_pending(session) -> bool:
+    """Whether a promo is already on its way out.
+
+    Only one promo is ever in flight. On a promo day the current cycle and the
+    next one are both inside the search horizon, so without this the tick would
+    stage the following cycle the moment the current one was claimed — draining
+    the rotation days ahead of the calendar.
+
+    Deliberately counts *any* queued promo, staged or hand-queued: either way a
+    piece of branded content is already scheduled, and a second would double up.
+    """
+    row = session.execute(
+        select(ThreadsPost.id)
+        .join(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+        .where(
+            ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
+            Candidate.category == PROMO_CATEGORY,
+        ).limit(1)
+    ).first()
+    return row is not None
+
+
+def _claimed_window_keys(session) -> set[str]:
+    """Windows an operator pin already holds.
+
+    Pins are not only deliberate claims: ``pin_post_to_window`` swaps, so
+    dragging any card pins both it and the card it displaced. With a promo
+    window every few days those byproduct pins land on promo slots constantly,
+    so the rotation steps over a claimed slot to the next one rather than
+    treating it as a refusal and stalling there.
+    """
+    return {
+        key for key in session.execute(
+            select(ThreadsPost.pinned_window_key).where(
+                ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
+                ThreadsPost.pinned_window_key != "",
+            )
+        ).scalars().all() if key
+    }
+
+
+def _promo_rotation(session) -> list[tuple[Cut, dt.datetime | None]]:
+    """Promo cuts eligible to air, least-recently-aired first.
+
+    A cut joins the rotation once the operator has queued it by hand — a post
+    of its own reaching ``queued`` or ``published`` is that opt-in, so nothing
+    airs unattended that the operator hasn't already sent out deliberately.
+
+    A cut drops out while it has a post already queued or publishing: that
+    airing is booked, and staging a second would double-book the same clip.
+    """
+    cuts = session.execute(
+        select(Cut)
+        .join(Candidate, Cut.candidate_pk == Candidate.id)
+        .options(selectinload(Cut.candidate))
+        .where(Candidate.category == PROMO_CATEGORY, Cut.trimmed_clip_path != "")
+    ).scalars().all()
+    if not cuts:
+        return []
+
+    last_aired: dict[int, dt.datetime] = dict(session.execute(
+        select(ThreadsPost.cut_pk, func.max(ThreadsPost.published_at))
+        .where(ThreadsPost.status == "published",
+               ThreadsPost.cut_pk.is_not(None),
+               ThreadsPost.published_at.is_not(None))
+        .group_by(ThreadsPost.cut_pk)
+    ).all())
+    booked = set(session.execute(
+        select(ThreadsPost.cut_pk).where(
+            ThreadsPost.cut_pk.is_not(None),
+            ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
+        )
+    ).scalars().all())
+    opted_in = booked | set(last_aired)
+
+    def aired_at(cut: Cut) -> dt.datetime | None:
+        when = last_aired.get(cut.id)
+        if when is not None and when.tzinfo is None:
+            when = when.replace(tzinfo=dt.timezone.utc)
+        return when
+
+    eligible = [c for c in cuts if c.id in opted_in and c.id not in booked]
+    # Never-aired cuts sort first; ids break ties so the order is stable across
+    # processes (both schedulers must pick the same head).
+    epoch = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    eligible.sort(key=lambda c: (aired_at(c) or epoch, c.id))
+    return [(c, aired_at(c)) for c in eligible]
+
+
+def _promo_due(session, cfg: dict, now: dt.datetime) -> Cut | None:
+    """The promo to air next, or None when the rotation should sit this one out.
+
+    With a small pool the head comes back around quickly, and the caption is
+    reused verbatim — ``min_days_between_repeats`` is what stops that from
+    reading as a loop. Skipping simply leaves the window to organic content.
+    """
+    rotation = _promo_rotation(session)
+    if not rotation:
+        return None
+    cut, last_aired = rotation[0]
+    gap_days = cfg["min_days_between_repeats"]
+    if last_aired is not None and gap_days > 0:
+        if (now - last_aired).total_seconds() < gap_days * 86400:
+            return None
+    return cut
+
+
+def _stage_promo(session, cut: Cut, window_key: str) -> ThreadsPost | None:
+    """Queue a fresh airing of ``cut``, pinned to ``window_key``.
+
+    Normally this clones the cut's last airing: caption and clip paths are
+    copied rather than rebuilt, so the clip is already in cloud storage and a
+    headless runner holding none of the operator's local files can still stage
+    and publish it — and reusing the caption is what the rotation is for.
+
+    With no usable prior airing it falls back to the cut's own draft caption
+    and exported file, which needs that file on this machine to upload. That
+    path is best-effort: a headless runner without the file simply leaves the
+    cycle for whichever scheduler does have it.
+    """
+    prior = session.execute(
+        select(ThreadsPost)
+        .where(ThreadsPost.cut_pk == cut.id, ThreadsPost.status == "published")
+        .order_by(ThreadsPost.published_at.desc().nullslast())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    if (prior is not None and (prior.caption or "").strip()
+            and (prior.clip_object_path or prior.clip_local_path)):
+        post = ThreadsPost(
+            candidate_pk=cut.candidate_pk,
+            cut_pk=cut.id,
+            caption=prior.caption,
+            clip_local_path=prior.clip_local_path,
+            clip_object_path=prior.clip_object_path,
+            clip_length_seconds=prior.clip_length_seconds,
+            attribution_text=prior.attribution_text,
+            attribution_skipped=prior.attribution_skipped,
+            status=STATUS_QUEUED,
+            pinned_window_key=window_key,
+        )
+        session.add(post)
+        session.flush()
+        return post
+
+    caption = (cut.draft_caption or "").strip()
+    if not caption:
+        return None
+    clip_path = cut.trimmed_clip_path
+    if cut.use_subtitles and cut.subtitled_clip_path:
+        if Path(cut.subtitled_clip_path).expanduser().exists():
+            clip_path = cut.subtitled_clip_path
+    if not clip_path:
+        return None
+    try:
+        post = record_post(session, cut.candidate, clip_path, caption,
+                           status=STATUS_QUEUED, cut=cut)
+    except FileNotFoundError:
+        log.info("Promo cut %s has no prior airing and its export isn't on this "
+                 "machine; leaving the cycle for another scheduler", cut.id)
+        return None
+    post.pinned_window_key = window_key
+    session.flush()
+    return post
+
+
+def ensure_promo_staged() -> str | None:
+    """Stage the next promo onto its window if the rotation has one ready.
+
+    Returns a short action string when a post was staged, else None. Safe to
+    call every tick: once a promo is pinned to the upcoming slot this costs one
+    indexed lookup.
+    """
+    cfg = _promo_config()
+    if cfg is None:
+        return None
+    now = utcnow()
+    with session_scope() as session:
+        state = _get_state(session)
+        if _promo_pending(session):
+            return None
+        slots = _upcoming_promo_slots(cfg, now, state.last_promo_window_key or "")
+        if not slots:
+            return None
+        cut = _promo_due(session, cfg, now)
+        if cut is None:
+            # Nothing eligible yet. Leave the cycle unconsumed so a promo that
+            # becomes eligible before the window fires can still take it; once
+            # the window passes, the slot drops out of the horizon by itself.
+            return None
+        claimed = _claimed_window_keys(session)
+        for window_key, _win in slots:
+            if window_key in claimed:
+                continue
+            post = _stage_promo(session, cut, window_key)
+            if post is None:
+                return None
+            # Consume the cycle even though the post could still be cancelled:
+            # cancelling deletes the row, and without this marker the next tick
+            # would mint it straight back and the operator could never decline
+            # one. Skipped-over slots stay unconsumed, so freeing one up before
+            # it fires still lets a promo land there.
+            state.last_promo_window_key = window_key
+            state.updated_at = utcnow()
+            log.info("Staged promo cut %s as post %s for window %s",
+                     cut.id, post.id, window_key)
+            return f"promo_staged:{window_key}:post={post.id}"
+        return None
+
+
 def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool:
     """Claim ``window_key`` for the post, publish it, record ``last_publish_at``."""
     with session_scope() as session:
@@ -403,6 +736,17 @@ def run_window_tick() -> str | None:
     settings = load_settings()
     if not settings.get("scheduler.enabled", True):
         return None
+
+    # Before the auth and active-hours gates: staging only writes a queued row,
+    # and a promo that shows on the calendar early is a promo the operator can
+    # still edit or decline. A failure here must never block publishing.
+    try:
+        staged = ensure_promo_staged()
+        if staged:
+            log.info("Promo rotation: %s", staged)
+    except Exception:
+        log.exception("Promo staging failed")
+
     if not threads_api.is_authenticated():
         return None
 
@@ -559,8 +903,9 @@ def _post_display_title(p) -> str:
     calendar's window slots), else the full clip title, else the source video
     title, else — for cut-less posts like imported Threads history — the
     post's own short calendar name condensed from its caption. When the post's
-    source video has a programming category, its emoji (📰/🌿/📼) leads the
-    label so the calendar/queue shows the channel mix at a glance."""
+    source video has a programming category, its emoji leads the label so the
+    calendar/queue shows the channel mix — including how promos are spaced —
+    at a glance."""
     title = ""
     if p.cut and (p.cut.calendar_name or "").strip():
         title = p.cut.calendar_name

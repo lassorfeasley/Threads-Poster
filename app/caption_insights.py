@@ -22,12 +22,13 @@ import hashlib
 import json
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from . import llm
 from .analytics import metrics_at_age_bulk
+from .categories import reserved_slugs
 from .config import load_caption_rules, load_settings
-from .models import AppToken, ThreadsPost, utcnow
+from .models import AppToken, Candidate, ThreadsPost, utcnow
 
 log = logging.getLogger("caption_insights")
 
@@ -81,11 +82,19 @@ def _select_captions(session) -> dict | None:
     settings = load_settings()
     age_hours = int(settings.get("learning.metric_age_hours", 48))
 
+    # Reserved categories are excluded for the same reason as in app/voice.py:
+    # a recycled promo caption reappears verbatim on every airing, so learning
+    # from it would mostly distil the ad copy. Outer join keeps imported
+    # Threads history, which has no candidate row.
     posts = session.execute(
-        select(ThreadsPost).where(
+        select(ThreadsPost)
+        .outerjoin(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+        .where(
             ThreadsPost.status == "published",
             ThreadsPost.published_at.is_not(None),
             ThreadsPost.caption != "",
+            or_(Candidate.category.is_(None),
+                Candidate.category.not_in(reserved_slugs())),
         )
     ).scalars().all()
     rows = [{"caption": p.caption.strip(), "post": p, "published_at": p.published_at}

@@ -21,12 +21,12 @@ from urllib.parse import urlencode
 import requests
 
 from . import meta_errors
-from .config import ROOT, env, load_settings
+from .config import DATA_DIR, env, load_settings
 
 log = logging.getLogger("instagram")
 
 GRAPH = "https://graph.instagram.com/v23.0"
-TOKEN_FILE = ROOT / "data" / "instagram_token.json"
+TOKEN_FILE = DATA_DIR / "instagram_token.json"
 
 SCOPES = "instagram_business_basic,instagram_business_content_publish"
 

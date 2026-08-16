@@ -15,11 +15,11 @@ import logging
 import threading
 from pathlib import Path
 
-from .config import ROOT, load_settings
+from .config import DATA_DIR, load_settings
 
 log = logging.getLogger("spend")
 
-_LEDGER = ROOT / "data" / "llm_spend.json"
+_LEDGER = DATA_DIR / "llm_spend.json"
 _lock = threading.Lock()
 
 # USD per 1,000,000 tokens. Only used to estimate spend for the budget guard;

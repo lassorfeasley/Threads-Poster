@@ -14,25 +14,47 @@ import time
 from pathlib import Path
 
 from . import clip_proposals, spend
-from .config import ROOT, load_settings
+from .config import ROOT, storage_dir, load_settings
 from .llm import suggest_title_from_transcript
 from .models import STATUS_ARCHIVED, STATUS_FAILED, Candidate, utcnow
 
 log = logging.getLogger("scrape")
 
-_last_ytdlp_call: float = 0.0
+# The last-call timestamp is shared by ALL workspace processes on this machine:
+# every workspace downloads from the same residential IP, so the politeness
+# interval must be global to the machine, not per process — otherwise two
+# dashboards double the request rate YouTube sees.
+_THROTTLE_FILE = ROOT / "workspaces" / ".shared" / "ytdlp_last"
 
 
 def _politeness_delay(settings) -> None:
-    """Sleep a randomized interval since the last yt-dlp/YouTube-page operation."""
-    global _last_ytdlp_call
+    """Sleep a randomized interval since the last yt-dlp/YouTube-page operation
+    by ANY workspace process. The flock is held through the sleep on purpose:
+    a second process arriving mid-wait queues behind the first and then times
+    its own delay from the updated stamp, keeping downloads sequential
+    machine-wide."""
+    import fcntl
+
     lo = settings.get("scrape.delay_min_seconds", 8)
     hi = settings.get("scrape.delay_max_seconds", 25)
-    wait = random.uniform(lo, hi)
-    elapsed = time.time() - _last_ytdlp_call
-    if elapsed < wait:
-        time.sleep(wait - elapsed)
-    _last_ytdlp_call = time.time()
+    _THROTTLE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_THROTTLE_FILE, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            try:
+                last = float(f.read().strip() or 0.0)
+            except ValueError:
+                last = 0.0
+            wait = random.uniform(lo, hi)
+            elapsed = time.time() - last
+            if elapsed < wait:
+                time.sleep(wait - elapsed)
+            f.seek(0)
+            f.truncate()
+            f.write(str(time.time()))
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _safe_name(text: str, limit: int = 80) -> str:
@@ -44,8 +66,8 @@ def _paths_for(candidate: Candidate, settings) -> tuple[Path, Path]:
     """(video_dir, transcript_dir) organized by channel/date."""
     channel = _safe_name(candidate.channel.call_sign or "unknown").replace("/", "-")
     date = (candidate.published_at or utcnow()).strftime("%Y-%m-%d")
-    video_dir = ROOT / settings.get("storage.download_dir", "data/videos") / channel / date
-    transcript_dir = ROOT / settings.get("storage.transcript_dir", "data/transcripts") / channel / date
+    video_dir = storage_dir(settings, "storage.download_dir", "data/videos") / channel / date
+    transcript_dir = storage_dir(settings, "storage.transcript_dir", "data/transcripts") / channel / date
     video_dir.mkdir(parents=True, exist_ok=True)
     transcript_dir.mkdir(parents=True, exist_ok=True)
     return video_dir, transcript_dir
@@ -86,22 +108,35 @@ def _get_whisper_model(settings):
     return _whisper_model
 
 
-def transcribe_local(media_path: str | Path, settings) -> list[dict] | None:
-    """Transcribe a local media file with faster-whisper (used for operator
-    uploads, which have no YouTube captions). Returns [{start, end, text}] or None."""
+def transcribe_local(media_path: str | Path, settings) -> tuple[list[dict] | None, list[dict] | None]:
+    """Transcribe a local media file with faster-whisper.
+
+    Returns ``(segments, words)``: segment-level ``[{start, end, text}]`` and
+    the word-level ``[{word, start, end}]`` stream from the same pass. Word
+    timestamps come free with the transcription (no second decode), and they
+    are what clip suggestions and burned-in captions cut against.
+    Both are None when transcription fails or hears nothing.
+    """
     try:
         model = _get_whisper_model(settings)
         # language pinned to English — see transcribe_words in subtitles.py:
         # auto-detect can misread noisy audio as Welsh and derail the output.
-        segments, _info = model.transcribe(str(media_path), language="en", vad_filter=True)
-        out = [
-            {"start": float(s.start), "end": float(s.end), "text": (s.text or "").strip()}
-            for s in segments
-        ]
-        return out or None
+        segments, _info = model.transcribe(str(media_path), language="en",
+                                           word_timestamps=True, vad_filter=True)
+        out: list[dict] = []
+        words: list[dict] = []
+        for s in segments:
+            out.append({"start": float(s.start), "end": float(s.end),
+                        "text": (s.text or "").strip()})
+            for w in s.words or []:
+                text = (w.word or "").strip()
+                if text:
+                    words.append({"word": text, "start": float(w.start),
+                                  "end": float(w.end)})
+        return (out or None), (words or None)
     except Exception as exc:
         log.warning("Local transcription failed for %s: %s", media_path, exc)
-        return None
+        return None, None
 
 
 def _write_transcript(segments: list[dict], transcript_dir: Path, video_id: str) -> tuple[Path, str]:
@@ -112,6 +147,30 @@ def _write_transcript(segments: list[dict], transcript_dir: Path, video_id: str)
     plain = "\n".join(lines)
     (transcript_dir / f"{video_id}.txt").write_text(plain)
     return json_path, plain
+
+
+def _write_word_transcript(words: list[dict], transcript_dir: Path, video_id: str) -> Path:
+    """Persist the full-video Whisper word stream (``[{word, start, end}]``).
+
+    Same shape ``subtitles.py`` uses for clip-level word streams, so exports
+    can slice this file by trim windows instead of re-running Whisper."""
+    path = transcript_dir / f"{video_id}_words.json"
+    path.write_text(json.dumps(words, indent=1))
+    return path
+
+
+def load_word_transcript(candidate) -> list[dict]:
+    """The video's Whisper word stream, or [] when it has none."""
+    path = getattr(candidate, "word_transcript_path", "") or ""
+    if not path:
+        return []
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [w for w in data if isinstance(w, dict) and (w.get("word") or "").strip()]
 
 
 # --- Metadata ----------------------------------------------------------------
@@ -360,7 +419,7 @@ def archive_candidate(session, candidate: Candidate, with_suggestions: bool = Tr
                     f"Uploaded file has no audio track (needed for waveform/"
                     f"transcript): {video_path.name}"
                 )
-            segments = transcribe_local(video_path, settings)
+            segments, words = transcribe_local(video_path, settings)
             method = "whisper" if segments else ""
         else:
             # 1. Transcript from YouTube captions (no media download needed).
@@ -374,13 +433,18 @@ def archive_candidate(session, candidate: Candidate, with_suggestions: bool = Tr
                     "often caused by interrupting the download (e.g. closing "
                     "the laptop). Hit Retry and leave it running until it finishes."
                 )
-            # 3. Captions missing (disabled / unavailable) — fall back to local
-            # Whisper now that we have audio. Same path uploads already take.
-            # Missing captions alone must NOT fail the archive.
-            if not segments:
-                log.info("No captions for %s; transcribing locally with Whisper",
+            # 3. Whisper always runs on the downloaded file: the word-level
+            # timestamps it produces are what clip suggestions and burned-in
+            # captions cut against, and YouTube captions can't provide them.
+            # When captions exist they still win the segment-level transcript
+            # (better punctuation); Whisper failing must NOT fail the archive.
+            w_segments, words = transcribe_local(video_path, settings)
+            if segments and words:
+                method = "captions+whisper"
+            elif not segments:
+                log.info("No captions for %s; using local Whisper transcript",
                          candidate.video_id)
-                segments = transcribe_local(video_path, settings)
+                segments = w_segments
                 method = "whisper" if segments else ""
 
         candidate.local_video_path = str(video_path)
@@ -393,6 +457,9 @@ def archive_candidate(session, candidate: Candidate, with_suggestions: bool = Tr
             log.warning("No transcript for %s (captions and Whisper both empty); "
                         "archiving without one", candidate.video_id)
         candidate.transcription_method = method
+        if words:
+            word_path = _write_word_transcript(words, transcript_dir, candidate.video_id)
+            candidate.word_transcript_path = str(word_path)
 
         # 4. Retitle pasted clips from what is actually said. Runs before the
         # clip pass so the caption draft is written against the corrected

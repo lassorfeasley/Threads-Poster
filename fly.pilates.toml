@@ -1,0 +1,26 @@
+# Fly.io deployment for the PILATES workspace's always-on posting scheduler.
+# Same image as fly.toml; only the app name and WORKSPACE differ.
+#
+# First-time setup (after the pilates Supabase project + Meta app exist):
+#   fly apps create threads-poster-scheduler-pilates
+#   fly secrets set -a threads-poster-scheduler-pilates \
+#       DATABASE_URL=... SUPABASE_URL=... \
+#       SUPABASE_SERVICE_KEY=... ANTHROPIC_API_KEY=...
+#   fly deploy -c fly.pilates.toml
+
+app = "threads-poster-scheduler-pilates"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  WORKSPACE = "pilates"
+
+[processes]
+  app = "python run.py scheduler --loop"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  processes = ["app"]

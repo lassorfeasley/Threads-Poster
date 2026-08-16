@@ -1,11 +1,12 @@
-{# Programming-category picker (news / nature / culture). The category lives on
-   the SOURCE VIDEO, so setting it from the video, cut, or post page edits the
-   same value everywhere. New candidates are auto-tagged by the monitor pass;
-   this field is the manual override. ``next_url`` is where the form returns.
+{# Programming-category picker. The category lives on the SOURCE VIDEO, so
+   setting it from the video, cut, or post page edits the same value
+   everywhere. New candidates are auto-tagged by the monitor pass; this field
+   is the manual override, and the only way to set a reserved category like
+   promos. ``next_url`` is where the form returns.
 
    Renders as a segmented toggle (emoji + short slug label) rather than a
-   dropdown — three options fit a narrow rail, and the full label is in the
-   button title. #}
+   dropdown — a handful of options fit a narrow rail, and the full label is in
+   the button title. #}
 {% macro field(candidate_id, category, next_url, show_label=true) %}
 <form method="post" action="/video/{{ candidate_id }}/category" class="cat-toggle-form">
   <input type="hidden" name="next" value="{{ next_url }}">

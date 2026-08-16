@@ -36,11 +36,12 @@ import logging
 import statistics
 from difflib import SequenceMatcher
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from . import llm
+from .categories import reserved_slugs
 from .config import Settings
-from .models import AppToken, DraftProposal, ThreadsPost, utcnow
+from .models import AppToken, Candidate, DraftProposal, ThreadsPost, utcnow
 
 log = logging.getLogger("voice")
 
@@ -83,10 +84,23 @@ def _voice_weight(post: ThreadsPost, has_proposal: bool) -> float:
 
 
 def collect_voice_captions(session) -> list[dict]:
-    """All published captions with their voice weight, newest first."""
+    """All published organic captions with their voice weight, newest first.
+
+    Reserved categories are left out. Promos recycle their caption verbatim on
+    every airing, so a single piece of ad copy would otherwise arrive as dozens
+    of separate "hand-written" samples and drag the whole profile toward it.
+    """
     posts = session.execute(
         select(ThreadsPost)
-        .where(ThreadsPost.status == "published", ThreadsPost.caption != "")
+        # Outer join: imported Threads history has no candidate, and it's the
+        # purest voice sample there is — an inner join would silently drop it.
+        .outerjoin(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+        .where(
+            ThreadsPost.status == "published",
+            ThreadsPost.caption != "",
+            or_(Candidate.category.is_(None),
+                Candidate.category.not_in(reserved_slugs())),
+        )
         .order_by(ThreadsPost.published_at.desc().nullslast())
     ).scalars().all()
     ledgered = set(session.execute(

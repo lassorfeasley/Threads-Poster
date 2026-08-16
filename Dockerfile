@@ -26,9 +26,12 @@ WORKDIR /app
 COPY requirements-scheduler.txt .
 RUN pip install --no-cache-dir -r requirements-scheduler.txt
 
+# All workspace configs ship in the image; WORKSPACE (set per Fly app in its
+# fly.*.toml) picks which one this scheduler serves. Data trees and .env files
+# are excluded by .dockerignore — secrets come from `fly secrets set`.
 COPY app/ ./app/
-COPY config/ ./config/
-COPY run.py .
+COPY workspaces/ ./workspaces/
+COPY workspaces.yaml run.py ./
 
 RUN useradd --create-home --uid 1000 scheduler && chown -R scheduler:scheduler /app
 USER scheduler

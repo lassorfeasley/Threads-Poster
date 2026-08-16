@@ -454,6 +454,36 @@ aside.sidebar:focus-within a.nav.active::before {
 }
 
 /* ------------------------------------------------------------
+   Workspace switcher — each entry is an isolated environment on its own
+   port. The rail carries the current workspace's accent as a left strip so
+   you always know which account you're operating without reading anything.
+   ------------------------------------------------------------ */
+aside.sidebar {
+  box-shadow: inset 3px 0 0 0 var(--ws-accent, transparent);
+}
+aside.sidebar:hover,
+aside.sidebar:focus-within {
+  box-shadow: inset 3px 0 0 0 var(--ws-accent, transparent), var(--shadow-lift);
+}
+.ws-switch {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: -8px 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.ws-switch .ws-dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+}
+.ws-switch a.nav.active {
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------
    Main layout
    ------------------------------------------------------------ */
 main {
@@ -3995,12 +4025,17 @@ body.cal-committing #cal-layout {
 }
 .seg-toggle button:disabled { cursor: default; }
 
-/* Equal-width segments that fill their parent (category + caption position). */
+/* Equal-width segments that fill their parent (category + caption position).
+   The category rail carries the configured genres plus the reserved ones, so
+   the segments trim their padding and ellipsize rather than assuming three. */
 .cat-toggle { width: 100%; display: flex; }
 .cat-toggle button {
   flex: 1;
   min-width: 0;
+  padding-inline: 8px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .cat-toggle.is-disabled { opacity: 0.45; }
 .cat-toggle-form {

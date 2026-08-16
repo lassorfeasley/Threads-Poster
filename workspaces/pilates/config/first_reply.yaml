@@ -1,0 +1,5 @@
+# Auto first-reply settings (edit via the Replies page).
+
+enabled: false
+attribution_enabled: true
+text: ''

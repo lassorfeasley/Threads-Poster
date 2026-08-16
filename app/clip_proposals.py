@@ -324,6 +324,13 @@ def load_transcript(candidate) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def load_words(candidate) -> list[dict]:
+    """The video's Whisper word stream, or [] when it has none."""
+    from .scrape import load_word_transcript
+
+    return load_word_transcript(candidate)
+
+
 def propose(session, candidate, settings, transcript_segments: list[dict]) -> list[int]:
     """Run one suggestion pass for a video and record it. Returns new row ids.
 
@@ -349,6 +356,10 @@ def propose(session, candidate, settings, transcript_segments: list[dict]) -> li
         min_seconds=min_seconds, max_seconds=max_seconds,
         opening_hold=opening_hold,
         used_ranges=claimed,
+        # The archive-time Whisper word stream, when this video has one:
+        # boundaries proposed against it land on word edges.
+        words=load_words(candidate),
+        description=candidate.description,
     )
 
     # Put each opening on a frame worth looking at. Sibling clips from this same

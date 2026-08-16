@@ -1,12 +1,33 @@
-# Who this workspace is: identity + audience fields that will parameterize the
-# LLM prompts (today they hardcode climate / local-TV / Renewables.org), plus
+# Who this workspace is: identity + audience fields that parameterize the LLM
+# prompts (relevance scoring, clip selection, captions, titles, digest), plus
 # white-label appearance for the app chrome. Editable via the Brand & audience
 # page under Configure; no code changes needed.
+#
+# These values reproduce the climate framing that used to be hardcoded in
+# app/llm.py, so this workspace behaves exactly as before.
 
 name: Renewables.org
 mission: ''
 audience: ''
 voice_notes: ''
-topic: ''
+topic: climate change
 app_name: climate archive
 logo_file: ''
+source_kind: local TV news
+relevance_rules: >-
+  it covers climate change, its impacts (extreme weather, wildfire, flood,
+  heat, drought, sea level), clean energy, emissions, or climate policy
+false_positives: >-
+  the keyword is incidental ('political climate', 'business climate', a sports
+  team name, routine weather forecasts with no climate angle)
+strong_openings: >-
+  on-scene footage and reporting, action in progress, fire, flood, storm
+  damage, wreckage, rescue crews, crowds, aerial or sweeping shots, weather in
+  motion, someone in the field or a witness speaking, a person visibly
+  reacting
+weak_openings: >-
+  an anchor or reporter reading at a studio desk, a studio toss ('X is live,
+  X?'), a sign-off ('back to you'), a greeting or headline read, station
+  graphics, charts, maps, slates, walls of lower-third text — the weakest
+  frames in any newscast
+clip_guidance: ''

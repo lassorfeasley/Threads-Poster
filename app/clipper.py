@@ -13,12 +13,12 @@ import tempfile
 from pathlib import Path
 from uuid import uuid4
 
-from .config import ROOT
+from .config import DATA_DIR
 
 log = logging.getLogger("clipper")
 
-CLIPS_DIR = ROOT / "data" / "clips"
-THUMBS_DIR = ROOT / "data" / "thumbs"
+CLIPS_DIR = DATA_DIR / "clips"
+THUMBS_DIR = DATA_DIR / "thumbs"
 
 ENCODE_ARGS = [
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -124,7 +124,7 @@ def export_supercut(source_path: str | Path, segments: list[dict], output_name: 
     return output
 
 
-WAVEFORM_DIR = ROOT / "data" / "waveforms"
+WAVEFORM_DIR = DATA_DIR / "waveforms"
 
 
 def get_waveform(source_path: str | Path, video_id: str, buckets: int = 1200) -> dict:

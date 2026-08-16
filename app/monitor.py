@@ -148,7 +148,8 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
             log.warning("LLM scoring failed for %s: %s", up.video_id, exc)
             candidate.relevance_rationale = f"(scoring failed: {exc})"
 
-        # Programming category (news / nature / culture) for the channel mix.
+        # Programming category for the channel mix. Only ever a genre from
+        # settings — reserved categories like promos are set by hand.
         if settings.get("categories.tag_at_monitor", True):
             try:
                 auto_tag_candidate(candidate, settings, channel=channel)

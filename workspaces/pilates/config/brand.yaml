@@ -1,0 +1,45 @@
+# Who this workspace is: identity + audience fields that parameterize the LLM
+# prompts (relevance scoring, clip selection, captions, titles, digest), plus
+# white-label appearance for the app chrome. Editable via the Brand & audience
+# page under Configure; no code changes needed.
+
+name: Pilates Archive
+mission: >-
+  Share the best pilates teaching moments as short clips — technique, flows,
+  and inspiration worth saving.
+audience: >-
+  People who practice or teach pilates: students looking for technique and
+  motivation, and instructors collecting cues and sequences.
+voice_notes: >-
+  Warm, encouraging, and precise about the body. Never body-shaming, never
+  'burn calories' framing — the appeal is skill, control, and how the
+  movement feels.
+topic: pilates and mindful movement
+app_name: pilates archive
+logo_file: ''
+source_kind: YouTube pilates class
+relevance_rules: >-
+  it contains actual pilates instruction or practice — mat or reformer
+  classes, single-exercise tutorials, form breakdowns, flows, mobility and
+  breathwork with a pilates approach, or teacher-training insights
+false_positives: >-
+  pilates is only mentioned in passing, it is an ad or product promotion, a
+  talking-only video with no movement, or generic fitness/HIIT content with
+  no pilates method in it
+strong_openings: >-
+  a movement already in progress, a clean demonstration of a recognizable
+  exercise, a flowing transition, an impressive or graceful position, a
+  bright studio shot with the instructor mid-motion
+weak_openings: >-
+  an instructor talking to camera before any movement starts, channel intros
+  and logo cards, subscribe reminders, someone setting up a mat or adjusting
+  equipment
+clip_guidance: >-
+  Source videos are usually one continuous class or tutorial, not separate
+  news stories. Treat each self-contained exercise, flow, or teaching cue as
+  a potential clip: it must make sense with no other context, ideally
+  demonstrating ONE movement or principle from setup to finish. Prefer
+  moments where the instructor names the exercise and cues it while
+  demonstrating. Cut long static holds, repeated identical reps, and small
+  talk between exercises. It is normal for one class to yield several
+  independent clips.

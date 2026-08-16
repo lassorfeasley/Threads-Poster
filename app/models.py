@@ -98,7 +98,11 @@ class Candidate(Base):
     local_video_path: Mapped[str] = mapped_column(Text, default="")
     transcript_path: Mapped[str] = mapped_column(Text, default="")
     transcript_text: Mapped[str] = mapped_column(Text, default="")
-    transcription_method: Mapped[str] = mapped_column(String(20), default="")  # captions | "" (none)
+    transcription_method: Mapped[str] = mapped_column(String(20), default="")  # captions | whisper | captions+whisper | "" (none)
+    # Full-video Whisper word stream ([{word, start, end}] JSON sidecar),
+    # written at archive time. Clip suggestions cut against it and exports
+    # slice it by trim windows instead of re-running Whisper per clip.
+    word_transcript_path: Mapped[str] = mapped_column(Text, default="")
 
     # Video-level caption seed written by the clip-suggestion pass. Deliberately
     # NOT copied into ``Cut.draft_caption`` — captions are drafted per cut from
@@ -323,6 +327,10 @@ class SchedulerState(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     last_window_key: Mapped[str] = mapped_column(String(40), default="")
+    # Latest window the promo rotation has staged a post for. Cancelling a
+    # staged promo deletes its row, so without this marker the next tick would
+    # mint the promo straight back and the operator could never decline one.
+    last_promo_window_key: Mapped[str] = mapped_column(String(40), default="")
     last_publish_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_metrics_poll_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_action: Mapped[str] = mapped_column(String(80), default="")

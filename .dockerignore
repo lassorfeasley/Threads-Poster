@@ -1,10 +1,13 @@
-# data/ holds downloaded videos, clips and waveforms — multiple GB, and the
-# scheduler reads none of it (clips come from Supabase signed URLs).
+# Workspace data trees hold downloaded videos, clips and waveforms — multiple
+# GB, and the scheduler reads none of it (clips come from Supabase signed URLs).
 data/
+workspaces/*/data/
+workspaces/.shared/
 
 # Secrets reach the container through `fly secrets set`, never the image.
 .env
 .env.example
+workspaces/*/.env
 
 # Not needed for a headless tick: the dashboard/scrape/transcribe dependency set,
 # the web assets, and local tooling.

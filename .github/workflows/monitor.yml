@@ -1,10 +1,17 @@
 name: Channel monitor
 
-# Runs one discovery pass (poll channels -> keyword filter -> LLM relevance ->
-# vision score -> store candidates in Postgres) every 6 hours, so new
-# candidates are waiting in the dashboard even when the operator's machine is
-# off. Safe to overlap with a manual dashboard run: video ids are unique, so
-# re-listed uploads are skipped before any LLM spend.
+# Runs one discovery pass PER WORKSPACE (poll channels -> keyword filter ->
+# LLM relevance -> vision score -> store candidates in that workspace's
+# Postgres) every 6 hours, so new candidates are waiting in the dashboard even
+# when the operator's machine is off. Safe to overlap with a manual dashboard
+# run: video ids are unique, so re-listed uploads are skipped before any LLM
+# spend.
+#
+# Secrets convention: the climate workspace uses the original unsuffixed
+# secrets (DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY); every other
+# workspace suffixes them with its slug (DATABASE_URL_PILATES, ...). A
+# workspace whose database secret is missing is skipped, so a new workspace
+# can be merged before its infrastructure exists.
 #
 # UTC crons below ≈ 6am / noon / 6pm / midnight ET during EDT.
 on:
@@ -12,17 +19,37 @@ on:
     - cron: "0 4,10,16,22 * * *"
   workflow_dispatch: {}
 
-concurrency:
-  group: channel-monitor
-  cancel-in-progress: false
-
 jobs:
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: channel-monitor-${{ matrix.workspace }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      # One workspace at a time: both hit the YouTube API and (for storyboard
+      # sheets) YouTube pages from the runner, and one failing shouldn't block
+      # reruns of the other.
+      max-parallel: 1
+      matrix:
+        include:
+          - workspace: climate
+            suffix: ""
+          - workspace: pilates
+            suffix: "_PILATES"
+    env:
+      WORKSPACE: ${{ matrix.workspace }}
+      DATABASE_URL: ${{ secrets[format('DATABASE_URL{0}', matrix.suffix)] }}
+      SUPABASE_URL: ${{ secrets[format('SUPABASE_URL{0}', matrix.suffix)] }}
+      SUPABASE_SERVICE_KEY: ${{ secrets[format('SUPABASE_SERVICE_KEY{0}', matrix.suffix)] }}
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
+        if: env.DATABASE_URL != ''
       - uses: actions/setup-python@v5
+        if: env.DATABASE_URL != ''
         with:
           python-version: "3.12"
           cache: pip
@@ -30,11 +57,7 @@ jobs:
       # Scheduler deps + yt-dlp (used only for storyboard metadata during
       # vision scoring; a bot-check failure there just skips the visual score).
       - run: pip install -r requirements-scheduler.txt yt-dlp
+        if: env.DATABASE_URL != ''
       - name: Run one monitor pass
-        run: python run.py monitor
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        if: env.DATABASE_URL != ''
+        run: python run.py monitor --workspace "$WORKSPACE"

@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "24"
+SCHEMA_VERSION = "26"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -117,6 +117,7 @@ _SCHEMA_SENTINELS = (
     "SELECT kind FROM draft_proposals LIMIT 0",
     "SELECT id FROM clip_proposals LIMIT 0",
     "SELECT multi_clip_auto FROM candidates LIMIT 0",
+    "SELECT last_promo_window_key FROM scheduler_state LIMIT 0",
 )
 
 
@@ -198,6 +199,7 @@ def _ensure_new_columns() -> None:
             "category_rationale": "TEXT DEFAULT ''",
             "multi_clip_potential": "BOOLEAN DEFAULT FALSE",
             "multi_clip_auto": "BOOLEAN DEFAULT FALSE",
+            "word_transcript_path": "TEXT DEFAULT ''",
         },
         "threads_posts": {
             "cut_pk": "INTEGER",
@@ -232,6 +234,9 @@ def _ensure_new_columns() -> None:
             "kind": "VARCHAR(20) DEFAULT 'caption'",
             "ig_post_pk": "INTEGER",
             "final_text": "TEXT DEFAULT ''",
+        },
+        "scheduler_state": {
+            "last_promo_window_key": "VARCHAR(40) DEFAULT ''",
         },
         "cuts": {
             "subs_position": "VARCHAR(10) DEFAULT 'bottom'",

@@ -18,12 +18,12 @@ from urllib.parse import urlencode
 import requests
 
 from . import meta_errors
-from .config import ROOT, env, load_settings
+from .config import DATA_DIR, env, load_settings
 
 log = logging.getLogger("threads")
 
 GRAPH = "https://graph.threads.net/v1.0"
-TOKEN_FILE = ROOT / "data" / "threads_token.json"
+TOKEN_FILE = DATA_DIR / "threads_token.json"
 
 SCOPES = "threads_basic,threads_content_publish,threads_manage_replies,threads_read_replies,threads_manage_insights"
 

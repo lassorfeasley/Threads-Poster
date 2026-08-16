@@ -1,0 +1,24 @@
+# Workspace registry: every account/topic this checkout can run. Each entry is
+# a fully isolated environment under workspaces/<slug>/ with its own config/,
+# data/, database, and Meta credentials, served by its own process on `port`.
+#
+#   slug:    directory name under workspaces/ (also the WORKSPACE env value)
+#   label:   display name in the sidebar switcher
+#   port:    local dashboard port for this workspace
+#   accent:  sidebar tint so you always know which environment you're in
+#   enabled: the supervisor (`python run.py dashboard`) starts enabled
+#            workspaces; the sidebar switcher lists them
+#
+# Add a new workspace with: python run.py workspace create <slug>
+
+workspaces:
+  - slug: climate
+    label: Climate Archive
+    port: 8321
+    accent: "#1A4A7D"
+    enabled: true
+  - slug: pilates
+    label: Pilates Archive
+    port: 8322
+    accent: "#8E4585"
+    enabled: true
