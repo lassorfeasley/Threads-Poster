@@ -24,13 +24,35 @@ from .storyboard import get_storyboard
 
 log = logging.getLogger("vision")
 
+# SUBJECT facet: what's happening on screen. The format-shaped names that used
+# to live here (talking head, podium, studio segment, static graphic) moved to
+# the FORMAT facet below — moved rather than duplicated, so their accumulated
+# TraitWeight history stays attached to the same names.
 DEFAULT_TRAITS = [
     "action", "people_doing_things", "fire", "flood", "storm_damage",
     "destruction", "rescue_or_emergency_response", "crowd", "dramatic_weather",
-    "aerial_or_sweeping_shot", "talking_head_or_anchor_at_desk",
-    "static_graphic_or_slideshow", "chart_or_data_screen",
-    "text_heavy_lower_thirds", "press_conference_podium",
+    "aerial_or_sweeping_shot", "chart_or_data_screen",
+    "text_heavy_lower_thirds",
+]
+
+# FORMAT facet: the production form of the footage, independent of subject —
+# a nature clip can be archival and a news clip can be a produced explainer.
+# This is the facet the scheduler's variety gate runs on, and where per-trait
+# performance signal is most expected. Kept deliberately small: a trait needs
+# ``learning.min_trait_posts`` observations before its verdict activates, so
+# every extra name slows learning for all of them.
+DEFAULT_FORMAT_TRAITS = [
+    "archival_footage",
+    "local_news_segment",
+    "produced_segment",
+    "nature_documentary",
+    "found_footage",
+    "panel_or_interview",
+    # Moved from the subject list (see note above).
+    "talking_head_or_anchor_at_desk",
+    "press_conference_podium",
     "low_motion_studio_segment",
+    "static_graphic_or_slideshow",
 ]
 
 
@@ -39,7 +61,7 @@ def _clean(values) -> list[str]:
 
 
 def vocabulary_from_settings(settings: Settings) -> list[str]:
-    """Flat trait vocabulary from config (fallback when DB list isn't passed)."""
+    """Flat SUBJECT vocabulary from config (fallback when DB list isn't passed)."""
     traits = _clean(settings.get("vision.traits"))
     if traits:
         return traits
@@ -47,6 +69,24 @@ def vocabulary_from_settings(settings: Settings) -> list[str]:
     return _clean(settings.get("vision.desirable_traits")) \
         + _clean(settings.get("vision.undesirable_traits")) \
         or list(DEFAULT_TRAITS)
+
+
+def format_vocabulary_from_settings(settings: Settings) -> list[str]:
+    """FORMAT vocabulary from config (fallback when DB list isn't passed)."""
+    return _clean(settings.get("vision.format_traits")) or list(DEFAULT_FORMAT_TRAITS)
+
+
+def split_tags_by_facet(tags: list[str], format_vocab: list[str]) -> tuple[list[str], list[str]]:
+    """Partition one tagging answer into ``(subject, format)`` name lists.
+
+    The model is shown the UNION of both vocabularies in a single call (zero
+    extra LLM cost); membership in the format vocabulary decides which field
+    each returned name lands in.
+    """
+    fmt = set(format_vocab)
+    subject = [t for t in tags if t not in fmt]
+    fmt_tags = [t for t in tags if t in fmt]
+    return subject, fmt_tags
 
 
 def storyboard_images(video_id: str, max_sheets: int = 4) -> list[bytes]:
@@ -97,10 +137,13 @@ def should_tag(candidate: Candidate, settings: Settings, run_state: dict | None,
 
 def tag_candidate_storyboard(candidate: Candidate, settings: Settings,
                              run_state: dict | None = None, force: bool = False,
-                             traits: list[str] | None = None) -> dict | None:
+                             traits: list[str] | None = None,
+                             format_traits: list[str] | None = None) -> dict | None:
     """Tag a candidate from YouTube storyboard stills (caller commits). Neutral
-    labels only — does not write a visual score. Returns the tag dict, or None
-    if skipped/unavailable."""
+    labels only — does not write a visual score. One call covers BOTH facets:
+    the model sees the union of the subject and format vocabularies and the
+    answer is partitioned back into ``visual_traits`` / ``format_tags``.
+    Returns the tag dict, or None if skipped/unavailable."""
     ok, reason = should_tag(candidate, settings, run_state, force)
     if not ok:
         log.info("Skipping storyboard tag for %s: %s", candidate.video_id, reason)
@@ -112,23 +155,29 @@ def tag_candidate_storyboard(candidate: Candidate, settings: Settings,
         return None
 
     vocab = traits if traits is not None else vocabulary_from_settings(settings)
+    fmt_vocab = (format_traits if format_traits is not None
+                 else format_vocabulary_from_settings(settings))
     try:
         result = llm.tag_footage(
             settings.get("vision.model", "claude-haiku-4-5"),
-            images, vocab, title=candidate.title,
+            images, vocab + [t for t in fmt_vocab if t not in vocab],
+            title=candidate.title,
         )
     except Exception as exc:
         log.warning("Storyboard tagging failed for %s: %s", candidate.video_id, exc)
         return None
 
-    candidate.visual_traits = ",".join(result["traits"])
+    subject, fmt = split_tags_by_facet(result["traits"], fmt_vocab)
+    candidate.visual_traits = ",".join(subject)
+    candidate.format_tags = ",".join(fmt)
     candidate.visual_rationale = result["why"]
     candidate.visual_scored_at = utcnow()
     # Stop writing judgment scores; clear any stale value on re-tag.
     candidate.visual_score = None
     if run_state is not None:
         run_state["scored"] = run_state.get("scored", 0) + 1
-    log.info("Storyboard tags for %s: [%s]", candidate.video_id, candidate.visual_traits)
+    log.info("Storyboard tags for %s: [%s] format=[%s]", candidate.video_id,
+             candidate.visual_traits, candidate.format_tags)
     return result
 
 
@@ -215,10 +264,16 @@ def frames_between(path: str | Path, start: float, end: float,
 
 
 def annotate_post_footage(post: ThreadsPost, settings: Settings,
-                          traits: list[str], force: bool = False) -> dict | None:
-    """Tag a published post from its posted clip file (caller commits). This is
-    the ground-truth signal for learning — traits of what actually shipped,
-    paired later with performance. Budget-guarded; returns None when skipped."""
+                          traits: list[str], force: bool = False,
+                          format_traits: list[str] | None = None) -> dict | None:
+    """Tag a post from its clip file (caller commits). This is the
+    ground-truth signal for learning — traits of what actually ships, paired
+    later with performance. Runs at QUEUE time now (the scheduler's tick
+    annotates queued posts), because the placement variety gate needs the
+    format facet before anything is placed; the publish path keeps calling it
+    as a fallback for posts that slipped through unannotated, and the
+    ``footage_scored_at`` guard keeps the total at one call per post either
+    way. Budget-guarded; returns None when skipped."""
     if post.footage_scored_at is not None and not force:
         return None
     if not post.clip_local_path:
@@ -231,18 +286,24 @@ def annotate_post_footage(post: ThreadsPost, settings: Settings,
                                settings.get("vision.post_frames", 12))
     if sheet is None:
         return None
+    fmt_vocab = (format_traits if format_traits is not None
+                 else format_vocabulary_from_settings(settings))
     try:
         result = llm.tag_footage(
             settings.get("vision.model", "claude-haiku-4-5"),
-            [sheet], traits, title=post.caption[:200],
+            [sheet], list(traits) + [t for t in fmt_vocab if t not in traits],
+            title=post.caption[:200],
         )
     except Exception as exc:
         log.warning("Footage annotation failed for post %s: %s", post.id, exc)
         return None
 
-    post.footage_traits = ",".join(result["traits"])
+    subject, fmt = split_tags_by_facet(result["traits"], fmt_vocab)
+    post.footage_traits = ",".join(subject)
+    post.format_tags = ",".join(fmt)
     post.footage_rationale = result["why"]
     post.footage_score = None  # judgment scores retired
     post.footage_scored_at = utcnow()
-    log.info("Footage traits for post %s: [%s]", post.id, post.footage_traits)
+    log.info("Footage traits for post %s: [%s] format=[%s]",
+             post.id, post.footage_traits, post.format_tags)
     return result

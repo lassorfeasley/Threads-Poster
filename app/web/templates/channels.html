@@ -127,7 +127,9 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
 <div id="channel-table" data-filter-section="channels">
 <div class="table-wrap">
 <table>
-  <tr><th>Call sign</th><th>Network</th><th>Market</th><th>Region</th><th>Country</th><th>Scope</th><th>Status</th><th>Last checked</th><th></th></tr>
+  <tr><th>Call sign</th><th>Network</th><th>Market</th><th>Region</th><th>Country</th><th>Scope</th>
+      <th title="Your own content: joins the promo rotation, excluded from caption-voice learning">First-party</th>
+      <th>Status</th><th>Last checked</th><th></th></tr>
   {% for ch in channels %}
   {% set state = "error" if ch.last_error else ("disabled" if not ch.enabled else ("ok" if ch.channel_id else "pending")) %}
   <tr class="ch-row" style="{{ 'opacity:.45' if not ch.enabled }}"
@@ -143,6 +145,13 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
     <td>{{ ch.region }}</td>
     <td>{{ ch.country or "—" }}</td>
     <td>{% if ch.scope and ch.scope != "local" %}<span class="badge">{{ ch.scope }}</span>{% else %}{{ ch.scope or "local" }}{% endif %}</td>
+    <td>
+      <form class="inline" method="post" action="/channels/{{ ch.id }}/first-party">
+        <button class="sm {{ 'primary' if ch.first_party }}"
+                title="{% if ch.first_party %}Your own content — click to treat as found footage{% else %}Found footage — click to mark as your own content{% endif %}">
+          {{ "Yes" if ch.first_party else "No" }}</button>
+      </form>
+    </td>
     <td>
       {% if ch.last_error %}<span class="badge hostile" title="{{ ch.last_error }}">error</span>
       {% elif not ch.enabled %}<span class="badge">disabled</span>

@@ -14,7 +14,12 @@ from sqlalchemy.orm import object_session
 from . import youtube
 from .categories import auto_tag_candidate
 from .config import env, load_keywords, load_settings
-from .db import active_traits, session_scope, sync_channels_from_config, sync_traits_from_config
+from .db import (
+    active_traits_by_facet,
+    session_scope,
+    sync_channels_from_config,
+    sync_traits_from_config,
+)
 from .llm import score_relevance
 from .matching import find_keyword_matches
 from .models import Candidate, Channel, utcnow
@@ -61,7 +66,7 @@ def ensure_channel_resolved(channel: Channel) -> bool:
 
 def poll_channel(session, channel: Channel, keywords: list[str], settings,
                  lookback_days: int | None = None, vision_state: dict | None = None,
-                 traits: list[str] | None = None) -> int:
+                 traits: dict[str, list[str]] | None = None) -> int:
     """Check one channel for new uploads; store keyword-matching candidates.
 
     `lookback_days` overrides the normal since-last-check watermark to scan
@@ -157,10 +162,13 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
                 log.warning("Category tagging failed for %s: %s", up.video_id, exc)
 
         # Optional storyboard tagging: neutral labels only (no visual score).
+        # One call tags both facets: subject traits + format tags.
         if settings.get("vision.enabled", True) and settings.get("vision.score_at_monitor", True):
             try:
+                vocab = traits or {}
                 tag_candidate_storyboard(candidate, settings, run_state=vision_state,
-                                         traits=traits)
+                                         traits=vocab.get("subject") or None,
+                                         format_traits=vocab.get("format") or None)
             except Exception as exc:  # never lose a candidate over tagging
                 log.warning("Storyboard tagging failed for %s: %s", up.video_id, exc)
 
@@ -195,7 +203,7 @@ def run_monitor_once(lookback_days: int | None = None) -> dict:
     with session_scope() as session:
         sync_channels_from_config(session)
         sync_traits_from_config(session)
-        traits = active_traits(session)
+        traits = active_traits_by_facet(session)
         channels = session.execute(select(Channel).where(Channel.enabled)).scalars().all()
         for channel in channels:
             total_stored += poll_channel(session, channel, keywords, settings, lookback_days,

@@ -1,11 +1,17 @@
 """Window scheduler for the Threads post queue.
 
-Publishes the FIFO ``queued`` list at fixed daily windows (US Eastern by
-default): one post per window, gated only by active hours and the spacing
-floor. Pinned posts claim their window; the rest fill remaining slots in order.
-A window is never given up because of how an earlier post is performing.
+Publishes the ``queued`` list at fixed daily windows (US Eastern by default):
+one post per window, gated by active hours and the spacing floor. Pinned posts
+claim their window. The rest fill remaining slots either FIFO (the default) or
+via the scored placement engine (``scheduler.placement.mode: scored`` — see
+app/placement.py), which spaces sibling clips of one source video, keeps
+content facets varied, runs timely material before it expires, and relaxes its
+own gates rather than leaving a window empty. Either way, a window is never
+given up because of how an earlier post is performing.
 
-Also drives the frequent metrics poller that feeds analytics.
+Also drives the frequent metrics poller that feeds analytics, the queue-time
+footage annotation pass that gives placement its facets, and two staging
+rotations (branded promos, evergreen-winner reposts).
 """
 from __future__ import annotations
 
@@ -16,15 +22,21 @@ import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import selectinload
 
 from . import threads_api
 from .analytics import poll_recent_metrics
-from .categories import category_by_slug
+from .categories import category_by_slug, default_shelf_life, is_first_party
 from .config import load_settings, scheduler_timezone
 from .db import session_scope
-from .models import Candidate, Cut, SchedulerState, ThreadsPost, utcnow
+from .models import Candidate, Channel, Cut, SchedulerState, ThreadsPost, utcnow
+from .placement import (
+    PlacementContext,
+    PlacementSettings,
+    PostFacts,
+    assign_posts_to_windows,
+)
 from .publishing import (
     clear_publishing,
     is_publish_active,
@@ -200,36 +212,186 @@ def _clear_stale_pins(posts: list[ThreadsPost], upcoming_keys: set[str]) -> None
             p.pinned_window_key = ""
 
 
-def assign_posts_to_windows(
-    posts: list[ThreadsPost],
-    window_keys: list[str],
-) -> list[ThreadsPost | None]:
-    """Map queued posts onto window keys: pins first, then FIFO into gaps.
+# The assignment function itself lives in app/placement.py (pure, no I/O).
+# Everything below builds its context: settings resolved once, history read
+# from the database, per-post facts precomputed.
 
-    Returns a list parallel to ``window_keys``. Earlier windows may stay empty
-    when a post is pinned to a later slot.
+# Synthetic channels that own operator uploads and pasted URLs (see
+# app/web/main.py and app/scrape.py). Not editorial sources: spacing "the
+# Uploads channel" would ration the operator's own hand-picked material.
+# String literals rather than imports so the headless scheduler image never
+# needs the scrape module's dependencies.
+_SYNTHETIC_CHANNEL_URLS = ("upload://local", "youtube://pasted")
+
+# Shelf life set on staged re-airs: a repost of a timely clip is evergreen AS
+# a repost — its moment already happened; it re-airs on proven performance.
+_REPOST_SHELF_LIFE = "evergreen"
+
+
+def _placement_settings(settings) -> PlacementSettings:
+    """Resolve the ``scheduler.placement`` block once (load_settings re-parses
+    YAML on every call — never read settings inside the placement walk)."""
+
+    def g(key: str, default):
+        return settings.get(f"scheduler.placement.{key}", default)
+
+    return PlacementSettings(
+        same_source_days=int(g("gates.same_source_days", 10)),
+        same_channel_days=int(g("gates.same_channel_days", 3)),
+        max_facet_overlap=float(g("gates.max_facet_overlap", 0.34)),
+        lookback_windows=int(g("gates.lookback_windows", 3)),
+        urgency_max=float(g("weights.urgency_max", 10.0)),
+        patience_per_day=float(g("weights.patience_per_day", 1.0)),
+        variety_penalty_max=float(g("weights.variety_penalty_max", 4.0)),
+        repost_penalty=float(g("weights.repost_penalty", 0.5)),
+        half_life_breaking=float(g("half_lives.breaking", 1.0)),
+        half_life_timely=float(g("half_lives.timely", 7.0)),
+        expire_after_half_lives=float(g("expire_after_half_lives", 3.0)),
+    )
+
+
+def _as_utc_date(when: dt.datetime | None) -> dt.date | None:
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    return when.astimezone(dt.timezone.utc).date()
+
+
+def resolve_facets(post: ThreadsPost | None, candidate: Candidate | None,
+                   facet_mode: str) -> frozenset[str]:
+    """The facet label set variety runs on.
+
+    ``format`` mode prefers the post's ground-truth ``format_tags`` (annotated
+    from the trimmed clip at queue time), falls back to the candidate's
+    storyboard prediction, and finally to the category — so an untagged post
+    still gets category-level variety rather than none. ``category`` mode is
+    the one-hot degenerate case.
     """
-    assignment: list[ThreadsPost | None] = [None] * len(window_keys)
-    key_index = {k: i for i, k in enumerate(window_keys)}
-    placed: set[int] = set()
+    if facet_mode == "format":
+        raw = ""
+        if post is not None:
+            raw = (post.format_tags or "").strip()
+        if not raw and candidate is not None:
+            raw = (candidate.format_tags or "").strip()
+        tags = frozenset(t.strip() for t in raw.split(",") if t.strip())
+        if tags:
+            return tags
+    cat = ((candidate.category if candidate else "") or "").strip()
+    return frozenset({cat}) if cat else frozenset()
 
-    # Pins that target a known upcoming window (first pin wins on conflict).
+
+def resolve_shelf_life(post: ThreadsPost | None, candidate: Candidate | None) -> str:
+    """Post override -> candidate's LLM tag -> category default -> evergreen."""
+    shelf = ((post.shelf_life if post else "") or "").strip().lower()
+    if not shelf and candidate is not None:
+        shelf = (candidate.shelf_life or "").strip().lower()
+    if not shelf:
+        shelf = default_shelf_life(candidate.category if candidate else "")
+    return shelf or "evergreen"
+
+
+def build_placement_context(session, posts: list[ThreadsPost],
+                            *, force: bool = False) -> PlacementContext | None:
+    """History + per-post facts for the scored placement engine.
+
+    Returns None when ``scheduler.placement.mode`` is not ``scored`` — the
+    caller then gets the original FIFO behavior. ``force`` builds one anyway
+    (the replay simulation and the calendar's scored preview both need to run
+    scored placement while the live mode is still fifo). Build a fresh context
+    per plan; the engine mutates it as it places posts.
+    """
+    settings = load_settings()
+    if not force and str(settings.get("scheduler.placement.mode", "fifo")).lower() != "scored":
+        return None
+    ps = _placement_settings(settings)
+    facet_mode = str(settings.get("scheduler.placement.facet", "category")).lower()
+    now = utcnow()
+
+    cand_ids = {p.candidate_pk for p in posts if p.candidate_pk}
+    candidates: dict[int, Candidate] = {}
+    if cand_ids:
+        candidates = {
+            c.id: c for c in session.execute(
+                select(Candidate).where(Candidate.id.in_(cand_ids))
+            ).scalars().all()
+        }
+    exempt_channels = set(session.execute(
+        select(Channel.id).where(Channel.url.in_(_SYNTHETIC_CHANNEL_URLS))
+    ).scalars().all())
+
+    facts: dict[int, PostFacts] = {}
     for p in posts:
-        pin = (p.pinned_window_key or "").strip()
-        if not pin or pin not in key_index:
-            continue
-        i = key_index[pin]
-        if assignment[i] is None:
-            assignment[i] = p
-            placed.add(p.id)
+        c = candidates.get(p.candidate_pk) if p.candidate_pk else None
+        queued_date = _as_utc_date(p.created_at) or now.date()
+        content_date = _as_utc_date(c.published_at if c else None) or queued_date
+        facts[p.id] = PostFacts(
+            post_id=p.id,
+            candidate_pk=p.candidate_pk,
+            channel_pk=c.channel_pk if c else None,
+            facets=resolve_facets(p, c, facet_mode),
+            half_life_days=ps.half_life_days(resolve_shelf_life(p, c)),
+            content_date=content_date,
+            queued_date=queued_date,
+            is_repost=p.repost_of_post_pk is not None,
+            channel_exempt=(c.channel_pk in exempt_channels) if c else False,
+        )
 
-    remaining = [p for p in posts if p.id not in placed]
-    ri = 0
-    for i in range(len(assignment)):
-        if assignment[i] is None and ri < len(remaining):
-            assignment[i] = remaining[ri]
-            ri += 1
-    return assignment
+    # Recent publish history feeds the source/channel gates. The horizon is
+    # the widest gate; anything older can't block a placement anyway.
+    horizon = max(ps.same_source_days, ps.same_channel_days)
+    since = now - dt.timedelta(days=horizon + 1)
+    candidate_air: dict[int, list[dt.date]] = {}
+    channel_air: dict[int, list[dt.date]] = {}
+    if horizon > 0:
+        rows = session.execute(
+            select(ThreadsPost.candidate_pk, Candidate.channel_pk,
+                   ThreadsPost.published_at)
+            .join(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+            .where(ThreadsPost.status == "published",
+                   ThreadsPost.published_at.is_not(None),
+                   ThreadsPost.published_at >= since)
+        ).all()
+        for cand_pk, chan_pk, when in rows:
+            day = _as_utc_date(when)
+            if day is None:
+                continue
+            if cand_pk is not None:
+                candidate_air.setdefault(cand_pk, []).append(day)
+            if chan_pk is not None and chan_pk not in exempt_channels:
+                channel_air.setdefault(chan_pk, []).append(day)
+
+    # The most recent published posts seed the variety trail, so the plan's
+    # first window is judged against what the feed actually just showed.
+    recent = session.execute(
+        select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate))
+        .where(ThreadsPost.status == "published",
+               ThreadsPost.published_at.is_not(None))
+        .order_by(ThreadsPost.published_at.desc())
+        .limit(max(1, ps.lookback_windows))
+    ).scalars().all()
+    trail = [resolve_facets(p, p.candidate, facet_mode) for p in reversed(recent)]
+
+    return PlacementContext(
+        settings=ps,
+        facts=facts,
+        candidate_air_dates=candidate_air,
+        channel_air_dates=channel_air,
+        facet_trail=trail,
+    )
+
+
+def _assign_with_mode(
+    session,
+    posts: list[ThreadsPost],
+    keys: list[str],
+) -> tuple[list[ThreadsPost | None], PlacementContext | None]:
+    """One entry point for every caller (tick head, pin swap, calendar plan),
+    so the plan the operator sees and the post the tick publishes can never
+    come from different modes."""
+    ctx = build_placement_context(session, posts)
+    return assign_posts_to_windows(posts, keys, ctx=ctx), ctx
 
 
 def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
@@ -255,7 +417,7 @@ def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
         keys.insert(0, window_key)
     posts = _queue_regular(session)
     _clear_stale_pins(posts, set(keys))
-    assignment = assign_posts_to_windows(posts, keys)
+    assignment, _ = _assign_with_mode(session, posts, keys)
     return assignment[keys.index(window_key)]
 
 
@@ -288,7 +450,7 @@ def pin_post_to_window(session, post_id: int, window_key: str) -> str:
 
     posts = _queue_regular(session)
     _clear_stale_pins(posts, set(keys))
-    assignment = assign_posts_to_windows(posts, keys)
+    assignment, _ = _assign_with_mode(session, posts, keys)
 
     # Where is the dragged post currently projected?
     from_key = ""
@@ -422,6 +584,15 @@ def _upcoming_promo_slots(cfg: dict, now: dt.datetime,
     return out
 
 
+# SQL predicate for first-party (brand-owned) content: the channel-level
+# provenance flag, with the legacy reserved ``promos`` category kept as a
+# per-video back-compat path until existing rows are backfilled. Mirrors
+# ``categories.is_first_party`` — keep the two in sync.
+def _first_party_clause():
+    return or_(Candidate.category == PROMO_CATEGORY,
+               Channel.first_party.is_(True))
+
+
 def _promo_pending(session) -> bool:
     """Whether a promo is already on its way out.
 
@@ -436,9 +607,10 @@ def _promo_pending(session) -> bool:
     row = session.execute(
         select(ThreadsPost.id)
         .join(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+        .join(Channel, Candidate.channel_pk == Channel.id)
         .where(
             ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
-            Candidate.category == PROMO_CATEGORY,
+            _first_party_clause(),
         ).limit(1)
     ).first()
     return row is not None
@@ -476,8 +648,9 @@ def _promo_rotation(session) -> list[tuple[Cut, dt.datetime | None]]:
     cuts = session.execute(
         select(Cut)
         .join(Candidate, Cut.candidate_pk == Candidate.id)
+        .join(Channel, Candidate.channel_pk == Channel.id)
         .options(selectinload(Cut.candidate))
-        .where(Candidate.category == PROMO_CATEGORY, Cut.trimmed_clip_path != "")
+        .where(_first_party_clause(), Cut.trimmed_clip_path != "")
     ).scalars().all()
     if not cuts:
         return []
@@ -632,6 +805,217 @@ def ensure_promo_staged() -> str | None:
         return None
 
 
+# --- Repost rotation ----------------------------------------------------------
+#
+# The promo machinery, generalized: every ``every_days`` days one window may
+# re-air a PROVEN ORGANIC post — published 3-6 months ago and a top performer
+# at the same age. Same staging model as promos (an ordinary queued post,
+# pinned to its window, cloned from the prior airing so a headless runner
+# needs no local files), so the operator can edit, drag, or cancel it. The two
+# rotations differ only in their pool and cadence config.
+#
+# Performance is judged age-normalized (views at a fixed age via the metric
+# snapshots), never lifetime totals — raw lifetime views would just re-elect
+# the oldest posts over and over.
+
+# Below this many published posts with metrics, a percentile is noise — the
+# rotation sits out until the account has a baseline.
+_REPOST_MIN_BASELINE = 10
+
+
+def _repost_config() -> dict | None:
+    """Repost rotation settings, or None when it's off or misconfigured.
+
+    Shares the promo cadence helpers (``_is_promo_window`` and
+    ``_upcoming_promo_slots`` only read anchor / every_days / window_index
+    from the dict they're given).
+    """
+    settings = load_settings()
+    if not settings.get("scheduler.placement.reposts.enabled", False):
+        return None
+
+    def g(key: str, default):
+        return settings.get(f"scheduler.placement.reposts.{key}", default)
+
+    every = int(g("every_days", 7) or 0)
+    if every < 1:
+        return None
+    raw_anchor = str(g("anchor", "2026-01-01") or "").strip()
+    try:
+        anchor = dt.date.fromisoformat(raw_anchor)
+    except ValueError:
+        log.warning("Invalid scheduler.placement.reposts.anchor %r; "
+                    "repost rotation disabled", raw_anchor)
+        return None
+    return {
+        "every_days": every,
+        "anchor": anchor,
+        "window_index": g("window_index", 0),
+        "min_age_days": float(g("min_age_days", 90) or 0),
+        "max_age_days": float(g("max_age_days", 180) or 0),
+        "min_days_between_repeats": float(g("min_days_between_repeats", 90) or 0),
+        "max_airings_per_cut": int(g("max_airings_per_cut", 3) or 0),
+        "percentile": float(g("percentile", 90) or 0),
+    }
+
+
+def _repost_pending(session) -> bool:
+    """Whether a staged re-air is already on its way out (one in flight, ever —
+    same rationale as ``_promo_pending``). Staged reposts are the only posts
+    that carry ``repost_of_post_pk``, so the flag is the marker."""
+    row = session.execute(
+        select(ThreadsPost.id).where(
+            ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
+            ThreadsPost.repost_of_post_pk.is_not(None),
+        ).limit(1)
+    ).first()
+    return row is not None
+
+
+def _repost_pool(session, cfg: dict, now: dt.datetime) -> list[tuple[Cut, ThreadsPost]]:
+    """``(cut, prior_airing)`` pairs eligible to re-air, least-recently-aired
+    first (ids break ties so all runners pick the same head).
+
+    A cut qualifies when its latest airing is ``min_age_days..max_age_days``
+    old, it has aired fewer than ``max_airings_per_cut`` times, its views at
+    the fixed comparison age clear the account's ``percentile``, and it isn't
+    first-party (branded content has its own rotation) or already booked.
+    """
+    from .analytics import metrics_at_age_bulk
+
+    posts = session.execute(
+        select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+                 selectinload(ThreadsPost.cut))
+        .where(ThreadsPost.status == "published",
+               ThreadsPost.published_at.is_not(None))
+    ).scalars().all()
+    if len(posts) < _REPOST_MIN_BASELINE:
+        return []
+
+    settings = load_settings()
+    age_hours = int(settings.get("learning.metric_age_hours", 48))
+    views_at_age = metrics_at_age_bulk(session, posts, "views", age_hours)
+    values = sorted(views_at_age.values())
+    if len(values) < _REPOST_MIN_BASELINE:
+        return []
+    # Deterministic percentile: floor index into the sorted values. Every
+    # runner computes the same threshold from the same snapshots.
+    idx = min(len(values) - 1, int(cfg["percentile"] * (len(values) - 1) // 100))
+    threshold = values[idx]
+
+    by_cut: dict[int, list[ThreadsPost]] = {}
+    for p in posts:
+        if p.cut_pk is not None:
+            by_cut.setdefault(p.cut_pk, []).append(p)
+
+    booked = set(session.execute(
+        select(ThreadsPost.cut_pk).where(
+            ThreadsPost.cut_pk.is_not(None),
+            ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
+        )
+    ).scalars().all())
+
+    min_gap = max(cfg["min_age_days"], cfg["min_days_between_repeats"])
+    eligible: list[tuple[dt.datetime, Cut, ThreadsPost]] = []
+    for cut_pk, airings in by_cut.items():
+        if cut_pk in booked:
+            continue
+        if cfg["max_airings_per_cut"] > 0 and len(airings) >= cfg["max_airings_per_cut"]:
+            continue
+        airings.sort(key=lambda p: (p.published_at, p.id))
+        last = airings[-1]
+        last_at = last.published_at
+        if last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=dt.timezone.utc)
+        age_days = (now - last_at).total_seconds() / 86400
+        if not (min_gap <= age_days <= cfg["max_age_days"]):
+            continue
+        if last.cut is None or is_first_party(last.candidate):
+            continue
+        best = max((views_at_age.get(p.id, 0) for p in airings), default=0)
+        if best < threshold or best <= 0:
+            continue
+        # Cloning needs a usable prior airing (caption + a clip reachable from
+        # any runner); without one the cut just isn't eligible yet.
+        if not (last.caption or "").strip():
+            continue
+        if not (last.clip_object_path or last.clip_local_path):
+            continue
+        eligible.append((last_at, last.cut, last))
+
+    eligible.sort(key=lambda t: (t[0], t[1].id))
+    return [(cut, prior) for _, cut, prior in eligible]
+
+
+def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str) -> ThreadsPost:
+    """Queue a re-air of ``prior``, pinned to ``window_key``.
+
+    Clones the airing the way ``_stage_promo`` does — caption and clip paths
+    copied, so the clip is already in cloud storage and a headless runner can
+    publish it. Declares itself with ``repost_of_post_pk`` and ships as
+    evergreen: the content's moment already happened, it re-airs on proven
+    performance. Facet annotations are copied too (same file — re-annotating
+    would spend an LLM call to learn the same answer).
+    """
+    post = ThreadsPost(
+        candidate_pk=cut.candidate_pk,
+        cut_pk=cut.id,
+        caption=prior.caption,
+        clip_local_path=prior.clip_local_path,
+        clip_object_path=prior.clip_object_path,
+        clip_length_seconds=prior.clip_length_seconds,
+        attribution_text=prior.attribution_text,
+        attribution_skipped=prior.attribution_skipped,
+        status=STATUS_QUEUED,
+        pinned_window_key=window_key,
+        repost_of_post_pk=prior.id,
+        shelf_life=_REPOST_SHELF_LIFE,
+        footage_traits=prior.footage_traits,
+        format_tags=prior.format_tags,
+        footage_rationale=prior.footage_rationale,
+        footage_scored_at=prior.footage_scored_at,
+    )
+    session.add(post)
+    session.flush()
+    return post
+
+
+def ensure_repost_staged() -> str | None:
+    """Stage the next proven re-air onto its window if one is due.
+
+    Mirrors ``ensure_promo_staged``: safe to call every tick, consumes its
+    cycle via ``last_repost_window_key`` so a cancelled staged repost is a
+    decision, not a re-mint loop.
+    """
+    cfg = _repost_config()
+    if cfg is None:
+        return None
+    now = utcnow()
+    with session_scope() as session:
+        state = _get_state(session)
+        if _repost_pending(session):
+            return None
+        slots = _upcoming_promo_slots(cfg, now, state.last_repost_window_key or "")
+        if not slots:
+            return None
+        pool = _repost_pool(session, cfg, now)
+        if not pool:
+            return None
+        cut, prior = pool[0]
+        claimed = _claimed_window_keys(session)
+        for window_key, _win in slots:
+            if window_key in claimed:
+                continue
+            post = _stage_repost(session, cut, prior, window_key)
+            state.last_repost_window_key = window_key
+            state.updated_at = utcnow()
+            log.info("Staged repost of post %s (cut %s) as post %s for window %s",
+                     prior.id, cut.id, post.id, window_key)
+            return f"repost_staged:{window_key}:post={post.id}"
+        return None
+
+
 def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool:
     """Claim ``window_key`` for the post, publish it, record ``last_publish_at``."""
     with session_scope() as session:
@@ -640,7 +1024,11 @@ def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool
         claimed = session.execute(
             update(ThreadsPost)
             .where(ThreadsPost.id == post_id, ThreadsPost.status == STATUS_QUEUED)
-            .values(status=STATUS_PUBLISHING, error="", pinned_window_key="")
+            # ``published_window_key`` is written here, inside the claim
+            # transaction, so it can never disagree with ``last_window_key``
+            # below — a separate write after the publish could be lost.
+            .values(status=STATUS_PUBLISHING, error="", pinned_window_key="",
+                    published_window_key=window_key)
         ).rowcount
         if claimed != 1:
             return False
@@ -747,6 +1135,14 @@ def run_window_tick() -> str | None:
     except Exception:
         log.exception("Promo staging failed")
 
+    # Same contract for the evergreen-winners repost rotation.
+    try:
+        staged = ensure_repost_staged()
+        if staged:
+            log.info("Repost rotation: %s", staged)
+    except Exception:
+        log.exception("Repost staging failed")
+
     if not threads_api.is_authenticated():
         return None
 
@@ -795,6 +1191,68 @@ def run_window_tick() -> str | None:
         state.last_action = f"publish_failed:{key}:post={post_id}"
         state.updated_at = utcnow()
     return f"publish_failed:{key}:post={post_id}"
+
+
+def annotate_queued_posts(limit: int = 2) -> int:
+    """Ground-truth facet tagging for queued posts, at queue time.
+
+    Footage annotation used to run after publishing — too late for the
+    placement gates to use it. Running it here, on the trimmed clip that will
+    actually ship, gives the scheduler its facets before anything is placed
+    while preserving the learning loop's ground-truth semantics (same file).
+    The ``footage_scored_at`` guard keeps the total at one call per post, so
+    moving the annotation forward doesn't change LLM spend; the per-tick
+    ``limit`` just keeps any single tick short. Headless runners without the
+    operator's files skip silently — the dashboard's tick picks those up.
+
+    A queued post whose clip file changes after annotation (captions toggled,
+    which swaps in the subtitled variant) is re-annotated: the requeue path
+    clears ``footage_scored_at`` when it swaps the file.
+    """
+    settings = load_settings()
+    if not settings.get("vision.enabled", True):
+        return 0
+    from .db import active_traits_by_facet
+    from .vision import annotate_post_footage
+
+    done = 0
+    with session_scope() as session:
+        vocab = active_traits_by_facet(session)
+        posts = session.execute(
+            select(ThreadsPost).where(
+                ThreadsPost.status == STATUS_QUEUED,
+                ThreadsPost.footage_scored_at.is_(None),
+                ThreadsPost.clip_local_path != "",
+            ).order_by(ThreadsPost.created_at.asc())
+        ).scalars().all()
+        for post in posts:
+            if done >= limit:
+                break
+            if not Path(post.clip_local_path).expanduser().exists():
+                continue  # not this machine's file — another runner has it
+            if annotate_post_footage(post, settings, vocab["subject"],
+                                     format_traits=vocab["format"]):
+                done += 1
+    return done
+
+
+def expired_queued_posts(session) -> list[ThreadsPost]:
+    """Queued posts whose shelf life has run out (scored mode only).
+
+    The placement engine never places an expired post, so without this they
+    would just sink silently. Surfaced in the notifications list instead, for
+    the operator to publish by hand, re-shelve, or delete;
+    ``attention_dismissed_at`` acknowledges one without deleting it.
+    """
+    posts = _queue_regular(session)
+    if not posts:
+        return []
+    ctx = build_placement_context(session, posts)
+    if ctx is None:
+        return []  # FIFO mode has no expiry
+    today = utcnow().astimezone(_tz()).date()
+    return [p for p in posts
+            if ctx.expired(p.id, today) and p.attention_dismissed_at is None]
 
 
 def run_metrics_poll() -> int:
@@ -896,6 +1354,25 @@ def _upcoming_window_slots(
             slots.append((key, win, i))
         d += dt.timedelta(days=1)
     return slots
+
+
+def _score_detail(decision) -> str:
+    """One-line score breakdown for a placed slot's hover tooltip, so 'why is
+    this post here' is answerable from the calendar."""
+    if decision is None:
+        return ""
+    if decision.pinned:
+        return "Pinned by hand — bypasses scoring"
+    p = decision.parts or {}
+    if decision.score is None or not p:
+        return ""
+    text = (f"score {decision.score:g} = urgency {p.get('urgency', 0):g}"
+            f" + patience {p.get('patience', 0):g}"
+            f" − variety {p.get('variety_penalty', 0):g}"
+            f" − repost {p.get('repost_penalty', 0):g}")
+    if decision.relax_step:
+        text += f" (relaxed gates: step {decision.relax_step})"
+    return text
 
 
 def _post_display_title(p) -> str:
@@ -1090,7 +1567,9 @@ def build_window_plan(
     )
     full_keys = [k for k, _, _ in full_upcoming]
     _clear_stale_pins(regular, set(full_keys))
-    post_by_key = dict(zip(full_keys, assign_posts_to_windows(regular, full_keys)))
+    assignment, ctx = _assign_with_mode(session, regular, full_keys)
+    post_by_key = dict(zip(full_keys, assignment))
+    decisions = ctx.decisions if ctx is not None else {}
 
     for key, _win_utc, idx, local in visible:
         post = post_by_key.get(key)
@@ -1116,6 +1595,7 @@ def build_window_plan(
                 "pinned": False,
             })
         else:
+            decision = decisions.get(key)
             plan.append({
                 "kind": "queued",
                 "window_key": key,
@@ -1130,12 +1610,19 @@ def build_window_plan(
                 "video_id": post.candidate.id if post.candidate else None,
                 "channel": (post.candidate.channel.call_sign
                             if post.candidate and post.candidate.channel else ""),
-            "thumbnail": (post.candidate.thumbnail_url if post.candidate else ""),
-            "title": _post_display_title(post),
+                "thumbnail": (post.candidate.thumbnail_url if post.candidate else ""),
+                "title": _post_display_title(post),
                 "permalink": post.permalink,
                 "projected": True,
                 "empty": False,
                 "pinned": bool((post.pinned_window_key or "").strip()),
+                # Scored-mode explainability: which relaxation step filled the
+                # slot (0 = clean; >=1 means gates were loosened, a sign the
+                # queue is shallow or concentrated) and the score breakdown.
+                "relax_step": (decision.relax_step
+                               if decision is not None and not decision.pinned
+                               else None),
+                "score_detail": _score_detail(decision),
             })
 
     # Published posts in range (for calendar history). The month grid lays each
@@ -1292,8 +1779,65 @@ def projected_slot_for_post(session, post_id: int, horizon_days: int = 60) -> di
     return None
 
 
+def placement_preview(session, days: int = 14) -> dict:
+    """FIFO and scored plans side by side over the next ``days``, so scored
+    mode can be judged against the live order before it is switched on.
+
+    Both plans are computed from the same queue snapshot; the scored one is
+    forced even while the live mode is fifo. Pins land identically in both.
+    """
+    settings = load_settings()
+    tz = _tz()
+    now = utcnow()
+    today = now.astimezone(tz).date()
+    state = _get_state(session)
+    upcoming = _upcoming_window_slots(
+        today, today + dt.timedelta(days=days),
+        now=now, last_window_key=state.last_window_key or "",
+    )
+    keys = [k for k, _, _ in upcoming]
+    posts = session.execute(
+        select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+                 selectinload(ThreadsPost.cut))
+        .where(ThreadsPost.status == STATUS_QUEUED)
+        .order_by(ThreadsPost.created_at.asc())
+    ).scalars().all()
+
+    fifo = assign_posts_to_windows(list(posts), keys)
+    ctx = build_placement_context(session, list(posts), force=True)
+    scored = assign_posts_to_windows(list(posts), keys, ctx=ctx)
+
+    rows = []
+    for (key, win_utc, _idx), f, s in zip(upcoming, fifo, scored):
+        if f is None and s is None:
+            continue
+        local = win_utc.astimezone(tz)
+        decision = ctx.decisions.get(key)
+        rows.append({
+            "window_key": key,
+            "when": local.strftime("%a %b %-d · %-I:%M %p"),
+            "fifo_id": f.id if f else None,
+            "fifo_title": _post_display_title(f) if f else "",
+            "scored_id": s.id if s else None,
+            "scored_title": _post_display_title(s) if s else "",
+            "differs": (f.id if f else None) != (s.id if s else None),
+            "relax_step": (decision.relax_step
+                           if decision is not None and not decision.pinned else None),
+            "pinned": bool(decision is not None and decision.pinned),
+            "score_detail": _score_detail(decision),
+        })
+    return {
+        "rows": rows,
+        "mode": str(settings.get("scheduler.placement.mode", "fifo")).lower(),
+        "facet": str(settings.get("scheduler.placement.facet", "category")).lower(),
+        "queue_count": len(posts),
+        "differences": sum(1 for r in rows if r["differs"]),
+    }
+
+
 def run_tick() -> None:
-    """One scheduler loop iteration: recover → metrics → window."""
+    """One scheduler loop iteration: recover → annotate → metrics → window."""
     try:
         with session_scope() as session:
             n = recover_stuck_publishing(session, only_inactive=True)
@@ -1301,6 +1845,15 @@ def run_tick() -> None:
             log.info("Recovered %d post(s) stuck in 'publishing'", n)
     except Exception:
         log.exception("Stuck-publish recovery failed")
+
+    # Queue-time facet annotation, before the window evaluation so a post
+    # queued minutes ago can still be placed on its facets this same tick.
+    try:
+        n = annotate_queued_posts()
+        if n:
+            log.info("Annotated %d queued post(s) with footage facets", n)
+    except Exception:
+        log.exception("Queued-post annotation failed")
 
     try:
         n = run_metrics_poll()

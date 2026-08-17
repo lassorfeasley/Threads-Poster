@@ -39,22 +39,29 @@ categories:
   model: claude-haiku-4-5
   # Tag new candidates during the monitor pass (alongside relevance scoring).
   tag_at_monitor: true
+  # ``default_shelf_life`` is the fallback urgency class for the scheduler
+  # when the auto-tagger abstained on a specific video: breaking (stale in
+  # days) | timely (fades in weeks) | evergreen (never). The LLM's per-video
+  # judgment, made alongside the category at monitor time, takes precedence.
   options:
     - slug: technique
       emoji: "🎯"
       label: Technique & form
+      default_shelf_life: evergreen
       description: >-
         Single-exercise tutorials and form breakdowns: how to do one movement
         well, common mistakes, modifications, and teaching cues.
     - slug: flow
       emoji: "🌊"
       label: Flows & class moments
+      default_shelf_life: evergreen
       description: >-
         Flowing sequences, transitions, and satisfying excerpts from full mat
         or reformer classes — movement to watch and follow along.
     - slug: lifestyle
       emoji: "✨"
       label: Lifestyle & inspiration
+      default_shelf_life: evergreen
       description: >-
         Practice-life content: studio culture, instructor life, progress and
         flexibility journeys, equipment, and motivation to get on the mat.
@@ -100,8 +107,11 @@ vision:
   min_relevance: 0.5
   max_per_run: 40
   max_sheets: 4
-  # Flat trait vocabulary (seeded into the Traits page on first run; page edits
-  # take precedence). Observation only — performance decides good/bad later.
+  # SUBJECT trait vocabulary — what's happening on screen (seeded into the
+  # Traits page on first run; page edits take precedence). Observation only —
+  # performance decides good/bad later. The format-shaped names that used to
+  # live here (talking head, title card, low-motion segment) moved to
+  # ``format_traits`` below; existing databases migrate them automatically.
   traits:
     - movement_in_progress
     - flowing_sequence
@@ -114,12 +124,27 @@ vision:
     - props_ball_ring_or_band
     - group_class
     - instructor_demonstrating
-    - talking_head_no_movement
-    - static_graphic_or_title_card
     - text_heavy_overlay
     - setup_or_equipment_adjusting
+  # FORMAT trait vocabulary — the production form of the footage, independent
+  # of its subject. This is the facet the scheduler's variety gate runs on
+  # (scheduler.placement.facet: format) and where per-tag performance signal
+  # is most expected. Kept deliberately small: each tag needs
+  # ``learning.min_trait_posts`` observations before its verdict activates,
+  # so every extra name slows learning for all of them. Tagged in the SAME
+  # vision call as the subject traits — no extra LLM cost.
+  format_traits:
+    - tutorial_or_demonstration
+    - class_excerpt
+    - produced_segment
+    - vlog_or_lifestyle_footage
+    - montage_or_compilation
+    - panel_or_interview
+    - talking_head_no_movement
+    - static_graphic_or_title_card
     - low_motion_segment
-  # Frames extracted from each PUBLISHED clip for ground-truth trait annotation.
+  # Frames extracted from each posted clip for ground-truth trait annotation
+  # (runs at queue time so the scheduler can place on the result).
   post_frames: 12
 
 ranking:
@@ -369,6 +394,75 @@ scheduler:
     # more recently than this. With a small pool this is what keeps the
     # rotation from becoming obvious.
     min_days_between_repeats: 10
+  # Scored placement (see app/placement.py): instead of pure FIFO, each window
+  # takes the highest-scoring queued post that passes the spacing and variety
+  # gates. Spaces clips cut from the same source video, keeps content facets
+  # varied day to day, runs timely material before it expires, and lets
+  # evergreen clips wait. Pins always win; a window is never left empty while
+  # eligible posts exist (gates relax softest-first instead — the calendar
+  # marks slots that needed relaxing).
+  placement:
+    # fifo | scored. Flipped to scored 2026-08-16 after validating against the
+    # replay sim and the placement preview; set back to fifo to revert.
+    mode: scored
+    # Which facet the variety gate and penalty run on:
+    #   category — the single programming category (coarse but always present)
+    #   format   — auto-tagged format tags (tutorial vs class excerpt vs
+    #              talking head…), falling back to category until a post is
+    #              tagged
+    facet: category
+    gates:
+      # Days two clips cut from the SAME source video must sit apart.
+      same_source_days: 10
+      # Days two clips from the same channel must sit apart (operator uploads
+      # and pasted links are exempt — those aren't editorial sources).
+      same_channel_days: 3
+      # Max facet overlap (Jaccard, 0..1) against recent windows before a post
+      # is held back for variety. 0.34 lets half-alike posts through and
+      # blocks near-duplicates; 1.0 disables the gate.
+      max_facet_overlap: 0.34
+      # How many recent windows the variety comparison looks back across.
+      lookback_windows: 3
+    weights:
+      # Score = urgency + patience - variety_penalty - repost_penalty.
+      # A fresh breaking clip starts at urgency_max and halves every
+      # half-life; patience grows linearly from the day a post is queued.
+      # With 10/1 here, fresh news outranks anything waiting under ten days —
+      # this ratio is the main dial.
+      urgency_max: 10.0
+      patience_per_day: 1.0
+      # Score penalty at full facet overlap with the previous window (decays
+      # with distance). Softer than the gate: the gate blocks, this nudges.
+      variety_penalty_max: 4.0
+      # Small constant so an original beats a staged re-air on a tie.
+      repost_penalty: 0.5
+    # Urgency half-lives in days, per shelf-life class. Evergreen never decays.
+    half_lives:
+      breaking: 1.0
+      timely: 7.0
+    # A post expires (never auto-placed; surfaces in Notifications instead)
+    # once older than half_life x this. Breaking at 1-day half-life goes stale
+    # in 3 days; timely at 7 days in 3 weeks — one knob, both behaviors.
+    expire_after_half_lives: 3
+    # Re-air proven posts: every ``every_days`` days one window may repeat a
+    # published post aged ``min_age_days..max_age_days`` whose views at the
+    # learning comparison age cleared the ``percentile`` of the account
+    # baseline. Staged exactly like promos: an ordinary queued post pinned to
+    # its window, editable and cancellable on the calendar.
+    reposts:
+      enabled: true
+      min_age_days: 90
+      max_age_days: 180
+      min_days_between_repeats: 90
+      # Lifetime cap on airings of one clip (original + re-airs).
+      max_airings_per_cut: 3
+      # A post must beat this percentile of views-at-48h to qualify.
+      percentile: 90
+      every_days: 7
+      # Cadence phase, like promos.anchor.
+      anchor: "2026-01-01"
+      # 0-based index into ``windows`` above (0 = the morning window).
+      window_index: 0
   # How often to re-pull insights for recently published posts. These dense
   # early samples feed the age-normalized comparisons in analytics.
   metrics_poll_interval_minutes: 15

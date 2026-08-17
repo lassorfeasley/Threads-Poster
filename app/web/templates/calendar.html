@@ -8,6 +8,8 @@
 {% endmacro %}
 {% import "components/toolbar.html" as ui %}
 {% set cal_actions %}
+  <a class="btn" href="/calendar/placement-preview"
+     title="Preview the scored posting order beside the live FIFO order">Placement preview</a>
   <div class="segmented cal-viewtoggle" role="tablist" aria-label="Switch calendar view">
     <button type="button" class="seg-btn is-active" data-view="calendar" role="tab" aria-selected="true">Calendar</button>
     <button type="button" class="seg-btn" data-view="queue" role="tab" aria-selected="false">Queue
@@ -78,14 +80,17 @@
                          title="{{ e.date_label }} {{ e.time }} · this window passed without publishing — the queue was empty, the spacing floor blocked it, or the publish failed. Check the scheduler panel and Notifications.">
                       <em>missed</em></div>
                   {% elif e.kind == 'queued' and e.post_id %}
+                    {% set relax = e.get('relax_step') %}
+                    {% set detail = e.get('score_detail') or '' %}
                     <div class="cal-event cal-slot {{ cls }} card cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
                          draggable="true"
                          data-post-id="{{ e.post_id }}"
                          data-window-key="{{ e.window_key }}"
-                         title="{{ e.date_label }} {{ e.time }} · queued{% if e.pinned %} (pinned){% endif %} · drag to another window · {{ label }}">
+                         title="{{ e.date_label }} {{ e.time }} · queued{% if e.pinned %} (pinned){% endif %}{% if relax %} · placed with relaxed gates (step {{ relax }}) — the queue is too shallow or concentrated to satisfy every spacing rule here{% endif %}{% if detail %} · {{ detail }}{% endif %} · drag to another window · {{ label }}">
                       <a href="/post/{{ e.post_id }}" class="cal-ev"
                          onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
                         {{ ev_card(e, label) }}
+                        {% if relax %}<span class="cal-ev-relax" title="Placed with relaxed gates (step {{ relax }})">⚠</span>{% endif %}
                       </a>
                     </div>
                   {% elif e.post_id %}
@@ -145,10 +150,11 @@
             <div class="meta">Drop a queued post here to pin it.</div>
           {% else %}
             <a class="queue-caption" href="/post/{{ e.post_id }}">{{ e.caption[:110] or '(untitled)' }}</a>
-            <div class="meta">
+            <div class="meta"{% if e.get('score_detail') %} title="{{ e.get('score_detail') }}"{% endif %}>
               {% if e.channel %}{{ e.channel }} · {% endif %}
               {% if e.has_reel %}+ Instagram Reel · {% endif %}
               {% if e.pinned %}pinned · {% elif e.kind == 'queued' %}projected · {% endif %}
+              {% if e.get('relax_step') %}<span title="Placed with relaxed gates (step {{ e.get('relax_step') }}) — the queue is too shallow or concentrated to satisfy every spacing rule here">⚠ relaxed ·</span> {% endif %}
               {% if e.kind == 'queued' %}drag to move{% endif %}
             </div>
           {% endif %}

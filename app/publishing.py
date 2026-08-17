@@ -465,14 +465,19 @@ def publish_reel_now(ig_id: int) -> InstagramPost | None:
 
 
 def _annotate_footage(session, post: ThreadsPost) -> None:
-    """Ground-truth footage trait tagging from the posted clip. Best-effort —
-    a tagging hiccup must never undo a successful publish (the backfill
-    command / dashboard button can retry later)."""
+    """Ground-truth footage trait tagging from the posted clip. Normally the
+    scheduler tick has already done this at queue time (the placement variety
+    gate needs the format facet before placing anything); the
+    ``footage_scored_at`` guard makes this publish-time call a no-op then.
+    Best-effort — a tagging hiccup must never undo a successful publish (the
+    backfill command / dashboard button can retry later)."""
     try:
-        from .db import active_traits
+        from .db import active_traits_by_facet
         from .vision import annotate_post_footage
 
-        annotate_post_footage(post, load_settings(), active_traits(session))
+        vocab = active_traits_by_facet(session)
+        annotate_post_footage(post, load_settings(), vocab["subject"],
+                              format_traits=vocab["format"])
     except Exception as exc:
         log.warning("Footage annotation failed for post %s: %s", post.id, exc)
 

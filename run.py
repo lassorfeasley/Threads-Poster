@@ -347,7 +347,7 @@ def cmd_score_visuals(args) -> None:
 
     from app import spend
     from app.config import load_settings
-    from app.db import active_traits, init_db, session_scope, sync_traits_from_config
+    from app.db import active_traits_by_facet, init_db, session_scope, sync_traits_from_config
     from app.models import Candidate
     from app.vision import tag_candidate_storyboard
 
@@ -357,7 +357,7 @@ def cmd_score_visuals(args) -> None:
     tagged = skipped = 0
     with session_scope() as session:
         sync_traits_from_config(session)
-        traits = active_traits(session)
+        vocab = active_traits_by_facet(session)
         query = select(Candidate).where(
             (Candidate.visual_traits == "") | (Candidate.visual_traits.is_(None)),
             (Candidate.relevance_score.is_(None)) | (Candidate.relevance_score >= min_rel),
@@ -368,7 +368,9 @@ def cmd_score_visuals(args) -> None:
             if not spend.within_budget():
                 log.info("Daily budget reached ($%.2f); stopping.", spend.today_spend())
                 break
-            result = tag_candidate_storyboard(c, settings, force=True, traits=traits)
+            result = tag_candidate_storyboard(c, settings, force=True,
+                                              traits=vocab["subject"],
+                                              format_traits=vocab["format"])
             if result is None:
                 skipped += 1
             else:
@@ -387,7 +389,7 @@ def cmd_annotate_posts(args) -> None:
     from app import spend
     from app.analytics import learn_trait_weights
     from app.config import load_settings
-    from app.db import active_traits, init_db, session_scope
+    from app.db import active_traits_by_facet, init_db, session_scope
     from app.models import ThreadsPost, TraitWeight
     from app.vision import annotate_post_footage
 
@@ -395,7 +397,7 @@ def cmd_annotate_posts(args) -> None:
     settings = load_settings()
     annotated = skipped = 0
     with session_scope() as session:
-        traits = active_traits(session)
+        vocab = active_traits_by_facet(session)
         query = select(ThreadsPost).where(
             ThreadsPost.status == "published",
             ThreadsPost.clip_local_path != "",
@@ -408,7 +410,9 @@ def cmd_annotate_posts(args) -> None:
             if not spend.within_budget():
                 log.info("Daily budget reached ($%.2f); stopping.", spend.today_spend())
                 break
-            result = annotate_post_footage(post, settings, traits, force=args.force)
+            result = annotate_post_footage(post, settings, vocab["subject"],
+                                           force=args.force,
+                                           format_traits=vocab["format"])
             if result is None:
                 skipped += 1
             else:
@@ -692,6 +696,20 @@ def cmd_scheduler(args) -> None:
         pass
 
 
+def cmd_placement_sim(args) -> None:
+    """Replay recent publish history through the scored placement engine and
+    report facet mix, same-source spacing, relaxation frequency, and queue
+    wait. Read-only: tune scheduler.placement weights against this, then flip
+    mode to 'scored'."""
+    from app.db import init_db, session_scope
+    from app.placement_sim import format_report, run_replay
+
+    init_db()
+    with session_scope() as session:
+        report = run_replay(session, days=args.days)
+    print(format_report(report))
+
+
 def cmd_migrate_db(_args) -> None:
     """Copy local SQLite data into the DATABASE_URL target (Supabase Postgres)."""
     from app.migrate import migrate_sqlite_to_target
@@ -771,6 +789,13 @@ def main() -> None:
 
     sub.add_parser("migrate-db", parents=[common],
                    help="copy local SQLite data into DATABASE_URL (e.g. Supabase)").set_defaults(func=cmd_migrate_db)
+
+    p = sub.add_parser("placement-sim", parents=[common],
+                       help="replay publish history through scored placement "
+                            "(read-only; tune weights before flipping the mode)")
+    p.add_argument("--days", type=int, default=90,
+                   help="how far back to replay (default 90)")
+    p.set_defaults(func=cmd_placement_sim)
     p = sub.add_parser("score-visuals", parents=[common],
                        help="backfill vision scores for unscored candidates")
     p.add_argument("--limit", type=int, default=None, metavar="N",

@@ -45,11 +45,21 @@
 <div class="post-preview">
 <div class="thread-preview">
 
-  {% if candidate_id %}
+  {% if candidate_id or format_tags or footage_traits or shelf_life or repost_of %}
   {# ---- Programming category (lives on the source video; shared by all its
-       cuts/posts) — a quiet strip above the post itself. ---- #}
+       cuts/posts) plus the auto-tagged placement facets — a quiet strip
+       above the post itself. ---- #}
   <div class="preview-topbar">
-    {{ catui.field(candidate_id, category, "/post/" ~ pid, show_label=false) }}
+    {% if candidate_id %}{{ catui.field(candidate_id, category, "/post/" ~ pid, show_label=false) }}{% endif %}
+    {% if format_tags or footage_traits or shelf_life or repost_of %}
+    <div class="badges">
+      {% for t in format_tags %}<span class="badge" title="format facet — production form, drives scheduling variety">{{ t }}</span>{% endfor %}
+      {% for t in footage_traits %}<span class="badge info" title="footage trait (subject facet)">{{ t }}</span>{% endfor %}
+      {% if shelf_life %}<span class="badge {{ 'hostile' if shelf_life == 'breaking' else ('score-hi' if shelf_life == 'timely' else 'supportive') }}"
+            title="Shelf life — drives scheduling urgency and expiry. {{ 'Auto-tagged on this content.' if shelf_life_tagged else 'Inherited from the category default (this video predates shelf-life tagging).' }}">{{ shelf_life }}</span>{% endif %}
+      {% if repost_of %}<a class="badge" href="/post/{{ repost_of }}" title="Re-airing of a proven earlier post">repost of #{{ repost_of }}</a>{% endif %}
+    </div>
+    {% endif %}
   </div>
   {% endif %}
 

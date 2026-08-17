@@ -28,7 +28,7 @@ from . import llm
 from .analytics import metrics_at_age_bulk
 from .categories import reserved_slugs
 from .config import load_caption_rules, load_settings
-from .models import AppToken, Candidate, ThreadsPost, utcnow
+from .models import AppToken, Candidate, Channel, ThreadsPost, utcnow
 
 log = logging.getLogger("caption_insights")
 
@@ -82,19 +82,23 @@ def _select_captions(session) -> dict | None:
     settings = load_settings()
     age_hours = int(settings.get("learning.metric_age_hours", 48))
 
-    # Reserved categories are excluded for the same reason as in app/voice.py:
-    # a recycled promo caption reappears verbatim on every airing, so learning
-    # from it would mostly distil the ad copy. Outer join keeps imported
-    # Threads history, which has no candidate row.
+    # First-party (branded) content is excluded for the same reason as in
+    # app/voice.py: a recycled promo caption reappears verbatim on every
+    # airing, so learning from it would mostly distil the ad copy. Provenance
+    # is derived from the channel's ``first_party`` flag, with the legacy
+    # reserved ``promos`` category kept as a per-video back-compat path. Outer
+    # joins keep imported Threads history, which has no candidate row.
     posts = session.execute(
         select(ThreadsPost)
         .outerjoin(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+        .outerjoin(Channel, Candidate.channel_pk == Channel.id)
         .where(
             ThreadsPost.status == "published",
             ThreadsPost.published_at.is_not(None),
             ThreadsPost.caption != "",
             or_(Candidate.category.is_(None),
                 Candidate.category.not_in(reserved_slugs())),
+            Channel.first_party.isnot(True),
         )
     ).scalars().all()
     rows = [{"caption": p.caption.strip(), "post": p, "published_at": p.published_at}

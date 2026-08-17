@@ -17,6 +17,13 @@ off the video — a local-TV segment about solar financing reads as promotional
 without being ours. So reserved categories are operator-assigned only: they
 are withheld from the vocabulary the auto-tagger sees, and the auto-tagger
 will not overwrite one it finds.
+
+Categories now share the variety job with auto-tagged facets (format tags,
+shelf life, first-party provenance — see app/placement.py). The category
+filters across the library/video/post/cut pages stay until scored placement
+ships (``scheduler.placement.mode: scored``) and the format-tag facet has
+proven itself in the placement preview; retiring them earlier would remove
+the operator's only working lens on the queue.
 """
 from __future__ import annotations
 
@@ -38,6 +45,7 @@ RESERVED_OPTIONS: list[dict] = [
             "First-party promotional footage made by or for the brand itself, "
             "rather than found footage from a monitored channel."
         ),
+        "default_shelf_life": "evergreen",
         "reserved": True,
         "auto_tag": False,
     },
@@ -57,11 +65,15 @@ def _normalize(raw) -> list[dict]:
         slug = str(item.get("slug") or "").strip().lower()
         if not slug:
             continue
+        shelf = str(item.get("default_shelf_life") or "").strip().lower()
         out.append({
             "slug": slug,
             "emoji": str(item.get("emoji") or "").strip(),
             "label": str(item.get("label") or slug).strip(),
             "description": str(item.get("description") or "").strip(),
+            # Fallback shelf life for videos in this category when the
+            # auto-tagger abstained (see app/placement.py). Empty = evergreen.
+            "default_shelf_life": shelf if shelf in ("breaking", "timely", "evergreen") else "",
             "reserved": False,
             "auto_tag": True,
         })
@@ -122,6 +134,28 @@ def is_reserved(slug: str | None) -> bool:
     return bool(slug) and slug in reserved_slugs()
 
 
+def default_shelf_life(slug: str | None) -> str:
+    """Fallback shelf life for a category (empty when unknown/unset)."""
+    opt = category_by_slug(slug)
+    return (opt or {}).get("default_shelf_life", "") or ""
+
+
+def is_first_party(candidate) -> bool:
+    """Provenance: is this the brand's own footage rather than found footage?
+
+    Derived, not tagged: a property of the SOURCE. A channel marked
+    ``first_party`` covers every video it carries; the legacy reserved
+    ``promos`` category survives as a per-video override so existing rows
+    (and one-off brand videos on found-footage channels) keep working.
+    """
+    if candidate is None:
+        return False
+    channel = getattr(candidate, "channel", None)
+    if channel is not None and getattr(channel, "first_party", False):
+        return True
+    return is_reserved(candidate.category)
+
+
 def auto_tag_candidate(candidate: Candidate, settings: Settings | None = None,
                        channel: Channel | None = None) -> dict | None:
     """LLM-recommend a programming category for a candidate and store it on
@@ -156,4 +190,8 @@ def auto_tag_candidate(candidate: Candidate, settings: Settings | None = None,
         return None
     candidate.category = result["category"]
     candidate.category_rationale = result["rationale"]
+    # Shelf life rides along in the same call; the scheduler resolves through
+    # post override -> this -> the category's default_shelf_life -> evergreen.
+    if result.get("shelf_life"):
+        candidate.shelf_life = result["shelf_life"]
     return result

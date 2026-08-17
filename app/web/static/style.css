@@ -2983,6 +2983,12 @@ body.cal-committing #cal-layout {
   font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
   color: var(--text-dim);
 }
+/* Scored placement filled this slot only by relaxing its gates — a run of
+   these marks a queue too shallow for the configured spacing rules. */
+.cal-ev-relax {
+  font-size: 10px; font-weight: 700;
+  color: var(--warning, #b8860b);
+}
 /* Keep the lifted drag state readable on the taller cards. */
 .cal-event.card.cal-drag { cursor: grab; }
 

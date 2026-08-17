@@ -34,7 +34,7 @@ from ..config import (
 )
 from ..db import (
     SessionLocal,
-    active_traits,
+    active_traits_by_facet,
     init_db,
     invalidate_traits_cache,
     session_scope,
@@ -96,8 +96,11 @@ from ..publishing import (
 from ..ranking import load_trait_weights, order_expr, sort_candidates
 from ..scheduler import (
     build_window_plan,
+    expired_queued_posts,
     pin_post_to_window,
+    placement_preview,
     projected_slot_for_post,
+    resolve_shelf_life,
     scheduler_status,
     spacing_allows_publish,
     start_scheduler_thread,
@@ -195,13 +198,18 @@ def _stranded_reels():
 
 
 def _load_attention_count() -> int:
-    """Unacknowledged failed posts, failed reels, and reels stranded behind an
-    already-published post — as one query."""
+    """Unacknowledged failed posts, failed reels, reels stranded behind an
+    already-published post, and queued posts whose shelf life ran out."""
     with session_scope() as session:
-        return int(session.execute(
+        count = int(session.execute(
             select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost)
                    + _stranded_reels())
         ).scalar_one())
+        try:
+            count += len(expired_queued_posts(session))
+        except Exception:
+            log.exception("Expired-post check failed")
+        return count
 
 
 pagecache.register("attention", _load_attention_count)
@@ -958,8 +966,10 @@ def video_score_visuals(candidate_id: int):
         c = session.get(Candidate, candidate_id)
         if c is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        traits = active_traits(session)
-        result = tag_candidate_storyboard(c, settings, force=True, traits=traits)
+        vocab = active_traits_by_facet(session)
+        result = tag_candidate_storyboard(c, settings, force=True,
+                                          traits=vocab["subject"],
+                                          format_traits=vocab["format"])
         if result is None:
             return JSONResponse(
                 {"error": "No storyboard available for this video, or tagging failed."},
@@ -1052,6 +1062,10 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
          "cut_rows": cut_rows, "posts": posts,
          "transcript_segments": transcript_segments,
          "has_local": has_local,
+         # Same chain the scheduler uses (candidate tag -> category default ->
+         # evergreen), so the badge always shows what placement will do.
+         "shelf_life": resolve_shelf_life(None, c),
+         "shelf_life_tagged": bool((c.shelf_life or "").strip()),
          "msg": msg, "active": "dashboard"},
     )
 
@@ -2793,6 +2807,12 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                     from ..storage_supabase import upload_trimmed_clip
                     keep.clip_local_path = clip_path
                     keep.clip_object_path = _object_key(Path(clip_path))
+                    # A different file may read differently on screen (burned-in
+                    # subtitles): clear the facet annotation so the scheduler's
+                    # queue-time pass re-tags the file that will actually ship.
+                    keep.footage_scored_at = None
+                    keep.footage_traits = ""
+                    keep.format_tags = ""
                     try:
                         upload_trimmed_clip(Path(clip_path), keep.clip_object_path)
                     except Exception as exc:
@@ -3213,6 +3233,16 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "candidate_id": cand.id if cand else None,
             "category": cand.category if cand else "",
             "category_rationale": cand.category_rationale if cand else "",
+            # Placement facets: what the scored scheduler sees for this post.
+            "format_tags": [t.strip() for t in (p.format_tags or "").split(",") if t.strip()],
+            "footage_traits": [t.strip() for t in (p.footage_traits or "").split(",") if t.strip()],
+            # Fully resolved (post -> candidate -> category default ->
+            # evergreen) so the badge always shows what placement will do,
+            # even for posts ingested before shelf-life tagging existed.
+            "shelf_life": resolve_shelf_life(p, cand),
+            "shelf_life_tagged": bool(((p.shelf_life or "").strip())
+                                      or ((cand.shelf_life or "").strip() if cand else "")),
+            "repost_of": p.repost_of_post_pk,
             "cut_id": cut.id if cut else None,
             "channel_sign": cand.channel.call_sign if (cand and cand.channel) else "",
             "video_title": cand.title if cand else "",
@@ -3626,6 +3656,20 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
     )
 
 
+@app.get("/calendar/placement-preview", response_class=HTMLResponse)
+def placement_preview_page(request: Request):
+    """Scored placement beside the FIFO order, from the same queue snapshot.
+
+    This is how scored mode ships dark: compare the two plans here for a
+    while, then flip ``scheduler.placement.mode`` in settings.yaml.
+    """
+    with session_scope() as session:
+        data = placement_preview(session)
+    return templates.TemplateResponse(
+        request, "placement_preview.html", {**data, "active": "calendar"},
+    )
+
+
 @app.get("/posts")
 def posts_page(msg: str = ""):
     """Retired page. The queue lives on the Calendar, drafts/history in the
@@ -3660,7 +3704,18 @@ def _notifications_data() -> dict:
             .where(*stranded_reel_filters())
             .order_by(InstagramPost.created_at.desc())
         ).scalars().all()
-    return {"failed": failed, "ig_failed": ig_failed, "ig_stranded": ig_stranded}
+        # Timely posts that went stale in the queue. The scored scheduler
+        # never auto-places an expired post, so without this they'd sink
+        # silently; the operator decides — post now, or delete.
+        try:
+            expired = expired_queued_posts(session)
+            for p in expired:  # eager-load for the template before detaching
+                _ = (p.cut.candidate if p.cut else None), p.candidate
+        except Exception:
+            log.exception("Expired-post check failed")
+            expired = []
+    return {"failed": failed, "ig_failed": ig_failed, "ig_stranded": ig_stranded,
+            "expired": expired}
 
 
 pagecache.register("notifications", _notifications_data)
@@ -4261,7 +4316,7 @@ def _annotate_posts_in_thread() -> None:
     settings = load_settings()
     try:
         with session_scope() as session:
-            traits = active_traits(session)
+            vocab = active_traits_by_facet(session)
             posts = session.execute(
                 select(ThreadsPost).where(
                     ThreadsPost.status == "published",
@@ -4274,7 +4329,8 @@ def _annotate_posts_in_thread() -> None:
                 if not spend.within_budget():
                     log.info("Footage backfill stopped: daily budget reached")
                     break
-                if annotate_post_footage(post, settings, traits):
+                if annotate_post_footage(post, settings, vocab["subject"],
+                                         format_traits=vocab["format"]):
                     done += 1
                     session.commit()
             from ..analytics import learn_trait_weights
@@ -4475,6 +4531,20 @@ def channel_toggle(channel_id: int):
         channel = session.get(Channel, channel_id)
         if channel:
             channel.enabled = not channel.enabled
+    return _flash("/channels", "Updated")
+
+
+@app.post("/channels/{channel_id}/first-party")
+def channel_first_party_toggle(channel_id: int):
+    """Mark a channel as the operator's own content (provenance facet).
+
+    First-party posts join the promo rotation pool and are excluded from
+    voice/caption learning, which is trained on found footage only.
+    """
+    with session_scope() as session:
+        channel = session.get(Channel, channel_id)
+        if channel:
+            channel.first_party = not bool(channel.first_party)
     return _flash("/channels", "Updated")
 
 

@@ -193,13 +193,22 @@ def suggest_channel_fields(model: str, url: str, title: str = "", description: s
 def suggest_category(model: str, categories: list[dict], title: str, description: str,
                      channel: str = "", matched_keywords: list[str] | None = None,
                      transcript_excerpt: str = "") -> dict:
-    """Recommend ONE programming category for a video. ``categories`` is the
-    auto-taggable vocabulary ({slug, label, description}) — the caller passes
-    ``categories.auto_tag_options()``, which excludes reserved categories the
-    model cannot infer. The channel aims for a roughly equal mix, so this is
-    genre/framing, not topic (every video already matched the brand's focus).
-    Returns {category: slug or "", rationale}; an off-vocabulary answer comes
-    back as "" so the video stays untagged rather than mislabeled.
+    """Recommend ONE programming category — and a shelf life — for a video.
+    ``categories`` is the auto-taggable vocabulary ({slug, label, description})
+    — the caller passes ``categories.auto_tag_options()``, which excludes
+    reserved categories the model cannot infer. The channel aims for a roughly
+    equal mix, so this is genre/framing, not topic (every video already
+    matched the brand's focus).
+
+    Shelf life rides along in the SAME call (the model already has everything
+    it needs, so this costs nothing extra) and feeds the scheduler's urgency
+    decay: ``breaking`` content is stale within days, ``timely`` within weeks,
+    ``evergreen`` never. It is orthogonal to category — a nature clip about an
+    active hurricane is timely; a news explainer is evergreen.
+
+    Returns {category: slug or "", shelf_life: "" | breaking | timely |
+    evergreen, rationale}; off-vocabulary answers come back as "" so the video
+    stays untagged rather than mislabeled.
     """
     vocab = "\n".join(
         f"- {c['slug']}: {c['label']} — {c['description']}" for c in categories
@@ -210,8 +219,14 @@ def suggest_category(model: str, categories: list[dict], title: str, description
         f"focused on {b['topic']}. Every video is already relevant to that "
         "focus; the category captures the GENRE and framing of the footage, "
         "not the topic. Pick exactly one slug from:\n" + vocab + "\n"
+        "Also judge the content's SHELF LIFE — how fast it stops being worth "
+        "posting, independent of its category:\n"
+        "- breaking: pegged to an event in the last day or two; stale within days\n"
+        "- timely: rides current events or a season; fades over a few weeks\n"
+        "- evergreen: makes the same sense to a viewer months from now\n"
         "Judge from the title, description, channel and transcript excerpt. "
-        "JSON shape: {\"category\": \"slug\", \"rationale\": \"one line\"}"
+        "JSON shape: {\"category\": \"slug\", \"shelf_life\": "
+        "\"breaking|timely|evergreen\", \"rationale\": \"one line\"}"
     )
     user = json.dumps({
         "title": title,
@@ -224,7 +239,11 @@ def suggest_category(model: str, categories: list[dict], title: str, description
     slug = str(data.get("category", "")).strip().lower()
     if slug not in {c["slug"] for c in categories}:
         slug = ""
-    return {"category": slug, "rationale": str(data.get("rationale", ""))[:500]}
+    shelf = str(data.get("shelf_life", "")).strip().lower()
+    if shelf not in ("breaking", "timely", "evergreen"):
+        shelf = ""
+    return {"category": slug, "shelf_life": shelf,
+            "rationale": str(data.get("rationale", ""))[:500]}
 
 
 def _clean_clip_segments(raw, horizon: float, cap: int,

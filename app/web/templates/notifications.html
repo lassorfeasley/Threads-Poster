@@ -3,15 +3,17 @@
 {% import "components/toolbar.html" as ui %}
 {% set n_stranded = (ig_stranded|length if ig_stranded else 0) %}
 {% set n_failed = (failed|length) + (ig_failed|length if ig_failed else 0) %}
-{% set n_total = n_failed + n_stranded %}
+{% set n_expired = (expired|length if expired else 0) %}
+{% set n_total = n_failed + n_stranded + n_expired %}
 {% if n_total %}
   {% set ntitle %}
     {% if n_failed %}<span class="badge hostile">{{ n_failed }} failed</span>{% endif %}
     {% if n_stranded %}<span class="badge hostile">{{ n_stranded }} never posted</span>{% endif %}
+    {% if n_expired %}<span class="badge hostile">{{ n_expired }} expired</span>{% endif %}
   {% endset %}
 {% endif %}
 {{ ui.pagebar("Notifications", title_extra=(ntitle if n_total else ''),
-              sub="Posts and reels that dropped out of the queue or never made it out. Fix the issue (see the error), then re-queue or retry — or dismiss once you're OK with it.") }}
+              sub="Posts and reels that dropped out of the queue, never made it out, or went stale waiting. Fix the issue (see the error), then re-queue or retry — or dismiss once you're OK with it.") }}
 
 {% if not n_total %}
   <div class="empty">
@@ -112,6 +114,49 @@
             <input type="hidden" name="next" value="/notifications">
             <button class="reject sm" title="Acknowledge and remove from notifications (kept in history)"
                     data-confirm="Dismiss this notification? It stays in your history but leaves this list."
+                    data-confirm-ok="Dismiss" data-confirm-variant="danger">Dismiss</button></form>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+    {#- Timely posts that went stale while queued. The scheduler never
+        auto-places an expired post, so these need a decision: post anyway,
+        or dismiss (which leaves the post queued but acknowledged). -#}
+    {% for p in expired or [] %}
+    {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
+    {% set thumb = thumb_for(cand) %}
+    <div class="post-card is-alert">
+      {% if thumb %}
+      <img class="pc-thumb" src="{{ thumb }}" alt="" loading="lazy"
+           onerror="this.classList.add('is-broken')">
+      {% else %}
+      <div class="pc-thumb is-empty" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+      </div>
+      {% endif %}
+      <div class="pc-body">
+        <a class="item-title" href="/post/{{ p.id }}">{{ p.caption[:140] or "(open post)" }}</a>
+        <div class="badges">
+          <span class="badge hostile">expired</span>
+          <span class="meta">Queued {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</span>
+        </div>
+        <div class="meta">
+          This clip was timely when it was queued and its moment has passed —
+          the scheduler won't place it automatically anymore. Post it anyway,
+          or dismiss to acknowledge (it stays queued but stops counting here).
+        </div>
+        <div class="pc-actions">
+          <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
+                data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="sm">Post now</button></form>
+          <form class="inline" method="post" action="/post/{{ p.id }}/dismiss"
+                data-async="Dismissed" data-async-remove=".post-card">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="reject sm" title="Acknowledge and remove from notifications (post stays queued)"
+                    data-confirm="Dismiss this notification? The post stays queued but leaves this list."
                     data-confirm-ok="Dismiss" data-confirm-variant="danger">Dismiss</button></form>
         </div>
       </div>

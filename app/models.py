@@ -40,6 +40,11 @@ class Channel(Base):
     uploads_playlist_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     channel_title: Mapped[str] = mapped_column(String(200), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Provenance: this channel carries the brand's OWN footage (first-party)
+    # rather than found footage. A property of the source, set once per
+    # channel, never per video — every candidate inherits it. Feeds the promo
+    # rotation pool and excludes brand copy from caption-voice learning.
+    first_party: Mapped[bool] = mapped_column(Boolean, default=False)
     # Monitor state: newest upload publish time we've already processed.
     last_seen_published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -81,6 +86,12 @@ class Candidate(Base):
     category: Mapped[str] = mapped_column(String(30), default="")
     category_rationale: Mapped[str] = mapped_column(Text, default="")
 
+    # LLM-judged shelf life of the CONTENT (breaking | timely | evergreen |
+    # "" = unset), assigned alongside the category at monitor time. Drives the
+    # scheduler's urgency decay and expiry; posts resolve through their own
+    # override -> this -> the category's default_shelf_life -> evergreen.
+    shelf_life: Mapped[str] = mapped_column(String(20), default="")
+
     # Operator marker: this video has material for more than one clip. Keeps
     # the video pinned in the dashboard's "Selected to trim" bucket (even after
     # exports/posts) until the operator toggles it off.
@@ -116,6 +127,11 @@ class Candidate(Base):
     visual_traits: Mapped[str] = mapped_column(Text, default="")  # comma-separated
     visual_rationale: Mapped[str] = mapped_column(Text, default="")
     visual_scored_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # FORMAT facet predicted from the same storyboard pass (comma-separated,
+    # from the format-trait vocabulary): production form rather than subject —
+    # archival vs produced segment vs talking head. Feeds the scheduler's
+    # variety gate until the post's own ground-truth ``format_tags`` exist.
+    format_tags: Mapped[str] = mapped_column(Text, default="")
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -237,6 +253,28 @@ class ThreadsPost(Base):
     footage_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     footage_rationale: Mapped[str] = mapped_column(Text, default="")
     footage_scored_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # FORMAT facet of the same annotation pass (comma-separated): production
+    # form rather than subject. Annotated at queue time from the trimmed clip
+    # (the same file that ships), so the scheduler's variety gate has ground
+    # truth BEFORE placement — post-publish would be too late to schedule on.
+    format_tags: Mapped[str] = mapped_column(Text, default="")
+
+    # Shelf-life override (breaking | timely | evergreen | "" = inherit from
+    # the candidate / category default). Set explicitly on staged re-airs: a
+    # repost of a timely clip is evergreen AS a repost.
+    shelf_life: Mapped[str] = mapped_column(String(20), default="")
+
+    # Declared re-air: the prior airing this post repeats. Inferring reposts
+    # from a shared cut_pk can't tell a rotation re-air from an operator
+    # re-queue, and can't count generations — this can.
+    repost_of_post_pk: Mapped[int | None] = mapped_column(
+        ForeignKey("threads_posts.id"), nullable=True)
+
+    # The scheduler window this post actually published from (``YYYY-MM-DD#N``),
+    # written inside the same transaction as the atomic claim. Manual publishes
+    # belong to no window and leave it empty. Before this column the window had
+    # to be reconstructed after the fact from publish times.
+    published_window_key: Mapped[str] = mapped_column(String(40), default="")
 
     # Structured attributes for analytics slicing.
     caption_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -331,6 +369,9 @@ class SchedulerState(Base):
     # staged promo deletes its row, so without this marker the next tick would
     # mint the promo straight back and the operator could never decline one.
     last_promo_window_key: Mapped[str] = mapped_column(String(40), default="")
+    # Same marker for the evergreen-winners repost rotation (see
+    # app/scheduler.py): a cancelled staged repost must not be re-minted.
+    last_repost_window_key: Mapped[str] = mapped_column(String(40), default="")
     last_publish_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_metrics_poll_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_action: Mapped[str] = mapped_column(String(80), default="")
@@ -381,9 +422,18 @@ class Trait(Base):
     KIND_DESIRABLE = "desirable"
     KIND_UNDESIRABLE = "undesirable"
 
+    # Facets keep observation axes apart: SUBJECT is what's happening on
+    # screen (fire, flood, crowd); FORMAT is the production form (archival,
+    # produced segment, talking head). The scheduler's variety gate runs on
+    # the format facet; mixing the two would dilute both the gate and the
+    # per-trait learning signal.
+    FACET_SUBJECT = "subject"
+    FACET_FORMAT = "format"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(60))
     kind: Mapped[str] = mapped_column(String(20), default=KIND_NEUTRAL)
+    facet: Mapped[str] = mapped_column(String(20), default=FACET_SUBJECT)
     description: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

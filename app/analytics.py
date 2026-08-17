@@ -480,7 +480,11 @@ def learn_trait_weights(session, rows: list[dict] | None = None, metric: str = "
             published = published.replace(tzinfo=dt.timezone.utc)
         age_days = max(0.0, (now - published).total_seconds() / 86400)
         weight = 0.5 ** (age_days / halflife_days) if halflife_days > 0 else 1.0
-        traits = [t.strip() for t in (post.footage_traits or "").split(",") if t.strip()]
+        # Both facets learn in one loop: subject traits and format tags share
+        # the annotation pass and the TraitWeight table (names never collide —
+        # the vocabularies are disjoint by construction).
+        raw = f"{post.footage_traits or ''},{post.format_tags or ''}"
+        traits = [t.strip() for t in raw.split(",") if t.strip()]
         observations.append({"value": float(value), "weight": weight, "traits": traits})
 
     total_n = len(observations)

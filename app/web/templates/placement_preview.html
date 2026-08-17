@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{% set ptitle %}
+  <span class="badge {{ 'supportive' if mode == 'scored' else 'info' }}">live mode: {{ mode }}</span>
+  {% if differences %}<span class="badge">{{ differences }} slot{{ 's' if differences != 1 }} differ</span>{% endif %}
+{% endset %}
+{{ ui.pagebar("Placement preview", title_extra=ptitle,
+              sub="The next two weeks planned both ways from the same queue: FIFO (today's live order unless mode is scored) beside scored placement, which spaces same-source clips, keeps facets varied, and runs timely posts first. Compare for a while, then flip scheduler.placement.mode to 'scored' in settings.yaml.") }}
+
+{% if not rows %}
+  <div class="empty" style="min-height: 120px;">
+    <span class="icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
+    <strong>Nothing queued</strong>
+    Queue a few clips and both plans will show here.
+  </div>
+{% else %}
+  <div class="meta" style="margin-bottom: 10px;">
+    {{ queue_count }} post{{ 's' if queue_count != 1 }} in the queue ·
+    variety facet: <strong>{{ facet }}</strong> ·
+    hover a scored row for its score breakdown; ⚠ marks a slot filled only by
+    relaxing gates (queue too shallow or concentrated for the spacing rules).
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Window</th>
+          <th>FIFO order</th>
+          <th>Scored order</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr {% if r.differs %}style="background: color-mix(in srgb, var(--accent) 7%, transparent);"{% endif %}>
+          <td class="meta" style="white-space: nowrap;">{{ r.when }}</td>
+          <td>
+            {% if r.fifo_id %}<a href="/post/{{ r.fifo_id }}">{{ r.fifo_title or '(post ' ~ r.fifo_id ~ ')' }}</a>
+            {% else %}<span class="meta">—</span>{% endif %}
+          </td>
+          <td {% if r.score_detail %}title="{{ r.score_detail }}"{% endif %}>
+            {% if r.scored_id %}
+              <a href="/post/{{ r.scored_id }}">{{ r.scored_title or '(post ' ~ r.scored_id ~ ')' }}</a>
+              {% if r.pinned %}<span class="badge">pinned</span>{% endif %}
+              {% if r.relax_step %}<span class="badge hostile" title="Placed with relaxed gates (step {{ r.relax_step }})">⚠ step {{ r.relax_step }}</span>{% endif %}
+            {% else %}
+              <span class="meta" title="Everything still in the queue is either expired or blocked here">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

@@ -18,7 +18,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "26"
+SCHEMA_VERSION = "27"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -118,6 +118,15 @@ _SCHEMA_SENTINELS = (
     "SELECT id FROM clip_proposals LIMIT 0",
     "SELECT multi_clip_auto FROM candidates LIMIT 0",
     "SELECT last_promo_window_key FROM scheduler_state LIMIT 0",
+    "SELECT shelf_life FROM threads_posts LIMIT 0",
+    "SELECT repost_of_post_pk FROM threads_posts LIMIT 0",
+    "SELECT published_window_key FROM threads_posts LIMIT 0",
+    "SELECT format_tags FROM threads_posts LIMIT 0",
+    "SELECT format_tags FROM candidates LIMIT 0",
+    "SELECT shelf_life FROM candidates LIMIT 0",
+    "SELECT first_party FROM channels LIMIT 0",
+    "SELECT last_repost_window_key FROM scheduler_state LIMIT 0",
+    "SELECT facet FROM traits LIMIT 0",
 )
 
 
@@ -200,6 +209,8 @@ def _ensure_new_columns() -> None:
             "multi_clip_potential": "BOOLEAN DEFAULT FALSE",
             "multi_clip_auto": "BOOLEAN DEFAULT FALSE",
             "word_transcript_path": "TEXT DEFAULT ''",
+            "shelf_life": "VARCHAR(20) DEFAULT ''",
+            "format_tags": "TEXT DEFAULT ''",
         },
         "threads_posts": {
             "cut_pk": "INTEGER",
@@ -219,6 +230,13 @@ def _ensure_new_columns() -> None:
             "footage_scored_at": "TIMESTAMP WITH TIME ZONE",
             "attention_dismissed_at": "TIMESTAMP WITH TIME ZONE",
             "calendar_name": "TEXT DEFAULT ''",
+            "shelf_life": "VARCHAR(20) DEFAULT ''",
+            "format_tags": "TEXT DEFAULT ''",
+            "repost_of_post_pk": "INTEGER",
+            "published_window_key": "VARCHAR(40) DEFAULT ''",
+        },
+        "traits": {
+            "facet": "VARCHAR(20) DEFAULT 'subject'",
         },
         "trait_weights": {
             "effective_n": "FLOAT",
@@ -229,6 +247,7 @@ def _ensure_new_columns() -> None:
         "channels": {
             "country": "VARCHAR(60) DEFAULT ''",
             "scope": "VARCHAR(20) DEFAULT 'local'",
+            "first_party": "BOOLEAN DEFAULT FALSE",
         },
         "draft_proposals": {
             "kind": "VARCHAR(20) DEFAULT 'caption'",
@@ -237,6 +256,7 @@ def _ensure_new_columns() -> None:
         },
         "scheduler_state": {
             "last_promo_window_key": "VARCHAR(40) DEFAULT ''",
+            "last_repost_window_key": "VARCHAR(40) DEFAULT ''",
         },
         "cuts": {
             "subs_position": "VARCHAR(10) DEFAULT 'bottom'",
@@ -273,6 +293,29 @@ def _ensure_new_columns() -> None:
         }:
             conn.execute(text(
                 "UPDATE draft_proposals SET final_text = COALESCE(final_caption, '')"
+            ))
+        # One-time facet backfill: these seeded trait names always described
+        # production FORM, not subject — they predate the facet split. Moving
+        # them (rather than duplicating them under new names) keeps their
+        # accumulated TraitWeight history attached.
+        if ("traits", "facet") in added:
+            conn.execute(text(
+                "UPDATE traits SET facet='format' WHERE name IN "
+                "('talking_head_or_anchor_at_desk', 'press_conference_podium', "
+                "'low_motion_studio_segment', 'static_graphic_or_slideshow', "
+                "'talking_head_no_movement', 'static_graphic_or_title_card', "
+                "'low_motion_segment')"
+            ))
+        # One-time provenance backfill: a channel whose videos the operator
+        # filed under the reserved ``promos`` category has already been
+        # asserted to carry brand footage. Deliberately evidence-based — NOT a
+        # blanket "all uploads are first-party", because the upload channel
+        # also carries found footage the operator saved locally.
+        if ("channels", "first_party") in added:
+            # TRUE literal works on Postgres and SQLite (3.23+) alike.
+            conn.execute(text(
+                "UPDATE channels SET first_party=TRUE WHERE id IN "
+                "(SELECT DISTINCT channel_pk FROM candidates WHERE category='promos')"
             ))
 
 
@@ -494,20 +537,31 @@ def sync_channels_from_config(session: Session) -> int:
 def sync_traits_from_config(session: Session) -> int:
     """Seed the trait vocabulary from settings on first run. Only adds missing
     names; never deletes or overwrites, so Traits-page edits survive a re-sync.
+
+    Two facets seed from two keys: ``vision.traits`` (subject — what's on
+    screen) and ``vision.format_traits`` (format — production form, which the
+    scheduler's variety gate runs on). The format facet falls back to a
+    built-in default vocabulary so the variety gate works with zero setup.
     """
+    from .vision import DEFAULT_FORMAT_TRAITS
+
     settings = load_settings()
     names = settings.get("vision.traits") or []
     if not names:
         # Legacy keys: merge both old lists into one flat vocabulary.
         names = list(settings.get("vision.desirable_traits") or []) \
             + list(settings.get("vision.undesirable_traits") or [])
+    format_names = settings.get("vision.format_traits") or list(DEFAULT_FORMAT_TRAITS)
+
     existing = {t.name for t in session.execute(select(Trait)).scalars().all()}
     added = 0
-    for raw in names:
+    for raw, facet in ([(n, Trait.FACET_SUBJECT) for n in names]
+                       + [(n, Trait.FACET_FORMAT) for n in format_names]):
         name = str(raw).strip()
         if not name or name in existing:
             continue
-        session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, enabled=True))
+        session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, facet=facet,
+                          enabled=True))
         existing.add(name)
         added += 1
     session.flush()
@@ -527,7 +581,7 @@ def invalidate_traits_cache() -> None:
 
 
 def active_traits(session: Session) -> list[str]:
-    """Enabled trait names (flat vocabulary)."""
+    """Enabled trait names (flat vocabulary, both facets)."""
     global _traits_cache
     now = time.monotonic()
     if _traits_cache is not None and now - _traits_cache[0] < _TRAITS_CACHE_TTL_SECONDS:
@@ -536,3 +590,17 @@ def active_traits(session: Session) -> list[str]:
     names = [t.name for t in rows]
     _traits_cache = (now, names)
     return list(names)
+
+
+def active_traits_by_facet(session: Session) -> dict[str, list[str]]:
+    """Enabled trait names grouped by facet: ``{"subject": [...], "format": [...]}``.
+
+    One vision call tags the union; the caller partitions the answer back by
+    facet, so splitting the vocabulary costs no extra LLM calls.
+    """
+    rows = session.execute(select(Trait).where(Trait.enabled)).scalars().all()
+    out: dict[str, list[str]] = {Trait.FACET_SUBJECT: [], Trait.FACET_FORMAT: []}
+    for t in rows:
+        facet = t.facet if t.facet == Trait.FACET_FORMAT else Trait.FACET_SUBJECT
+        out[facet].append(t.name)
+    return out
