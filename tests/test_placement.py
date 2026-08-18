@@ -260,6 +260,43 @@ class TestRelaxationLadder(unittest.TestCase):
         )
         self.assertEqual(self._place_single(ctx), 4)
 
+    def test_capped_ladder_never_relaxes_source(self):
+        # With relax_source_gates off (a rerun fallback exists), a post whose
+        # source aired yesterday stays out: the window is left empty for the
+        # fallback rather than packing sibling clips together.
+        ctx = make_ctx(
+            {1: facts(1, cand=10)},
+            settings=PlacementSettings(relax_source_gates=False),
+            candidate_air_dates={10: [DAY0 - dt.timedelta(days=1)]},
+        )
+        out = assign_posts_to_windows([FakePost(1)], [_key(0)], ctx=ctx)
+        self.assertEqual(ids(out), [None])
+
+    def test_capped_ladder_places_sibling_once_gap_passes(self):
+        # Same sibling clip, but a window horizon long enough that the source
+        # gap eventually passes: it lands at the first legal window instead of
+        # never airing.
+        ctx = make_ctx(
+            {1: facts(1, cand=10)},
+            settings=PlacementSettings(relax_source_gates=False),
+            candidate_air_dates={10: [DAY0 - dt.timedelta(days=1)]},
+        )
+        keys = [_key(d) for d in range(12)]
+        out = assign_posts_to_windows([FakePost(1)], keys, ctx=ctx)
+        # Aired 1 day before DAY0; 10-day gate first passes at offset 9.
+        self.assertEqual(out.index(next(p for p in out if p is not None)), 9)
+
+    def test_capped_ladder_still_relaxes_variety_and_channel(self):
+        # The cap only removes the source steps; softer relaxations survive.
+        ctx = make_ctx(
+            {1: facts(1, cand=10, chan=5)},
+            settings=PlacementSettings(relax_source_gates=False),
+            channel_air_dates={5: [DAY0 - dt.timedelta(days=1)]},
+        )
+        out = assign_posts_to_windows([FakePost(1)], [_key(0)], ctx=ctx)
+        self.assertEqual(ids(out), [1])
+        self.assertEqual(ctx.decisions[_key(0)].relax_step, 2)
+
 
 class TestPins(unittest.TestCase):
     def test_pin_bypasses_gates(self):

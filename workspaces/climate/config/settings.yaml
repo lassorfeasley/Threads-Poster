@@ -462,6 +462,16 @@ scheduler:
       anchor: "2026-01-01"
       # 0-based index into ``windows`` above (0 = the morning window).
       window_index: 0
+    # Never go silent: when a window comes due and the queue is empty, re-air
+    # the least-recently-aired evergreen post instead of skipping the slot.
+    # No cadence — it runs exactly when a window would otherwise be empty, so
+    # anything actually queued always wins. Same-source spacing still applies.
+    filler:
+      enabled: true
+      # A clip must have been quiet this long before it can re-air as filler.
+      # The pool cycles least-recently-aired first, so the real gap between
+      # re-airs of one clip grows as the published library grows.
+      min_quiet_days: 45
   # How often to re-pull insights for recently published posts. These dense
   # early samples feed the age-normalized comparisons in analytics.
   metrics_poll_interval_minutes: 15

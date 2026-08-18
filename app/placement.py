@@ -67,6 +67,10 @@ class PlacementSettings:
     same_channel_days: int = 3
     max_facet_overlap: float = 0.34
     lookback_windows: int = 3
+    # Whether the ladder may relax the same-source gates (its last two steps).
+    # False when a rerun fallback exists: better to leave the window to a
+    # library re-air than to pack sibling clips of one video back-to-back.
+    relax_source_gates: bool = True
     urgency_max: float = 10.0
     patience_per_day: float = 1.0
     variety_penalty_max: float = 4.0
@@ -300,15 +304,19 @@ def choose_for_window(ctx: PlacementContext, remaining: list,
     """Best eligible post for one window: ``(post, relax_step, score, parts)``.
 
     Walks the relaxation ladder until a pool survives the gates, then takes
-    the highest score (ties break on lower id). Returns ``(None, ...)`` only
-    when every remaining post is expired or the queue is empty — the last
-    ladder step drops every relaxable gate.
+    the highest score (ties break on lower id). With ``relax_source_gates``
+    the last ladder step drops every relaxable gate, so ``(None, ...)`` means
+    the queue is empty or everything left has expired. Without it the ladder
+    stops before the source steps, and ``None`` can also mean "only sibling
+    clips remain" — the window is left for the rerun fallback instead.
     """
     day = window_key_date(window_key)
     if day is None:
         return None, None, None, {}
     live = [p for p in remaining if not ctx.expired(p.id, day)]
-    for step, relaxed in enumerate(RELAXATION_LADDER):
+    ladder = (RELAXATION_LADDER if ctx.settings.relax_source_gates
+              else RELAXATION_LADDER[:3])
+    for step, relaxed in enumerate(ladder):
         pool = [p for p in live if ctx.gates_pass(p.id, day, relaxed)]
         if not pool:
             continue

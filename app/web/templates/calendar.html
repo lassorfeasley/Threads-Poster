@@ -68,7 +68,7 @@
                   <div class="cal-slot vacant"
                        title="{{ day }} · {{ windows_local[i] if (windows_local and i < windows_local|length) else '' }} — no post"></div>
                 {% else %}
-                  {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind == 'queued' else ('pub' if e.kind == 'published' else ('missed' if e.kind == 'missed' else 'draft'))) %}
+                  {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind == 'queued' else ('pub' if e.kind == 'published' else ('missed' if e.kind == 'missed' else ('rerun' if e.kind == 'rerun' else 'draft')))) %}
                   {% set label = e.title or e.caption %}
                   {% if e.kind == 'open' %}
                     <div class="cal-event cal-slot {{ cls }} empty cal-drop"
@@ -79,6 +79,15 @@
                     <div class="cal-event cal-slot {{ cls }}"
                          title="{{ e.date_label }} {{ e.time }} · this window passed without publishing — the queue was empty, the spacing floor blocked it, or the publish failed. Check the scheduler panel and Notifications.">
                       <em>missed</em></div>
+                  {% elif e.kind == 'rerun' %}
+                    <div class="cal-event cal-slot {{ cls }} card cal-drop"
+                         data-window-key="{{ e.window_key }}"
+                         title="{{ e.date_label }} {{ e.time }} · projected rerun — nothing fresh is queued for this window, so the scheduler plans to re-air this proven evergreen post. Queue new content or drop a card here and it takes the slot instead. · {{ label }}">
+                      <a href="/post/{{ e.post_id }}" class="cal-ev">
+                        {{ ev_card(e, label) }}
+                        <span class="cal-ev-rerun" title="Rerun — displaced automatically by any fresh content">↻</span>
+                      </a>
+                    </div>
                   {% elif e.kind == 'queued' and e.post_id %}
                     {% set relax = e.get('relax_step') %}
                     {% set detail = e.get('score_detail') or '' %}
@@ -136,9 +145,9 @@
     <ol class="queue-list" id="queue-dnd">
       {% for e in linear %}
       <li class="queue-item {{ e.kind }}{% if e.empty %} empty{% endif %}{% if e.pinned %} pinned{% endif %}
-          {% if e.kind in ('open', 'queued') %} cal-drop{% endif %}
+          {% if e.kind in ('open', 'queued', 'rerun') %} cal-drop{% endif %}
           {% if e.kind == 'queued' %} cal-drag{% endif %}"
-          {% if e.kind in ('open', 'queued') %}data-window-key="{{ e.window_key }}"{% endif %}
+          {% if e.kind in ('open', 'queued', 'rerun') %}data-window-key="{{ e.window_key }}"{% endif %}
           {% if e.kind == 'queued' and e.post_id %}draggable="true" data-post-id="{{ e.post_id }}"{% endif %}>
         <div class="queue-when">
           <span class="queue-date">{{ e.date_label }}</span>
@@ -154,6 +163,7 @@
               {% if e.channel %}{{ e.channel }} · {% endif %}
               {% if e.has_reel %}+ Instagram Reel · {% endif %}
               {% if e.pinned %}pinned · {% elif e.kind == 'queued' %}projected · {% endif %}
+              {% if e.kind == 'rerun' %}<span title="Nothing fresh is queued for this window, so the scheduler plans to re-air this proven evergreen post. Any new content displaces it automatically.">↻ rerun (projected) ·</span> {% endif %}
               {% if e.get('relax_step') %}<span title="Placed with relaxed gates (step {{ e.get('relax_step') }}) — the queue is too shallow or concentrated to satisfy every spacing rule here">⚠ relaxed ·</span> {% endif %}
               {% if e.kind == 'queued' %}drag to move{% endif %}
             </div>

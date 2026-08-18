@@ -9,7 +9,11 @@ sqlalchemy>=2.0
 pyyaml>=6.0
 python-dotenv>=1.0
 requests>=2.32
-yt-dlp>=2025.1.1
+# YouTube is running an experiment that makes PO tokens mandatory on the
+# android_vr client, which 403s every download. The `visionos` client is the
+# escape hatch and only exists in builds after the 2026.07.04 stable, so a
+# nightly is required until the next stable ships: pip install -U --pre yt-dlp
+yt-dlp>=2026.08.18
 youtube-transcript-api>=0.6.2
 # Local speech-to-text for operator-uploaded clips (CPU, no API key)
 faster-whisper>=1.0

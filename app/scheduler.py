@@ -10,11 +10,13 @@ own gates rather than leaving a window empty. Either way, a window is never
 given up because of how an earlier post is performing.
 
 Also drives the frequent metrics poller that feeds analytics, the queue-time
-footage annotation pass that gives placement its facets, and two staging
-rotations (branded promos, evergreen-winner reposts).
+footage annotation pass that gives placement its facets, two staging rotations
+(branded promos, evergreen-winner reposts), and the just-in-time filler that
+re-airs a quiet evergreen post when a due window finds the queue empty.
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import logging
 import threading
@@ -32,10 +34,12 @@ from .config import load_settings, scheduler_timezone
 from .db import session_scope
 from .models import Candidate, Channel, Cut, SchedulerState, ThreadsPost, utcnow
 from .placement import (
+    SHELF_EVERGREEN,
     PlacementContext,
     PlacementSettings,
     PostFacts,
     assign_posts_to_windows,
+    window_key_date,
 )
 from .publishing import (
     clear_publishing,
@@ -247,6 +251,10 @@ def _placement_settings(settings) -> PlacementSettings:
         half_life_breaking=float(g("half_lives.breaking", 1.0)),
         half_life_timely=float(g("half_lives.timely", 7.0)),
         expire_after_half_lives=float(g("expire_after_half_lives", 3.0)),
+        # With filler on, an "empty" window becomes a library re-air, so the
+        # ladder must never trade same-source spacing for a fill — leaving the
+        # slot to a rerun beats airing sibling clips back-to-back.
+        relax_source_gates=not bool(g("filler.enabled", False)),
     )
 
 
@@ -861,8 +869,9 @@ def _repost_config() -> dict | None:
 
 def _repost_pending(session) -> bool:
     """Whether a staged re-air is already on its way out (one in flight, ever —
-    same rationale as ``_promo_pending``). Staged reposts are the only posts
-    that carry ``repost_of_post_pk``, so the flag is the marker."""
+    same rationale as ``_promo_pending``). Staged re-airs — rotation reposts
+    and just-in-time filler alike — are the only posts that carry
+    ``repost_of_post_pk``, so the flag is the marker for both."""
     row = session.execute(
         select(ThreadsPost.id).where(
             ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
@@ -1016,6 +1025,196 @@ def ensure_repost_staged() -> str | None:
         return None
 
 
+def _filler_config() -> dict | None:
+    """Just-in-time filler settings, or None when the feature is off.
+
+    Filler is the "never go silent" floor: when a window comes due and the
+    queue is empty, re-air the least-recently-aired evergreen post instead of
+    skipping the slot. It needs no cadence config — it runs exactly when a
+    window would otherwise be empty, so real queued content always wins by
+    construction.
+    """
+    settings = load_settings()
+    if not settings.get("scheduler.placement.filler.enabled", False):
+        return None
+    quiet = float(settings.get("scheduler.placement.filler.min_quiet_days", 45) or 0)
+    return {"min_quiet_days": max(1.0, quiet)}
+
+
+def _filler_rotation(session, cfg: dict) -> tuple[list[dict], dict[int, dt.date]]:
+    """The rerun library: per-cut facts for filler picking, plus each
+    candidate's latest air date (for same-source spacing).
+
+    Each fact is ``{cut, prior, last_aired, required_quiet_days,
+    candidate_pk}`` for a cut that may re-air as filler once it has been
+    quiet long enough. Deliberately looser than ``_repost_pool`` — filler is
+    the floor under an empty calendar, not a best-of selection — so there is
+    no performance bar, no lifetime airing cap, and no maximum age. What
+    remains:
+
+    - evergreen only, by the resolved shelf life of the last airing — old
+      *news* re-airing as filler would be wrong, not just weak
+    - not first-party (promos have their own rotation), not already booked,
+      and clone-able (caption + a clip path reachable from any runner)
+
+    Performance sets the cadence: ``required_quiet_days`` is
+    ``min_quiet_days / (1 + rank)`` where rank is the cut's percentile (0..1)
+    of views at the learning comparison age. A top clip re-airs after roughly
+    half the quiet period of a median one; a dud waits the full period. The
+    rank is computed from stored metric snapshots, so every runner derives
+    the same cadence.
+    """
+    from .analytics import metrics_at_age_bulk
+
+    posts = session.execute(
+        select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+                 selectinload(ThreadsPost.cut))
+        .where(ThreadsPost.status == "published",
+               ThreadsPost.published_at.is_not(None))
+    ).scalars().all()
+
+    def _aware(ts: dt.datetime) -> dt.datetime:
+        return ts if ts.tzinfo is not None else ts.replace(tzinfo=dt.timezone.utc)
+
+    by_cut: dict[int, list[tuple[dt.datetime, ThreadsPost]]] = {}
+    latest_by_candidate: dict[int, dt.date] = {}
+    for p in posts:
+        at = _aware(p.published_at)
+        if p.cut_pk is not None:
+            by_cut.setdefault(p.cut_pk, []).append((at, p))
+        if p.candidate_pk is not None:
+            prev = latest_by_candidate.get(p.candidate_pk)
+            if prev is None or at.date() > prev:
+                latest_by_candidate[p.candidate_pk] = at.date()
+
+    booked = set(session.execute(
+        select(ThreadsPost.cut_pk).where(
+            ThreadsPost.cut_pk.is_not(None),
+            ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
+        )
+    ).scalars().all())
+
+    settings = load_settings()
+    age_hours = int(settings.get("learning.metric_age_hours", 48))
+    views_at_age = metrics_at_age_bulk(session, posts, "views", age_hours)
+    ranked = sorted(views_at_age.values())
+
+    def _rank(value: float) -> float:
+        """Percentile rank 0..1 via bisect over every published post's views —
+        deterministic, and a missing metric ranks 0 (full quiet period)."""
+        if len(ranked) < 2:
+            return 0.0
+        return bisect.bisect_left(ranked, value) / (len(ranked) - 1)
+
+    facts: list[dict] = []
+    for cut_pk, airings in by_cut.items():
+        if cut_pk in booked:
+            continue
+        airings.sort(key=lambda t: (t[0], t[1].id))
+        last_at, last = airings[-1]
+        if last.cut is None or is_first_party(last.candidate):
+            continue
+        if resolve_shelf_life(last, last.candidate) != SHELF_EVERGREEN:
+            continue
+        if not (last.caption or "").strip():
+            continue
+        if not (last.clip_object_path or last.clip_local_path):
+            continue
+        best = max((views_at_age.get(p.id, 0) for _, p in airings), default=0)
+        rank = min(1.0, max(0.0, _rank(best)))
+        facts.append({
+            "cut": last.cut,
+            "prior": last,
+            "last_aired": last_at.date(),
+            "required_quiet_days": cfg["min_quiet_days"] / (1.0 + rank),
+            "candidate_pk": last.candidate_pk,
+        })
+    # Stable order so ties in the picker resolve identically on every runner.
+    facts.sort(key=lambda f: f["cut"].id)
+    return facts, latest_by_candidate
+
+
+def _pick_filler(facts: list[dict], day: dt.date,
+                 cand_last: dict[int, dt.date],
+                 source_gap_days: float) -> dict | None:
+    """Most-overdue eligible rerun for ``day``, or None.
+
+    Eligible = quiet at least its own ``required_quiet_days`` (hits cycle
+    faster) and no sibling clip of the same video within
+    ``source_gap_days``. Overdue ratio (days quiet / required) decides, cut
+    id breaks ties, so all runners and the calendar projection agree.
+    """
+    best = None
+    best_key: tuple[float, int] | None = None
+    for f in facts:
+        quiet = (day - f["last_aired"]).days
+        if quiet < f["required_quiet_days"]:
+            continue
+        cand_pk = f["candidate_pk"]
+        if cand_pk is not None:
+            seen = cand_last.get(cand_pk)
+            if seen is not None and abs((day - seen).days) < source_gap_days:
+                continue
+        key = (quiet / f["required_quiet_days"], -f["cut"].id)
+        if best_key is None or key > best_key:
+            best, best_key = f, key
+    return best
+
+
+def _stage_filler_jit(session, state: SchedulerState, window_key: str,
+                      now: dt.datetime) -> int | None:
+    """Stage a filler re-air for a due window whose queue came up empty.
+
+    Returns the staged post's id, or None when filler is off, nothing
+    qualifies, or another runner beat us to the window.
+
+    Unlike the promo/repost rotations (which stage into *future* windows and
+    tolerate benign races), this stages into a window being consumed *right
+    now* while several runners may be ticking on it. Two runners each staging
+    their own row would each pass the atomic post-claim — a double post. So
+    the window itself is the lock: a compare-and-set on
+    ``SchedulerState.last_window_key`` (from the value this runner read to
+    this window's key) admits exactly one runner; the losers see rowcount 0
+    and back off. If the winner's publish then fails, the window is spent —
+    the same cost as the empty window we were about to record anyway, and the
+    failed post surfaces in notifications.
+    """
+    cfg = _filler_config()
+    if cfg is None:
+        return None
+    # One re-air in flight at a time, shared with the repost rotation — the
+    # marker is the same ``repost_of_post_pk`` flag.
+    if _repost_pending(session):
+        return None
+    day = window_key_date(window_key)
+    if day is None:
+        return None
+    facts, cand_last = _filler_rotation(session, cfg)
+    source_gap = float(_placement_settings(load_settings()).same_source_days)
+    pick = _pick_filler(facts, day, cand_last, source_gap)
+    if pick is None:
+        return None
+
+    won = session.execute(
+        update(SchedulerState)
+        .where(SchedulerState.id == state.id,
+               SchedulerState.last_window_key == (state.last_window_key or ""))
+        .values(last_window_key=window_key,
+                last_action=f"filler_staged:{window_key}",
+                updated_at=utcnow())
+    ).rowcount
+    if won != 1:
+        return None
+    session.expire(state)
+
+    cut, prior = pick["cut"], pick["prior"]
+    post = _stage_repost(session, cut, prior, window_key)
+    log.info("Staged filler re-air of post %s (cut %s) as post %s for empty window %s",
+             prior.id, cut.id, post.id, window_key)
+    return post.id
+
+
 def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool:
     """Claim ``window_key`` for the post, publish it, record ``last_publish_at``."""
     with session_scope() as session:
@@ -1163,25 +1362,34 @@ def run_window_tick() -> str | None:
 
         key = _window_key(day, due_index)
 
-        head = _queue_head_for_window(session, key)
-        if head is None:
-            state.last_window_key = key
-            state.last_action = f"empty:{key}"
-            state.updated_at = utcnow()
-            return f"empty:{key}"
-
         if not _spacing_ok(state, now):
             state.last_window_key = key
             state.last_action = f"spacing_block:{key}"
             state.updated_at = utcnow()
             return f"spacing_block:{key}"
 
-        post_id = head.id
+        head = _queue_head_for_window(session, key)
+        if head is not None:
+            post_id = head.id
+            verb = "publish"
+        else:
+            # Empty queue: re-air an evergreen post rather than going silent
+            # (scheduler.placement.filler). Real queued content always wins —
+            # this runs only when the plan left this window with nothing.
+            post_id = _stage_filler_jit(session, state, key, now)
+            verb = "filler_publish"
+            if post_id is None:
+                state.last_window_key = key
+                state.last_action = f"empty:{key}"
+                state.updated_at = utcnow()
+                return f"empty:{key}"
 
     # ``_claim_and_publish`` marks the window spent as part of claiming the post.
-    # Nothing is recorded here, so a failure below leaves the window due and the
-    # next tick picks it up again instead of dropping the slot.
-    action = f"publish:{key}:post={post_id}"
+    # Nothing is recorded here, so a queue-publish failure below leaves the
+    # window due and the next tick picks it up again instead of dropping the
+    # slot. (A filler publish already consumed the window when it staged; if
+    # it fails the slot is spent, same as the empty window it replaced.)
+    action = f"{verb}:{key}:post={post_id}"
     if _claim_and_publish(post_id, key, action):
         log.info("Published queue post %s at window %s", post_id, key)
         return action
@@ -1571,9 +1779,69 @@ def build_window_plan(
     post_by_key = dict(zip(full_keys, assignment))
     decisions = ctx.decisions if ctx is not None else {}
 
+    # Project the rerun program into windows the queue leaves open, walking
+    # the FULL horizon (not just the visible range) so the projection is
+    # stable across views. This is display only — nothing is staged until a
+    # window actually comes due (the just-in-time filler in run_window_tick
+    # uses the same rotation and picker, so what airs is what was projected,
+    # modulo whatever reality changes in between). Fresh content displaces
+    # reruns by construction: real posts claim windows first, reruns only
+    # ever take the leftovers.
+    rerun_by_key: dict[str, dict] = {}
+    fcfg = _filler_config()
+    if fcfg is not None:
+        facts, cand_last = _filler_rotation(session, fcfg)
+        source_gap = float(_placement_settings(load_settings()).same_source_days)
+        for key, _win_utc, _idx in full_upcoming:
+            day_of = window_key_date(key)
+            if day_of is None:
+                continue
+            assigned = post_by_key.get(key)
+            if assigned is not None:
+                # A real post occupies this window; its source video blocks
+                # sibling reruns around it just like a real airing would.
+                if assigned.candidate_pk is not None:
+                    prev = cand_last.get(assigned.candidate_pk)
+                    if prev is None or day_of > prev:
+                        cand_last[assigned.candidate_pk] = day_of
+                continue
+            pick = _pick_filler(facts, day_of, cand_last, source_gap)
+            if pick is None:
+                continue
+            rerun_by_key[key] = pick
+            pick["last_aired"] = day_of
+            if pick["candidate_pk"] is not None:
+                cand_last[pick["candidate_pk"]] = day_of
+
     for key, _win_utc, idx, local in visible:
         post = post_by_key.get(key)
-        if post is None:
+        rerun = rerun_by_key.get(key) if post is None else None
+        if post is None and rerun is not None:
+            prior = rerun["prior"]
+            plan.append({
+                "kind": "rerun",
+                "window_key": key,
+                "window_index": idx,
+                "sort": local,
+                "time": local.strftime("%-I:%M %p"),
+                "day": local.day,
+                "date_label": local.strftime("%a %-d"),
+                "caption": (prior.caption or "").strip(),
+                "status": "rerun",
+                # Links to the ORIGINAL airing: no row exists for the rerun
+                # until its window comes due and the filler stages it.
+                "post_id": prior.id,
+                "video_id": prior.candidate.id if prior.candidate else None,
+                "channel": (prior.candidate.channel.call_sign
+                            if prior.candidate and prior.candidate.channel else ""),
+                "thumbnail": (prior.candidate.thumbnail_url if prior.candidate else ""),
+                "title": _post_display_title(prior),
+                "permalink": "",
+                "projected": True,
+                "empty": False,
+                "pinned": False,
+            })
+        elif post is None:
             plan.append({
                 "kind": "open",
                 "window_key": key,

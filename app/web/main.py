@@ -3595,12 +3595,15 @@ def _calendar_data(y: int, m: int) -> dict:
             ).all()
         }
         for e in plan:
-            e["has_reel"] = bool(e.get("post_id") and e["post_id"] in reel_post_ids)
+            # Reruns link to their ORIGINAL airing; that post's reel already
+            # went out and won't re-post, so no +IG marker on the rerun card.
+            e["has_reel"] = bool(e["kind"] != "rerun" and e.get("post_id")
+                                 and e["post_id"] in reel_post_ids)
             # Calendar grid: published history + upcoming filled/open windows.
             events.setdefault(e["day"], []).append(e)
 
         # Linear queue: upcoming windows only (not published history).
-        linear = [e for e in plan if e["kind"] in ("queued", "open")]
+        linear = [e for e in plan if e["kind"] in ("queued", "open", "rerun")]
         # Cap the linear list to the next ~21 slots so it stays scannable.
         linear = linear[:21]
 

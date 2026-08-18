@@ -2647,6 +2647,19 @@ a.cal-event:hover { background: var(--panel3); }
 .cal-event.sched { background: var(--blue-soft); }
 .cal-event.pub { background: var(--accent-soft); }
 .cal-event.fail { background: var(--danger-soft); }
+/* Projected rerun: the plan's fallback programming when nothing fresh is
+   queued. Dashed + dimmed so the calendar reads "this will air unless you
+   give it something better", not "this is booked". */
+.cal-event.rerun {
+  background: transparent;
+  border: 1px dashed var(--border);
+  opacity: 0.75;
+}
+.cal-ev-rerun {
+  font-size: 10px; font-weight: 700;
+  color: var(--text-dim);
+}
+.queue-item.rerun { opacity: 0.8; }
 .cal-event.open,
 .cal-event.empty {
   border: 1px dashed var(--border);
