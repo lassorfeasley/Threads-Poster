@@ -4231,8 +4231,12 @@ def traits_page(request: Request, msg: str = ""):
              for w in weight_rows),
             key=lambda d: (d["lift"] if d["lift"] is not None else -99), reverse=True)
         baseline = next((w.baseline for w in weight_rows if w.baseline is not None), None)
+        # Both tag columns: subject traits live in footage_traits, format
+        # traits in format_tags. One count dict works because a name belongs
+        # to exactly one facet (split_tags_by_facet partitions on it).
         post_tag_rows = session.execute(
-            select(ThreadsPost.footage_traits).where(ThreadsPost.status == "published")
+            select(ThreadsPost.footage_traits, ThreadsPost.format_tags)
+            .where(ThreadsPost.status == "published")
         ).all()
         published_total = session.execute(
             select(func.count(ThreadsPost.id)).where(ThreadsPost.status == "published")
@@ -4246,16 +4250,21 @@ def traits_page(request: Request, msg: str = ""):
         ).scalar_one()
     post_counts: dict[str, int] = {}
     annotated_posts = 0
-    for (v,) in post_tag_rows:
-        tags = [t.strip() for t in (v or "").split(",") if t.strip()]
+    for subject_csv, format_csv in post_tag_rows:
+        tags = [t.strip() for t in (subject_csv or "").split(",") if t.strip()]
+        tags += [t.strip() for t in (format_csv or "").split(",") if t.strip()]
         if tags:
             annotated_posts += 1
-        for t in tags:
+        for t in set(tags):
             post_counts[t] = post_counts.get(t, 0) + 1
+    facet_counts = {
+        "subject": sum(1 for t in traits if t.facet != Trait.FACET_FORMAT),
+        "format": sum(1 for t in traits if t.facet == Trait.FACET_FORMAT),
+    }
     return templates.TemplateResponse(
         request, "traits.html",
         {"traits": traits, "post_counts": post_counts,
-         "annotated_posts": annotated_posts,
+         "annotated_posts": annotated_posts, "facet_counts": facet_counts,
          "published_total": published_total, "unannotated": unannotated,
          "weights": weights, "baseline": baseline, "trait_weights": trait_weights,
          "min_trait_posts": settings.get("learning.min_trait_posts", 20),
@@ -4368,17 +4377,22 @@ def traits_relearn():
 
 
 @app.post("/traits/add")
-def trait_add(name: str = Form(...)):
+def trait_add(name: str = Form(...), facet: str = Form(Trait.FACET_SUBJECT)):
     name = _normalize_trait(name)
     if not name:
         return _flash("/traits", "Empty trait name")
+    facet = (facet or "").strip().lower()
+    if facet not in (Trait.FACET_SUBJECT, Trait.FACET_FORMAT):
+        return _flash("/traits", f"Unknown facet '{facet}'")
     with session_scope() as session:
         exists = session.execute(select(Trait).where(Trait.name == name)).scalar_one_or_none()
         if exists:
             return _flash("/traits", f"'{name}' already exists")
-        session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, enabled=True))
+        session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, facet=facet,
+                          enabled=True))
     invalidate_traits_cache()
-    return _flash("/traits", f"Added '{name}'")
+    label = "format" if facet == Trait.FACET_FORMAT else "subject"
+    return _flash("/traits", f"Added '{name}' ({label})")
 
 
 @app.post("/traits/{trait_id}/toggle")
