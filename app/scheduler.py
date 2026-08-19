@@ -2039,11 +2039,18 @@ def build_window_plan(
                 "pinned": bool((post.pinned_window_key or "").strip()),
                 # Scored-mode explainability: which relaxation step filled the
                 # slot (0 = clean; >=1 means gates were loosened, a sign the
-                # queue is shallow or concentrated) and the score breakdown.
+                # queue is shallow or concentrated) and the score breakdown —
+                # flattened for tooltips, structured for the calendar popover.
                 "relax_step": (decision.relax_step
                                if decision is not None and not decision.pinned
                                else None),
                 "score_detail": _score_detail(decision),
+                "score": (decision.score
+                          if decision is not None and not decision.pinned
+                          else None),
+                "score_parts": (dict(decision.parts)
+                                if decision is not None and not decision.pinned
+                                and decision.parts else None),
             })
 
     # Published posts in range (for calendar history). The month grid lays each

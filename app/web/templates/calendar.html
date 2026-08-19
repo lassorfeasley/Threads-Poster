@@ -100,6 +100,17 @@
                          onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
                         {{ ev_card(e, label) }}
                         {% if relax %}<span class="cal-ev-relax" title="Placed with relaxed gates (step {{ relax }})">⚠</span>{% endif %}
+                        {% if e.get('score_parts') %}
+                        <span class="cal-score-chip" role="button" tabindex="0"
+                              title="Why is this post here? Click for the placement score breakdown"
+                              data-post="{{ e.post_id }}" data-window="{{ e.window_key }}"
+                              data-score="{{ e.score }}"
+                              data-urgency="{{ e.score_parts.get('urgency', 0) }}"
+                              data-patience="{{ e.score_parts.get('patience', 0) }}"
+                              data-variety="{{ e.score_parts.get('variety_penalty', 0) }}"
+                              data-repost="{{ e.score_parts.get('repost_penalty', 0) }}"
+                              data-relax="{{ relax or 0 }}">Σ</span>
+                        {% endif %}
                       </a>
                     </div>
                   {% elif e.post_id %}
@@ -159,12 +170,23 @@
             <div class="meta">Drop a queued post here to pin it.</div>
           {% else %}
             <a class="queue-caption" href="/post/{{ e.post_id }}">{{ e.caption[:110] or '(untitled)' }}</a>
-            <div class="meta"{% if e.get('score_detail') %} title="{{ e.get('score_detail') }}"{% endif %}>
+            <div class="meta">
               {% if e.channel %}{{ e.channel }} · {% endif %}
               {% if e.has_reel %}+ Instagram Reel · {% endif %}
               {% if e.pinned %}pinned · {% elif e.kind == 'queued' %}projected · {% endif %}
               {% if e.kind == 'rerun' %}<span title="Nothing fresh is queued for this window, so the scheduler plans to re-air this proven evergreen post. Any new content displaces it automatically.">↻ rerun (projected) ·</span> {% endif %}
               {% if e.get('relax_step') %}<span title="Placed with relaxed gates (step {{ e.get('relax_step') }}) — the queue is too shallow or concentrated to satisfy every spacing rule here">⚠ relaxed ·</span> {% endif %}
+              {% if e.get('score_parts') %}
+              <span class="cal-score-chip" role="button" tabindex="0"
+                    title="Why is this post here? Click for the placement score breakdown"
+                    data-post="{{ e.post_id }}" data-window="{{ e.window_key }}"
+                    data-score="{{ e.score }}"
+                    data-urgency="{{ e.score_parts.get('urgency', 0) }}"
+                    data-patience="{{ e.score_parts.get('patience', 0) }}"
+                    data-variety="{{ e.score_parts.get('variety_penalty', 0) }}"
+                    data-repost="{{ e.score_parts.get('repost_penalty', 0) }}"
+                    data-relax="{{ e.get('relax_step') or 0 }}">score {{ "%g"|format(e.score) }}</span> ·
+              {% endif %}
               {% if e.kind == 'queued' %}drag to move{% endif %}
             </div>
           {% endif %}
@@ -391,6 +413,88 @@
     }
     commitMove(postId, windowKey);
   });
+
+  // ---------- Placement score popover ----------
+  // The score chip on a queued slot opens the four-term breakdown that put
+  // the post there (score = urgency + patience − variety − repost), with a
+  // link to the post's Scheduling panel where the inputs can be corrected.
+  // Delegated so it survives the in-place region refresh after a drag.
+  let scorePop = null;
+  function closeScorePop() {
+    if (scorePop) { scorePop.remove(); scorePop = null; }
+  }
+  function openScorePop(chip) {
+    const key = (chip.dataset.post || '') + ':' + (chip.dataset.window || '');
+    const reopen = !(scorePop && scorePop.dataset.for === key);
+    closeScorePop();
+    if (!reopen) return;
+
+    const terms = [
+      { label: 'urgency',  value: +chip.dataset.urgency  || 0, sign: '+',
+        hint: 'How hot the content still is — starts at the max for fresh breaking clips and halves every half-life. Evergreen is always 0.' },
+      { label: 'patience', value: +chip.dataset.patience || 0, sign: '+',
+        hint: 'Days this post has waited in the queue — guarantees nothing starves.' },
+      { label: 'variety',  value: +chip.dataset.variety  || 0, sign: '−',
+        hint: 'Penalty for overlapping the facets (category + format tags) of recently placed posts.' },
+      { label: 'repost',   value: +chip.dataset.repost   || 0, sign: '−',
+        hint: 'Small constant so an original beats a staged re-air on a tie.' },
+    ];
+    const maxAbs = Math.max(0.001, ...terms.map((t) => Math.abs(t.value)));
+    const relax = +chip.dataset.relax || 0;
+
+    const pop = document.createElement('div');
+    pop.className = 'score-pop card';
+    pop.dataset.for = key;
+    const score = +chip.dataset.score || 0;
+    let html = '<div class="score-pop-head">Placement score <strong>'
+      + score.toLocaleString(undefined, { maximumFractionDigits: 2 }) + '</strong></div>';
+    terms.forEach((t) => {
+      const pct = Math.round(Math.abs(t.value) / maxAbs * 100);
+      html += '<div class="score-pop-row" title="' + t.hint + '">'
+        + '<span class="score-pop-lbl">' + t.sign + ' ' + t.label + '</span>'
+        + '<span class="score-pop-bar"><span class="score-pop-fill ' + (t.sign === '+' ? 'pos' : 'neg')
+        + '" style="width:' + pct + '%"></span></span>'
+        + '<span class="score-pop-val">' + t.value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+        + '</span></div>';
+    });
+    if (relax) {
+      html += '<div class="score-pop-note warn">⚠ Placed with relaxed gates (step ' + relax
+        + ') — the queue was too shallow or concentrated to satisfy every spacing rule here.</div>';
+    }
+    html += '<div class="score-pop-note">Recomputed on every plan build — nothing is stored.</div>'
+      + '<a class="score-pop-link" href="/post/' + chip.dataset.post
+      + '">Adjust shelf life &amp; tags on the post page →</a>';
+    pop.innerHTML = html;
+    document.body.appendChild(pop);
+
+    // Below the chip, clamped to the viewport; above when there's no room.
+    const r = chip.getBoundingClientRect();
+    const w = pop.offsetWidth, h = pop.offsetHeight;
+    let left = Math.min(Math.max(8, r.left), window.innerWidth - w - 8);
+    let top = r.bottom + 6;
+    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+    scorePop = pop;
+  }
+  document.addEventListener('click', (ev) => {
+    const chip = ev.target.closest('.cal-score-chip');
+    if (chip) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openScorePop(chip);
+      return;
+    }
+    if (scorePop && !scorePop.contains(ev.target)) closeScorePop();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeScorePop();
+    if (ev.key === 'Enter' && ev.target.classList && ev.target.classList.contains('cal-score-chip')) {
+      ev.preventDefault();
+      openScorePop(ev.target);
+    }
+  });
+  window.addEventListener('scroll', closeScorePop, true);
 })();
 </script>
 {% endblock %}
