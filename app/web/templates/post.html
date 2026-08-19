@@ -419,6 +419,63 @@
 </div>{# /thread-preview #}
 </div>{# /post-preview #}
 
+{% if shelf %}
+{# ---- Scheduling: the shelf-life dial placement runs on, correctable in
+     place. Post-level override only — the model's original answer survives
+     underneath, so Reset to AI is always a real reset. ---- #}
+<div class="card tight" style="margin-top: 14px;">
+  <div class="row center" style="gap: 12px; flex-wrap: wrap;">
+    <strong>Scheduling</strong>
+    <form method="post" action="/post/{{ pid }}/shelf-life" class="inline seg-toggle">
+      <input type="hidden" name="next" value="/post/{{ pid }}">
+      <button name="shelf_life" value="breaking" class="{{ 'is-on' if shelf.shelf_life == 'breaking' }}"
+              title="News-cycle content: highest urgency, decays in a day, expires in days">breaking</button>
+      <button name="shelf_life" value="timely" class="{{ 'is-on' if shelf.shelf_life == 'timely' }}"
+              title="Seasonal or trend-adjacent: urgency halves weekly, expires in weeks">timely</button>
+      <button name="shelf_life" value="evergreen" class="{{ 'is-on' if shelf.shelf_life == 'evergreen' }}"
+              title="Holds up whenever it airs: no urgency decay, never expires, qualifies for reruns">evergreen</button>
+    </form>
+    {% if shelf.override and not repost_of %}
+    <form method="post" action="/post/{{ pid }}/shelf-life" class="inline">
+      <input type="hidden" name="next" value="/post/{{ pid }}">
+      <input type="hidden" name="shelf_life" value="">
+      <button class="btn sm ghost" title="Clear your override and fall back to the AI's tag (or the category default)">Reset to AI</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="meta" style="margin-top: 8px;">
+    {% if shelf.source == 'override' and repost_of %}
+    Set to evergreen when this re-air was staged — only evergreen content re-airs.
+    {% elif shelf.source == 'override' %}
+    Your override — the AI {{ 'said “' ~ shelf.ai_tag ~ '”' if shelf.ai_tag else 'left it to the category default (“' ~ shelf.default ~ '”)' }}.
+    {% elif shelf.source == 'ai' %}
+    AI-tagged from this content. Correct it above if the call looks wrong.
+    {% else %}
+    No AI tag on this content — inherited from the category default. Set it above if you know better.
+    {% endif %}
+  </div>
+  <div class="meta" style="margin-top: 4px;">
+    {% if shelf.shelf_life == 'evergreen' %}
+    Evergreen: no urgency decay and no expiry.
+    {%- if status == 'published' %} Qualifies for the rerun rotation (see Recycling below).
+    {%- elif status == 'queued' %} It waits patiently in the queue while urgent content jumps ahead.{% endif %}
+    {% elif shelf.expired %}
+    <span class="badge hostile">expired</span>
+    Expired {{ shelf.expires_on.strftime("%b %-d, %Y") }} — the scheduler will not auto-place it
+    (publish now or pin it to a window to force it out).
+    {% else %}
+    Urgency today: {{ shelf.urgency }} of {{ shelf.urgency_max }}
+    {%- if shelf.expires_on %} · expires {{ shelf.expires_on.strftime("%b %-d, %Y") }} if not published{% endif %}.
+    {% endif %}
+  </div>
+  {% if category_rationale %}
+  <div class="meta" style="margin-top: 4px;" title="The model's reasoning when it categorized the source video">
+    AI on the category: “{{ category_rationale }}”
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if recycle %}
 {# ---- Rerun outlook: when (and whether) this clip comes back through the
      filler rotation. Answers "why isn't this re-airing" without reading the

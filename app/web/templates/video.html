@@ -73,7 +73,7 @@
       {% for t in (c.format_tags or "").split(",") if t %}<span class="badge" title="format facet — production form, drives the scheduler's variety">{{ t }}</span>{% endfor %}
       {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
       {% if shelf_life %}<span class="badge {{ 'hostile' if shelf_life == 'breaking' else ('score-hi' if shelf_life == 'timely' else 'supportive') }}"
-            title="Shelf life — how fast this stops being worth posting; drives scheduling urgency and expiry. {{ 'Auto-tagged on this content.' if shelf_life_tagged else 'Inherited from the category default (this video predates shelf-life tagging).' }}">{{ shelf_life }}</span>{% endif %}
+            title="Shelf life — how fast this stops being worth posting; drives scheduling urgency and expiry. {{ 'Auto-tagged on this content.' if shelf_life_tagged else 'Inherited from the category default (this video predates shelf-life tagging).' }} Correct it per post from the Scheduling panel on the post page.">{{ shelf_life }}</span>{% endif %}
     </div>
     <div class="meta" id="visual-line">{% if c.visual_rationale %}Tags: {{ c.visual_rationale }}{% endif %}</div>
     {% else %}

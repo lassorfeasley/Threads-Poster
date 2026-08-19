@@ -93,6 +93,7 @@ from ..publishing import (
     record_instagram_post,
     record_post,
 )
+from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_expr, sort_candidates
 from ..scheduler import (
     build_window_plan,
@@ -104,6 +105,7 @@ from ..scheduler import (
     recycle_status,
     resolve_shelf_life,
     scheduler_status,
+    shelf_life_outlook,
     spacing_allows_publish,
     start_scheduler_thread,
     window_time_labels,
@@ -995,7 +997,9 @@ def set_video_category(candidate_id: int, category: str = Form(""), next: str = 
         if c is None:
             return _flash("/", "Video not found")
         c.category = category
-        c.category_rationale = ""  # operator's own choice needs no LLM rationale
+        # Keep category_rationale: it's the model's original reasoning, and
+        # the scheduling panel shows it as provenance ("the AI said …") even
+        # after an operator override. Wiping it left overrides unexplainable.
     return _flash(dest,
                   f"Category set to {cat['emoji']} {cat['label']}" if cat else "Category cleared")
 
@@ -3244,6 +3248,8 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "shelf_life": resolve_shelf_life(p, cand),
             "shelf_life_tagged": bool(((p.shelf_life or "").strip())
                                       or ((cand.shelf_life or "").strip() if cand else "")),
+            # Full override chain + derived urgency/expiry for the panel.
+            "shelf": shelf_life_outlook(p, cand),
             "repost_of": p.repost_of_post_pk,
             "cut_id": cut.id if cut else None,
             "channel_sign": cand.channel.call_sign if (cand and cand.channel) else "",
@@ -3741,6 +3747,29 @@ def notifications_page(request: Request, msg: str = ""):
         request, "notifications.html",
         {**pagecache.read("notifications"), "msg": msg, "active": "notifications"},
     )
+
+
+@app.post("/post/{post_id}/shelf-life")
+def set_post_shelf_life(post_id: int, shelf_life: str = Form(""), next: str = Form("")):
+    """Operator overrides this post's shelf life, or clears the override.
+
+    Writes the POST-level column only — ``resolve_shelf_life`` reads it ahead
+    of the candidate's LLM tag, and the tag itself is never touched, so
+    clearing the override ("reset to AI") falls straight back to the model's
+    answer (or the category default). Shelf life drives placement urgency and
+    the expiry gate, so a correction takes effect on the next plan build.
+    """
+    dest = next if next.startswith("/") else f"/post/{post_id}"
+    shelf = (shelf_life or "").strip().lower()
+    if shelf and shelf not in SHELF_LIVES:
+        return _flash(dest, f"Unknown shelf life '{shelf}'")
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return _flash("/calendar", "Post not found")
+        p.shelf_life = shelf
+    return _flash(dest, f"Shelf life set to {shelf} (your override)" if shelf
+                  else "Shelf life reset to the AI's answer")
 
 
 @app.post("/post/{post_id}/dismiss")

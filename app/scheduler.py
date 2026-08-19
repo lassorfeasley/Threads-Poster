@@ -316,6 +316,42 @@ def resolve_shelf_life(post: ThreadsPost | None, candidate: Candidate | None) ->
     return shelf or "evergreen"
 
 
+def shelf_life_outlook(post: ThreadsPost | None, candidate: Candidate | None) -> dict:
+    """How the resolved shelf life plays out for a post today, for the UI.
+
+    Returns the resolved value, every layer of the override chain (so the
+    panel can say "your override — the AI said timely"), today's urgency
+    contribution, and the expiry date (None = never expires). Uses the same
+    math as ``PlacementContext.score`` / ``expired`` so the panel shows what
+    placement will actually do.
+    """
+    resolved = resolve_shelf_life(post, candidate)
+    override = ((post.shelf_life if post else "") or "").strip().lower()
+    ai_tag = ((candidate.shelf_life if candidate else "") or "").strip().lower()
+    default = default_shelf_life(candidate.category if candidate else "") or "evergreen"
+    source = "override" if override else ("ai" if ai_tag else "default")
+
+    ps = _placement_settings(load_settings())
+    half = ps.half_life_days(resolved)
+    content_date = (_as_utc_date(candidate.published_at) if candidate else None) \
+        or (_as_utc_date(post.created_at) if post else None)
+    urgency = 0.0
+    expires_on = None
+    expired = False
+    if half is not None and content_date is not None:
+        today = utcnow().date()
+        age = max(0, (today - content_date).days)
+        urgency = round(ps.urgency_max * 0.5 ** (age / half), 2)
+        expires_on = content_date + dt.timedelta(days=math.ceil(half * ps.expire_after_half_lives))
+        expired = (today - content_date).days > half * ps.expire_after_half_lives
+    return {
+        "shelf_life": resolved, "source": source,
+        "override": override, "ai_tag": ai_tag, "default": default,
+        "urgency": urgency, "urgency_max": ps.urgency_max,
+        "content_date": content_date, "expires_on": expires_on, "expired": expired,
+    }
+
+
 def build_placement_context(session, posts: list[ThreadsPost],
                             *, force: bool = False) -> PlacementContext | None:
     """History + per-post facts for the scored placement engine.
