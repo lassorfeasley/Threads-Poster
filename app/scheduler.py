@@ -876,9 +876,10 @@ def _repost_config() -> dict | None:
         "anchor": anchor,
         "window_index": g("window_index", 0),
         "min_age_days": float(g("min_age_days", 90) or 0),
-        "max_age_days": float(g("max_age_days", 180) or 0),
         "min_days_between_repeats": float(g("min_days_between_repeats", 90) or 0),
-        "max_airings_per_cut": int(g("max_airings_per_cut", 3) or 0),
+        # 0 = no lifetime cap; the filler rotation's growing quiet period is
+        # what keeps a much-aired clip from dominating instead.
+        "max_airings_per_cut": int(g("max_airings_per_cut", 0) or 0),
         "percentile": float(g("percentile", 90) or 0),
     }
 
@@ -901,10 +902,14 @@ def _repost_pool(session, cfg: dict, now: dt.datetime) -> list[tuple[Cut, Thread
     """``(cut, prior_airing)`` pairs eligible to re-air, least-recently-aired
     first (ids break ties so all runners pick the same head).
 
-    A cut qualifies when its latest airing is ``min_age_days..max_age_days``
-    old, it has aired fewer than ``max_airings_per_cut`` times, its views at
-    the fixed comparison age clear the account's ``percentile``, and it isn't
-    first-party (branded content has its own rotation) or already booked.
+    A cut qualifies when it resolves evergreen (old timely/breaking coverage
+    must not re-air as a "proven winner" — its moment already happened, the
+    same rule the filler rotation applies), its latest airing is at least
+    ``min_age_days`` old — there is no age ceiling; archival evergreen is the
+    whole point of re-airing — its views at the fixed comparison age clear
+    the account's ``percentile``, and it isn't first-party (branded content
+    has its own rotation) or already booked. ``max_airings_per_cut`` caps
+    lifetime airings when non-zero; 0 means uncapped.
     """
     from .analytics import metrics_at_age_bulk
 
@@ -954,9 +959,14 @@ def _repost_pool(session, cfg: dict, now: dt.datetime) -> list[tuple[Cut, Thread
         if last_at.tzinfo is None:
             last_at = last_at.replace(tzinfo=dt.timezone.utc)
         age_days = (now - last_at).total_seconds() / 86400
-        if not (min_gap <= age_days <= cfg["max_age_days"]):
+        if age_days < min_gap:
             continue
         if last.cut is None or is_first_party(last.candidate):
+            continue
+        # Evergreen only. This supersedes the old max_age_days ceiling: an
+        # evergreen clip never ages out of the pool, and non-evergreen never
+        # enters it at any age.
+        if resolve_shelf_life(last, last.candidate) != SHELF_EVERGREEN:
             continue
         best = max((views_at_age.get(p.id, 0) for p in airings), default=0)
         if best < threshold or best <= 0:
@@ -1054,7 +1064,8 @@ def _filler_config() -> dict | None:
     if not settings.get("scheduler.placement.filler.enabled", False):
         return None
     quiet = float(settings.get("scheduler.placement.filler.min_quiet_days", 45) or 0)
-    return {"min_quiet_days": max(1.0, quiet)}
+    growth = float(settings.get("scheduler.placement.filler.airing_growth", 0.5) or 0)
+    return {"min_quiet_days": max(1.0, quiet), "airing_growth": max(0.0, growth)}
 
 
 def _filler_rotation(session, cfg: dict) -> tuple[list[dict], dict[int, dt.date]]:
@@ -1073,12 +1084,14 @@ def _filler_rotation(session, cfg: dict) -> tuple[list[dict], dict[int, dt.date]
     - not first-party (promos have their own rotation), not already booked,
       and clone-able (caption + a clip path reachable from any runner)
 
-    Performance sets the cadence: ``required_quiet_days`` is
-    ``min_quiet_days / (1 + rank)`` where rank is the cut's percentile (0..1)
-    of views at the learning comparison age. A top clip re-airs after roughly
-    half the quiet period of a median one; a dud waits the full period. The
-    rank is computed from stored metric snapshots, so every runner derives
-    the same cadence.
+    Performance sets the cadence, prior airings stretch it:
+    ``required_quiet_days = min_quiet_days x (1 + airing_growth x (airings-1))
+    / (1 + rank)`` where rank is the cut's percentile (0..1) of views at the
+    learning comparison age. A top clip re-airs after roughly half the quiet
+    period of a median one; a dud waits the full period; and every re-air
+    pushes the next one further out, so recycling never hard-stops but a
+    much-aired clip cannot dominate the rotation. The rank is computed from
+    stored metric snapshots, so every runner derives the same cadence.
     """
     from .analytics import metrics_at_age_bulk
 
@@ -1139,11 +1152,15 @@ def _filler_rotation(session, cfg: dict) -> tuple[list[dict], dict[int, dt.date]
             continue
         best = max((views_at_age.get(p.id, 0) for _, p in airings), default=0)
         rank = min(1.0, max(0.0, _rank(best)))
+        # Each prior airing stretches the quiet period: the decay curve that
+        # replaced the old hard lifetime cap on re-airs.
+        growth = 1.0 + cfg["airing_growth"] * max(0, len(airings) - 1)
         facts.append({
             "cut": last.cut,
             "prior": last,
             "last_aired": last_at.date(),
-            "required_quiet_days": cfg["min_quiet_days"] / (1.0 + rank),
+            "airings": len(airings),
+            "required_quiet_days": cfg["min_quiet_days"] * growth / (1.0 + rank),
             "candidate_pk": last.candidate_pk,
         })
     # Stable order so ties in the picker resolve identically on every runner.

@@ -450,17 +450,16 @@ scheduler:
     # once older than half_life x this. Breaking at 1-day half-life goes stale
     # in 3 days; timely at 7 days in 3 weeks — one knob, both behaviors.
     expire_after_half_lives: 3
-    # Re-air proven posts: every ``every_days`` days one window may repeat a
-    # published post aged ``min_age_days..max_age_days`` whose views at the
-    # learning comparison age cleared the ``percentile`` of the account
-    # baseline. Staged exactly like promos: an ordinary queued post pinned to
-    # its window, editable and cancellable on the calendar.
+    # Re-air proven posts: every ``every_days`` days one window may repeat an
+    # EVERGREEN published post at least ``min_age_days`` old whose views at
+    # the learning comparison age cleared the ``percentile`` of the account
+    # baseline. No age ceiling — archival evergreen is the whole point of
+    # re-airing — and old timely/breaking coverage never qualifies at any
+    # age. Staged exactly like promos: an ordinary queued post pinned to its
+    # window, editable and cancellable on the calendar.
     reposts:
       enabled: true
       min_age_days: 90
-      # Age ceiling for NON-evergreen clips only; evergreen never ages out of
-      # the pool (archival footage is the whole point of re-airing it).
-      max_age_days: 180
       min_days_between_repeats: 90
       # Lifetime cap on airings of one clip (original + re-airs). 0 = no cap:
       # the growing filler quiet period is what keeps rotation fresh instead.
