@@ -1841,12 +1841,15 @@ initSegDnd();
   const status0 = stage.dataset.status;
   if (status0 === 'failed') return;
 
+  // Wall-clock estimates, not server progress — /export-status only reports
+  // exporting/ready/failed. Ordered to match _export_cut_in_thread: supercut,
+  // then the word-stream slice, then the title draft.
   const phases = [
     { at: 0,  pct: 8,  title: 'Building your clip', msg: 'Cutting segments…' },
     { at: 3,  pct: 28, title: 'Building your clip', msg: 'Encoding video…' },
     { at: 8,  pct: 52, title: 'Almost there', msg: 'Joining the supercut…' },
-    { at: 16, pct: 72, title: 'Finishing up', msg: 'Writing the clip file…' },
-    { at: 28, pct: 88, title: 'Finishing up', msg: 'Still encoding — large clips take a bit…' },
+    { at: 16, pct: 72, title: 'Finishing up', msg: 'Lining up the transcript…' },
+    { at: 28, pct: 88, title: 'Finishing up', msg: 'Still working — large clips take a bit…' },
   ];
   const started = Date.now();
   const titleEl = document.getElementById('export-stage-title');
@@ -2399,12 +2402,14 @@ async function retryExport() {
       status.classList.add('is-busy');
       status.classList.remove('is-error');
 
+      // Wall-clock estimates, not server progress. Word timings already exist
+      // by now (sliced from the archive-time stream at export), so this request
+      // only groups them, renders caption frames and re-encodes.
       const phases = [
-        { at: 0,  pct: 10, msg: 'Transcribing audio…' },
-        { at: 4,  pct: 32, msg: 'Aligning word timestamps…' },
-        { at: 12, pct: 55, msg: 'Rendering burned-in captions…' },
-        { at: 25, pct: 74, msg: 'Encoding captioned clip…' },
-        { at: 45, pct: 88, msg: 'Still rendering — this can take a minute…' },
+        { at: 0,  pct: 10, msg: 'Preparing caption text…' },
+        { at: 4,  pct: 32, msg: 'Rendering caption frames…' },
+        { at: 12, pct: 58, msg: 'Encoding captioned clip…' },
+        { at: 30, pct: 84, msg: 'Still encoding — this can take a minute…' },
       ];
       const started = Date.now();
       function applyPhase() {
