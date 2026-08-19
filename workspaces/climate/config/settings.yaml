@@ -409,7 +409,13 @@ scheduler:
     #   category — the single programming category (coarse but always present)
     #   format   — auto-tagged format tags (archival vs produced vs talking
     #              head…), falling back to category until a post is tagged
-    facet: category
+    #   union    — category PLUS format tags in one set. The category floor
+    #              keeps untagged posts comparable during a tagging backlog,
+    #              while the tags grade the overlap: same category + different
+    #              format is 1/3 (passes the 0.34 gate), same category + same
+    #              format blocks. Flipped 2026-08-19; set back to category to
+    #              revert.
+    facet: union
     gates:
       # Days two clips cut from the SAME source video must sit apart.
       same_source_days: 10
@@ -451,10 +457,13 @@ scheduler:
     reposts:
       enabled: true
       min_age_days: 90
+      # Age ceiling for NON-evergreen clips only; evergreen never ages out of
+      # the pool (archival footage is the whole point of re-airing it).
       max_age_days: 180
       min_days_between_repeats: 90
-      # Lifetime cap on airings of one clip (original + re-airs).
-      max_airings_per_cut: 3
+      # Lifetime cap on airings of one clip (original + re-airs). 0 = no cap:
+      # the growing filler quiet period is what keeps rotation fresh instead.
+      max_airings_per_cut: 0
       # A post must beat this percentile of views-at-48h to qualify.
       percentile: 90
       every_days: 7
@@ -472,6 +481,11 @@ scheduler:
       # The pool cycles least-recently-aired first, so the real gap between
       # re-airs of one clip grows as the published library grows.
       min_quiet_days: 45
+      # Each prior airing stretches the required quiet period by this fraction
+      # of min_quiet_days: required = min_quiet x (1 + growth x (airings - 1))
+      # / (1 + rank). Nothing ever hard-stops recycling; a much-aired clip
+      # just waits longer each time. 0 restores the flat quiet period.
+      airing_growth: 0.5
   # How often to re-pull insights for recently published posts. These dense
   # early samples feed the age-normalized comparisons in analytics.
   metrics_poll_interval_minutes: 15

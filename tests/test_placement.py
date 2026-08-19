@@ -162,6 +162,51 @@ class TestGates(unittest.TestCase):
         # Post 1 is identical to the trail (blocked); post 2 overlaps 1/3.
         self.assertEqual(ids(out), [2])
 
+    def test_union_shaped_facets_grade_the_gate(self):
+        # Union facet sets ({category} | format_tags): same category with a
+        # DIFFERENT production form overlaps 1/3 — under the 0.34 gate — where
+        # the bare category would be a hard 1.0 block. Same category AND same
+        # form still blocks (2/3).
+        posts = [FakePost(1), FakePost(2)]
+        ctx = make_ctx(
+            {
+                1: facts(1, cand=10, tags={"culture", "archival_footage"}),
+                2: facts(2, cand=11, tags={"culture", "produced_segment"}),
+            },
+            facet_trail=[frozenset({"culture", "archival_footage", "panel_or_interview"})],
+        )
+        out = assign_posts_to_windows(posts, [_key(0)], ctx=ctx)
+        # Post 1 shares 2 of 3 labels with the trail (0.667, blocked); post 2
+        # shares only the category, 1 of 4 (0.25, passes).
+        self.assertEqual(ids(out), [2])
+        self.assertEqual(ctx.decisions[_key(0)].relax_step, 0)
+
+    def test_union_category_floor_blocks_untagged_repeat(self):
+        # An UNTAGGED post (category-only set) against a tagged same-category
+        # trail entry overlaps 1/2 — still blocked. The category floor keeps
+        # variety conservative during a tagging backlog instead of waving
+        # untagged posts through with zero overlap.
+        posts = [FakePost(1), FakePost(2)]
+        ctx = make_ctx(
+            {
+                1: facts(1, cand=10, tags={"culture"}),
+                2: facts(2, cand=11, tags={"nature"}),
+            },
+            facet_trail=[frozenset({"culture", "archival_footage"})],
+        )
+        out = assign_posts_to_windows(posts, [_key(0)], ctx=ctx)
+        self.assertEqual(ids(out), [2])
+
+    def test_variety_penalty_is_graded_by_overlap(self):
+        # The penalty term scales with Jaccard: 1/3 overlap against the only
+        # trail entry costs variety_penalty_max / 3, not the full 4.0.
+        ctx = make_ctx(
+            {1: facts(1, cand=10, tags={"culture", "produced_segment"}, queued_days_ago=1)},
+            facet_trail=[frozenset({"culture", "archival_footage"})],
+        )
+        _score, parts = ctx.score(1, DAY0)
+        self.assertAlmostEqual(parts["variety_penalty"], 4.0 * (1 / 3), places=5)
+
     def test_expired_post_never_placed(self):
         # Breaking (half-life 1d) content from 10 days ago: expired, window
         # stays empty even though the queue is non-empty. Expiry never relaxes.

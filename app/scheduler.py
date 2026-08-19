@@ -266,27 +266,43 @@ def _as_utc_date(when: dt.datetime | None) -> dt.date | None:
     return when.astimezone(dt.timezone.utc).date()
 
 
+def _format_tag_set(post: ThreadsPost | None,
+                    candidate: Candidate | None) -> frozenset[str]:
+    """Format tags for a post: the ground-truth ``format_tags`` annotated from
+    the trimmed clip at queue time, falling back to the candidate's storyboard
+    prediction."""
+    raw = ""
+    if post is not None:
+        raw = (post.format_tags or "").strip()
+    if not raw and candidate is not None:
+        raw = (candidate.format_tags or "").strip()
+    return frozenset(t.strip() for t in raw.split(",") if t.strip())
+
+
 def resolve_facets(post: ThreadsPost | None, candidate: Candidate | None,
                    facet_mode: str) -> frozenset[str]:
     """The facet label set variety runs on.
 
-    ``format`` mode prefers the post's ground-truth ``format_tags`` (annotated
-    from the trimmed clip at queue time), falls back to the candidate's
-    storyboard prediction, and finally to the category — so an untagged post
-    still gets category-level variety rather than none. ``category`` mode is
-    the one-hot degenerate case.
+    ``union`` mode combines the category with the format tags. The category is
+    a floor every post has, so tagged and untagged posts still overlap
+    meaningfully during a tagging backlog (two same-category posts score 0.5,
+    not 0.0), while the format tags grade the comparison: same category but
+    different production form is 1/3 — under the 0.34 gate — where the
+    category alone would be a hard 1.0 block.
+
+    ``format`` mode prefers the format tags alone, falling back to the
+    category so an untagged post still gets category-level variety rather
+    than none. ``category`` mode is the one-hot degenerate case.
     """
+    cat = ((candidate.category if candidate else "") or "").strip()
+    cat_set = frozenset({cat}) if cat else frozenset()
+    if facet_mode == "union":
+        return cat_set | _format_tag_set(post, candidate)
     if facet_mode == "format":
-        raw = ""
-        if post is not None:
-            raw = (post.format_tags or "").strip()
-        if not raw and candidate is not None:
-            raw = (candidate.format_tags or "").strip()
-        tags = frozenset(t.strip() for t in raw.split(",") if t.strip())
+        tags = _format_tag_set(post, candidate)
         if tags:
             return tags
-    cat = ((candidate.category if candidate else "") or "").strip()
-    return frozenset({cat}) if cat else frozenset()
+    return cat_set
 
 
 def resolve_shelf_life(post: ThreadsPost | None, candidate: Candidate | None) -> str:
