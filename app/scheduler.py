@@ -1232,21 +1232,49 @@ def _pick_filler(facts: list[dict], day: dt.date,
     return best
 
 
+# The rerun outlook is expensive to compute: _filler_rotation loads every
+# published post AND ranks performance from each one's full metric-snapshot
+# series (polled every 15 minutes, so tens of thousands of rows on a mature
+# account). The UI asks for it on every published post page and every
+# library rebuild, where that cost is pure latency. Its inputs only change
+# on the publish/metrics cadence — minutes — so UI reads serve a short-lived
+# module cache of plain values (no ORM objects). The staging path
+# (_stage_filler_jit) never reads this cache: it recomputes fresh facts
+# inside its own transaction.
+_recycle_ui_cache: tuple[float, dict[int, dict]] | None = None
+_RECYCLE_UI_TTL_S = 300.0
+
+
+def invalidate_recycle_overview() -> None:
+    """Drop the cached rerun outlook. Call after writing an input the
+    operator expects to see reflected immediately (e.g. a shelf-life
+    override); everything else just waits out the TTL."""
+    global _recycle_ui_cache
+    _recycle_ui_cache = None
+
+
 def recycle_overview(session) -> dict[int, dict]:
     """Filler-rotation outlook per cut, for the UI: ``{cut_pk: fact}``.
 
     Each fact is ``{airings, last_aired, required_quiet_days, next_eligible,
     overdue}`` for a cut currently in the rerun library. Cuts the rotation
     excludes (booked, first-party, not evergreen, no caption/clip) are absent.
-    Empty when filler is off. Read-only — shares ``_filler_rotation`` with
-    the staging path so the page always shows what the scheduler would do.
+    Empty when filler is off. Shares ``_filler_rotation`` with the staging
+    path so the page shows what the scheduler would do, but serves a cached
+    copy for up to ``_RECYCLE_UI_TTL_S`` seconds (see note above).
     """
+    global _recycle_ui_cache
+    cached = _recycle_ui_cache
+    if cached is not None and time.monotonic() - cached[0] < _RECYCLE_UI_TTL_S:
+        return cached[1]
     cfg = _filler_config()
     if cfg is None:
-        return {}
+        out: dict[int, dict] = {}
+        _recycle_ui_cache = (time.monotonic(), out)
+        return out
     facts, _ = _filler_rotation(session, cfg)
     today = utcnow().date()
-    out: dict[int, dict] = {}
+    out = {}
     for f in facts:
         required = float(f["required_quiet_days"])
         next_at = f["last_aired"] + dt.timedelta(days=math.ceil(required))
@@ -1257,6 +1285,7 @@ def recycle_overview(session) -> dict[int, dict]:
             "next_eligible": next_at,
             "overdue": today >= next_at,
         }
+    _recycle_ui_cache = (time.monotonic(), out)
     return out
 
 

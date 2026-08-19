@@ -98,6 +98,7 @@ from ..ranking import load_trait_weights, order_expr, sort_candidates
 from ..scheduler import (
     build_window_plan,
     expired_queued_posts,
+    invalidate_recycle_overview,
     pin_post_to_window,
     placement_preview,
     projected_slot_for_post,
@@ -3768,6 +3769,9 @@ def set_post_shelf_life(post_id: int, shelf_life: str = Form(""), next: str = Fo
         if p is None:
             return _flash("/calendar", "Post not found")
         p.shelf_life = shelf
+    # Shelf life gates rerun eligibility; refresh the outlook immediately so
+    # the Recycling card reflects the override on the very next page load.
+    invalidate_recycle_overview()
     return _flash(dest, f"Shelf life set to {shelf} (your override)" if shelf
                   else "Shelf life reset to the AI's answer")
 
