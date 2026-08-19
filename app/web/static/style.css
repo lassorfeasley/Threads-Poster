@@ -4528,6 +4528,15 @@ details.panel > .panel-body { padding: 14px 18px; }
   user-select: none;
 }
 .cal-score-chip:hover { color: var(--text); background: var(--panel3); }
+/* On the month grid the card clips overflow (nowrap + ellipsis), which would
+   hide an inline chip at the end of the title — pin it to the corner instead. */
+.cal-event.card { position: relative; }
+.cal-event.card .cal-score-chip {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  z-index: 2;
+}
 .score-pop {
   position: fixed;
   z-index: 240;

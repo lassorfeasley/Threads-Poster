@@ -32,9 +32,11 @@
 <div class="canvas canvas-wide">
 {{ ui.pagebar("", crumbs=post_crumbs, actions=post_actions) }}
 
-{# Everything lives on the preview itself now — stats in the engagement row,
-   replies threaded under the first comment. The rail only returns for errors. #}
-{% set has_side = error %}
+{# Everything editorial lives on the preview itself — stats in the engagement
+   row, replies threaded under the first comment. The rail carries the
+   scheduling controls (shelf life, recycling outlook) and errors, so they sit
+   beside the post instead of below the fold. #}
+{% set has_side = error or shelf or recycle %}
 <div class="post-layout{{ ' no-side' if not has_side }}">
 <div class="post-main">
 {# The main column replicates the post as it will appear on Threads: one
@@ -55,8 +57,8 @@
     <div class="badges">
       {% for t in format_tags %}<span class="badge" title="format facet — production form, drives scheduling variety">{{ t }}</span>{% endfor %}
       {% for t in footage_traits %}<span class="badge info" title="footage trait (subject facet)">{{ t }}</span>{% endfor %}
-      {% if shelf_life %}<span class="badge {{ 'hostile' if shelf_life == 'breaking' else ('score-hi' if shelf_life == 'timely' else 'supportive') }}"
-            title="Shelf life — drives scheduling urgency and expiry. {{ 'Auto-tagged on this content.' if shelf_life_tagged else 'Inherited from the category default (this video predates shelf-life tagging).' }}">{{ shelf_life }}</span>{% endif %}
+      {% if shelf_life %}<a class="badge {{ 'hostile' if shelf_life == 'breaking' else ('score-hi' if shelf_life == 'timely' else 'supportive') }}" href="#scheduling"
+            title="Shelf life — drives scheduling urgency and expiry. {{ 'Auto-tagged on this content.' if shelf_life_tagged else 'Inherited from the category default (this video predates shelf-life tagging).' }} Change it in the Scheduling panel →">{{ shelf_life }}</a>{% endif %}
       {% if repost_of %}<a class="badge" href="/post/{{ repost_of }}" title="Re-airing of a proven earlier post">repost of #{{ repost_of }}</a>{% endif %}
     </div>
     {% endif %}
@@ -418,12 +420,22 @@
 
 </div>{# /thread-preview #}
 </div>{# /post-preview #}
+</div>{# /post-main #}
+
+{% if has_side %}
+<div class="post-side">
+{% if error %}
+<div class="card" style="border-color: var(--danger-border);">
+  <div class="card-title" style="color: var(--danger);">Last error</div>
+  <div class="meta">{{ error }}</div>
+</div>
+{% endif %}
 
 {% if shelf %}
 {# ---- Scheduling: the shelf-life dial placement runs on, correctable in
      place. Post-level override only — the model's original answer survives
      underneath, so Reset to AI is always a real reset. ---- #}
-<div class="card tight" style="margin-top: 14px;">
+<div class="card tight" id="scheduling" style="margin-bottom: 14px;">
   <div class="row center" style="gap: 12px; flex-wrap: wrap;">
     <strong>Scheduling</strong>
     <form method="post" action="/post/{{ pid }}/shelf-life" class="inline seg-toggle">
@@ -504,16 +516,6 @@
     not in the rerun library: {{ recycle.reason }}.
   </div>
   {% endif %}
-</div>
-{% endif %}
-</div>{# /post-main #}
-
-{% if has_side %}
-<div class="post-side">
-{% if error %}
-<div class="card" style="border-color: var(--danger-border);">
-  <div class="card-title" style="color: var(--danger);">Last error</div>
-  <div class="meta">{{ error }}</div>
 </div>
 {% endif %}
 </div>{# /post-side #}
