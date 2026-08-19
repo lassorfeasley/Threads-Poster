@@ -19,6 +19,7 @@ from __future__ import annotations
 import bisect
 import datetime as dt
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -1193,6 +1194,89 @@ def _pick_filler(facts: list[dict], day: dt.date,
         if best_key is None or key > best_key:
             best, best_key = f, key
     return best
+
+
+def recycle_overview(session) -> dict[int, dict]:
+    """Filler-rotation outlook per cut, for the UI: ``{cut_pk: fact}``.
+
+    Each fact is ``{airings, last_aired, required_quiet_days, next_eligible,
+    overdue}`` for a cut currently in the rerun library. Cuts the rotation
+    excludes (booked, first-party, not evergreen, no caption/clip) are absent.
+    Empty when filler is off. Read-only — shares ``_filler_rotation`` with
+    the staging path so the page always shows what the scheduler would do.
+    """
+    cfg = _filler_config()
+    if cfg is None:
+        return {}
+    facts, _ = _filler_rotation(session, cfg)
+    today = utcnow().date()
+    out: dict[int, dict] = {}
+    for f in facts:
+        required = float(f["required_quiet_days"])
+        next_at = f["last_aired"] + dt.timedelta(days=math.ceil(required))
+        out[f["cut"].id] = {
+            "airings": f["airings"],
+            "last_aired": f["last_aired"],
+            "required_quiet_days": required,
+            "next_eligible": next_at,
+            "overdue": today >= next_at,
+        }
+    return out
+
+
+def recycle_status(session, post: ThreadsPost) -> dict | None:
+    """Recycling outlook for one published post's cut, or None when n/a.
+
+    ``{"state": "eligible", ...recycle_overview fact}`` when the cut is in
+    the rerun library; ``{"state": "ineligible", "reason", "airings",
+    "last_aired"}`` when the rotation excludes it; ``{"state": "off"}`` when
+    filler is disabled. The reason mirrors ``_filler_rotation``'s checks so
+    the page explains the scheduler instead of guessing at it.
+    """
+    if post.status != "published" or post.cut_pk is None:
+        return None
+    if _filler_config() is None:
+        return {"state": "off"}
+    info = recycle_overview(session).get(post.cut_pk)
+    if info is not None:
+        return {"state": "eligible", **info}
+
+    airings = session.execute(
+        select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+                 selectinload(ThreadsPost.cut))
+        .where(ThreadsPost.cut_pk == post.cut_pk,
+               ThreadsPost.status == "published",
+               ThreadsPost.published_at.is_not(None))
+    ).scalars().all()
+    airings.sort(key=lambda p: (p.published_at, p.id))
+    last = airings[-1] if airings else post
+    last_at = _as_utc_date(last.published_at)
+
+    booked = session.execute(
+        select(ThreadsPost.id).where(
+            ThreadsPost.cut_pk == post.cut_pk,
+            ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
+        ).limit(1)
+    ).first() is not None
+
+    if booked:
+        reason = "a re-air of this clip is already queued"
+    elif last.cut is None:
+        reason = "the original cut no longer exists"
+    elif is_first_party(last.candidate):
+        reason = "first-party content rotates through promos, not reruns"
+    elif resolve_shelf_life(last, last.candidate) != SHELF_EVERGREEN:
+        reason = ("only evergreen clips re-air — this one resolves "
+                  f"{resolve_shelf_life(last, last.candidate)}")
+    elif not (last.caption or "").strip():
+        reason = "the last airing has no caption to clone"
+    elif not (last.clip_object_path or last.clip_local_path):
+        reason = "no clip file reachable from the schedulers"
+    else:
+        reason = "not in the rerun library yet"
+    return {"state": "ineligible", "reason": reason,
+            "airings": len(airings), "last_aired": last_at}
 
 
 def _stage_filler_jit(session, state: SchedulerState, window_key: str,

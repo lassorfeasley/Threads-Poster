@@ -100,6 +100,8 @@ from ..scheduler import (
     pin_post_to_window,
     placement_preview,
     projected_slot_for_post,
+    recycle_overview,
+    recycle_status,
     resolve_shelf_life,
     scheduler_status,
     spacing_allows_publish,
@@ -3273,6 +3275,9 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
             "schedule": schedule,
+            # Rerun outlook for published posts: when (and whether) this
+            # clip comes back through the filler rotation.
+            "recycle": recycle_status(session, p),
             "giphy_enabled": giphy_configured(),
         }
         # Paired Instagram reel (queued alongside this post, publishes with it).
@@ -3443,11 +3448,15 @@ def _library_dataset() -> dict:
                 ).distinct()
             ).all()
         }
+        # Rerun outlook per cut (one rotation pass for the whole page), so a
+        # posted clip's card can say when it next qualifies to re-air.
+        reruns = recycle_overview(session)
         cut_rows = [
             {"cut": cut,
              "exported": bool(cut.trimmed_clip_path),
              "posted": cut.id in published_cut_pks,
-             "captioned": bool(cut.subtitled_clip_path)}
+             "captioned": bool(cut.subtitled_clip_path),
+             "recycle": reruns.get(cut.id)}
             for cut in cuts
         ]
 

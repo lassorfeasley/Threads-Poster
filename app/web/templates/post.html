@@ -418,6 +418,37 @@
 
 </div>{# /thread-preview #}
 </div>{# /post-preview #}
+
+{% if recycle %}
+{# ---- Rerun outlook: when (and whether) this clip comes back through the
+     filler rotation. Answers "why isn't this re-airing" without reading the
+     scheduler source. ---- #}
+<div class="card tight" style="margin-top: 14px;">
+  <strong>Recycling</strong>
+  {% if recycle.state == 'off' %}
+  <span class="meta">The rerun rotation is disabled (<code>scheduler.placement.filler</code>).</span>
+  {% elif recycle.state == 'eligible' %}
+  <div class="meta" style="margin-top: 4px;">
+    Aired {{ recycle.airings }} time{{ 's' if recycle.airings != 1 }}{% if recycle.last_aired %},
+    last on {{ recycle.last_aired.strftime("%b %-d, %Y") }}{% endif %} ·
+    needs {{ "%.0f"|format(recycle.required_quiet_days) }} quiet days before re-airing
+    (grows with each airing, shrinks for proven performers).
+    {% if recycle.overdue %}
+    <span class="badge supportive" title="Past its quiet period — the most overdue clip re-airs when a posting window finds the queue empty">eligible now</span>
+    {% else %}
+    Next eligible {{ recycle.next_eligible.strftime("%b %-d, %Y") }}.
+    {% endif %}
+    It re-airs when a posting window finds the queue empty — fresh content always wins.
+  </div>
+  {% else %}
+  <div class="meta" style="margin-top: 4px;">
+    Aired {{ recycle.airings }} time{{ 's' if recycle.airings != 1 }}{% if recycle.last_aired %},
+    last on {{ recycle.last_aired.strftime("%b %-d, %Y") }}{% endif %} ·
+    not in the rerun library: {{ recycle.reason }}.
+  </div>
+  {% endif %}
+</div>
+{% endif %}
 </div>{# /post-main #}
 
 {% if has_side %}

@@ -161,6 +161,13 @@
           {% elif row.exported %}<span class="badge info">exported — not posted</span>
           {% else %}<span class="badge score-lo">not trimmed yet</span>{% endif %}
           {% if row.captioned %}<span class="badge">captioned</span>{% endif %}
+          {% if row.recycle %}
+            {% if row.recycle.overdue %}
+            <span class="badge info" title="Aired {{ row.recycle.airings }}x, last {{ row.recycle.last_aired.strftime('%b %-d, %Y') }}. Past its quiet period — re-airs when a posting window finds the queue empty.">↻ rerun-ready</span>
+            {% else %}
+            <span class="badge" title="Aired {{ row.recycle.airings }}x, last {{ row.recycle.last_aired.strftime('%b %-d, %Y') }}. The quiet period grows with each airing and shrinks for proven performers.">↻ {{ row.recycle.next_eligible.strftime('%b %-d') }}</span>
+            {% endif %}
+          {% endif %}
         </div>
       </div>
     </a>
