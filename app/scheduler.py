@@ -2326,6 +2326,18 @@ def run_tick() -> None:
     except Exception:
         log.exception("Window tick failed")
 
+    # Keep the rerun-outlook cache warm off the request path. The rotation's
+    # metric scan (every published post's snapshot series) takes seconds on a
+    # remote database; recomputing it here means no page view — and no
+    # pagecache rebuild, which every write triggers — ever pays that cost.
+    try:
+        cached = _recycle_ui_cache
+        if cached is None or time.monotonic() - cached[0] >= _RECYCLE_UI_TTL_S:
+            with session_scope() as session:
+                recycle_overview(session)
+    except Exception:
+        log.exception("Rerun-outlook warmup failed")
+
 
 def start_scheduler_thread(interval_seconds: int = 60) -> None:
     """Start the background adaptive-scheduler loop. Idempotent."""
