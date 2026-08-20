@@ -32,7 +32,7 @@ DEFAULT_TRAITS = [
     "action", "people_doing_things", "fire", "flood", "storm_damage",
     "destruction", "rescue_or_emergency_response", "crowd", "dramatic_weather",
     "aerial_or_sweeping_shot", "chart_or_data_screen",
-    "text_heavy_lower_thirds",
+    "text_heavy_lower_thirds", "burned_in_subtitles",
 ]
 
 # FORMAT facet: the production form of the footage, independent of subject —
@@ -54,6 +54,21 @@ DEFAULT_FORMAT_TRAITS = [
     "low_motion_studio_segment",
     "static_graphic_or_slideshow",
 ]
+
+
+def suggest_subs_position(traits_csv: str) -> str:
+    """Suggest a burned-in caption position from footage/visual traits.
+
+    Returns ``"none"`` when the footage already has subtitles baked in,
+    ``"top"`` when lower-thirds or chyrons would collide with bottom captions,
+    or ``"bottom"`` as the default.
+    """
+    traits = {t.strip().lower() for t in (traits_csv or "").split(",") if t.strip()}
+    if "burned_in_subtitles" in traits:
+        return "none"
+    if "text_heavy_lower_thirds" in traits:
+        return "top"
+    return "bottom"
 
 
 def _clean(values) -> list[str]:

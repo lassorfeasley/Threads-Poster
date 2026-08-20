@@ -601,6 +601,9 @@ main.main-settings {
    Pagebar — unified page toolbar (title + actions + tabs + tools)
    ------------------------------------------------------------ */
 .pagebar { margin-bottom: 22px; }
+/* Height of the compact sticky band (crumbs/actions row). Post-page rails
+   stick below it so category chips aren't clipped under the chrome. */
+:root { --pagebar-sticky-h: 50px; }
 /* Sticky variant breaks out of the centered main column to span the full width
    from the sidebar edge to the right of the viewport, as a distinct chrome band.
    An inner wrapper keeps its content aligned with the page content below. */
@@ -682,6 +685,11 @@ main.main-settings {
 /* Bottom-align: the stacked-label date fields are taller than the one-line
    search/combo, so anchoring everything to the input baseline keeps the row tidy. */
 .pagebar-tools.below-bar { margin: 4px 0 18px; align-items: flex-end; }
+/* The flex display above outranks the `hidden` attribute's UA style, so the
+   collapsible advanced row (Library "More filters") needs this explicitly. */
+.pagebar-tools[hidden] { display: none; }
+/* Advanced row tucks up under the primary filter row it extends. */
+.pagebar-tools.below-bar + .pagebar-tools.below-bar { margin-top: -10px; }
 .tb-field { display: inline-flex; align-items: center; gap: 7px; margin: 0; }
 .tb-label { color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
 /* Date filters: label sits above the input so the row stays scannable. */
@@ -1127,6 +1135,92 @@ button.sm.is-loading::after,
   border-color: var(--blue-border);
   background: var(--blue-soft);
 }
+/* Trait tags in the post rail. Vocabulary names run long, so these are
+   full-width rows rather than pills that wrapped one-per-line anyway. */
+.tag-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.tag-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 10px;
+  font-size: 12px;
+  background: var(--panel2);
+}
+.tag-row + .tag-row { border-top: 1px solid var(--border); }
+.tag-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.tag-x {
+  all: unset;
+  flex: none;
+  cursor: pointer;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted);
+}
+.tag-row:hover .tag-x { color: var(--text); }
+.tag-x:hover { background: var(--danger-soft); color: var(--danger); }
+.tag-group { margin-top: 12px; }
+.tag-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+.tag-group-head > .meta {
+  display: block;
+  margin-bottom: 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+/* Jump to the Traits page to grow the closed vocabulary. */
+.tag-vocab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.tag-vocab-add:hover { color: var(--blue); background: var(--panel2); }
+.tag-vocab-add svg { display: block; }
+.tag-add-form { margin-top: 6px; }
+.tag-add-row { display: flex; gap: 6px; align-items: stretch; }
+/* The add-tags checkbox combo fills the row where the old single select sat,
+   sized down to match the tag rows; the panel tracks the summary's width. */
+.tag-add-row .combo { flex: 1; min-width: 0; }
+.tag-add-row .combo > summary {
+  width: 100%;
+  min-width: 0;
+  font-size: 12.5px;
+  padding: 5px 10px;
+  border-radius: var(--radius);
+}
+.tag-add-row .combo-panel { width: 100%; min-width: 0; }
+/* Until something is checked the summary reads as a placeholder. */
+.tag-add-combo:not(.is-set) [data-combo-label] { color: var(--muted); }
 
 /* Inline busy state: spinner + accent text (e.g. caption generation). */
 .meta.busy { color: var(--accent); }
@@ -1396,6 +1490,7 @@ form.inline { display: inline-flex; }
 input[type="text"],
 input[type="number"],
 input[type="date"],
+input[type="search"],
 textarea,
 select {
   font: inherit;
@@ -2155,6 +2250,9 @@ canvas#detail-wave {
   min-width: 4.5em;
   text-align: right;
 }
+/* Reserving the count's width before there's a count leaves the search box
+   visibly short of the lines it filters. It reflows once, on first keystroke. */
+.find-search #tx-search-count:empty { display: none; }
 .tx-focus {
   display: flex;
   flex-direction: column;
@@ -2180,6 +2278,9 @@ canvas#detail-wave {
   font-size: 12.5px;
   line-height: 1.45;
   text-align: left;
+  /* Overrides the nowrap every other button wants — transcript lines have to
+     wrap or they get clipped in any column narrower than the sentence. */
+  white-space: normal;
   cursor: pointer;
   opacity: 0.4;
   transition: background 0.12s ease, opacity 0.12s ease, color 0.12s ease, font-size 0.12s ease;
@@ -3083,10 +3184,12 @@ body.cal-committing #cal-layout {
   line-height: 1.35;
 }
 
-/* --- Video profile: player + transcript left, clips/posts rail right. --- */
+/* --- Video profile: player + its clips/posts left, classification and
+       transcript in the rail. The rail runs wider than a typical sidebar
+       because transcript lines need the room. --- */
 .video-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr);
+  grid-template-columns: minmax(0, 1.4fr) minmax(340px, 1fr);
   gap: var(--sp-5);
   align-items: start;
 }
@@ -3116,46 +3219,29 @@ body.cal-committing #cal-layout {
   border-top: 1px solid var(--border);
   background: var(--panel2);
 }
-.video-find .tx-focus.video-tx {
-  max-height: min(42vh, 360px);
-}
-.video-meta { padding: 0 2px; }
-.video-meta-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-}
 .video-desc {
   margin: 0;
-  display: inline-block;
 }
 .video-desc summary {
   cursor: pointer;
   color: var(--muted);
   font-size: 13px;
 }
-.video-desc[open] {
-  display: block;
-  flex: 1 1 100%;
-}
 .video-desc .meta { margin-top: 6px; }
 
-.video-rail {
-  min-width: 0;
+/* Clips and posts, stacked under the player. */
+.video-section {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
-  position: sticky;
-  top: var(--sp-4);
 }
-.video-rail-head {
+.video-section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
-.video-rail-title {
+.video-section-title {
   margin: 0;
   font-size: 14px;
   font-weight: 700;
@@ -3169,7 +3255,7 @@ body.cal-committing #cal-layout {
   border-bottom: 1px solid var(--border);
   margin-bottom: 2px;
 }
-.video-rail-empty {
+.video-section-empty {
   margin: 0;
   padding: 18px 14px;
 }
@@ -3180,14 +3266,15 @@ body.cal-committing #cal-layout {
 }
 .video-clip {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  align-items: center;
+  gap: 16px;
   padding: 12px 14px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
 }
 .video-clip-main {
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -3202,29 +3289,42 @@ body.cal-committing #cal-layout {
 }
 .video-clip-title:hover { color: var(--blue); }
 .video-clip-actions {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.video-rail-posts {
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-4);
-  border-top: 1px solid var(--border);
+
+/* Not sticky: with the transcript in it the rail outgrows the viewport, and a
+   pinned column taller than the screen either hides its own tail or needs an
+   inner scrollbar nested inside the page's. One scrollbar is the honest one. */
+.video-rail {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
 }
-.video-rail .video-post {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 10px;
-  padding: 10px 12px;
+.video-rail .card.tight { margin-bottom: 0; }
+.video-tx-card .find-transcript {
+  padding: 8px 0 0;
+  border-top: 0;
+  background: transparent;
 }
-.video-rail .video-post-actions { justify-content: flex-start; }
+/* The bleed that lets row hovers reach the card edge overflows a rail card. */
+.video-tx-card .tx-focus { margin: 0; padding: 0; }
+.tx-focus.video-tx {
+  max-height: min(46vh, 420px);
+}
 
 @media (max-width: 980px) {
   .video-layout { grid-template-columns: 1fr; gap: var(--sp-4); }
-  .video-rail { position: static; }
+}
+@media (max-width: 720px) {
+  .video-clip {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
 }
 
 /* --- Post page: video hero in a wide left column, workflow in a right rail. --- */
@@ -3248,7 +3348,7 @@ body.cal-committing #cal-layout {
    sticky preview just pins in place while content below scrolls oddly. */
 .post-main .post-preview {
   position: sticky;
-  top: var(--sp-4);
+  top: calc(var(--pagebar-sticky-h) + var(--sp-4));
 }
 .post-layout.no-side .post-preview {
   position: static;
@@ -3261,22 +3361,29 @@ body.cal-committing #cal-layout {
    (caption + video) and its first comment render like the real thing; text is
    edited in place and item actions hide behind a "…" kebab menu. --- */
 .thread-preview {
+  --thread-inset: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: var(--sp-4) var(--sp-4) var(--sp-2);
+  padding: var(--thread-inset);
+}
+/* Category rail above the post card on the cut Post step. */
+.preview-topbar {
+  margin: 0;
+}
+.preview-topbar .cat-toggle button {
+  padding-block: 7px;
 }
 .thread-item {
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr);
 }
-/* Category strip above the post — part of the frame, not the content. */
-.preview-topbar {
-  /* Negative side margins run the hairline edge-to-edge of the card. */
-  margin: 0 calc(-1 * var(--sp-4)) var(--sp-4);
-  padding: 0 var(--sp-4) var(--sp-3);
-  border-bottom: 1px solid var(--border);
-}
+/* Classification card in the sidebar — category toggle + facet badges. */
+.post-side .cat-toggle-form { flex-wrap: wrap; }
+.post-side .cat-toggle { min-width: 0; }
 .ti-gutter {
   display: flex;
   flex-direction: column;
@@ -3314,6 +3421,7 @@ body.cal-committing #cal-layout {
   align-items: center;
   gap: 7px;
   min-height: 26px;
+  margin-bottom: var(--sp-3);
 }
 .ti-name { font-weight: 700; font-size: 14.5px; letter-spacing: -0.1px; }
 .ti-type { color: var(--muted); font-size: 13px; white-space: nowrap; }
@@ -3383,9 +3491,9 @@ body.cal-committing #cal-layout {
 .ti-text {
   display: block;
   width: 100%;
-  min-height: calc(15px * 1.5 + 8px); /* one line + vertical padding */
-  margin-top: 2px;
-  padding: 8px 10px;
+  min-height: calc(15px * 1.5 + 20px); /* one line + vertical padding */
+  margin-top: 0;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: transparent;
@@ -3412,7 +3520,7 @@ body.cal-committing #cal-layout {
 /* Textarea + in-field sparkle (suggest / regenerate draft). */
 .ti-text-wrap {
   position: relative;
-  margin-top: 2px;
+  margin-top: 0;
 }
 .ti-text-wrap .ti-text {
   margin-top: 0;
@@ -3420,8 +3528,8 @@ body.cal-committing #cal-layout {
 }
 .ti-sparkle {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 8px;
+  right: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3454,7 +3562,7 @@ body.cal-committing #cal-layout {
 }
 .ti-sparkle svg { display: block; }
 .ti-text-static {
-  margin-top: 2px;
+  margin-top: 0;
   font-size: 15px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -3526,15 +3634,15 @@ body.cal-committing #cal-layout {
 /* Audience replies: flat Threads feed rows separated by hairlines, not a
    connector-threaded nest under the attribution comment. */
 .thread-item.is-audience {
-  margin: 0 calc(-1 * var(--sp-4));
-  padding: var(--sp-3) var(--sp-4) var(--sp-2);
+  margin: 0 calc(-1 * var(--thread-inset, var(--sp-4)));
+  padding: var(--sp-3) var(--thread-inset, var(--sp-4)) var(--sp-2);
   border-top: 1px solid var(--border);
 }
 .thread-item.is-audience .ti-main {
   padding-bottom: var(--sp-2);
 }
 .thread-item.is-audience .ti-text-static {
-  margin-top: 2px;
+  margin-top: 0;
 }
 
 /* Threads-style action icons under a reply (Reply is the live control). */
@@ -3707,6 +3815,7 @@ body.cal-committing #cal-layout {
   gap: var(--sp-3);
   margin-top: var(--sp-3);
 }
+.ti-clip-tools[hidden] { display: none; }
 .ti-clip-tools .cat-toggle { flex: 1; min-width: 0; }
 /* Quiet inline text button (icon + label, no chrome). */
 .ghost-line-btn {
@@ -3740,7 +3849,14 @@ body.cal-committing #cal-layout {
   color: var(--text);
 }
 .thread-actions .ta-schedule .schedule-ic { color: var(--accent); display: inline-flex; }
-.post-side { min-width: 0; }
+/* Classification, shelf life, recycling — stays in view while the preview
+   column scrolls (mirrors .post-preview on the left). */
+.post-side {
+  min-width: 0;
+  position: sticky;
+  top: calc(var(--pagebar-sticky-h) + var(--sp-4));
+  align-self: start;
+}
 /* Sections fill the rail and stack tightly instead of centering on the canvas. */
 .post-side .wf-section {
   max-width: 100%;
@@ -3748,6 +3864,45 @@ body.cal-committing #cal-layout {
 }
 .post-side .card { max-width: 100%; }
 .post-side .ship-rail { margin-top: 0; }
+
+/* Publish controls moved out of the thread preview into the sidebar rail. */
+.post-side .post-ship-card .ig-include-form { width: 100%; margin: 0; }
+.post-side .post-ship-card .field-hint { margin: 8px 0 0; }
+.post-side .post-ship-actions.has-top-rule {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.post-side .post-ship-actions .ta-schedule {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.post-side .post-ship-actions .ta-schedule .schedule-ic { color: var(--accent); display: inline-flex; }
+.post-side .post-ship-buttons {
+  display: flex;
+  gap: var(--sp-2);
+}
+.post-side .post-ship-buttons > button,
+.post-side .post-ship-buttons > form.inline {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.post-side .post-ship-buttons > button,
+.post-side .post-ship-buttons form.inline button {
+  width: 100%;
+}
+.post-side .post-ship-buttons #update-btn:disabled {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+  cursor: default;
+  box-shadow: none;
+}
 
 /* Attribution is usually one sentence — start compact, JS auto-grows it. */
 .attribution-input { min-height: 72px; }
@@ -3788,21 +3943,27 @@ body.cal-committing #cal-layout {
 .thread-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: var(--sp-2);
   /* Negative side margins run the hairline edge-to-edge of the card. */
-  padding: var(--sp-3) var(--sp-4) var(--sp-2);
-  margin: var(--sp-2) calc(-1 * var(--sp-4)) 0;
+  padding: var(--sp-3) var(--thread-inset, var(--sp-4)) 0;
+  margin: 0 calc(-1 * var(--thread-inset, var(--sp-4))) 0;
   border-top: 1px solid var(--border);
+}
+.thread-actions > form#post-form {
+  display: contents; /* hidden fields only — buttons associate via form= */
 }
 /* Instagram include: full-width row directly above the ship buttons. */
 .ig-include-bar {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: var(--sp-3) var(--sp-4) 0;
-  margin: var(--sp-2) calc(-1 * var(--sp-4)) 0;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--thread-inset, var(--sp-4));
+  margin: 0 calc(-1 * var(--thread-inset, var(--sp-4))) 0;
   border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
+.ig-include-form { width: 100%; margin: 0; }
 .ig-include-label {
   display: flex;
   align-items: center;
@@ -3823,9 +3984,9 @@ body.cal-committing #cal-layout {
 .ig-include-bar .field-hint {
   margin: 0;
 }
-/* Share one hairline when the include bar sits above the ship buttons. */
+/* Sit flush under the include row — flex gap + extra top padding stacked awkwardly. */
 .ig-include-bar + .thread-actions {
-  margin-top: 0;
+  margin-top: calc(-1 * var(--sp-4));
   border-top: none;
   padding-top: var(--sp-3);
 }
@@ -4063,6 +4224,18 @@ body.cal-committing #cal-layout {
   gap: 12px;
 }
 .cat-toggle-form .cat-toggle { flex: 1; }
+
+/* Shelf-life row in the post rail — three equal segments, same as category. */
+.shelf-life-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.shelf-life-row > .seg-toggle.cat-toggle {
+  flex: 1;
+  min-width: 0;
+}
 
 /* iOS-style on/off switch */
 .switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
@@ -4317,6 +4490,12 @@ details.panel > .panel-body { padding: 14px 18px; }
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 14px;
 }
+/* Dashboard workflow cards sit in a dense grid — drop the lift shadow so the
+   row reads flat against the panel background. */
+#in-progress-section .media-card,
+#in-progress-section .media-card:hover {
+  box-shadow: none;
+}
 
 .media-card {
   display: flex;
@@ -4395,8 +4574,22 @@ details.panel > .panel-body { padding: 14px 18px; }
 .media-card .thumb-badge {
   position: absolute; top: 6px; left: 6px;
   display: flex; gap: 4px;
+  /* Wraps rather than running past the cap that keeps it clear of the ✕. */
+  flex-wrap: wrap;
   max-width: calc(100% - 44px);
 }
+/* Badges are tuned for dark panels: a 12%-opacity tint that vanishes against a
+   bright video frame. Over a thumbnail they get the same dark plate the
+   duration chip uses, keeping only the hue that carries the meaning. Opaque
+   enough that the frame behind it doesn't wash the text out. */
+.media-card .thumb-badge .badge {
+  background: rgba(0, 0, 0, 0.82);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+.media-card .thumb-badge .badge.supportive { color: var(--accent); }
+.media-card .thumb-badge .badge.hostile { color: var(--danger); }
+.media-card .thumb-badge .badge.info { color: var(--blue); }
 .media-card .mc-x {
   position: absolute; top: 6px; right: 6px;
   width: 24px; height: 24px; padding: 0;
@@ -4468,7 +4661,8 @@ details.panel > .panel-body { padding: 14px 18px; }
 
 @media (max-width: 980px) {
   .post-layout { grid-template-columns: 1fr; gap: var(--sp-4); }
-  .post-main .post-preview { position: static; }
+  .post-main .post-preview,
+  .post-side { position: static; }
 }
 
 @media (max-width: 860px) {

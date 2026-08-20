@@ -9,7 +9,7 @@
    toolbar.js shows or hides — a hidden slot's controls sit out of the match
    entirely. #}
 {% set lib_filters %}
-  {{ ui.search(name="q", placeholder="title, channel, caption…", debounce=false, filter_target=LIB) }}
+  {{ ui.search(name="q", placeholder="title, channel, caption, tag…", debounce=false, filter_target=LIB) }}
   {{ ui.combo("channel", channel_choices, all_label="All channels",
               filter_target=LIB, filter_key="channel") }}
   {# Category rides on the source video, so a clip and every post cut from it
@@ -48,6 +48,9 @@
                      ("engagement-asc", "Least engagement"),
                      ("title-asc", "Caption A–Z"), ("title-desc", "Caption Z–A"),
                      ("category-asc", "Category A–Z")]) }}
+    <button type="button" class="btn ghost sm" id="adv-toggle" aria-expanded="false"
+            aria-controls="adv-filters"
+            title="Editorial facets: shelf life, rerun state, performance tier, tags">More filters</button>
   </span>
   {{ ui.clear_filters(LIB) }}
 {% endset %}
@@ -64,6 +67,25 @@
 
 <div class="pagebar-tools below-bar" data-toolbar>
   {{ lib_filters }}
+</div>
+
+{# Advanced facets for the Posts view, behind the "More filters" toggle. The
+   row starts hidden AND is scoped to the posts tab (data-view-slot), and
+   toolbar.js ignores controls inside hidden containers — so a collapsed row
+   never silently constrains the grid. Shelf life and rerun state read the
+   scheduler's own resolution; tier ladders (a top-10% post also matches
+   "Above median") via the list match mode. #}
+<div class="pagebar-tools below-bar" data-toolbar id="adv-filters" data-view-slot="posts" hidden>
+  {{ ui.select("shelf", shelf_choices, submit=false, filter_target=LIB,
+               filter_key="shelf", all_label="Any shelf life") }}
+  {{ ui.combo("rerun", rerun_choices, all_label="Any rerun state",
+              filter_target=LIB, filter_key="rerun", filter_mode="list") }}
+  {{ ui.select("tier", tier_choices, submit=false, filter_target=LIB,
+               filter_key="tier", all_label="Any performance", filter_mode="list") }}
+  {{ ui.combo("format", format_choices, all_label="All formats",
+              filter_target=LIB, filter_key="format", filter_mode="list") }}
+  {{ ui.combo("subject", subject_choices, all_label="All subjects",
+              filter_target=LIB, filter_key="subject", filter_mode="list") }}
 </div>
 
 <div id="lib-panels">
@@ -162,10 +184,15 @@
           {% else %}<span class="badge score-lo">not trimmed yet</span>{% endif %}
           {% if row.captioned %}<span class="badge">captioned</span>{% endif %}
           {% if row.recycle %}
-            {% if row.recycle.overdue %}
-            <span class="badge info" title="Aired {{ row.recycle.airings }}x, last {{ row.recycle.last_aired.strftime('%b %-d, %Y') }}. Past its quiet period — re-airs when a posting window finds the queue empty.">↻ rerun-ready</span>
+            {% set rc = row.recycle %}
+            {% set rc_pct = (rc.rank * 100) | round | int %}
+            {# The receipt: how this clip's performance set its rerun cadence. #}
+            {% set rc_perf = ("{:,}".format(rc.views_at_age) ~ " views in its first " ~ rc.metric_age_hours ~ "h ranks above " ~ rc_pct ~ "% of posts — waits " ~ (rc.required_quiet_days | round(0, 'ceil') | int) ~ " days between airings instead of the base " ~ (rc.base_quiet_days | round(0, 'ceil') | int) ~ ".") if rc.views_at_age > 0 else ("No early view data — waits the full base quiet period (" ~ (rc.base_quiet_days | round(0, 'ceil') | int) ~ " days).") %}
+            {% set rc_top = (" · top " ~ (100 - rc_pct) ~ "%") if (rc.views_at_age > 0 and rc.rank >= 0.5) else "" %}
+            {% if rc.overdue %}
+            <span class="badge info" title="Aired {{ rc.airings }}x, last {{ rc.last_aired.strftime('%b %-d, %Y') }}. Past its quiet period — re-airs when a posting window finds the queue empty. {{ rc_perf }}">↻ rerun-ready{{ rc_top }}</span>
             {% else %}
-            <span class="badge" title="Aired {{ row.recycle.airings }}x, last {{ row.recycle.last_aired.strftime('%b %-d, %Y') }}. The quiet period grows with each airing and shrinks for proven performers.">↻ {{ row.recycle.next_eligible.strftime('%b %-d') }}</span>
+            <span class="badge" title="Aired {{ rc.airings }}x, last {{ rc.last_aired.strftime('%b %-d, %Y') }}. The quiet period grows with each airing and shrinks for proven performers. {{ rc_perf }}">↻ {{ rc.next_eligible.strftime('%b %-d') }}{{ rc_top }}</span>
             {% endif %}
           {% endif %}
         </div>
@@ -215,10 +242,14 @@
     {% set post_cat = category_by_slug(post_category) %}
     {% set posted_on = p.created_at.strftime("%Y-%m-%d") if p.created_at else "" %}
     {% set m = post_metrics[p.id] %}
+    {% set fx = post_facets[p.id] %}
     <a class="media-card" href="/post/{{ p.id }}"
-       data-filter-row data-search="{{ ((p.caption or '') ~ ' ' ~ (p.cut.clip_title if (p.cut and p.cut.clip_title) else '') ~ ' ' ~ post_channel ~ ' ' ~ p.status ~ ' ' ~ (post_cat.label if post_cat else '')) | lower }}"
+       data-filter-row data-search="{{ ((p.caption or '') ~ ' ' ~ (p.cut.clip_title if (p.cut and p.cut.clip_title) else '') ~ ' ' ~ post_channel ~ ' ' ~ p.status ~ ' ' ~ (post_cat.label if post_cat else '') ~ ' ' ~ fx.search_extra) | lower }}"
        data-channel="{{ post_channel }}" data-status="{{ p.status }}"
        data-category="{{ post_category or '' }}"
+       data-shelf="{{ fx.shelf }}" data-rerun="{{ fx.rerun | join(',') }}"
+       data-tier="{{ fx.tier | join(',') }}" data-format="{{ fx.formats | join(',') }}"
+       data-subject="{{ fx.subjects | join(',') }}"
        data-date="{{ posted_on }}" data-sort-date="{{ posted_on }}"
        data-sort-title="{{ p.caption or '' }}"
        data-sort-category="{{ post_cat.label if post_cat else '' }}"
@@ -265,5 +296,24 @@
   {% endif %}
 </div>
 </div>{# /lib-panels #}
+
+<script>
+  // "More filters" disclosure: hidden controls sit out of matching entirely
+  // (toolbar.js isLive), so collapsing the row also releases its filters —
+  // refreshToolbarFilters makes that take effect immediately.
+  (function () {
+    var btn = document.getElementById('adv-toggle');
+    var row = document.getElementById('adv-filters');
+    if (!btn || !row) return;
+    btn.addEventListener('click', function () {
+      var open = row.hidden;
+      row.hidden = !open;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.classList.toggle('is-on', open);
+      btn.textContent = open ? 'Fewer filters' : 'More filters';
+      window.refreshToolbarFilters();
+    });
+  })();
+</script>
 
 {% endblock %}

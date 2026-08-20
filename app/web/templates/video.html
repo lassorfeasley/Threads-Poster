@@ -2,6 +2,7 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {% import "components/category.html" as catui %}
+{% import "components/tags.html" as tagui %}
 
 {# Steps ahead point at the most recent clip / post when one exists. #}
 {% set latest_cut = cut_rows[-1] if cut_rows else none %}
@@ -38,7 +39,7 @@
 <div class="video-ident">
   <h1 class="video-ident-title">{{ c.title }}</h1>
   <div class="meta">
-    {{ c.channel.call_sign }} · {{ c.channel.market }}
+    {{ c.channel.call_sign }}{% if c.channel.market %} · {{ c.channel.market }}{% endif %}
     · {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
     {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
     {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>
@@ -52,60 +53,8 @@
 
 <div class="video-layout">
 
-{# ============ MAIN: player + transcript ============ #}
+{# ============ MAIN: the video, then the clips cut from it ============ #}
 <div class="video-main">
-
-  {# Compact toolbar above the player — Approve stays visible for new videos. #}
-  <div class="video-meta stack-sm">
-    <div class="video-meta-row">
-      {{ catui.field(c.id, c.category, "/video/" ~ c.id, show_label=false) }}
-      <button type="button" class="btn ghost sm" id="score-visuals-btn" onclick="scoreVisuals()">
-        {{ "Re-tag traits" if c.visual_traits else "Tag traits" }}</button>
-      {% if c.description %}
-      <details class="video-desc">
-        <summary>Description</summary>
-        <div class="meta">{{ c.description[:1500] }}</div>
-      </details>
-      {% endif %}
-    </div>
-    {% if c.visual_traits or c.visual_rationale or c.format_tags or shelf_life %}
-    <div class="badges" id="badges">
-      {% for t in (c.format_tags or "").split(",") if t %}<span class="badge" title="format facet — production form, drives the scheduler's variety">{{ t }}</span>{% endfor %}
-      {% for t in c.visual_traits.split(",") if t %}<span class="badge info">{{ t }}</span>{% endfor %}
-      {% if shelf_life %}<span class="badge {{ 'hostile' if shelf_life == 'breaking' else ('score-hi' if shelf_life == 'timely' else 'supportive') }}"
-            title="Shelf life — how fast this stops being worth posting; drives scheduling urgency and expiry. {{ 'Auto-tagged on this content.' if shelf_life_tagged else 'Inherited from the category default (this video predates shelf-life tagging).' }} Correct it per post from the Scheduling panel on the post page.">{{ shelf_life }}</span>{% endif %}
-    </div>
-    <div class="meta" id="visual-line">{% if c.visual_rationale %}Tags: {{ c.visual_rationale }}{% endif %}</div>
-    {% else %}
-    <div class="badges" id="badges" hidden></div>
-    <div class="meta" id="visual-line" hidden></div>
-    {% endif %}
-
-    {% if c.status in ("new", "rejected", "approved") %}
-    <div class="btn-group" id="review-actions">
-      {% if c.status in ("new", "rejected") %}
-        <form class="inline" method="post" action="/video/{{ c.id }}/approve" id="approve-form">
-          <button class="approve" type="submit">Approve — download &amp; transcribe →</button>
-        </form>
-        {% if c.status == "new" %}
-        <form class="inline" method="post" action="/video/{{ c.id }}/reject">
-          <button class="reject">Reject</button>
-        </form>
-        {% endif %}
-      {% else %}
-        <span class="meta">Download in progress…</span>
-      {% endif %}
-    </div>
-    {% endif %}
-    <div id="approve-progress" style="display: none;">
-      <div class="badges" style="margin-bottom: 8px;">
-        <span class="badge info"><span class="dot"></span> downloading &amp; transcribing</span>
-      </div>
-      <div class="meta">Running in the background — you can leave this page. It opens the
-        trim editor automatically when the video is ready.</div>
-      <div class="meta" id="approve-dots" style="margin-top: 8px;">working…</div>
-    </div>
-  </div>
 
   <div class="card find-card video-find">
     {% if has_local %}
@@ -153,7 +102,171 @@
       </form>
     </div>
     {% endif %}
+  </div>
 
+  {# The approve gate sits under the player: nothing below it works until the
+     download lands, so it reads as the next step rather than a toolbar. #}
+  {% if c.status in ("new", "rejected", "approved") %}
+  <div class="btn-group" id="review-actions">
+    {% if c.status in ("new", "rejected") %}
+      <form class="inline" method="post" action="/video/{{ c.id }}/approve" id="approve-form">
+        <button class="approve" type="submit">Approve — download &amp; transcribe →</button>
+      </form>
+      {% if c.status == "new" %}
+      <form class="inline" method="post" action="/video/{{ c.id }}/reject">
+        <button class="reject">Reject</button>
+      </form>
+      {% endif %}
+    {% else %}
+      <span class="meta">Download in progress…</span>
+    {% endif %}
+  </div>
+  {% endif %}
+  <div id="approve-progress" style="display: none;">
+    <div class="badges" style="margin-bottom: 8px;">
+      <span class="badge info"><span class="dot"></span> downloading &amp; transcribing</span>
+    </div>
+    <div class="meta">Running in the background — you can leave this page. It opens the
+      trim editor automatically when the video is ready.</div>
+    <div class="meta" id="approve-dots" style="margin-top: 8px;">working…</div>
+  </div>
+
+  {# ---- Clips cut from this video ---- #}
+  <section class="video-section">
+    <div class="video-section-head">
+      <h2 class="video-section-title">Clips
+        {% if cut_rows %}<span class="crumb-count">{{ cut_rows|length }}</span>{% endif %}
+      </h2>
+      {% if state.scraped %}
+      <form method="post" action="/video/{{ c.id }}/cuts" class="inline">
+        <button class="approve sm">＋ New clip</button>
+      </form>
+      {% endif %}
+    </div>
+
+    {% if state.scraped %}
+    <label class="switch video-bookmark" style="gap: 10px;"
+           title="Keeps the video under “Selected to trim” on the dashboard until you turn it off.">
+      <input type="checkbox" id="multi-clip-toggle"
+             {% if c.multi_clip_potential %}checked{% endif %}
+             onchange="toggleMultiClip(this)">
+      <span class="switch-track"><span class="switch-thumb"></span></span>
+      <span style="margin-left: 10px;">Bookmark for additional clips{% if c.multi_clip_auto %}
+        <span class="meta">(suggested)</span>{% endif %}</span>
+    </label>
+
+    {% if not cut_rows %}
+    <div class="empty video-section-empty"><strong>No clips yet</strong>
+      Make your first clip to pick the segments you want to post.</div>
+    {% else %}
+    <div class="video-clip-list">
+      {% for row in cut_rows %}
+      <div class="video-clip">
+        <div class="video-clip-main">
+          <a class="video-clip-title" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
+            {{ row.cut.clip_title or "Untitled clip #" ~ loop.index }}</a>
+          <div class="badges">
+            {% if row.state.posted %}<span class="badge supportive">posted</span>
+            {% elif row.state.exported %}<span class="badge info">exported</span>
+            {% else %}<span class="badge score-lo">not trimmed</span>{% endif %}
+            {% if row.state.captioned %}<span class="badge">captioned</span>{% endif %}
+            {% if row.post_count %}<span class="badge" title="Posts from this clip">{{ row.post_count }} post{{ "s" if row.post_count != 1 }}</span>{% endif %}
+          </div>
+          <div class="meta">{{ row.cut.created_at.strftime("%b %-d %H:%M") if row.cut.created_at else "?" }}</div>
+          {% if row.recycle %}
+          {% set rc = row.recycle %}
+          <div class="meta">
+            {% if rc.overdue %}<span class="badge supportive">rerun eligible</span>
+            {% else %}Rerun eligible {{ rc.next_eligible.strftime("%b %-d") }}{% endif %}
+             · {{ rc.airings }} airing{{ "s" if rc.airings != 1 }}
+            {%- if rc.views_at_age > 0 %}
+             · <span title="{{ '{:,}'.format(rc.views_at_age) }} views in its first {{ rc.metric_age_hours }}h — that rank divides the base wait of {{ rc.base_quiet_days | round(0, 'ceil') | int }} days down to {{ rc.required_quiet_days | round(0, 'ceil') | int }}.">ranks above {{ (rc.rank * 100) | round | int }}% of posts</span>
+            {%- endif %}
+          </div>
+          {% endif %}
+        </div>
+        <div class="video-clip-actions">
+          <a class="btn sm {{ '' if row.state.posted else 'primary' }}"
+             href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
+            {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Edit →") }}</a>
+          <form method="post" action="/cut/{{ row.cut.id }}/delete"
+                data-async="Clip deleted" data-async-remove=".video-clip"
+                data-confirm="Delete this clip? Its draft/queued posts are removed; published posts are kept."
+                data-confirm-ok="Delete" data-confirm-variant="danger">
+            <button class="reject sm icon-btn" title="Delete this clip" aria-label="Delete clip">✕</button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% else %}
+    <div class="empty video-section-empty">
+      <strong>Clips unlock after download</strong>
+      {% if c.status in ("new", "rejected") %}
+        Approve the video to download &amp; transcribe it.
+      {% elif c.status == "approved" %}
+        Download in progress…
+      {% elif c.status == "failed" %}
+        Retry the download to continue.
+      {% endif %}
+    </div>
+    {% endif %}
+  </section>
+</div>
+
+{# ============ RAIL: how the video is classified, and what it says ============ #}
+<aside class="video-rail">
+  {% set fmt_tags = (c.format_tags or "").split(",")|map("trim")|select|list %}
+  {% set subj_tags = (c.visual_traits or "").split(",")|map("trim")|select|list %}
+
+  <div class="card tight">
+    {# Heading-free, matching the post page: sections divide with rules
+       instead of all-caps labels. #}
+    {{ catui.field(c.id, c.category, "/video/" ~ c.id, show_label=false) }}
+    {% if fmt_tags or subj_tags %}<hr class="div">{% endif %}
+
+    {{ tagui.facet_group("Format", "Production form — drives the scheduler's variety gate",
+                        fmt_tags) }}
+    {{ tagui.facet_group("Subject", "What's on screen — feeds per-trait performance learning",
+                        subj_tags) }}
+
+    {% if shelf_life %}
+    <hr class="div">
+    <ul class="tag-list">
+      {# The word "shelf life" rides along in the row: without the group label,
+         a bare "evergreen" would read as just another tag. #}
+      <li class="tag-row"><span class="tag-name" title="How fast this stops being worth posting — drives scheduling urgency and expiry.{{ ' Auto-tagged on this content.' if shelf_life_tagged else ' Inherited from the category default; this video predates shelf-life tagging.' }} Correct it per post from the post page.">{{ shelf_life }} shelf life</span></li>
+    </ul>
+    {% endif %}
+
+    {% if c.visual_rationale %}
+    <details class="meta" style="margin-top: 12px;">
+      <summary>AI rationale</summary>
+      <p style="margin: 4px 0 0;">{{ c.visual_rationale }}</p>
+    </details>
+    {% endif %}
+
+    {# Tags come from storyboard stills, so re-running is cheap and sometimes
+       worth it after the full download replaces the thumbnail-era guess. #}
+    <div class="tag-group">
+      <button type="button" class="btn sm" id="score-visuals-btn" onclick="scoreVisuals()">
+        {{ "Re-tag traits" if c.visual_traits else "Tag traits" }}</button>
+    </div>
+  </div>
+
+  {% if c.description %}
+  <div class="card tight">
+    <details class="video-desc">
+      <summary>Description</summary>
+      <div class="meta">{{ c.description[:1500] }}</div>
+    </details>
+  </div>
+  {% endif %}
+
+  <div class="card tight video-tx-card">
+    <strong>Transcript</strong>
     <div class="find-transcript">
       <div class="find-search">
         <svg class="find-search-ic" width="14" height="14" viewBox="0 0 24 24" fill="none"
@@ -179,110 +292,6 @@
       {% endif %}
     </div>
   </div>
-</div>
-
-{# ============ RAIL: clips + posts ============ #}
-<aside class="video-rail">
-  <div class="video-rail-head">
-    <h2 class="video-rail-title">Clips
-      {% if cut_rows %}<span class="crumb-count">{{ cut_rows|length }}</span>{% endif %}
-    </h2>
-    {% if state.scraped %}
-    <form method="post" action="/video/{{ c.id }}/cuts" class="inline">
-      <button class="approve sm">＋ New clip</button>
-    </form>
-    {% endif %}
-  </div>
-
-  {% if state.scraped %}
-  <label class="switch video-bookmark" style="gap: 10px;"
-         title="Keeps the video under “Selected to trim” on the dashboard until you turn it off.">
-    <input type="checkbox" id="multi-clip-toggle"
-           {% if c.multi_clip_potential %}checked{% endif %}
-           onchange="toggleMultiClip(this)">
-    <span class="switch-track"><span class="switch-thumb"></span></span>
-    <span style="margin-left: 10px;">Bookmark for additional clips{% if c.multi_clip_auto %}
-      <span class="meta">(suggested)</span>{% endif %}</span>
-  </label>
-
-  {% if not cut_rows %}
-  <div class="empty video-rail-empty"><strong>No clips yet</strong>
-    Make your first clip to pick the segments you want to post.</div>
-  {% else %}
-  <div class="video-clip-list">
-    {% for row in cut_rows %}
-    <div class="video-clip">
-      <div class="video-clip-main">
-        <a class="video-clip-title" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
-          {{ row.cut.clip_title or "Untitled clip #" ~ loop.index }}</a>
-        <div class="badges">
-          {% if row.state.posted %}<span class="badge supportive">posted</span>
-          {% elif row.state.exported %}<span class="badge info">exported</span>
-          {% else %}<span class="badge score-lo">not trimmed</span>{% endif %}
-          {% if row.state.captioned %}<span class="badge">captioned</span>{% endif %}
-          {% if row.post_count %}<span class="badge" title="Posts from this clip">{{ row.post_count }} post{{ "s" if row.post_count != 1 }}</span>{% endif %}
-        </div>
-        <div class="meta">{{ row.cut.created_at.strftime("%b %-d %H:%M") if row.cut.created_at else "?" }}</div>
-      </div>
-      <div class="video-clip-actions">
-        <a class="btn sm {{ '' if row.state.posted else 'primary' }}"
-           href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
-          {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Edit →") }}</a>
-        <form method="post" action="/cut/{{ row.cut.id }}/delete"
-              data-async="Clip deleted" data-async-remove=".video-clip"
-              data-confirm="Delete this clip? Its draft/queued posts are removed; published posts are kept."
-              data-confirm-ok="Delete" data-confirm-variant="danger">
-          <button class="reject sm icon-btn" title="Delete this clip" aria-label="Delete clip">✕</button>
-        </form>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  {% else %}
-  <div class="empty video-rail-empty">
-    <strong>Clips unlock after download</strong>
-    {% if c.status in ("new", "rejected") %}
-      Approve the video to download &amp; transcribe it.
-    {% elif c.status == "approved" %}
-      Download in progress…
-    {% elif c.status == "failed" %}
-      Retry the download to continue.
-    {% endif %}
-  </div>
-  {% endif %}
-
-  {% if posts %}
-  <section class="video-rail-posts">
-    <h2 class="video-rail-title">Posts
-      <span class="crumb-count">{{ posts|length }}</span>
-    </h2>
-    <div class="video-posts">
-      {% for p in posts %}
-      <div class="video-post">
-        <div class="video-post-main">
-          <div class="video-post-meta">
-            <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
-            <span class="meta">
-              {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
-              {% elif p.status == "publishing" %}publishing…
-              {% elif p.created_at %}added {{ p.created_at.strftime("%b %-d") }}
-              {% endif %}
-            </span>
-          </div>
-          <a class="video-post-caption" href="/post/{{ p.id }}" title="{{ p.caption }}">{{ p.caption or "(untitled)" }}</a>
-        </div>
-        <div class="video-post-actions">
-          <a class="sm" href="/post/{{ p.id }}">Details</a>
-          {% if p.cut_pk %}<a class="sm" href="/cut/{{ p.cut_pk }}?step=post">Clip</a>{% endif %}
-          {% if p.permalink %}<a class="sm" href="{{ p.permalink }}" target="_blank">Open ↗</a>{% endif %}
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </section>
-  {% endif %}
 </aside>
 
 </div>{# /.video-layout #}
@@ -296,7 +305,6 @@ async function scoreVisuals() {
     const r = await fetch('/video/{{ c.id }}/score-visuals', { method: 'POST' });
     const d = await r.json();
     if (!r.ok) { alert(d.error || 'Tagging failed'); btn.disabled = false; return; }
-    document.getElementById('visual-line').textContent = d.why ? 'Tags: ' + d.why : '';
     window.location.reload();
   } catch (e) { alert('Tagging failed: ' + e); btn.disabled = false; }
 }

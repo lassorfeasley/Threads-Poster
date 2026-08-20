@@ -14,13 +14,27 @@
 {% endset %}
 {{ ui.pagebar("", crumbs=tri_crumbs, actions=tri_actions) }}
 
-<div id="done" class="empty" style="display: none; padding: 56px 20px;">
-  <span class="icon">🎉</span>
-  <strong style="font-size: 16px;">Queue clear</strong>
-  <div class="meta" style="margin-top: 6px;">
-    <span id="done-stats"></span><br><br>
-    <button class="btn" id="undo-btn-done" onclick="undo()">Undo last</button>
-    <a class="btn primary" href="/">Back to dashboard</a>
+<div id="done" style="display: none;">
+  <div class="empty" style="padding: 40px 20px;">
+    <span class="icon">🎉</span>
+    <strong style="font-size: 16px;">Queue clear</strong>
+    <div class="meta" style="margin-top: 6px;">
+      <span id="done-stats"></span><br><br>
+      <button class="btn" id="undo-btn-done" onclick="undo()">Undo last</button>
+      <a class="btn primary" href="/">Back to dashboard</a>
+    </div>
+  </div>
+
+  {# Hand-off: what you just approved, so triage ends by walking into the
+     editor instead of bouncing off the dashboard to find these again. #}
+  <div id="done-approved" style="display: none;">
+    <div class="panel-head">
+      {# One text node: .panel-head h2 is a flex row, so separate spans here
+         would get gap-spaced away from the words around them. #}
+      <h2 id="done-approved-heading"></h2>
+    </div>
+    <div class="meta" id="done-approved-hint" style="margin-bottom: 12px;"></div>
+    <div id="done-cards" class="card-grid"></div>
   </div>
 </div>
 
@@ -91,16 +105,21 @@ function render() {
   if (idx >= queue.length) {
     triEl.style.display = 'none';
     doneEl.style.display = 'block';
+    // Hiding the iframe doesn't stop it — the last video keeps playing over
+    // the queue-clear screen until its document is actually torn down.
+    document.getElementById('player').src = 'about:blank';
     document.getElementById('done-stats').textContent =
       `${stats.approved} approved · ${stats.rejected} rejected · ${stats.skipped} skipped`;
     document.getElementById('progress').textContent = 'All done';
     setProgress(queue.length, queue.length);
     updateUndoButtons();
+    renderApproved();
     return;
   }
   const c = queue[idx];
   triEl.style.display = 'block';
   doneEl.style.display = 'none';
+  stopApprovedPolling();
   document.getElementById('player').src =
     `https://www.youtube-nocookie.com/embed/${c.video_id}?autoplay=1&mute=0`;
   document.getElementById('title').textContent = c.title;
@@ -115,6 +134,117 @@ function render() {
   updateUndoButtons();
   loadFilmstrip(c);
   prefetchNext();
+}
+
+// ---- Queue-clear hand-off: cards for what was just approved ----
+// Approving only kicks off the download, so these start as "getting ready" and
+// become editable as each scrape lands. Derived from `history` rather than a
+// list of its own, so undo takes a card back out for free.
+const byId = new Map(queue.map(c => [c.id, c]));
+const scrapeStatus = new Map();  // id -> last status seen from the server
+let approvedPoll = null;
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function approvedItems() {
+  return history.filter(h => h.action === 'approve')
+                .map(h => byId.get(h.id)).filter(Boolean);
+}
+
+function approvedCard(c) {
+  const status = scrapeStatus.get(c.id);
+  const ready = status === 'archived';
+  const failed = status === 'failed';
+  // Anything not finished points at the video page, which shows the download
+  // banner and forwards itself into the editor the moment the scrape lands.
+  const href = ready ? `/video/${c.id}/cut` : `/video/${c.id}`;
+  const badge = ready
+    ? '<span class="badge supportive">ready to edit</span>'
+    : (failed ? '<span class="badge hostile">scrape failed</span>'
+              : '<span class="badge info"><span class="dot"></span> getting ready</span>');
+  const thumb = c.thumb
+    ? `<img src="${esc(c.thumb)}" alt="" loading="lazy"
+            onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">`
+    : `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+         <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>`;
+  return `<div class="media-card is-clickable" tabindex="0" role="link"
+       onclick="location.href='${href}'"
+       onkeydown="if(event.key==='Enter'){location.href='${href}'}">
+    <div class="thumb-wrap${c.thumb ? '' : ' is-empty'}">
+      ${thumb}
+      <span class="thumb-badge">${badge}</span>
+      ${c.duration_short ? `<span class="thumb-dur">${esc(c.duration_short)}</span>` : ''}
+    </div>
+    <div class="mc-body">
+      <div class="item-title">${esc(c.title)}</div>
+      <div class="meta">${esc(c.channel)}</div>
+    </div>
+  </div>`;
+}
+
+function renderApproved() {
+  const wrap = document.getElementById('done-approved');
+  const items = approvedItems();
+  if (!items.length) {
+    wrap.style.display = 'none';
+    stopApprovedPolling();
+    return;
+  }
+  wrap.style.display = 'block';
+  document.getElementById('done-approved-heading').textContent =
+    `Just approved (${items.length})`;
+  const waiting = items.filter(c => scrapeStatus.get(c.id) !== 'archived'
+                                 && scrapeStatus.get(c.id) !== 'failed').length;
+  const failed = items.filter(c => scrapeStatus.get(c.id) === 'failed').length;
+  const failNote = failed
+    ? ` ${failed} download${failed === 1 ? '' : 's'} failed — open ${failed === 1 ? 'it' : 'them'} to retry.`
+    : '';
+  document.getElementById('done-approved-hint').textContent = waiting
+    ? `Still downloading and transcribing ${waiting} of ${items.length}` +
+      ` — each card opens the editor once it lands.${failNote}`
+    : (failed === items.length
+        ? failNote.trim()
+        : `Ready to trim. Pick one to start editing.${failNote}`);
+  document.getElementById('done-cards').innerHTML = items.map(approvedCard).join('');
+  if (waiting) startApprovedPolling(); else stopApprovedPolling();
+}
+
+function startApprovedPolling() {
+  if (approvedPoll) return;
+  approvedPoll = setInterval(pollApproved, 3000);
+}
+
+function stopApprovedPolling() {
+  if (!approvedPoll) return;
+  clearInterval(approvedPoll);
+  approvedPoll = null;
+}
+
+async function pollApproved() {
+  const waiting = approvedItems().filter(
+    c => scrapeStatus.get(c.id) !== 'archived' && scrapeStatus.get(c.id) !== 'failed');
+  if (!waiting.length) { stopApprovedPolling(); return; }
+  let changed = false;
+  await Promise.all(waiting.map(async (c) => {
+    try {
+      // The approve write is optimistic, so a poll can beat it to the server.
+      // Waiting on it keeps us from reading back a stale "new".
+      const p = pending.get(c.id);
+      if (p) { try { await p; } catch (e) { /* ignore */ } }
+      const r = await fetch(`/video/${c.id}/status`);
+      if (!r.ok) return;
+      const s = await r.json();
+      if (s.status && s.status !== scrapeStatus.get(c.id)) {
+        scrapeStatus.set(c.id, s.status);
+        if (s.status === 'archived' || s.status === 'failed') changed = true;
+      }
+    } catch (e) { /* keep polling */ }
+  }));
+  if (changed) renderApproved();
 }
 
 function traitBadge(t) {

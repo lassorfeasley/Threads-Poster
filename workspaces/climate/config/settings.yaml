@@ -125,6 +125,8 @@ vision:
     - aerial_or_sweeping_shot
     - chart_or_data_screen
     - text_heavy_lower_thirds
+    - animals
+    - celebrities
   # FORMAT trait vocabulary — the production form of the footage, independent
   # of its subject. This is the facet the scheduler's variety gate runs on
   # (scheduler.placement.facet: format) and where per-tag performance signal
@@ -143,6 +145,7 @@ vision:
     - press_conference_podium
     - low_motion_studio_segment
     - static_graphic_or_slideshow
+    - advertisement_or_commercial
   # Frames extracted from each posted clip for ground-truth trait annotation
   # (runs at queue time so the scheduler can place on the result).
   post_frames: 12
@@ -403,7 +406,7 @@ scheduler:
   # marks slots that needed relaxing).
   placement:
     # fifo | scored. Flipped to scored 2026-08-16 after validating against the
-    # replay sim and the placement preview; set back to fifo to revert.
+    # replay sim; set back to fifo to revert.
     mode: scored
     # Which facet the variety gate and penalty run on:
     #   category — the single programming category (coarse but always present)

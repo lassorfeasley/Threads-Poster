@@ -7,10 +7,10 @@
 <div class="card roadmap-card">
   <div class="card-title" style="margin-bottom: 6px;">North star</div>
   <p class="meta" style="margin: 0 0 10px;">
-    Keep improving the product as a local web UI (easy UX iteration). When distribution matters, package the same stack as a Mac app so customers never touch Python, yt-dlp, ffmpeg, or Whisper — those still run on <em>their</em> machine. Longer term: optional cloud for always-on publishing, shared workspaces, and fuller autopilot. Prefer notarized direct download over Mac App Store; do not plan a Swift rewrite.
+    Keep improving the product as a local web UI (easy UX iteration). Host the dashboard so other people can use it without running Python — media creation stays local (Mac app) or becomes upload-your-own. Longer term: optional always-on publishing, shared workspaces, and fuller autopilot. Prefer a hosted web app over Mac App Store; do not plan a Swift rewrite.
   </p>
   <p class="meta" style="margin: 0;">
-    Autonomy goal: the app can operate a Threads account (queue, schedule, engage) with human taste checks as needed. Local media creation and cloud/always-on publishing can stay split — same shape as today’s local factory + headless publisher.
+    Autonomy goal: the app can operate a Threads account (queue, schedule, engage) with human taste checks as needed. Local media creation and cloud/always-on publishing can stay split — same shape as today's local factory + headless publisher.
   </p>
 </div>
 
@@ -29,7 +29,7 @@
       <span class="badge supportive">Done</span>
       <div>
         <strong>Configuration IA: Configure vs Optimize</strong>
-        <span class="meta">Configure is the pipeline in setup order — Brand &amp; audience, Channels, Keywords, Connections (who you are, what you watch, what you catch, where you publish). Optimize is the ongoing loop — Analytics, Style guide, Traits. “Threads account” became <strong>Connections</strong>: it manages Instagram too, and Threads is an integration, not the product identity. Open IA questions: first reply, triage, and categories still have no sidebar home.</span>
+        <span class="meta">Configure is the pipeline in setup order — Brand &amp; audience, Channels, Keywords, Connections (who you are, what you watch, what you catch, where you publish). Optimize is the ongoing loop — Analytics, Style guide, Traits. "Threads account" became <strong>Connections</strong>: it manages Instagram too, and Threads is an integration, not the product identity. Open IA questions: first reply, triage, and categories still have no sidebar home.</span>
       </div>
     </li>
     <li>
@@ -40,10 +40,31 @@
       </div>
     </li>
     <li>
+      <span class="badge supportive">Done</span>
+      <div>
+        <strong>Multi-workspace isolation</strong>
+        <span class="meta">Each workspace (<code>workspaces/&lt;slug&gt;/</code>) has its own config, data, Postgres database, Supabase storage, and Meta credentials. The supervisor starts one dashboard process per enabled workspace; the sidebar switches between them. New workspace scaffolding via <code>python run.py workspace create &lt;slug&gt;</code>. Currently running: climate (port 8321) and pilates (port 8322).</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge supportive">Done</span>
+      <div>
+        <strong>Always-on cloud publishing</strong>
+        <span class="meta">Posts go out when the laptop is closed. Fly.io runs one always-on worker per workspace (<code>python run.py scheduler --loop</code>, shared-cpu-1x / 256 MB) that ticks posting windows and polls metrics. GitHub Actions cron (every 30 min) is the backup layer. Window claims are atomic, so overlapping schedulers (local dashboard + Fly + Actions) never double-post. Clips reach the headless publisher via Supabase Storage signed URLs — no local files needed.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge supportive">Done</span>
+      <div>
+        <strong>Headless channel monitoring</strong>
+        <span class="meta">GitHub Actions cron (every 6 hours) runs <code>python run.py monitor</code> per workspace: poll channels &rarr; keyword filter &rarr; LLM relevance &rarr; vision score &rarr; store candidates in Postgres. New videos appear in the dashboard even when the operator is away. Safe to overlap with manual dashboard runs (video IDs are unique).</span>
+      </div>
+    </li>
+    <li>
       <span class="badge info">Next</span>
       <div>
         <strong>Parameterize LLM prompts from brand config</strong>
-        <span class="meta">The larger half: every prompt still hardcodes climate / local-TV / Renewables.org — relevance scoring, categories, clip window, caption draft, Reel hook, editorial coach, clip title, digest. Feed them from Brand &amp; audience instead. Improves today’s use even before selling.</span>
+        <span class="meta">The larger half: every prompt still hardcodes climate / local-TV / Renewables.org — relevance scoring, categories, clip window, caption draft, Reel hook, editorial coach, clip title, digest. Feed them from Brand &amp; audience instead. Improves today's use even before selling.</span>
       </div>
     </li>
     <li>
@@ -57,8 +78,50 @@
 </div>
 
 <div class="card roadmap-card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 4px;">Phase 1 — Distribute as a Mac app</div>
-  <p class="meta" style="margin: 0 0 12px;">Same local pipeline; hide the plumbing. Build when UX feels solid — not before.</p>
+  <div class="card-title" style="margin-bottom: 4px;">Phase 1 — Host the dashboard</div>
+  <p class="meta" style="margin: 0 0 12px;">Put the FastAPI app on the internet so a second person can use it without cloning the repo. The dev loop stays local (<code>python run.py dashboard</code>); hosted is a deploy target, not a dev environment. Media creation (yt-dlp, ffmpeg, Whisper) stays local or becomes upload-your-own — the hosted app never downloads YouTube videos. <strong>Deliberately deferred</strong> (Aug 2026): finish the Phase 0 latency pass first — hosting won't fix UI latency (the cost is remote-Postgres round trips, which a hosted UI pays too), and there's no second user waiting yet.</p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>Deploy the dashboard to Fly (or Railway / Render)</strong>
+        <span class="meta">The same FastAPI + Jinja app that runs locally, served over HTTPS. Already talks to Postgres and Supabase — no SQLite dependency on the server. One Fly app per workspace (or a single app with workspace routing). Add a <code>Dockerfile.web</code> and an <code>[http_service]</code> block. Config files (<code>workspaces/&lt;slug&gt;/config/</code>) ship in the image; secrets come from <code>fly secrets set</code>. The existing Fly scheduler workers keep running alongside.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>Auth gate (even for one user)</strong>
+        <span class="meta">The dashboard has no login today — it binds to <code>127.0.0.1</code> and trusts the operator. Hosting it means adding an auth wall before anything else goes public. Simplest v1: a single shared password or invite-only magic link (no user model yet). Just enough to keep the internet out while you use it yourself over HTTPS.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>Real HTTPS OAuth callback (kill paste-code)</strong>
+        <span class="meta">Pulled forward: it's a small, independent cloud endpoint with a solo payoff today — it kills the paste-the-<code>?code=</code> ritual on Connections — and App Review needs it anyway for a reviewable demo. Replace "authorize &rarr; broken localhost page &rarr; paste <code>?code=</code>" with a hosted redirect (e.g. <code>https://yourproduct.com/threads/callback</code>) that exchanges the code server-side. Becomes trivial once the dashboard itself is hosted — the callback is just another route.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Upload-your-own-clip flow</strong>
+        <span class="meta">Today clips are created locally (download &rarr; trim &rarr; subtitle &rarr; export &rarr; upload to Supabase). A hosted user with no local pipeline needs a way to bring their own video: upload a file, write a caption, queue it. The triage/trim/subtitle workflow stays local-only for now; this just adds a "bring a finished clip" entry point so the hosted dashboard is useful on its own for someone who already has video.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>White-label the clip output</strong>
+        <span class="meta">App name and logo already ship on Brand &amp; audience; what remains is the clip's look — subtitle colors and the bundled Funnel font are still the Renewables.org look, hardcoded in <code>settings.yaml</code> / <code>app/subtitles.py</code>. Per-workspace colors and fonts only pay off when someone else runs the app, so this sits with distribution, not Phase 0.</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Phase 1b — Mac app (optional, parallel track)</div>
+  <p class="meta" style="margin: 0 0 12px;">Same local pipeline; hide the plumbing. Only matters if local media creation needs to ship to non-developers. Not a prerequisite for multi-user — the hosted dashboard is.</p>
   <ul class="roadmap-list">
     <li>
       <span class="badge">Later</span>
@@ -78,89 +141,68 @@
       <span class="badge">Later</span>
       <div>
         <strong>Release discipline (the actual cost of being an app)</strong>
-        <span class="meta">The dev loop stays the browser app — packaging is a distribution artifact, not a dev environment. One-time: signing, notarization, and a build pipeline. Per release: smoke-test the signed artifact on a clean machine (bundled-Python paths, Gatekeeper, arm64 + Intel), and keep DB migrations additive / forward-safe (already the <code>_ensure_new_columns</code> habit) since updates run against customers’ existing <code>app.db</code>. Add a log-export / diagnostics button once there are users on machines we can’t see.</span>
-      </div>
-    </li>
-    <li>
-      <span class="badge">Later</span>
-      <div>
-        <strong>Licensing / seats (solo first)</strong>
-        <span class="meta">Simple paid license is enough for v1. Multi-seat collaboration waits on Phase 2.</span>
-      </div>
-    </li>
-    <li>
-      <span class="badge">Later</span>
-      <div>
-        <strong>White-label the clip output</strong>
-        <span class="meta">App name and logo already ship on Brand &amp; audience; what remains is the clip’s look — subtitle colors and the bundled Funnel font are still the Renewables.org look, hardcoded in <code>settings.yaml</code> / <code>app/subtitles.py</code>. Per-workspace colors and fonts only pay off when someone else runs the app, so this sits with distribution, not Phase 0.</span>
-      </div>
-    </li>
-    <li>
-      <span class="badge">Later</span>
-      <div>
-        <strong>Customer Threads connect (no Meta Developer for them)</strong>
-        <span class="meta">Customers click Connect Threads, log in with their normal Instagram/Threads account on Meta’s consent screen, and grant permissions — like “Sign in with Google.” They never open developers.facebook.com, create an app, copy secrets, register redirect URIs, or accept tester invites. <em>You</em> own one product Meta app; App ID/Secret stay server-side. Can run in parallel with packaging (see Meta section below).</span>
+        <span class="meta">The dev loop stays the browser app — packaging is a distribution artifact, not a dev environment. One-time: signing, notarization, and a build pipeline. Per release: smoke-test the signed artifact on a clean machine (bundled-Python paths, Gatekeeper, arm64 + Intel), and keep DB migrations additive / forward-safe (already the <code>_ensure_new_columns</code> habit) since updates run against customers' existing <code>app.db</code>. Add a log-export / diagnostics button once there are users on machines we can't see.</span>
       </div>
     </li>
   </ul>
 </div>
 
 <div class="card roadmap-card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 4px;">Meta / Threads for customers (prerequisite for anyone else’s account)</div>
+  <div class="card-title" style="margin-bottom: 4px;">Meta / Threads for customers (prerequisite for anyone else's account)</div>
   <p class="meta" style="margin: 0 0 10px;">
-    Today’s flow is single-operator + tester invite + paste OAuth code from <code>https://localhost/…</code>. Productized, that admin stays with us once; customers only do OAuth consent. <strong>Sequencing decision:</strong> stay in tester mode and improve the product solo; trigger App Review when a real second user appears. Approval is likely — these scopes are the textbook third-party publishing bundle, and review judges permission usage shown in a working demo, not where the content comes from — but budget one resubmission cycle.
+    Today's flow is single-operator + tester invite + paste OAuth code from <code>https://localhost/&hellip;</code>. Productized, that admin stays with us once; customers only do OAuth consent. <strong>Sequencing decision:</strong> stay in tester mode and improve the product solo; trigger App Review when a real second user appears. Approval is likely — these scopes are the textbook third-party publishing bundle, and review judges permission usage shown in a working demo, not where the content comes from — but budget one resubmission cycle.
   </p>
   <p class="meta" style="margin: 0 0 12px;">
-    Bigger risk than review: posting broadcasters’ footage is an account-level IP exposure (complaints / strikes against the Threads or Instagram account), independent of API approval — and amplified once customers pick the source channels. Also: Reels require the customer’s Instagram account to be a (free) <em>professional</em> account; Threads takes any normal account.
+    Bigger risk than review: posting broadcasters' footage is an account-level IP exposure (complaints / strikes against the Threads or Instagram account), independent of API approval — and amplified once customers pick the source channels. Also: Reels require the customer's Instagram account to be a (free) <em>professional</em> account; Threads takes any normal account.
   </p>
   <ul class="roadmap-list">
     <li>
       <span class="badge">Later</span>
       <div>
         <strong>One product Meta app + App Review + publish</strong>
-        <span class="meta">Leave “testers only.” Get Advanced Access / review for the scopes we already use: <code>threads_basic</code>, <code>threads_content_publish</code>, <code>threads_manage_replies</code>, <code>threads_read_replies</code>, <code>threads_manage_insights</code>. Use the Threads app ID/secret (not the generic Meta app ID). Platform checklist: privacy policy URL, data-deletion callback/instructions, deauthorize callback, app icon, plus a demo/screencast showing every permission in use. Business Verification has weeks of lead time (documents, possibly an entity) — start that paperwork one step earlier than feels necessary; it parallelizes for free. After publish, any Threads user can authorize — no tester role.</span>
+        <span class="meta">Leave "testers only." Get Advanced Access / review for the scopes we already use: <code>threads_basic</code>, <code>threads_content_publish</code>, <code>threads_manage_replies</code>, <code>threads_read_replies</code>, <code>threads_manage_insights</code>. Use the Threads app ID/secret (not the generic Meta app ID). Platform checklist: privacy policy URL, data-deletion callback/instructions, deauthorize callback, app icon, plus a demo/screencast showing every permission in use. Business Verification has weeks of lead time (documents, possibly an entity) — start that paperwork one step earlier than feels necessary; it parallelizes for free. After publish, any Threads user can authorize — no tester role.</span>
       </div>
     </li>
     <li>
-      <span class="badge info">Next</span>
+      <span class="badge">Later</span>
       <div>
-        <strong>Real HTTPS OAuth callback (kill paste-code)</strong>
-        <span class="meta">Pulled forward: it’s a small, independent cloud endpoint with a solo payoff today — it kills the paste-the-<code>?code=</code> ritual on Connections — and App Review needs it anyway for a reviewable demo. Replace “authorize → broken localhost page → paste <code>?code=</code>” with a hosted redirect (e.g. <code>https://yourproduct.com/threads/callback</code>) that exchanges the code server-side. Mac app still needs this: Meta wants HTTPS redirects, so a small cloud OAuth broker (or license backend) completes the handshake and returns the token to the local app — customers still never configure Meta.</span>
+        <strong>Customer Threads connect (no Meta Developer for them)</strong>
+        <span class="meta">Customers click Connect Threads, log in with their normal Instagram/Threads account on Meta's consent screen, and grant permissions — like "Sign in with Google." They never open developers.facebook.com, create an app, copy secrets, register redirect URIs, or accept tester invites. <em>You</em> own one product Meta app; App ID/Secret stay server-side.</span>
       </div>
     </li>
     <li>
       <span class="badge">Later</span>
       <div>
         <strong>Per-workspace (or per-user) token storage</strong>
-        <span class="meta">Stop the single global <code>AppToken(name=&quot;threads&quot;)</code>. Store long-lived Threads tokens keyed by workspace/user + Threads user id; keep refresh (~60d tokens, refresh when stale). Headless publish (Fly / Actions / scheduler) uses that workspace’s token. Enforce Threads’ ~250 API posts / 24h per profile in product UX.</span>
+        <span class="meta">Stop the single global <code>AppToken(name=&quot;threads&quot;)</code>. Store long-lived Threads tokens keyed by workspace/user + Threads user id; keep refresh (~60d tokens, refresh when stale). Headless publish (Fly / Actions / scheduler) uses that workspace's token. Enforce Threads' ~250 API posts / 24h per profile in product UX.</span>
       </div>
     </li>
     <li>
       <span class="badge">Later</span>
       <div>
         <strong>Product account vs Threads connection</strong>
-        <span class="meta">Optional light product login (license key or email) for the Mac app / workspace; Threads remains a connected integration, not the product identity. Same pattern later for YouTube if needed.</span>
+        <span class="meta">Optional light product login (license key or email) for the workspace; Threads remains a connected integration, not the product identity. Same pattern later for YouTube if needed.</span>
       </div>
     </li>
   </ul>
 </div>
 
 <div class="card roadmap-card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 4px;">Phase 2 — Autopilot &amp; optional cloud</div>
-  <p class="meta" style="margin: 0 0 12px;">Run the account with less babysitting; keep scrape/Whisper local unless a deliberate decision says otherwise.</p>
+  <div class="card-title" style="margin-bottom: 4px;">Phase 2 — Multi-user &amp; deeper autopilot</div>
+  <p class="meta" style="margin: 0 0 12px;">Run other people's accounts; let the app do more on its own.</p>
   <ul class="roadmap-list">
     <li>
       <span class="badge">Later</span>
       <div>
-        <strong>Stronger unattended publishing</strong>
-        <span class="meta">Durable queue + scheduler so the account keeps posting when the operator isn’t clicking. Mac-on is fine for early autopilot; cloud worker (like today’s Fly / Actions path) for set-and-forget.</span>
+        <strong>User accounts &amp; workspace provisioning</strong>
+        <span class="meta">A signup flow creates a workspace, its Postgres schema, and its Supabase storage bucket. Today workspaces are scaffolded by <code>python run.py workspace create</code> and configured by hand — this automates that path for someone who isn't you. Licensing / seats layer goes here.</span>
       </div>
     </li>
     <li>
       <span class="badge">Later</span>
       <div>
         <strong>Shared workspaces (if teams matter)</strong>
-        <span class="meta">User accounts → workspace owns channels, brand, and one Threads connection. Local apps claim download/trim jobs and upload finished clips. Triage can be multiplayer; media stays on someone’s machine.</span>
+        <span class="meta">User accounts &rarr; workspace owns channels, brand, and one Threads connection. Local apps claim download/trim jobs and upload finished clips. Triage can be multiplayer; media stays on someone's machine.</span>
       </div>
     </li>
   </ul>
@@ -186,31 +228,27 @@
     <li>
       <span class="badge hostile">No</span>
       <div>
-        <strong>Separate “companion app” while still selling pure hosted web</strong>
-        <span class="meta">Unnecessary if the Mac app <em>is</em> the product. A browser-only hosted UI plus a side agent is the fallback if we ever need teams-on-web with local media — not the plan for v1.</span>
-      </div>
-    </li>
-    <li>
-      <span class="badge hostile">No</span>
-      <div>
         <strong>Ask customers for Instagram/Threads passwords</strong>
-        <span class="meta">Not allowed and not needed. Only Meta OAuth through <em>our</em> reviewed app. No scraping credentials, no “paste your password.”</span>
+        <span class="meta">Not allowed and not needed. Only Meta OAuth through <em>our</em> reviewed app. No scraping credentials, no "paste your password."</span>
       </div>
     </li>
     <li>
       <span class="badge hostile">No</span>
       <div>
         <strong>Make each customer create their own Meta developer app</strong>
-        <span class="meta">That is today’s personal-setup tax. Distribution means we absorb Meta console admin once; customers only authorize.</span>
+        <span class="meta">That is today's personal-setup tax. Distribution means we absorb Meta console admin once; customers only authorize.</span>
       </div>
     </li>
   </ul>
 </div>
 
 <div class="card roadmap-card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 6px;">Why local scrape / Whisper still “feel” seamless</div>
+  <div class="card-title" style="margin-bottom: 6px;">Architecture: what runs where</div>
+  <p class="meta" style="margin: 0 0 10px;">
+    Today you never "installed a companion" because you <em>are</em> the runtime (<code>python run.py dashboard</code>). The product already splits into a local factory (yt-dlp, ffmpeg, Whisper — heavy, on your Mac) and headless cloud services (scheduler on Fly, monitor on Actions — light, always on). Hosting the dashboard is the next layer: the same FastAPI app, served over HTTPS, talking to the same Postgres and Supabase it already uses. The dev loop does not change — <code>python run.py dashboard</code> stays the development environment; the hosted deploy is a build artifact.
+  </p>
   <p class="meta" style="margin: 0;">
-    Today you never “installed a companion” because you <em>are</em> the runtime (<code>python run.py dashboard</code>). A packaged Mac app preserves that: one install, browser-shaped UI, heavy work on-device. Customers should not need Meta Developer setup or multiple product accounts for the core loop — Threads (and later YouTube) show up as connected integrations on one workspace after a normal OAuth consent.
+    Customers should not need Meta Developer setup or multiple product accounts for the core loop — Threads (and later YouTube) show up as connected integrations on one workspace after a normal OAuth consent.
   </p>
 </div>
 

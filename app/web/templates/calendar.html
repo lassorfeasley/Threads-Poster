@@ -7,16 +7,14 @@
   </span>
 {% endmacro %}
 {% import "components/toolbar.html" as ui %}
-{% set cal_actions %}
-  <a class="btn" href="/calendar/placement-preview"
-     title="Preview the scored posting order beside the live FIFO order">Placement preview</a>
-  <div class="segmented cal-viewtoggle" role="tablist" aria-label="Switch calendar view">
+{% set cal_views %}
+  <div class="segmented sm cal-viewtoggle" role="tablist" aria-label="Switch calendar view">
     <button type="button" class="seg-btn is-active" data-view="calendar" role="tab" aria-selected="true">Calendar</button>
     <button type="button" class="seg-btn" data-view="queue" role="tab" aria-selected="false">Queue
       {% if queue_count %}<span class="seg-count">{{ queue_count }}</span>{% endif %}</button>
   </div>
 {% endset %}
-{{ ui.pagebar("Calendar", actions=cal_actions) }}
+{{ ui.pagebar("", views=cal_views) }}
 
 <div class="cal-layout" id="cal-layout">
   <section class="cal-month" id="view-calendar">

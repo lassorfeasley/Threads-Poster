@@ -45,6 +45,17 @@ Optional extras:
   **Storage** (clip hosting for Threads) is independent of which database you
   use — keep `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` either way.
 
+  Measured on the climate workspace (Aug 2026): the raw round trip to
+  Supabase is ~85ms, so a 24-query page like the calendar costs ~2.3s remote
+  vs ~6ms on SQLite. For pure UI iteration, point `DATABASE_URL` at a SQLite
+  copy (or unset it); switch back to Postgres when you need the live queue.
+
+- **`SCHEDULER_EMBEDDED=false`**: skips the dashboard's in-process scheduler
+  thread. Use it when the Fly worker owns publishing (no reason to tick twice)
+  or in a dev session that must never publish. Overlap is safe either way —
+  the window claim is atomic — this is about not paying for ticks, metric
+  polls, and annotation passes inside the UI process.
+
 ### API keys (`.env`)
 
 | Variable | What it is |

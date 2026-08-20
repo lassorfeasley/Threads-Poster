@@ -161,12 +161,13 @@
    (value, label) pairs. Inside a server form the checkboxes post under `name`
    and apply on close; with filter_target they match data-<key> on rows any-of. #}
 {% macro combo(name, options, selected=[], label=none, all_label=none,
-               filter_target=none, filter_key=none) %}
+               filter_target=none, filter_key=none, filter_mode=none) %}
 <div class="tb-field tb-combo">
   {% if label %}<span class="tb-label">{{ label }}</span>{% endif %}
   <details class="combo"
            {% if filter_target %}data-filter-input data-filter-target="{{ filter_target }}"
-           data-filter-key="{{ filter_key or name }}"{% endif %}>
+           data-filter-key="{{ filter_key or name }}"{% endif %}
+           {% if filter_mode %}data-filter-mode="{{ filter_mode }}"{% endif %}>
     <summary class="combo-summary">
       <span data-combo-label data-combo-empty="{{ all_label or ('All ' ~ name) }}">{{ all_label or ('All ' ~ name) }}</span>
       <svg class="combo-caret" width="10" height="6" viewBox="0 0 10 6" fill="none"
@@ -190,12 +191,13 @@
 
 {# Native select that submits its form on change (server model) or filters a list.
    `options` is a list of values or (value, label) pairs. #}
-{% macro select(name, options, selected='', label=none, submit=true, filter_target=none, filter_key=none, all_label=none) %}
+{% macro select(name, options, selected='', label=none, submit=true, filter_target=none, filter_key=none, all_label=none, filter_mode=none) %}
 <label class="tb-field tb-select">
   {% if label %}<span class="tb-label">{{ label }}</span>{% endif %}
   <select name="{{ name }}"
           {% if submit %}data-submit-on-change{% endif %}
-          {% if filter_target %}data-filter-input data-filter-target="{{ filter_target }}" data-filter-key="{{ filter_key or name }}"{% endif %}>
+          {% if filter_target %}data-filter-input data-filter-target="{{ filter_target }}" data-filter-key="{{ filter_key or name }}"{% endif %}
+          {% if filter_mode %}data-filter-mode="{{ filter_mode }}"{% endif %}>
     {% if all_label is not none %}<option value="">{{ all_label }}</option>{% endif %}
     {% for opt in options %}
       {% if opt is string %}

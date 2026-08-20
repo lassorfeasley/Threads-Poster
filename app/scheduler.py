@@ -1199,6 +1199,13 @@ def _filler_rotation(session, cfg: dict) -> tuple[list[dict], dict[int, dt.date]
             "airings": len(airings),
             "required_quiet_days": cfg["min_quiet_days"] * growth / (1.0 + rank),
             "candidate_pk": last.candidate_pk,
+            # Performance receipt for the UI: what set this cut's cadence.
+            # base_quiet_days is the wait before the performance division —
+            # the gap between it and required_quiet_days IS the rank's effect.
+            "rank": rank,
+            "views_at_age": best,
+            "base_quiet_days": cfg["min_quiet_days"] * growth,
+            "metric_age_hours": age_hours,
         })
     # Stable order so ties in the picker resolve identically on every runner.
     facts.sort(key=lambda f: f["cut"].id)
@@ -1274,16 +1281,33 @@ def recycle_overview(session) -> dict[int, dict]:
         return out
     facts, _ = _filler_rotation(session, cfg)
     today = utcnow().date()
+    # The repost rotation's performance bar, when that feature is on — lets
+    # the page say a cut also qualifies for proactive "proven winner" re-airs
+    # rather than only filler. Rank comparison mirrors _repost_pool's
+    # value-threshold check closely enough for display.
+    repost_cfg = _repost_config()
+    repost_pct = float(repost_cfg["percentile"]) if repost_cfg else None
     out = {}
     for f in facts:
         required = float(f["required_quiet_days"])
         next_at = f["last_aired"] + dt.timedelta(days=math.ceil(required))
+        rank = float(f["rank"])
         out[f["cut"].id] = {
             "airings": f["airings"],
             "last_aired": f["last_aired"],
             "required_quiet_days": required,
             "next_eligible": next_at,
             "overdue": today >= next_at,
+            "quiet_days": (today - f["last_aired"]).days,
+            "rank": rank,
+            "views_at_age": f["views_at_age"],
+            "base_quiet_days": float(f["base_quiet_days"]),
+            "metric_age_hours": f["metric_age_hours"],
+            "airing_growth": cfg["airing_growth"],
+            "repost_percentile": repost_pct,
+            "proven_winner": (repost_pct is not None
+                              and rank >= repost_pct / 100.0
+                              and f["views_at_age"] > 0),
         }
     _recycle_ui_cache = (time.monotonic(), out)
     return out
@@ -2234,63 +2258,6 @@ def projected_slot_for_post(session, post_id: int, horizon_days: int = 60) -> di
         if entry.get("post_id") == post_id and entry["kind"] == "queued":
             return entry
     return None
-
-
-def placement_preview(session, days: int = 14) -> dict:
-    """FIFO and scored plans side by side over the next ``days``, so scored
-    mode can be judged against the live order before it is switched on.
-
-    Both plans are computed from the same queue snapshot; the scored one is
-    forced even while the live mode is fifo. Pins land identically in both.
-    """
-    settings = load_settings()
-    tz = _tz()
-    now = utcnow()
-    today = now.astimezone(tz).date()
-    state = _get_state(session)
-    upcoming = _upcoming_window_slots(
-        today, today + dt.timedelta(days=days),
-        now=now, last_window_key=state.last_window_key or "",
-    )
-    keys = [k for k, _, _ in upcoming]
-    posts = session.execute(
-        select(ThreadsPost)
-        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
-                 selectinload(ThreadsPost.cut))
-        .where(ThreadsPost.status == STATUS_QUEUED)
-        .order_by(ThreadsPost.created_at.asc())
-    ).scalars().all()
-
-    fifo = assign_posts_to_windows(list(posts), keys)
-    ctx = build_placement_context(session, list(posts), force=True)
-    scored = assign_posts_to_windows(list(posts), keys, ctx=ctx)
-
-    rows = []
-    for (key, win_utc, _idx), f, s in zip(upcoming, fifo, scored):
-        if f is None and s is None:
-            continue
-        local = win_utc.astimezone(tz)
-        decision = ctx.decisions.get(key)
-        rows.append({
-            "window_key": key,
-            "when": local.strftime("%a %b %-d · %-I:%M %p"),
-            "fifo_id": f.id if f else None,
-            "fifo_title": _post_display_title(f) if f else "",
-            "scored_id": s.id if s else None,
-            "scored_title": _post_display_title(s) if s else "",
-            "differs": (f.id if f else None) != (s.id if s else None),
-            "relax_step": (decision.relax_step
-                           if decision is not None and not decision.pinned else None),
-            "pinned": bool(decision is not None and decision.pinned),
-            "score_detail": _score_detail(decision),
-        })
-    return {
-        "rows": rows,
-        "mode": str(settings.get("scheduler.placement.mode", "fifo")).lower(),
-        "facet": str(settings.get("scheduler.placement.facet", "category")).lower(),
-        "queue_count": len(posts),
-        "differences": sum(1 for r in rows if r["differs"]),
-    }
 
 
 def run_tick() -> None:

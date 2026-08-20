@@ -403,7 +403,7 @@ scheduler:
   # marks slots that needed relaxing).
   placement:
     # fifo | scored. Flipped to scored 2026-08-16 after validating against the
-    # replay sim and the placement preview; set back to fifo to revert.
+    # replay sim; set back to fifo to revert.
     mode: scored
     # Which facet the variety gate and penalty run on:
     #   category — the single programming category (coarse but always present)

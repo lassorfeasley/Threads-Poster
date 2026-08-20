@@ -2,6 +2,8 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {% import "components/category.html" as catui %}
+{% import "components/tags.html" as tagui %}
+
 {% set post_badge %}{% if source == "threads" %}<span class="badge">Threads history</span>{% endif %}{% endset %}
 {% set post_crumbs %}
 {{ ui.workflow_crumbs('post',
@@ -32,38 +34,19 @@
 <div class="canvas canvas-wide">
 {{ ui.pagebar("", crumbs=post_crumbs, actions=post_actions) }}
 
-{# Everything editorial lives on the preview itself — stats in the engagement
-   row, replies threaded under the first comment. The rail carries the
-   scheduling controls (shelf life, recycling outlook) and errors, so they sit
-   beside the post instead of below the fold. #}
-{% set has_side = error or shelf or recycle %}
+{# The preview replicates the post as it will appear on Threads. The rail
+   carries classification (category, facets), publishing controls, recycling,
+   and errors — editorial metadata that doesn't belong in the content preview. #}
+{% set editable = status in ("draft", "queued", "failed") %}
+{% set has_side = error or shelf or candidate_id or format_tags or footage_traits or repost_of or trait_vocab or (recycle and recycle.state != 'off') or show_ig_switch or editable %}
 <div class="post-layout{{ ' no-side' if not has_side }}">
 <div class="post-main">
 {# The main column replicates the post as it will appear on Threads: one
    surface, caption + video as the post, the attribution as the first comment.
    Text is edited in place; actions hide behind each item's "…" menu. #}
-{% set editable = status in ("draft", "queued", "failed") %}
 {% set handle = account_name or "you" %}
 <div class="post-preview">
 <div class="thread-preview">
-
-  {% if candidate_id or format_tags or footage_traits or shelf_life or repost_of %}
-  {# ---- Programming category (lives on the source video; shared by all its
-       cuts/posts) plus the auto-tagged placement facets — a quiet strip
-       above the post itself. ---- #}
-  <div class="preview-topbar">
-    {% if candidate_id %}{{ catui.field(candidate_id, category, "/post/" ~ pid, show_label=false) }}{% endif %}
-    {% if format_tags or footage_traits or shelf_life or repost_of %}
-    <div class="badges">
-      {% for t in format_tags %}<span class="badge" title="format facet — production form, drives scheduling variety">{{ t }}</span>{% endfor %}
-      {% for t in footage_traits %}<span class="badge info" title="footage trait (subject facet)">{{ t }}</span>{% endfor %}
-      {% if shelf_life %}<a class="badge {{ 'hostile' if shelf_life == 'breaking' else ('score-hi' if shelf_life == 'timely' else 'supportive') }}" href="#scheduling"
-            title="Shelf life — drives scheduling urgency and expiry. {{ 'Auto-tagged on this content.' if shelf_life_tagged else 'Inherited from the category default (this video predates shelf-life tagging).' }} Change it in the Scheduling panel →">{{ shelf_life }}</a>{% endif %}
-      {% if repost_of %}<a class="badge" href="/post/{{ repost_of }}" title="Re-airing of a proven earlier post">repost of #{{ repost_of }}</a>{% endif %}
-    </div>
-    {% endif %}
-  </div>
-  {% endif %}
 
   {# ---- The post ---- #}
   <article class="thread-item">
@@ -127,8 +110,9 @@
       </div>
       {% if editable and (can_recaption or clip_transcript_text) %}
       {# Where Threads shows engagement icons, an unposted clip shows its
-         controls: burned-in caption position + one-click transcript copy. #}
-      <div class="ti-clip-tools">
+         controls: burned-in caption position + one-click transcript copy.
+         Hidden on Instagram — the vertical composite burns its own captions. #}
+      <div class="ti-clip-tools" id="threads-clip-tools">
         {% if can_recaption %}
         <div class="seg-toggle cat-toggle" id="recap-line" role="group" aria-label="Burned-in captions">
           <button type="button" class="{{ 'is-on' if subs_mode == 'none' }}"
@@ -339,80 +323,6 @@
   </div>
   {% endif %}
 
-  {% if ig %}
-  {# ---- Paired Instagram reel: publishes right after this post's window. ---- #}
-  {#- Stranded: the post is live but the reel still says "queued". The paired
-      publish fires once, right after the post commits, and nothing retries it
-      later — so this needs to read as a problem, not as "waiting". -#}
-  {% set reel_stranded = status == "published" and ig.status in ("queued", "draft") %}
-  <div class="thread-actions">
-    <span class="ta-note">
-      Instagram Reel ·
-      {% if ig.status == "published" %}
-        <span class="badge supportive">published</span>
-        {% if ig.permalink %}<a href="{{ ig.permalink }}" target="_blank">open ↗</a>{% endif %}
-      {% elif ig.status == "failed" %}
-        <span class="badge hostile">failed</span>
-        {% if ig.error %}<span class="meta" style="color: var(--danger);">{{ ig.error[:160] }}</span>{% endif %}
-      {% elif reel_stranded %}
-        <span class="badge hostile">never posted</span>
-        <span class="meta">this post is live, but the reel never went out with it</span>
-      {% else %}
-        <span class="badge">{{ ig.status }}</span>
-        <span class="meta">publishes with this post</span>
-      {% endif %}
-    </span>
-    {% if ig.status == "failed" or reel_stranded %}
-    <form class="inline" method="post" action="/igpost/{{ ig.id }}/retry"
-          data-confirm="Publish this reel to Instagram now? Meta's processing can take a minute or two."
-          data-confirm-ok="Publish reel">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="sm">{{ "Post reel now" if reel_stranded else "Retry reel" }}</button>
-    </form>
-    {% endif %}
-    {% if ig.status in ("queued", "draft", "failed") %}
-    <form class="inline" method="post" action="/igpost/{{ ig.id }}/cancel"
-          data-confirm="Remove the Instagram reel from this post? The Threads post stays queued."
-          data-confirm-ok="Remove reel" data-confirm-variant="danger">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button class="reject sm">Remove reel</button>
-    </form>
-    {% endif %}
-  </div>
-  {% endif %}
-
-  {% if editable %}
-  {# ---- Save/publish: lives where the edits happen. The projected slot sits
-       left; Update is ghost-quiet until caption/attribution change. ---- #}
-  <div class="thread-actions">
-    <form method="post" action="/post/{{ pid }}/queue" id="queue-form">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-    </form>
-    {% if status == "queued" and schedule %}
-    <div class="ta-schedule">
-      <span class="schedule-ic" aria-hidden="true">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-      </span>
-      <span>{% if schedule.unknown %}No slot yet{% else %}{{ schedule.when.strftime("%b %-d · %-I:%M %p %Z") }}{% endif %}</span>
-    </div>
-    {% endif %}
-    {% if status == "queued" %}
-    <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
-    </form>
-    <button type="submit" form="queue-form" id="update-btn" class="approve"
-            disabled title="No changes to save">Update</button>
-    {% else %}
-    <button type="submit" form="queue-form" id="update-btn" class="approve">Add to queue</button>
-    <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
-    </form>
-    {% endif %}
-  </div>
-  {% endif %}
-
   {% if clip_transcript_text %}
   {# Clipboard source for the copy-transcript buttons (never displayed). #}
   <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
@@ -424,6 +334,175 @@
 
 {% if has_side %}
 <div class="post-side">
+{% if candidate_id or format_tags or footage_traits or repost_of or trait_vocab or shelf %}
+<div class="card tight" style="margin-bottom: 14px;">
+  {# Heading-free card: category chips, tag groups, and the shelf-life toggle
+     are self-describing, so sections separate with rules instead of labels. #}
+  {% set unused_format = trait_vocab.get("format", [])|reject("in", format_tags)|list %}
+  {% set unused_subject = trait_vocab.get("subject", [])|reject("in", footage_traits)|list %}
+  {% if candidate_id %}
+  {{ catui.field(candidate_id, category, "/post/" ~ pid, show_label=false) }}
+  {% if format_tags or unused_format or footage_traits or unused_subject or shelf %}<hr class="div">{% endif %}
+  {% endif %}
+
+  {{ tagui.facet_group("Format", "Production form — drives the scheduler's variety gate",
+                      format_tags, facet="format", action="/post/" ~ pid ~ "/tags",
+                      unused=unused_format, next="/post/" ~ pid) }}
+  {{ tagui.facet_group("Subject", "What's on screen — feeds per-trait performance learning",
+                      footage_traits, facet="subject", action="/post/" ~ pid ~ "/tags",
+                      unused=unused_subject, next="/post/" ~ pid) }}
+
+  {% if repost_of %}
+  <div style="margin-top: 10px;">
+    <a class="badge" href="/post/{{ repost_of }}" title="Re-airing of a proven earlier post">repost of #{{ repost_of }}</a>
+  </div>
+  {% endif %}
+
+  {% if shelf %}
+  <hr class="div">
+  <div id="scheduling">
+    <div class="shelf-life-row">
+      <form method="post" action="/post/{{ pid }}/shelf-life" class="seg-toggle cat-toggle">
+        <input type="hidden" name="next" value="/post/{{ pid }}">
+        <button name="shelf_life" value="breaking" class="{{ 'is-on' if shelf.shelf_life == 'breaking' }}"
+                title="News-cycle content: highest urgency, decays in a day, expires in days">breaking</button>
+        <button name="shelf_life" value="timely" class="{{ 'is-on' if shelf.shelf_life == 'timely' }}"
+                title="Seasonal or trend-adjacent: urgency halves weekly, expires in weeks">timely</button>
+        <button name="shelf_life" value="evergreen" class="{{ 'is-on' if shelf.shelf_life == 'evergreen' }}"
+                title="Holds up whenever it airs: no urgency decay, never expires, qualifies for reruns">evergreen</button>
+      </form>
+      {% if shelf.override and not repost_of %}
+      <form method="post" action="/post/{{ pid }}/shelf-life" class="inline">
+        <input type="hidden" name="next" value="/post/{{ pid }}">
+        <input type="hidden" name="shelf_life" value="">
+        <button class="btn sm ghost" title="Clear your override and fall back to the AI's tag (or the category default)">Reset to AI</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if shelf.source == 'override' %}
+    <div class="meta" style="margin-top: 8px;">
+      {% if repost_of %}
+      Set to evergreen when this re-air was staged — only evergreen content re-airs.
+      {% else %}
+      Your override — the AI {{ 'said “' ~ shelf.ai_tag ~ '”' if shelf.ai_tag else 'left it to the category default (“' ~ shelf.default ~ '”)' }}.
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if category_rationale %}
+    <details class="meta" style="margin-top: 6px;">
+      <summary>AI rationale</summary>
+      <p style="margin: 4px 0 0;">{{ category_rationale }}</p>
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if show_ig_switch or editable %}
+<div class="card tight post-ship-card" style="margin-bottom: 14px;">
+  {% if show_ig_switch %}
+  <form method="post" action="/post/{{ pid }}/instagram" class="ig-include-form">
+    <input type="hidden" name="next" value="/post/{{ pid }}">
+    <label class="ig-include-label {{ 'is-disabled' if not instagram_ok or not ig_switch_editable }}">
+      <span>Instagram reel</span>
+      <span class="switch">
+        <input type="checkbox" name="include_instagram" value="1"
+               {{ 'checked' if include_instagram }}
+               {{ '' if (instagram_ok and ig_switch_editable) else 'disabled' }}
+               onchange="this.form.requestSubmit()">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </span>
+    </label>
+  </form>
+  {% if not instagram_ok and ig_switch_editable %}
+  <p class="field-hint">Instagram isn't connected —
+    <a href="/connections">connect it</a> to queue reels alongside Threads posts.</p>
+  {% endif %}
+  {% endif %}
+
+  {% if editable %}
+  <form method="post" action="/post/{{ pid }}/queue" id="queue-form">
+    <input type="hidden" name="next" value="/post/{{ pid }}">
+  </form>
+  <div class="post-ship-actions{{ ' has-top-rule' if show_ig_switch }}">
+    {% if status == "queued" and schedule %}
+    <div class="ta-schedule">
+      <span class="schedule-ic" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      </span>
+      <span>{% if schedule.unknown %}No slot yet{% else %}{{ schedule.when.strftime("%b %-d · %-I:%M %p %Z") }}{% endif %}</span>
+    </div>
+    {% endif %}
+    <div class="post-ship-buttons">
+      {% if status == "queued" %}
+      <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
+        <input type="hidden" name="next" value="/post/{{ pid }}">
+        <button data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
+      </form>
+      <button type="submit" form="queue-form" id="update-btn" class="approve"
+              disabled title="No changes to save">Update</button>
+      {% else %}
+      <button type="submit" form="queue-form" id="update-btn" class="approve">Add to queue</button>
+      <form class="inline" method="post" action="/post/{{ pid }}/publish-now">
+        <input type="hidden" name="next" value="/post/{{ pid }}">
+        <button data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{# Rerun outlook with its performance receipt: the quiet period is base days
+   stretched by prior airings, then divided by the clip's percentile of views
+   at the fixed comparison age — this card shows each input so the date reads
+   as a consequence of performance, not an arbitrary countdown. #}
+{% if recycle and recycle.state != 'off' %}
+<div class="card tight" style="margin-bottom: 14px;">
+  <strong>Recycling</strong>
+  {% if recycle.state == 'eligible' %}
+  <div style="margin-top: 8px;">
+    {% if recycle.overdue %}
+    <span class="badge supportive" title="Past its quiet period — re-airs the next time a posting window finds the queue empty. Fresh content always takes the slot first.">rerun-ready</span>
+    {% else %}
+    <span class="badge" title="Quiet since {{ recycle.last_aired.strftime('%b %-d, %Y') }} — becomes rerun-ready once the quiet period has passed.">eligible {{ recycle.next_eligible.strftime('%b %-d, %Y') }}</span>
+    {% endif %}
+    {% if recycle.proven_winner %}
+    <span class="badge supportive" title="First-{{ recycle.metric_age_hours }}h views clear the repost rotation's top-{{ (100 - recycle.repost_percentile) | round | int }}% bar, so this clip can also be re-scheduled proactively as a proven winner — not just as queue filler.">proven winner</span>
+    {% endif %}
+  </div>
+  {% if not recycle.overdue %}
+  <div class="meta" style="margin-top: 6px;">
+    {{ recycle.quiet_days }} of {{ recycle.required_quiet_days | round(0, 'ceil') | int }} quiet days so far.
+  </div>
+  {% endif %}
+  <div class="meta" style="margin-top: 8px;"
+       title="Posts are compared by views at the same age ({{ recycle.metric_age_hours }} hours after publish) so older posts don't automatically win. The rank divides the base wait: the account's best clip re-airs roughly twice as fast as its weakest.">
+    {% if recycle.views_at_age > 0 %}
+    Performance sets the pace: {{ "{:,}".format(recycle.views_at_age) }} views in its first {{ recycle.metric_age_hours }}h ranks above {{ (recycle.rank * 100) | round | int }}% of posts, so it waits
+    {{ recycle.required_quiet_days | round(0, 'ceil') | int }} days between airings instead of the base {{ recycle.base_quiet_days | round(0, 'ceil') | int }}.
+    {% else %}
+    No early view data for this clip yet, so it waits the full base quiet period ({{ recycle.base_quiet_days | round(0, 'ceil') | int }} days).
+    {% endif %}
+  </div>
+  <div class="meta" style="margin-top: 6px;">
+    Aired {{ recycle.airings }}×, last {{ recycle.last_aired.strftime('%b %-d, %Y') }}.
+    {%- if recycle.airing_growth %} Each re-air stretches the next wait by {{ (recycle.airing_growth * 100) | round | int }}%.{% endif %}
+  </div>
+  {% elif recycle.state == 'ineligible' %}
+  <div class="meta" style="margin-top: 8px;">Not in the rerun rotation — {{ recycle.reason }}.</div>
+  {% if recycle.airings %}
+  <div class="meta" style="margin-top: 6px;">
+    Aired {{ recycle.airings }}×{% if recycle.last_aired %}, last {{ recycle.last_aired.strftime('%b %-d, %Y') }}{% endif %}.
+  </div>
+  {% endif %}
+  {% endif %}
+</div>
+{% endif %}
+
 {% if error %}
 <div class="card" style="border-color: var(--danger-border);">
   <div class="card-title" style="color: var(--danger);">Last error</div>
@@ -431,93 +510,6 @@
 </div>
 {% endif %}
 
-{% if shelf %}
-{# ---- Scheduling: the shelf-life dial placement runs on, correctable in
-     place. Post-level override only — the model's original answer survives
-     underneath, so Reset to AI is always a real reset. ---- #}
-<div class="card tight" id="scheduling" style="margin-bottom: 14px;">
-  <div class="row center" style="gap: 12px; flex-wrap: wrap;">
-    <strong>Scheduling</strong>
-    <form method="post" action="/post/{{ pid }}/shelf-life" class="inline seg-toggle">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <button name="shelf_life" value="breaking" class="{{ 'is-on' if shelf.shelf_life == 'breaking' }}"
-              title="News-cycle content: highest urgency, decays in a day, expires in days">breaking</button>
-      <button name="shelf_life" value="timely" class="{{ 'is-on' if shelf.shelf_life == 'timely' }}"
-              title="Seasonal or trend-adjacent: urgency halves weekly, expires in weeks">timely</button>
-      <button name="shelf_life" value="evergreen" class="{{ 'is-on' if shelf.shelf_life == 'evergreen' }}"
-              title="Holds up whenever it airs: no urgency decay, never expires, qualifies for reruns">evergreen</button>
-    </form>
-    {% if shelf.override and not repost_of %}
-    <form method="post" action="/post/{{ pid }}/shelf-life" class="inline">
-      <input type="hidden" name="next" value="/post/{{ pid }}">
-      <input type="hidden" name="shelf_life" value="">
-      <button class="btn sm ghost" title="Clear your override and fall back to the AI's tag (or the category default)">Reset to AI</button>
-    </form>
-    {% endif %}
-  </div>
-  <div class="meta" style="margin-top: 8px;">
-    {% if shelf.source == 'override' and repost_of %}
-    Set to evergreen when this re-air was staged — only evergreen content re-airs.
-    {% elif shelf.source == 'override' %}
-    Your override — the AI {{ 'said “' ~ shelf.ai_tag ~ '”' if shelf.ai_tag else 'left it to the category default (“' ~ shelf.default ~ '”)' }}.
-    {% elif shelf.source == 'ai' %}
-    AI-tagged from this content. Correct it above if the call looks wrong.
-    {% else %}
-    No AI tag on this content — inherited from the category default. Set it above if you know better.
-    {% endif %}
-  </div>
-  <div class="meta" style="margin-top: 4px;">
-    {% if shelf.shelf_life == 'evergreen' %}
-    Evergreen: no urgency decay and no expiry.
-    {%- if status == 'published' %} Qualifies for the rerun rotation (see Recycling below).
-    {%- elif status == 'queued' %} It waits patiently in the queue while urgent content jumps ahead.{% endif %}
-    {% elif shelf.expired %}
-    <span class="badge hostile">expired</span>
-    Expired {{ shelf.expires_on.strftime("%b %-d, %Y") }} — the scheduler will not auto-place it
-    (publish now or pin it to a window to force it out).
-    {% else %}
-    Urgency today: {{ shelf.urgency }} of {{ shelf.urgency_max }}
-    {%- if shelf.expires_on %} · expires {{ shelf.expires_on.strftime("%b %-d, %Y") }} if not published{% endif %}.
-    {% endif %}
-  </div>
-  {% if category_rationale %}
-  <div class="meta" style="margin-top: 4px;" title="The model's reasoning when it categorized the source video">
-    AI on the category: “{{ category_rationale }}”
-  </div>
-  {% endif %}
-</div>
-{% endif %}
-
-{% if recycle %}
-{# ---- Rerun outlook: when (and whether) this clip comes back through the
-     filler rotation. Answers "why isn't this re-airing" without reading the
-     scheduler source. ---- #}
-<div class="card tight" style="margin-top: 14px;">
-  <strong>Recycling</strong>
-  {% if recycle.state == 'off' %}
-  <span class="meta">The rerun rotation is disabled (<code>scheduler.placement.filler</code>).</span>
-  {% elif recycle.state == 'eligible' %}
-  <div class="meta" style="margin-top: 4px;">
-    Aired {{ recycle.airings }} time{{ 's' if recycle.airings != 1 }}{% if recycle.last_aired %},
-    last on {{ recycle.last_aired.strftime("%b %-d, %Y") }}{% endif %} ·
-    needs {{ "%.0f"|format(recycle.required_quiet_days) }} quiet days before re-airing
-    (grows with each airing, shrinks for proven performers).
-    {% if recycle.overdue %}
-    <span class="badge supportive" title="Past its quiet period — the most overdue clip re-airs when a posting window finds the queue empty">eligible now</span>
-    {% else %}
-    Next eligible {{ recycle.next_eligible.strftime("%b %-d, %Y") }}.
-    {% endif %}
-    It re-airs when a posting window finds the queue empty — fresh content always wins.
-  </div>
-  {% else %}
-  <div class="meta" style="margin-top: 4px;">
-    Aired {{ recycle.airings }} time{{ 's' if recycle.airings != 1 }}{% if recycle.last_aired %},
-    last on {{ recycle.last_aired.strftime("%b %-d, %Y") }}{% endif %} ·
-    not in the rerun library: {{ recycle.reason }}.
-  </div>
-  {% endif %}
-</div>
-{% endif %}
 </div>{# /post-side #}
 {% endif %}{# /has_side #}
 </div>{# /post-layout #}
@@ -578,6 +570,8 @@
     document.querySelectorAll('#platform-preview button').forEach((b) => {
       b.classList.toggle('is-on', b.dataset.platform === which);
     });
+    const threadsTools = document.getElementById('threads-clip-tools');
+    if (threadsTools) threadsTools.hidden = which === 'instagram';
     // The toolbar download follows the previewed version.
     const dl = document.getElementById('post-download-link');
     if (which === 'instagram') {

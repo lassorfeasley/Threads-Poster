@@ -1228,7 +1228,7 @@ function syncExportControls() {
 function renderSegments() {
   syncExportControls();
   const box = document.getElementById('segments');
-  box.innerHTML = segments.length ? '' : '<div class="meta">No segments yet — set start/end and add one.</div>';
+  box.innerHTML = '';
   segments.forEach((s, i) => {
     const div = document.createElement('div');
     div.className = 'seg-row' + (i === selectedSeg ? ' selected' : '');
@@ -1346,8 +1346,7 @@ function renderClipProposals() {
   toggle.textContent = collapsed ? 'Show' : 'Hide';
 
   if (!n) {
-    list.innerHTML = '<div class="meta">Nothing proposed yet — Suggest reads the '
-      + 'transcript and proposes the clips this video holds.</div>';
+    list.innerHTML = '';
     return;
   }
   if (collapsed) { list.innerHTML = ''; return; }
@@ -1882,6 +1881,7 @@ initSegDnd();
         params.set('step', 'post');
         if (s.autosubs) params.set('autosubs', '1');
         if (s.autocaption) params.set('autocaption', '1');
+        if (s.autohook) params.set('autohook', '1');
         if (s.askmulti) params.set('askmulti', String(s.askmulti));
         location.replace(location.pathname + '?' + params.toString());
         return;
@@ -2119,10 +2119,6 @@ async function retryExport() {
          Instagram toggle above. #}
       <input type="hidden" name="publish_target" id="publish-target-field" value="">
     </form>
-    {% if pending_post_status %}
-    <span class="ta-note">Edits the clip's
-      <a href="/post/{{ pending_post_id }}">{{ pending_post_status }} post</a></span>
-    {% endif %}
     <button id="btn-draft" form="post-form"
             formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
     <button id="btn-post-now" form="post-form">Post now</button>
@@ -2338,30 +2334,29 @@ async function retryExport() {
       });
     })();
 
-    async function suggestHook(btn) {
+    async function suggestHook(btn, silent) {
       const ta = document.getElementById('hook-text');
       if (!ta) return;
-      btn.disabled = true;
-      btn.classList.add('is-busy');
+      if (!btn) btn = document.getElementById('hook-suggest');
+      if (btn) { btn.disabled = true; btn.classList.add('is-busy'); }
       try {
         const r = await fetch('/cut/{{ cut.id }}/suggest-hook', { method: 'POST' });
         const d = await r.json();
-        if (!r.ok) { alert(d.error || 'Hook draft failed.'); return; }
+        if (!r.ok) { if (!silent) alert(d.error || 'Hook draft failed.'); return; }
         if (d.transcript) {
           const box = document.getElementById('clip-transcript-plain');
           if (box) box.value = d.transcript;
         }
         ta.value = d.hook || '';
         ta.dispatchEvent(new Event('input'));
-        btn.title = btn.ariaLabel = 'Regenerate draft';
-        ta.focus();
+        if (btn) btn.title = btn.ariaLabel = 'Regenerate draft';
+        if (!silent) ta.focus();
         // input handler schedules regen; kick it off immediately for the draft.
         generateVertical();
       } catch (e) {
-        alert('Hook draft failed: ' + e);
+        if (!silent) alert('Hook draft failed: ' + e);
       } finally {
-        btn.disabled = false;
-        btn.classList.remove('is-busy');
+        if (btn) { btn.disabled = false; btn.classList.remove('is-busy'); }
       }
     }
 
@@ -2452,6 +2447,8 @@ async function retryExport() {
           params.delete('autosubs');
           if (after && after.autocaption) params.set('autocaption', '1');
           else params.delete('autocaption');
+          if (after && after.autohook) params.set('autohook', '1');
+          else params.delete('autohook');
           location.href = location.pathname + '?' + params.toString();
           return;
         }
@@ -2469,21 +2466,26 @@ async function retryExport() {
       if (after && after.autocaption && typeof suggestCaption === 'function') {
         suggestCaption(true);
       }
+      if (after && after.autohook) suggestHook(null, true);
     }
 
     (function bootPostMedia() {
       const params = new URLSearchParams(location.search);
       const wantAutocaption = params.get('autocaption') === '1';
+      const wantAutohook = params.get('autohook') === '1';
       const wantAutosubs = params.get('autosubs') === '1' && !hasSubs;
+      const hookEl = document.getElementById('hook-text');
+      const hookEmpty = !hookEl || !hookEl.value.trim();
       // Consume flags from the URL up front so a manual reload doesn't re-fire.
-      if (wantAutocaption || params.has('autosubs')) {
+      if (wantAutocaption || wantAutohook || params.has('autosubs')) {
         params.delete('autocaption');
+        params.delete('autohook');
         params.delete('autosubs');
         const qs = params.toString();
         history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
       }
       if (wantAutosubs) {
-        generateSubtitles(subsPos, { autocaption: wantAutocaption });
+        generateSubtitles(subsPos, { autocaption: wantAutocaption, autohook: wantAutohook && hookEmpty });
         return;
       }
       // Transcript already on disk (or operator skipped burned-in captions):
@@ -2492,6 +2494,7 @@ async function retryExport() {
         // suggestCaption is defined in the later script block; defer a tick.
         setTimeout(() => { if (typeof suggestCaption === 'function') suggestCaption(true); }, 0);
       }
+      if (wantAutohook && hookEmpty) suggestHook(null, true);
     })();
     // Briefly swap a copy button's contents for a checkmark, then restore —
     // works for icon-only buttons without wiping the icon permanently.
@@ -2828,41 +2831,42 @@ async function retryExport() {
     </script>
 
   {% if posts %}
-    <section class="wf-section">
-      <h2>Posts from this clip</h2>
-      <div class="video-posts">
-        {% for p in posts %}
-        <div class="video-post">
-          <div class="video-post-main">
-            <div class="video-post-meta">
-              <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
-              <span class="meta">
-                {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
-                {% elif p.status == "publishing" %}publishing…
-                {% elif p.created_at %}added {{ p.created_at.strftime("%b %-d") }}
-                {% endif %}
-              </span>
-            </div>
-            <a class="video-post-caption" href="/post/{{ p.id }}" title="{{ p.caption }}">{{ p.caption or "(untitled)" }}</a>
-          </div>
-          <div class="video-post-actions">
-            <a class="sm" href="/post/{{ p.id }}">Details</a>
-            {% if p.permalink %}<a class="sm" href="{{ p.permalink }}" target="_blank">Open ↗</a>{% endif %}
-            {% if p.status in ("queued", "draft") %}
-              <form class="inline" method="post" action="/post/{{ p.id }}/publish-now">
-                <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
-                <button class="sm" data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
-              </form>
-              <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
-                <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
-                <button class="reject sm" data-confirm="Remove this {{ p.status }} post?" data-confirm-ok="Remove" data-confirm-variant="danger">Delete</button>
-              </form>
+  <section class="video-section">
+    <h2 class="video-section-title">Posts
+      <span class="crumb-count">{{ posts|length }}</span>
+    </h2>
+    <div class="video-posts">
+      {% for p in posts %}
+      <div class="video-post">
+        <div class="video-post-main">
+          <div class="video-post-meta">
+            <span class="badge {{ 'supportive' if p.status == 'published' else ('hostile' if p.status == 'failed' else ('info' if p.status == 'queued' else '')) }}">{{ p.status }}</span>
+            {% if (p.status == "published" and p.published_at) or p.status == "publishing" %}
+            <span class="meta">
+              {% if p.status == "published" and p.published_at %}{{ p.published_at.strftime("%b %-d · %-I:%M %p") }}
+              {% else %}publishing…{% endif %}
+            </span>
             {% endif %}
           </div>
         </div>
-        {% endfor %}
+        <div class="video-post-actions">
+          <a class="sm" href="/post/{{ p.id }}">Details</a>
+          {% if p.permalink %}<a class="sm" href="{{ p.permalink }}" target="_blank">Open ↗</a>{% endif %}
+          {% if p.status in ("queued", "draft") %}
+            <form class="inline" method="post" action="/post/{{ p.id }}/publish-now">
+              <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
+              <button class="sm" data-confirm="Publish to Threads now?" data-confirm-ok="Post now" data-confirm-variant="approve">Post now</button>
+            </form>
+            <form class="inline" method="post" action="/post/{{ p.id }}/cancel">
+              <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
+              <button class="reject sm" data-confirm="Remove this {{ p.status }} post?" data-confirm-ok="Remove" data-confirm-variant="danger">Delete</button>
+            </form>
+          {% endif %}
+        </div>
       </div>
-    </section>
+      {% endfor %}
+    </div>
+  </section>
   {% endif %}
 </div>{# /.post-main #}
 </div>{# /.post-layout #}

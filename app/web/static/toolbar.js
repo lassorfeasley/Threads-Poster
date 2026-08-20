@@ -232,11 +232,24 @@
     return (control.value || '').trim() !== '';
   }
 
+  // List mode (data-filter-mode="list"): the row attribute is a comma-separated
+  // list and the control matches when its value equals any entry — how multi-
+  // valued facets (tags, tier ladders) filter without exploding into one
+  // attribute per value.
+  function listHas(row, key, val) {
+    var raw = (row.getAttribute('data-' + key) || '').toLowerCase();
+    return raw.split(',').some(function (t) { return t.trim() === val; });
+  }
+
   function matches(control, row) {
     var key = control.getAttribute('data-filter-key');
+    var list = control.getAttribute('data-filter-mode') === 'list';
     if (control.tagName === 'DETAILS') {
       var checked = comboChecked(control);
       if (!checked.length) return true;
+      if (list) {
+        return checked.some(function (cb) { return listHas(row, key, cb.value.toLowerCase()); });
+      }
       var rowVal = (row.getAttribute('data-' + key) || '').toLowerCase();
       return checked.some(function (cb) { return cb.value.toLowerCase() === rowVal; });
     }
@@ -247,6 +260,7 @@
       if (!when) return false;
       return control.getAttribute('data-filter-op') === 'lte' ? when <= val : when >= val;
     }
+    if (key && list) return listHas(row, key, val);
     if (key) return (row.getAttribute('data-' + key) || '').toLowerCase() === val;
     // Free-text search: every whitespace-separated term has to appear, so
     // "kxyz flood" narrows rather than finding nothing.

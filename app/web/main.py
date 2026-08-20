@@ -8,6 +8,7 @@ on /cut/{id}.
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import json
 import logging
@@ -22,8 +23,8 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import clip_proposals, instagram_api, spend, threads_api, youtube
-from ..analytics import (generate_report, latest_metrics_bulk, snapshot_metrics,
-                         write_and_store_digest)
+from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
+                         snapshot_metrics, write_and_store_digest)
 from ..categories import category_by_slug, category_options
 from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
 from ..config import (
@@ -100,7 +101,6 @@ from ..scheduler import (
     expired_queued_posts,
     invalidate_recycle_overview,
     pin_post_to_window,
-    placement_preview,
     projected_slot_for_post,
     recycle_overview,
     recycle_status,
@@ -112,7 +112,7 @@ from ..scheduler import (
     window_time_labels,
 )
 from ..scrape import PASTED_CHANNEL_URL, archive_candidate, fetch_video_metadata
-from ..vision import annotate_post_footage, tag_candidate_storyboard
+from ..vision import annotate_post_footage, suggest_subs_position, tag_candidate_storyboard
 from ..voice import voice_context
 from ..youtube import YouTubeAPIError, parse_video_url
 from . import pagecache
@@ -321,10 +321,44 @@ with session_scope() as _s:
 # Configure logging first: this module is the uvicorn worker's entry point, so
 # without it the scheduler's own log output has nowhere to go.
 setup_logging()
-start_scheduler_thread()
+# SCHEDULER_EMBEDDED=false skips the in-process scheduler when a dedicated
+# worker (the Fly app) owns publishing — the dashboard then spends nothing on
+# ticks, annotation, or metric polls. Publishing still overlaps safely when
+# both run (the window claim is atomic); this flag is about not paying twice,
+# and about keeping a dev dashboard from publishing at all.
+if env("SCHEDULER_EMBEDDED", "true").strip().lower() not in ("false", "0", "no"):
+    start_scheduler_thread()
 # Keeps the list pages' datasets warm, so a page render doesn't wait on the
 # database (see pagecache: only pages in active use are refreshed).
 pagecache.start_refresher()
+
+
+# Datasets a given write can actually change, keyed by the route's path
+# pattern. Only the highest-frequency operator actions are mapped — a triage
+# burst or a calendar drag shouldn't force every list page to rebuild against
+# a remote database. Anything not listed falls back to invalidating everything,
+# so a new route is stale-safe by default; add it here only once it's verified
+# which cached pages its write can touch.
+_WRITE_SCOPE: dict[str, tuple[str, ...]] = {
+    # Triage: candidate status + triage ledger only. Candidates appear on the
+    # dashboard lists and the library's Videos section, never on the
+    # calendar/queue, notifications, or the attention count.
+    "/video/{candidate_id}/approve": ("dashboard", "library"),
+    "/video/{candidate_id}/reject": ("dashboard", "library"),
+    "/video/{candidate_id}/reset": ("dashboard", "library"),
+    "/video/{candidate_id}/unreject": ("dashboard", "library"),
+    "/video/{candidate_id}/retry": ("dashboard", "library"),
+    # Calendar drag-and-drop: pins only reorder upcoming windows. Shelf-life
+    # expiry (what attention/notifications watch) is content-age-based and
+    # unaffected by which window a post is pinned to.
+    "/post/{post_id}/pin-window": ("calendar",),
+    "/post/{post_id}/unpin": ("calendar",),
+    # One metric snapshot row: of the cached pages, only the library surfaces
+    # per-post metrics (analytics lives on its own TTL, volatile=False).
+    "/post/{post_id}/refresh-stats": ("library",),
+    # Comments aren't part of any cached dataset.
+    "/post/{post_id}/sync-replies": (),
+}
 
 
 @app.middleware("http")
@@ -337,7 +371,13 @@ async def _drop_cached_reads_after_writes(request: Request, call_next):
     """
     response = await call_next(request)
     if request.method in ("POST", "PUT", "PATCH", "DELETE") and response.status_code < 400:
-        pagecache.invalidate()
+        route = request.scope.get("route")
+        scope = _WRITE_SCOPE.get(getattr(route, "path_format", None))
+        if scope is None:
+            pagecache.invalidate()
+        else:
+            for name in scope:
+                pagecache.drop(name)
     return response
 
 
@@ -905,10 +945,16 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
                 "id": c.id,
                 "video_id": c.video_id,
                 "title": c.title,
+                # For the hand-off cards on the queue-clear screen, which are
+                # built client-side from whatever the operator approved.
+                "thumb": _thumb_for(c),
                 "channel": f"{c.channel.call_sign} — {c.channel.market}",
                 "published": c.published_at.strftime("%b %d, %Y %H:%M UTC") if c.published_at else "?",
                 "duration": (f"{c.duration_seconds // 60}m {c.duration_seconds % 60}s"
                              if c.duration_seconds else ""),
+                # Card overlays read as m:ss everywhere else in the app.
+                "duration_short": (f"{c.duration_seconds // 60}:{c.duration_seconds % 60:02d}"
+                                   if c.duration_seconds else ""),
                 "score": c.relevance_score,
                 "visual_traits": [t for t in (c.visual_traits or "").split(",") if t],
                 "visual_rationale": c.visual_rationale,
@@ -1048,9 +1094,11 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
             if p.cut_pk is not None:
                 posts_by_cut[p.cut_pk] = posts_by_cut.get(p.cut_pk, 0) + 1
 
+        reruns = recycle_overview(session)
         cut_rows = [
             {"cut": cut, "state": _cut_state(cut, posted_cut_pks),
-             "post_count": posts_by_cut.get(cut.id, 0)}
+             "post_count": posts_by_cut.get(cut.id, 0),
+             "recycle": reruns.get(cut.id)}
             for cut in cuts
         ]
 
@@ -1375,7 +1423,12 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "attribution_text": (pending.attribution_text or "") if pending else "",
          "attribution_enabled": bool(load_first_reply().get("attribution_enabled")),
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
-         "subs_position": (getattr(cut, "subs_position", "") or load_settings().get("subtitles.position", "bottom")),
+         "subs_position": (
+             cut.subs_position if cut.use_subtitles
+             else suggest_subs_position(c.visual_traits)
+             or load_settings().get("subtitles.position", "bottom")
+         ),
+         "suggested_subs": suggest_subs_position(c.visual_traits),
          "msg": msg, "active": "dashboard"},
     )
 
@@ -2068,6 +2121,8 @@ def _export_cut_in_thread(cut_id: int) -> None:
             cut.updated_at = utcnow()
             cut.subtitled_clip_path = ""
             cut.vertical_clip_path = ""
+            if not (cut.hook_text or "").strip():
+                cut.hook_autodrafted = False
             cut.clip_transcript_path = transcript_sidecar
             cut.use_subtitles = False
             cut.export_status = ""
@@ -2126,6 +2181,7 @@ def cut_export_status(cut_id: int):
         seed = (c.draft_caption or "").strip() if c else ""
         current = (cut.draft_caption or "").strip()
         autocaption = bool(exported and (not current or current == seed))
+        autohook = bool(exported and not (cut.hook_text or "").strip())
         askmulti = 0
         if c and c.multi_clip_potential and exported:
             exported_cuts = session.execute(
@@ -2140,6 +2196,7 @@ def cut_export_status(cut_id: int):
             "error": "",
             "autosubs": exported,
             "autocaption": autocaption,
+            "autohook": autohook,
             "askmulti": askmulti,
         }
 
@@ -3214,12 +3271,14 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             select(ThreadsComment).where(ThreadsComment.post_pk == p.id)
             .order_by(ThreadsComment.created_at.desc())
         ).scalars().all()
+        first_reply_cid = (p.first_reply_id or "").strip()
         comment_rows = [
             {"id": c.id, "username": c.username, "text": c.text,
              "reply_status": c.reply_status,
              "reply_text": c.reply_text_posted,
              "commented_at": c.commented_at}
             for c in comments
+            if c.comment_id != first_reply_cid or not first_reply_cid
         ]
         # Projected publishing slot (same plan the calendar shows), so a queued
         # post says exactly when it's expected to go out. Reschedule from the
@@ -3243,6 +3302,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             # Placement facets: what the scored scheduler sees for this post.
             "format_tags": [t.strip() for t in (p.format_tags or "").split(",") if t.strip()],
             "footage_traits": [t.strip() for t in (p.footage_traits or "").split(",") if t.strip()],
+            "trait_vocab": active_traits_by_facet(session),
             # Fully resolved (post -> candidate -> category default ->
             # evergreen) so the badge always shows what placement will do,
             # even for posts ingested before shelf-life tagging existed.
@@ -3251,6 +3311,10 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
                                       or ((cand.shelf_life or "").strip() if cand else "")),
             # Full override chain + derived urgency/expiry for the panel.
             "shelf": shelf_life_outlook(p, cand),
+            # Rerun outlook with its performance receipt: why this clip's
+            # quiet period is what it is (rank of views at the comparison
+            # age), or why the rotation excludes it. None unless published.
+            "recycle": recycle_status(session, p),
             "repost_of": p.repost_of_post_pk,
             "cut_id": cut.id if cut else None,
             "channel_sign": cand.channel.call_sign if (cand and cand.channel) else "",
@@ -3268,6 +3332,11 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
                 ((cut.subs_position or "bottom") if cut else "bottom")
                 if has_burned_captions else "none"
             ),
+            # Smart default from footage traits: where captions should go
+            # (or whether they should be skipped entirely) before the
+            # operator has made an explicit choice.
+            "suggested_subs": suggest_subs_position(
+                p.footage_traits or (cand.visual_traits if cand else "")),
             "clip_transcript_text": clip_transcript_text,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
@@ -3282,9 +3351,6 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
             "schedule": schedule,
-            # Rerun outlook for published posts: when (and whether) this
-            # clip comes back through the filler rotation.
-            "recycle": recycle_status(session, p),
             "giphy_enabled": giphy_configured(),
         }
         # Paired Instagram reel (queued alongside this post, publishes with it).
@@ -3302,9 +3368,55 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "published_at": ig.published_at,
             "video_url": ig_video_url,
         } if ig else None)
+        instagram_ok = instagram_api.is_authenticated()
+        ctx["instagram_ok"] = instagram_ok
+        ctx["include_instagram"] = bool(
+            ig and ig.status in ("queued", "draft", "failed", "published"))
+        ctx["ig_switch_editable"] = (
+            p.status in ("draft", "queued", "failed")
+            and (ig is None or ig.status in ("queued", "draft", "failed"))
+        )
+        ctx["show_ig_switch"] = (
+            (p.status in ("draft", "queued", "failed") and cut is not None and has_clip)
+            or ig is not None
+        )
     return templates.TemplateResponse(
         request, "post.html", {**ctx, "msg": msg, "active": "posts"}
     )
+
+
+@app.post("/post/{post_id}/instagram")
+def set_post_instagram(post_id: int, include_instagram: str = Form(""),
+                       next: str = Form("")):
+    """Pair or unpair an Instagram reel with a not-yet-published post."""
+    dest = next if next and next.startswith("/") else f"/post/{post_id}"
+    want = _wants_instagram(include_instagram)
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return _flash(dest, "Post not found")
+        ig = session.execute(
+            select(InstagramPost).where(InstagramPost.threads_post_pk == p.id)
+            .order_by(InstagramPost.created_at.desc()).limit(1)
+        ).scalar_one_or_none()
+        if want:
+            if p.status not in ("draft", "queued", "failed"):
+                return _flash(dest, "Can't add a reel to a published post")
+            cut = session.get(Cut, p.cut_pk) if p.cut_pk else None
+            if cut is None:
+                return _flash(dest, "No clip attached")
+            ig_error = _instagram_ready_error(cut, True)
+            if ig_error:
+                return _flash(dest, ig_error)
+            record_instagram_post(session, cut, p, cut.vertical_clip_path,
+                                  p.caption or "")
+            return _flash(dest, "Instagram reel will publish with this post")
+        if ig is None:
+            return _flash(dest, "No reel to remove")
+        if ig.status == "published":
+            return _flash(dest, "This reel is already live")
+        session.delete(ig)
+    return _flash(dest, "Instagram reel removed")
 
 
 @app.post("/post/{post_id}/refresh-stats")
@@ -3493,6 +3605,94 @@ def _library_dataset() -> dict:
             row["engagement"] = sum(interactions) if interactions else None
             post_metrics[p.id] = row
 
+        # --- Advanced-filter facets per post: resolved shelf life, rerun
+        # state, performance tier, and the placement tags. Plain values only —
+        # footage_traits is raiseload-deferred on the list query, so tags come
+        # from one extra column fetch instead of the ORM objects. ---
+        traits_by_post: dict[int, str] = dict(session.execute(
+            select(ThreadsPost.id, ThreadsPost.footage_traits)
+            .where(ThreadsPost.id.in_([p.id for p in posts]))
+        ).all()) if posts else {}
+
+        # Performance tier from the same views-at-fixed-age ranking the
+        # scheduler's rerun cadence uses (not lifetime views, which would let
+        # old posts always win). Tokens ladder so "above median" also matches
+        # every top-10% post: data-tier="top10,top25,above".
+        published = [p for p in posts if p.status == "published" and p.published_at]
+        age_hours = int(load_settings().get("learning.metric_age_hours", 48))
+        views_at_age = metrics_at_age_bulk(session, published, "views", age_hours)
+        ranked_views = sorted(views_at_age.values())
+
+        def _tier_tokens(post_id: int) -> list[str]:
+            value = views_at_age.get(post_id)
+            if value is None or len(ranked_views) < 2:
+                return ["nodata"]
+            rank = bisect.bisect_left(ranked_views, value) / (len(ranked_views) - 1)
+            if rank < 0.5:
+                return ["below"]
+            tokens = ["above"]
+            if rank >= 0.75:
+                tokens.insert(0, "top25")
+            if rank >= 0.9:
+                tokens.insert(0, "top10")
+            return tokens
+
+        post_facets: dict[int, dict] = {}
+        for p in posts:
+            cand = p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate
+            shelf = resolve_shelf_life(p, cand)
+            rerun: list[str] = []
+            if p.repost_of_post_pk is not None:
+                rerun.append("reair")
+            if p.status == "published":
+                info = reruns.get(p.cut_pk) if p.cut_pk is not None else None
+                if info is not None:
+                    rerun.append("ready" if info["overdue"] else "waiting")
+                else:
+                    rerun.append("ineligible")
+            formats = [t.strip() for t in (p.format_tags or "").split(",") if t.strip()]
+            subjects = [t.strip() for t in (traits_by_post.get(p.id) or "").split(",")
+                        if t.strip()]
+            # Extra haystack for the free-text box, so typing "evergreen" or a
+            # tag narrows without touching the dropdowns.
+            words = [shelf] + formats + subjects
+            if "ready" in rerun:
+                words.append("rerun-ready")
+            if "reair" in rerun:
+                words.append("re-air")
+            post_facets[p.id] = {
+                "shelf": shelf,
+                "rerun": rerun,
+                "tier": _tier_tokens(p.id) if p.status == "published" else [],
+                "formats": formats,
+                "subjects": subjects,
+                "search_extra": " ".join(words),
+            }
+
+        # Advanced-filter vocabularies, restricted to what's on the page so no
+        # option can match nothing (same rule as the category dropdown).
+        _shelves = {f["shelf"] for f in post_facets.values() if f["shelf"]}
+        shelf_choices = [(s, s.capitalize()) for s in ("breaking", "timely", "evergreen")
+                         if s in _shelves]
+        _rerun_used = {t for f in post_facets.values() for t in f["rerun"]}
+        rerun_choices = [(k, lbl) for k, lbl in
+                         (("ready", "Rerun-ready"),
+                          ("waiting", "In rotation — waiting"),
+                          ("ineligible", "Not in rotation"),
+                          ("reair", "Is a re-air"))
+                         if k in _rerun_used]
+        _tier_used = {t for f in post_facets.values() for t in f["tier"]}
+        tier_choices = [(k, lbl) for k, lbl in
+                        (("top10", "Top 10%"), ("top25", "Top 25%"),
+                         ("above", "Above median"), ("below", "Below median"),
+                         ("nodata", "No view data yet"))
+                        if k in _tier_used]
+        # Raw tag as the value (rows carry it verbatim), prettified as the label.
+        format_choices = [(t, t.replace("_", " ")) for t in
+                          sorted({t for f in post_facets.values() for t in f["formats"]})]
+        subject_choices = [(t, t.replace("_", " ")) for t in
+                           sorted({t for f in post_facets.values() for t in f["subjects"]})]
+
         # --- Filter vocabularies, drawn from what's actually on the page so the
         # dropdowns never offer a choice that matches nothing. ---
         def _call_sign(candidate) -> str:
@@ -3526,11 +3726,14 @@ def _library_dataset() -> dict:
 
     return {
         "video_rows": video_rows, "cut_rows": cut_rows, "posts": posts,
-        "post_metrics": post_metrics,
+        "post_metrics": post_metrics, "post_facets": post_facets,
         "counts": {"videos": len(video_rows), "cuts": len(cut_rows), "posts": len(posts)},
         "channel_choices": sorted(cs for cs in call_signs if cs),
         "category_choices": category_choices,
         "post_status_choices": post_statuses,
+        "shelf_choices": shelf_choices, "rerun_choices": rerun_choices,
+        "tier_choices": tier_choices, "format_choices": format_choices,
+        "subject_choices": subject_choices,
     }
 
 
@@ -3593,12 +3796,15 @@ def _calendar_data(y: int, m: int) -> dict:
     status = {}
     windows_et: list[str] = []
     with session_scope() as session:
-        drafts_count = session.execute(
-            select(func.count()).select_from(ThreadsPost).where(ThreadsPost.status == "draft")
-        ).scalar_one()
-        queue_count = session.execute(
-            select(func.count()).select_from(ThreadsPost).where(ThreadsPost.status == "queued")
-        ).scalar_one()
+        # One grouped query instead of two counts: round trips are the page's
+        # whole cost on a remote database.
+        status_counts = dict(session.execute(
+            select(ThreadsPost.status, func.count())
+            .where(ThreadsPost.status.in_(("draft", "queued")))
+            .group_by(ThreadsPost.status)
+        ).all())
+        drafts_count = status_counts.get("draft", 0)
+        queue_count = status_counts.get("queued", 0)
         status = scheduler_status(session)
         windows_et = list(status.get("windows") or [])
 
@@ -3672,20 +3878,6 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
          "windows_local": window_time_labels(),
          "msg": msg, "active": "calendar"},
-    )
-
-
-@app.get("/calendar/placement-preview", response_class=HTMLResponse)
-def placement_preview_page(request: Request):
-    """Scored placement beside the FIFO order, from the same queue snapshot.
-
-    This is how scored mode ships dark: compare the two plans here for a
-    while, then flip ``scheduler.placement.mode`` in settings.yaml.
-    """
-    with session_scope() as session:
-        data = placement_preview(session)
-    return templates.TemplateResponse(
-        request, "placement_preview.html", {**data, "active": "calendar"},
     )
 
 
@@ -3774,6 +3966,61 @@ def set_post_shelf_life(post_id: int, shelf_life: str = Form(""), next: str = Fo
     invalidate_recycle_overview()
     return _flash(dest, f"Shelf life set to {shelf} (your override)" if shelf
                   else "Shelf life reset to the AI's answer")
+
+
+@app.post("/post/{post_id}/tags")
+def update_post_tags(post_id: int, action: str = Form(...),
+                     tag: list[str] = Form([]), facet: str = Form("subject"),
+                     next: str = Form("")):
+    """Add or remove trait tags on a post.
+
+    ``tag`` may repeat — the add combo submits every checked name in one go
+    (remove buttons still send a single one). ``facet`` picks the column —
+    ``format_tags`` for format, ``footage_traits`` for subject. Each facet has
+    its own add box, so the caller always states which one it meant.
+    """
+    dest = next if next and next.startswith("/") else f"/post/{post_id}"
+    tags: list[str] = []
+    for t in tag:
+        t = t.strip().lower().replace(" ", "_")
+        if t and t not in tags:
+            tags.append(t)
+    if not tags:
+        return _flash(dest, "No tag selected")
+    if action not in ("add", "remove"):
+        return _flash(dest, f"Unknown action '{action}'")
+    changed: list[str] = []
+    with session_scope() as session:
+        p = session.get(ThreadsPost, post_id)
+        if p is None:
+            return _flash("/calendar", "Post not found")
+        for t in tags:
+            # Which facet a name belongs to is a property of the trait, not of
+            # the box it was typed into, so the vocabulary overrules the form
+            # on add. Removal trusts the form: the pill was rendered from one
+            # column and that is the column it has to come out of, however it
+            # got there.
+            t_facet = facet
+            if action == "add":
+                known = session.execute(
+                    select(Trait).where(Trait.name == t)
+                ).scalar_one_or_none()
+                if known is not None:
+                    t_facet = known.facet
+            col = "format_tags" if t_facet == Trait.FACET_FORMAT else "footage_traits"
+            existing = [x.strip() for x in (getattr(p, col) or "").split(",") if x.strip()]
+            if action == "add":
+                if t not in existing:
+                    existing.append(t)
+                    changed.append(t)
+            else:
+                if t in existing:
+                    changed.append(t)
+                existing = [x for x in existing if x != t]
+            setattr(p, col, ",".join(existing))
+    if not changed:
+        return _flash(dest, "Already tagged" if action == "add" else "Nothing to remove")
+    return _flash(dest, f"{'Added' if action == 'add' else 'Removed'} {', '.join(changed)}")
 
 
 @app.post("/post/{post_id}/dismiss")

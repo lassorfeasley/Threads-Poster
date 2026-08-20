@@ -60,8 +60,30 @@ class Settings:
         return node
 
 
+# Parsed-settings cache, keyed on the file's (mtime, size). settings.yaml is
+# ~500 lines and load_settings() is called liberally — the calendar's window
+# plan alone reads it 100+ times, which made YAML parsing rival the database
+# as a page-load cost. Nothing in the app writes settings.yaml (it's edited
+# by hand), and the stat check picks up out-of-band edits, so callers keep
+# their re-read-every-call semantics at the price of one stat() instead of a
+# full parse. Callers never mutate Settings.raw, so sharing one object is safe.
+_settings_cache: tuple[tuple[int, int], Settings] | None = None
+
+
 def load_settings() -> Settings:
-    return Settings(raw=_load_yaml(CONFIG_DIR / "settings.yaml"))
+    global _settings_cache
+    path = CONFIG_DIR / "settings.yaml"
+    try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (0, 0)
+    cached = _settings_cache
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    settings = Settings(raw=_load_yaml(path))
+    _settings_cache = (key, settings)
+    return settings
 
 
 def scheduler_timezone() -> ZoneInfo:

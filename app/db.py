@@ -1,6 +1,7 @@
 """Database engine/session setup and channel-seed sync."""
 from __future__ import annotations
 
+import logging
 import time
 from contextlib import contextmanager
 
@@ -9,6 +10,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .config import database_url, load_channel_seed, load_settings
 from .models import Base, Channel, Trait
+
+log = logging.getLogger("db")
 
 _url = database_url()
 _is_sqlite = _url.startswith("sqlite")
@@ -535,13 +538,22 @@ def sync_channels_from_config(session: Session) -> int:
 
 
 def sync_traits_from_config(session: Session) -> int:
-    """Seed the trait vocabulary from settings on first run. Only adds missing
-    names; never deletes or overwrites, so Traits-page edits survive a re-sync.
+    """Reconcile the trait vocabulary with settings: add missing names and
+    correct the facet of names already present. Never deletes, so hand-added
+    traits and Traits-page enable/disable state survive a re-sync.
 
     Two facets seed from two keys: ``vision.traits`` (subject — what's on
     screen) and ``vision.format_traits`` (format — production form, which the
     scheduler's variety gate runs on). The format facet falls back to a
     built-in default vocabulary so the variety gate works with zero setup.
+
+    Facet is reconciled rather than left alone because names move between the
+    two lists as the vocabulary is refined, and a stale facet is not cosmetic:
+    every tagging path partitions the model's answer through
+    ``active_traits_by_facet``, so a format name still recorded as subject gets
+    written to the post's subject column and the placement variety gate — which
+    reads the format column — never sees it. Config wins because the Traits
+    page cannot edit facet, so there is no operator choice here to clobber.
     """
     from .vision import DEFAULT_FORMAT_TRAITS
 
@@ -553,18 +565,31 @@ def sync_traits_from_config(session: Session) -> int:
             + list(settings.get("vision.undesirable_traits") or [])
     format_names = settings.get("vision.format_traits") or list(DEFAULT_FORMAT_TRAITS)
 
-    existing = {t.name for t in session.execute(select(Trait)).scalars().all()}
-    added = 0
+    # Format membership wins for a name listed under both keys, mirroring how
+    # ``vision.split_tags_by_facet`` partitions a tagging answer.
+    desired: dict[str, str] = {}
     for raw, facet in ([(n, Trait.FACET_SUBJECT) for n in names]
                        + [(n, Trait.FACET_FORMAT) for n in format_names]):
         name = str(raw).strip()
-        if not name or name in existing:
-            continue
-        session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, facet=facet,
-                          enabled=True))
-        existing.add(name)
-        added += 1
+        if name:
+            desired[name] = facet
+
+    rows = {t.name: t for t in session.execute(select(Trait)).scalars().all()}
+    added = 0
+    refaceted: list[str] = []
+    for name, facet in desired.items():
+        row = rows.get(name)
+        if row is None:
+            session.add(Trait(name=name, kind=Trait.KIND_NEUTRAL, facet=facet,
+                              enabled=True))
+            added += 1
+        elif row.facet != facet:
+            row.facet = facet
+            refaceted.append(name)
     session.flush()
+    if refaceted:
+        log.info("Corrected trait facet from config for %d trait(s): %s",
+                 len(refaceted), ", ".join(sorted(refaceted)))
     return added
 
 

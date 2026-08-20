@@ -1,0 +1,74 @@
+{# Trait tags grouped by facet, shared by the post and video pages.
+
+   Vocabulary names run long (talking_head_or_anchor_at_desk), so these render
+   as full-width rows rather than pills that wrapped one-per-line anyway. The
+   group heading carries the facet, so the rows need no colour coding.
+
+   Editing is opt-in: pass ``action`` to get remove buttons and an add box.
+   The video page leaves it off — candidate tags are predictions from
+   storyboard stills that the queue-time annotation supersedes, so hand-editing
+   them would be writing over a guess that gets thrown away. #}
+{% macro facet_group(label, hint, tags, facet="", action="", unused=none, next="") %}
+{% if tags or unused %}
+<div class="tag-group">
+  <div class="tag-group-head">
+    <span class="meta" title="{{ hint }}">{{ label }}</span>
+    {% if action %}
+    <a class="tag-vocab-add" href="/traits"
+       title="Add a new {{ label|lower }} tag to the vocabulary"
+       aria-label="Add a new {{ label|lower }} tag to the vocabulary">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+    </a>
+    {% endif %}
+  </div>
+  {% if tags %}
+  <ul class="tag-list">
+    {% for t in tags %}
+    <li class="tag-row">
+      <span class="tag-name" title="{{ t }}">{{ t.replace("_", " ") }}</span>
+      {% if action %}
+      <form method="post" action="{{ action }}" class="inline">
+        <input type="hidden" name="action" value="remove"><input type="hidden" name="tag" value="{{ t }}">
+        <input type="hidden" name="facet" value="{{ facet }}"><input type="hidden" name="next" value="{{ next }}">
+        <button type="submit" class="tag-x" aria-label="Remove {{ t }}" title="Remove">&times;</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if action and unused %}
+  <form method="post" action="{{ action }}" class="tag-add-form">
+    <input type="hidden" name="action" value="add">
+    <input type="hidden" name="facet" value="{{ facet }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="tag-add-row">
+      {# A closed vocabulary, so checkboxes rather than free text: it can't
+         invent a tag the Traits page doesn't know, and several tags can be
+         checked and added in one submit. toolbar.js keeps the summary label
+         live ("2 selected") and closes the panel on outside click; nothing
+         applies until the Add button posts the form. #}
+      <details class="combo tag-add-combo">
+        <summary class="combo-summary" aria-label="Add {{ label|lower }} tags">
+          <span data-combo-label data-combo-empty="Add {{ label|lower }} tags…">Add {{ label|lower }} tags…</span>
+          <svg class="combo-caret" width="10" height="6" viewBox="0 0 10 6" fill="none"
+               stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 1l4 4 4-4"/></svg>
+        </summary>
+        <div class="combo-panel">
+          {% for t in unused %}
+          <label class="combo-opt">
+            <input type="checkbox" name="tag" value="{{ t }}" data-combo-text="{{ t.replace('_', ' ') }}"> {{ t.replace("_", " ") }}
+          </label>
+          {% endfor %}
+        </div>
+      </details>
+      <button type="submit" class="btn sm">Add</button>
+    </div>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+{% endmacro %}

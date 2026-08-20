@@ -34,8 +34,6 @@
       <button type="button" class="btn ghost sm" aria-label="Close"
               onclick="document.getElementById('url-dialog').close()">✕</button>
     </div>
-    <p class="meta" style="margin: 0 0 16px;">Downloads with yt-dlp and runs through the same
-      trim → caption → post workflow. Paste one URL per line to queue several at once.</p>
     <div class="field">
       <label>YouTube URL(s)</label>
       <textarea name="urls" id="url-input" rows="4"
@@ -195,8 +193,6 @@
   <div class="mc-body">
     <div class="item-title">{{ c.title }}</div>
     {% if c.clip_title %}<div class="meta clip-title" title="Generated clip title">{{ c.clip_title }}</div>{% endif %}
-    <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
-      {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
   </div>
 </div>
 {% endfor %}
