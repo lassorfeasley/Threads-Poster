@@ -104,18 +104,24 @@
     <div id="clip-proposals" class="clip-proposals">
       <div class="clip-proposals-head">
         <span class="clip-proposals-title" id="clip-proposals-title">Suggested clips</span>
-        <div class="clip-proposals-tools">
-          <button type="button" class="ghost sm" id="clip-proposals-toggle"
-                  onclick="toggleClipProposals()" hidden>Show</button>
-          <button type="button" class="ghost sm" id="clip-proposals-reroll"
-                  onclick="rerollClipProposals()"
-                  title="Ask the model to read the transcript and propose clips">Suggest</button>
-          <button type="button" class="ghost sm" id="clip-proposals-dismiss-all"
-                  onclick="dismissAllClipProposals()"
-                  title="Reject every suggestion for this video" hidden>None of these</button>
-        </div>
+        <button type="button" class="ghost sm icon-btn clip-proposals-chevron" id="clip-proposals-toggle"
+                onclick="toggleClipProposals()" title="Hide suggestions"
+                aria-label="Hide suggestions" hidden>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
       </div>
       <div id="clip-proposals-list"></div>
+      <div class="clip-proposals-foot" id="clip-proposals-foot">
+        <button type="button" class="ghost sm" id="clip-proposals-reroll"
+                onclick="rerollClipProposals()"
+                title="Ask the AI to read the transcript and propose clips">Suggest clips</button>
+        <button type="button" class="ghost sm" id="clip-proposals-dismiss-all"
+                onclick="dismissAllClipProposals()"
+                title="Reject every suggestion for this video" hidden>Dismiss all</button>
+      </div>
     </div>
     {% endif %}
 
@@ -1324,6 +1330,7 @@ function renderClipProposals() {
   const list = document.getElementById('clip-proposals-list');
   const title = document.getElementById('clip-proposals-title');
   const toggle = document.getElementById('clip-proposals-toggle');
+  const foot = document.getElementById('clip-proposals-foot');
   const reroll = document.getElementById('clip-proposals-reroll');
   const dismissAll = document.getElementById('clip-proposals-dismiss-all');
   // A proposal with nothing left after already-clipped material is removed is
@@ -1341,10 +1348,16 @@ function renderClipProposals() {
   title.textContent = n
     ? `${n} suggested clip${n === 1 ? '' : 's'}`
     : 'Suggested clips';
-  reroll.textContent = n ? 'Re-roll' : 'Suggest';
+  reroll.textContent = n ? 'Suggest again' : 'Suggest clips';
   dismissAll.hidden = !n;
   toggle.hidden = !n || segments.length === 0;
-  toggle.textContent = collapsed ? 'Show' : 'Hide';
+  const toggleLabel = collapsed ? 'Show suggestions' : 'Hide suggestions';
+  toggle.title = toggleLabel;
+  toggle.setAttribute('aria-label', toggleLabel);
+  toggle.setAttribute('aria-expanded', String(!collapsed));
+  panel.classList.toggle('is-collapsed', collapsed);
+  // Collapsed = just the one-line header; the actions go with the list.
+  foot.hidden = collapsed;
 
   if (!n) {
     list.innerHTML = '';
@@ -1364,7 +1377,7 @@ function renderClipProposals() {
       <div class="proposal-meta meta">${segs} segment${segs === 1 ? '' : 's'}
         · ${Math.round(view.seconds)}s${conf}</div>
       ${view.trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
-      ${clip.why ? `<div class="proposal-why meta">${escapeHtml(clip.why)}</div>` : ''}
+      ${clip.why ? `<details class="proposal-why-toggle"><summary>Why?</summary><div class="proposal-why meta">${escapeHtml(clip.why)}</div></details>` : ''}
       <div class="proposal-actions">
         <button type="button" class="ghost sm proposal-play" data-act="play"
                 title="Play this clip without applying it">
@@ -2088,43 +2101,6 @@ async function retryExport() {
     </div>
   </article>
 
-  {% if threads_ok %}
-  {# Instagram include sits full-width above the ship buttons — on by default,
-     so queueing posts the paired reel without hunting for a toggle. #}
-  <div class="ig-include-bar">
-    <label class="ig-include-label {{ 'is-disabled' if not instagram_ok }}">
-      <span>Include Instagram Reel with this post</span>
-      <span class="switch">
-        <input type="checkbox" form="post-form" name="include_instagram" value="1"
-               id="include-instagram" {{ 'checked' if include_instagram }}
-               {{ '' if instagram_ok else 'disabled' }}>
-        <span class="switch-track"><span class="switch-thumb"></span></span>
-      </span>
-    </label>
-    {% if not instagram_ok %}
-    <p class="field-hint">Instagram isn't connected —
-      <a href="/connections">connect it</a> to queue reels alongside Threads posts.</p>
-    {% endif %}
-  </div>
-  {# ---- Ship: buttons submit form#post-form via the form= attribute; JS
-       confirms + validates the caption before anything fires. ---- #}
-  <div class="thread-actions">
-    <form method="post" action="/cut/{{ cut.id }}/post" id="post-form">
-      <input type="hidden" name="use_subtitles" id="use-subtitles-field"
-             value="{{ '1' if cut.use_subtitles else '0' }}">
-      {# Which platforms Post now ships to — set by the Post now dialog
-         (both | threads | instagram). Ignored by queue/draft, which follow the
-         Instagram toggle above. #}
-      <input type="hidden" name="publish_target" id="publish-target-field" value="">
-    </form>
-    <button id="btn-draft" form="post-form"
-            formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
-    <button id="btn-post-now" form="post-form">Post now</button>
-    <button id="btn-queue" form="post-form" class="approve"
-            formaction="/cut/{{ cut.id }}/queue" formnovalidate>{{ "Update queue" if pending_post_status == "queued" else "Add to queue" }}</button>
-  </div>
-  {% endif %}
-
   {# Clipboard source for Copy transcript. May be empty on first paint before
      Whisper has run; copyTranscript() fetches /cut/{id}/transcript on demand. #}
   <textarea id="clip-transcript-plain" hidden readonly>{{ clip_transcript_text }}</textarea>
@@ -2598,21 +2574,27 @@ async function retryExport() {
         const menu = el && el.closest ? el.closest('details.ti-menu') : null;
         if (menu) menu.removeAttribute('open');
       }
-      async function suggestAttribution(btn) {
+      async function suggestAttribution(btn, silent) {
         const ta = document.getElementById('attribution');
         if (!ta) return;
-        const isSparkle = btn.classList.contains('ti-sparkle');
-        const lbl = isSparkle ? null : (btn.querySelector('.lbl') || btn);
+        if (!btn) btn = document.getElementById('attribution-suggest');
+        const isSparkle = btn && btn.classList.contains('ti-sparkle');
+        const lbl = (btn && !isSparkle) ? (btn.querySelector('.lbl') || btn) : null;
         const old = lbl ? lbl.textContent : '';
-        btn.disabled = true;
-        if (isSparkle) btn.classList.add('is-busy');
-        else if (lbl) lbl.textContent = 'Drafting…';
+        if (btn) {
+          btn.disabled = true;
+          if (isSparkle) btn.classList.add('is-busy');
+          else if (lbl) lbl.textContent = 'Drafting…';
+        }
         try {
           const r = await fetch('/cut/{{ cut.id }}/suggest-attribution', { method: 'POST' });
           const d = await r.json();
-          if (!r.ok) { alert(d.error || 'Attribution draft failed.'); return; }
+          if (!r.ok) {
+            if (!silent) alert(d.error || 'Attribution draft failed.');
+            return;
+          }
           if (d.unavailable || !d.text) {
-            alert(d.message || 'No citation drafted — the source data is not available.');
+            if (!silent) alert(d.message || 'No citation drafted — the source data is not available.');
             return;
           }
           ta.value = d.text;
@@ -2621,16 +2603,29 @@ async function retryExport() {
           if (regen) regen.textContent = 'Regenerate draft';
           const sparkle = document.getElementById('attribution-suggest');
           if (sparkle) sparkle.title = sparkle.ariaLabel = 'Regenerate draft';
-          closeMenu(btn);
-          ta.focus();
+          if (!silent) {
+            closeMenu(btn);
+            ta.focus();
+          }
         } catch (e) {
-          alert('Attribution draft failed: ' + e);
+          if (!silent) alert('Attribution draft failed: ' + e);
         } finally {
-          btn.disabled = false;
-          if (isSparkle) btn.classList.remove('is-busy');
-          else if (lbl && lbl.textContent === 'Drafting…') lbl.textContent = old;
+          if (btn) {
+            btn.disabled = false;
+            if (isSparkle) btn.classList.remove('is-busy');
+            else if (lbl && lbl.textContent === 'Drafting…') lbl.textContent = old;
+          }
         }
       }
+      // Invitation mode: draft the call to action into the box on load so it
+      // can be reviewed before queue/publish (same draft the ship path would
+      // write later if the box were still empty).
+      {% if fr_invitation %}
+      (function () {
+        const ta = document.getElementById('attribution');
+        if (ta && !ta.value.trim()) suggestAttribution(null, true);
+      })();
+      {% endif %}
       // The suggestion is only ever a PROPOSAL: it renders in a review card
       // and touches the caption field/DB only when the operator accepts it.
       let proposedCaption = '';
@@ -2869,16 +2864,16 @@ async function retryExport() {
 </div>{# /.post-main #}
 
 {# ============ RAIL: how this clip is classified ============ #}
-{# The same rail the post page carries, one stage earlier. It can live here
-   because the clip IS the footage that ships: tags set now are ground truth,
-   not the storyboard guess the video page holds, and they seed the post at
-   queue time instead of the LLM annotation pass. #}
+{# The same rail the post page carries, one stage earlier. Format/subject
+   describe on-screen content (not captions), so vision tags the exported clip
+   file here; the operator can correct before queue. Tags seed the post and
+   stand in for the post-level annotation pass. #}
 <aside class="post-side">
   {% set cut_fmt = (cut.format_tags or "").split(",")|map("trim")|select|list %}
   {% set cut_subj = (cut.footage_traits or "").split(",")|map("trim")|select|list %}
   {% set unused_format = trait_vocab.get("format", [])|reject("in", cut_fmt)|list %}
   {% set unused_subject = trait_vocab.get("subject", [])|reject("in", cut_subj)|list %}
-  <div class="card tight">
+  <div class="card tight"{% if tagging %} data-tagging="1"{% endif %}>
     {{ catui.field(c.id, c.category, "/cut/" ~ cut.id ~ "?step=post", show_label=false) }}
     <hr class="div">
     {{ tagui.facet_group("Format", "Production form — drives the scheduler's variety gate",
@@ -2889,7 +2884,9 @@ async function retryExport() {
                         cut_subj, facet="subject", action="/cut/" ~ cut.id ~ "/tags",
                         unused=unused_subject,
                         next="/cut/" ~ cut.id ~ "?step=post") }}
-    {% if cut_fmt or cut_subj %}
+    {% if tagging and not cut_fmt and not cut_subj %}
+    <p class="meta" style="margin: 10px 0 0;">Tagging footage…</p>
+    {% elif cut_fmt or cut_subj %}
     <p class="meta" style="margin: 10px 0 0;">Carried onto the post at queue time
       in place of automatic tagging.</p>
     {% elif inherited_fmt or inherited_subj %}
@@ -2904,9 +2901,83 @@ async function retryExport() {
     {{ tagui.facet_group("Subject", "Predicted from the video's storyboard stills",
                         inherited_subj) }}
     {% endif %}
+
+    <hr class="div">
+    <div class="shelf-life-row">
+      {# Content-level: writes the source video's tag, which every clip and
+         post from it inherits. Per-post overrides live on the post page. #}
+      <form method="post" action="/video/{{ c.id }}/shelf-life" class="seg-toggle cat-toggle">
+        <input type="hidden" name="next" value="/cut/{{ cut.id }}?step=post">
+        <button name="shelf_life" value="breaking" class="{{ 'is-on' if shelf_life == 'breaking' }}"
+                title="News-cycle content: highest urgency, decays in a day, expires in days">breaking</button>
+        <button name="shelf_life" value="timely" class="{{ 'is-on' if shelf_life == 'timely' }}"
+                title="Seasonal or trend-adjacent: urgency halves weekly, expires in weeks">timely</button>
+        <button name="shelf_life" value="evergreen" class="{{ 'is-on' if shelf_life == 'evergreen' }}"
+                title="Holds up whenever it airs: no urgency decay, never expires, qualifies for reruns">evergreen</button>
+      </form>
+    </div>
+    {% if not shelf_life_tagged %}
+    <p class="meta" style="margin: 8px 0 0;">Category default — correcting it here
+      tags the source video, so its other clips inherit too.</p>
+    {% endif %}
   </div>
+
+  {% if threads_ok %}
+  {# Ship controls live in the rail (same spot as the post page): Instagram
+     include on by default, then draft / post-now / queue. Caption + attribution
+     textareas associate via form="post-form"; buttons submit through form=. #}
+  <div class="card tight post-ship-card" style="margin-top: 14px;">
+    <form method="post" action="/cut/{{ cut.id }}/post" id="post-form">
+      <input type="hidden" name="use_subtitles" id="use-subtitles-field"
+             value="{{ '1' if cut.use_subtitles else '0' }}">
+      {# Which platforms Post now ships to — set by the Post now dialog
+         (both | threads | instagram). Ignored by queue/draft, which follow the
+         Instagram toggle below. #}
+      <input type="hidden" name="publish_target" id="publish-target-field" value="">
+    </form>
+    <label class="ig-include-label {{ 'is-disabled' if not instagram_ok }}">
+      <span>Instagram reel</span>
+      <span class="switch">
+        <input type="checkbox" form="post-form" name="include_instagram" value="1"
+               id="include-instagram" {{ 'checked' if include_instagram }}
+               {{ '' if instagram_ok else 'disabled' }}>
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </span>
+    </label>
+    {% if not instagram_ok %}
+    <p class="field-hint">Instagram isn't connected —
+      <a href="/connections">connect it</a> to queue reels alongside Threads posts.</p>
+    {% endif %}
+    <div class="post-ship-actions has-top-rule">
+      <button id="btn-queue" form="post-form" class="approve" style="width: 100%;"
+              formaction="/cut/{{ cut.id }}/queue" formnovalidate>{{ "Update queue" if pending_post_status == "queued" else "Add to queue" }}</button>
+      <div class="post-ship-buttons" style="margin-top: 8px;">
+        <button id="btn-draft" form="post-form"
+                formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
+        <button id="btn-post-now" form="post-form">Post now</button>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 </aside>
 </div>{# /.post-layout #}
+{% if tagging %}
+<script>
+(function () {
+  let tries = 0;
+  async function pollTags() {
+    tries += 1;
+    try {
+      const r = await fetch('/cut/{{ cut.id }}/tags-status');
+      const d = await r.json();
+      if (d.tagged) { location.reload(); return; }
+    } catch (e) { /* keep polling */ }
+    if (tries < 40) setTimeout(pollTags, 1500);
+  }
+  setTimeout(pollTags, 1200);
+})();
+</script>
+{% endif %}
 <script>
   async function copyCaption() {
     const btn = document.getElementById('copy-caption-btn');

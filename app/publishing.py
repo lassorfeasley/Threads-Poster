@@ -87,8 +87,9 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         # recorded no duration at all.
         clip_length_seconds=_clip_duration_seconds(clip),
     )
-    # Tags the operator set on the clip are ground truth about this exact file,
-    # so they carry over now and spare the post the annotation pass entirely.
+    # Tags set on the clip (vision on export, optionally corrected by hand)
+    # describe this exact file, so they carry over now and spare the post the
+    # annotation pass entirely.
     from .vision import seed_post_tags_from_cut
 
     seed_post_tags_from_cut(post, cut)

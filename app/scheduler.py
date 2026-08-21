@@ -1623,10 +1623,10 @@ def annotate_queued_posts(limit: int = 2) -> int:
     which swaps in the subtitled variant) is re-annotated: the requeue path
     clears ``footage_scored_at`` when it swaps the file.
 
-    A clip the operator tagged by hand short-circuits the model: those tags
-    describe the same file and were set by someone who watched it, so they are
-    copied over and the call is skipped. That runs even with vision disabled,
-    and before the per-tick ``limit``, since it costs nothing.
+    A clip tagged on export (or corrected by hand) short-circuits the model:
+    those tags describe the same file, so they are copied over and the call is
+    skipped. That runs even with vision disabled, and before the per-tick
+    ``limit``, since it costs nothing.
     """
     settings = load_settings()
     from .db import active_traits_by_facet

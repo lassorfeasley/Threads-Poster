@@ -9,15 +9,122 @@
 {% import "components/toolbar.html" as ui %}
 {% set cal_views %}
   <div class="segmented sm cal-viewtoggle" role="tablist" aria-label="Switch calendar view">
-    <button type="button" class="seg-btn is-active" data-view="calendar" role="tab" aria-selected="true">Calendar</button>
+    <button type="button" class="seg-btn" data-view="month" role="tab" aria-selected="false">Month</button>
+    <button type="button" class="seg-btn is-active" data-view="week" role="tab" aria-selected="true">Week</button>
     <button type="button" class="seg-btn" data-view="queue" role="tab" aria-selected="false">Queue
       {% if queue_count %}<span class="seg-count">{{ queue_count }}</span>{% endif %}</button>
   </div>
 {% endset %}
 {{ ui.pagebar("", views=cal_views) }}
 
+{% macro wk_media(e, label) %}
+  {# Card face: still on top (time chip overlaid), title + status chips below. #}
+  <span class="cal-wk-thumb{{ '' if e.thumbnail else ' is-empty' }}">
+    {% if e.thumbnail %}
+    <img src="{{ e.thumbnail }}" alt="" loading="lazy"
+         onerror="this.closest('.cal-wk-thumb').classList.add('is-empty'); this.remove();">
+    {% else %}
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+    {% endif %}
+    <span class="cal-wk-time">{{ e.time }}</span>
+  </span>
+  <span class="cal-wk-body">
+    <span class="cal-wk-title">{{ (label or '(post)')[:90] }}</span>
+    {% if e.has_reel or e.kind == 'rerun' or e.get('relax_step') or e.get('score_parts') %}
+    <span class="cal-wk-chips">
+      {% if e.has_reel %}<span class="cal-ev-reel" title="Also queued as an Instagram Reel">+IG</span>{% endif %}
+      {% if e.kind == 'rerun' %}<span class="cal-ev-rerun" title="Projected rerun — displaced automatically by any fresh content">↻ rerun</span>{% endif %}
+      {% if e.get('relax_step') %}<span class="cal-ev-relax" title="Placed with relaxed gates (step {{ e.get('relax_step') }})">⚠</span>{% endif %}
+      {% if e.get('score_parts') %}
+      <span class="cal-score-chip" role="button" tabindex="0"
+            title="Why is this post here? Click for the placement score breakdown"
+            data-post="{{ e.post_id }}" data-window="{{ e.window_key }}"
+            data-score="{{ e.score }}"
+            data-urgency="{{ e.score_parts.get('urgency', 0) }}"
+            data-patience="{{ e.score_parts.get('patience', 0) }}"
+            data-variety="{{ e.score_parts.get('variety_penalty', 0) }}"
+            data-repost="{{ e.score_parts.get('repost_penalty', 0) }}"
+            data-relax="{{ e.get('relax_step') or 0 }}">Σ</span>
+      {% endif %}
+    </span>
+    {% endif %}
+  </span>
+{% endmacro %}
+
 <div class="cal-layout" id="cal-layout">
-  <section class="cal-month" id="view-calendar">
+  <section class="cal-week" id="view-week">
+    <div class="cal-toolbar">
+      <a class="btn" href="/calendar?start={{ week_prev }}">← Prev</a>
+      <div class="cal-title">{{ week_title }}</div>
+      <a class="btn" href="/calendar?start={{ week_next }}">Next →</a>
+      <a class="btn" href="/calendar" style="margin-left: auto;">Today</a>
+    </div>
+
+    <div class="cal-week-grid">
+      {% for d in week_days %}
+      {% set evs = week_events.get(d.isoformat(), []) %}
+      <div class="cal-week-col{{ ' today' if d == today_date }}">
+        <div class="cal-week-day">
+          <span class="cal-week-dow">{{ dow[loop.index0] }}</span>
+          <span class="cal-week-date">{{ d.strftime('%b') ~ ' ' if (loop.first or d.day == 1) }}{{ d.day }}</span>
+        </div>
+        <div class="cal-week-stack">
+          {% for e in evs %}
+            {% set cls = 'open' if e.kind == 'open' else ('sched' if e.kind == 'queued' else ('pub' if e.kind == 'published' else ('missed' if e.kind == 'missed' else ('rerun' if e.kind == 'rerun' else 'draft')))) %}
+            {% set label = e.title or e.caption %}
+            {% if e.kind == 'open' %}
+              <div class="cal-event cal-wk-slot {{ cls }} empty cal-drop"
+                   data-window-key="{{ e.window_key }}"
+                   title="{{ e.date_label }} {{ e.time }} · open window — drop a queued post here">
+                <span class="cal-wk-slot-time">{{ e.time }}</span><em>open</em></div>
+            {% elif e.kind == 'missed' %}
+              <div class="cal-event cal-wk-slot {{ cls }}"
+                   title="{{ e.date_label }} {{ e.time }} · this window passed without publishing — the queue was empty, the spacing floor blocked it, or the publish failed. Check the scheduler panel and Notifications.">
+                <span class="cal-wk-slot-time">{{ e.time }}</span><em>missed</em></div>
+            {% elif e.kind == 'rerun' %}
+              <div class="cal-event cal-wk-card {{ cls }} card cal-drop"
+                   data-window-key="{{ e.window_key }}"
+                   title="{{ e.date_label }} {{ e.time }} · projected rerun — nothing fresh is queued for this window, so the scheduler plans to re-air this proven evergreen post. Queue new content or drop a card here and it takes the slot instead. · {{ label }}">
+                <a href="/post/{{ e.post_id }}" class="cal-wk-link">{{ wk_media(e, label) }}</a>
+              </div>
+            {% elif e.kind == 'queued' and e.post_id %}
+              {% set relax = e.get('relax_step') %}
+              {% set detail = e.get('score_detail') or '' %}
+              <div class="cal-event cal-wk-card {{ cls }} card cal-drag cal-drop{% if e.pinned %} pinned{% endif %}"
+                   draggable="true"
+                   data-post-id="{{ e.post_id }}"
+                   data-window-key="{{ e.window_key }}"
+                   title="{{ e.date_label }} {{ e.time }} · queued{% if e.pinned %} (pinned){% endif %}{% if relax %} · placed with relaxed gates (step {{ relax }}) — the queue is too shallow or concentrated to satisfy every spacing rule here{% endif %}{% if detail %} · {{ detail }}{% endif %} · drag to another window · {{ label }}">
+                <a href="/post/{{ e.post_id }}" class="cal-wk-link"
+                   onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
+                  {{ wk_media(e, label) }}
+                </a>
+              </div>
+            {% elif e.post_id %}
+              <a class="cal-event cal-wk-card {{ cls }} card" href="/post/{{ e.post_id }}"
+                 title="{{ e.date_label }} {{ e.time }} · {{ e.status }} · {{ label }}">
+                {{ wk_media(e, label) }}</a>
+            {% elif e.permalink %}
+              <a class="cal-event cal-wk-card {{ cls }} card" href="{{ e.permalink }}" target="_blank"
+                 title="{{ e.date_label }} {{ e.time }} · {{ e.status }} · {{ label }}">
+                {{ wk_media(e, label) }}</a>
+            {% else %}
+              <span class="cal-event cal-wk-card {{ cls }} card"
+                    title="{{ e.date_label }} {{ e.time }} · {{ e.status }} · {{ label }}">
+                {{ wk_media(e, label) }}</span>
+            {% endif %}
+          {% else %}
+            <div class="cal-week-none">No windows</div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="cal-month" id="view-calendar" hidden>
     <div class="cal-toolbar">
       <a class="btn" href="/calendar?year={{ prev_y }}&month={{ prev_m }}">← Prev</a>
       <div class="cal-title">{{ month_name }} {{ year }}</div>
@@ -203,18 +310,22 @@
 
 <script>
 (function () {
-  // ---------- View toggle: Calendar <-> Queue (one at a time) ----------
+  // ---------- View toggle: Month / Week / Queue (one at a time) ----------
   const layout = document.getElementById('cal-layout');
-  const viewCal = document.getElementById('view-calendar');
+  const viewMonth = document.getElementById('view-calendar');
+  const viewWeek = document.getElementById('view-week');
   const viewQueue = document.getElementById('view-queue');
   const toggleBtns = Array.from(document.querySelectorAll('.cal-viewtoggle .seg-btn'));
 
   function setView(view) {
-    const isQueue = view === 'queue';
-    viewCal.hidden = isQueue;
-    viewQueue.hidden = !isQueue;
-    layout.classList.toggle('view-queue', isQueue);
-    layout.classList.toggle('view-calendar', !isQueue);
+    // 'calendar' is the pre-week stored value — it was the default, not a
+    // choice, so it migrates to the new default rather than pinning Month.
+    if (!['month', 'week', 'queue'].includes(view)) view = 'week';
+    viewMonth.hidden = view !== 'month';
+    viewWeek.hidden = view !== 'week';
+    viewQueue.hidden = view !== 'queue';
+    layout.classList.toggle('view-queue', view === 'queue');
+    layout.classList.toggle('view-calendar', view !== 'queue');
     toggleBtns.forEach((b) => {
       const on = b.dataset.view === view;
       b.classList.toggle('is-active', on);
@@ -224,8 +335,12 @@
   }
   toggleBtns.forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
   (function restoreView() {
-    let v = 'calendar';
-    try { v = localStorage.getItem('calView') || 'calendar'; } catch (e) {}
+    let v = 'week';
+    try { v = localStorage.getItem('calView') || 'week'; } catch (e) {}
+    // Paging the month grid (?year=&month=) should land on the month view even
+    // if the sticky preference is week — the click expressed intent.
+    if (new URLSearchParams(location.search).has('month')) v = 'month';
+    else if (new URLSearchParams(location.search).has('start')) v = 'week';
     setView(v);
   })();
 
@@ -284,7 +399,7 @@
     const res = await fetch(location.href, { headers: { 'X-Requested-With': 'fetch' } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
-    ['#view-calendar', '#view-queue'].forEach((sel) => {
+    ['#view-calendar', '#view-week', '#view-queue'].forEach((sel) => {
       const fresh = doc.querySelector(sel);
       const cur = document.querySelector(sel);
       if (fresh && cur) cur.innerHTML = fresh.innerHTML;

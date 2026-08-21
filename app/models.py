@@ -200,13 +200,16 @@ class Cut(Base):
     # Unused: reel caption is the Threads ``draft_caption``. Kept for existing DBs.
     ig_draft_caption: Mapped[str] = mapped_column(Text, default="")
 
-    # Operator-set trait tags for the trimmed clip, in the same two facets the
-    # post carries (comma-separated). The clip IS the footage that ships, so
-    # this is the earliest point real ground truth exists — the candidate's
-    # tags only ever described the whole source video. Set here, they seed the
-    # post at queue time and stand in for the LLM annotation pass entirely.
+    # Trait tags for the trimmed clip (comma-separated), same two facets as
+    # the post. Filled by vision on export from the clip file itself — format
+    # and subject describe on-screen content, not captions — then editable on
+    # the clip page. They seed the post at queue time and stand in for the
+    # post-level annotation pass. ``footage_tagged_at`` marks that the vision
+    # pass ran (even when it found nothing), so we don't retry forever.
     format_tags: Mapped[str] = mapped_column(Text, default="")
     footage_traits: Mapped[str] = mapped_column(Text, default="")
+    footage_tagged_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

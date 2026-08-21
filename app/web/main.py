@@ -115,7 +115,10 @@ from ..scheduler import (
     window_time_labels,
 )
 from ..scrape import PASTED_CHANNEL_URL, archive_candidate, fetch_video_metadata
-from ..vision import annotate_post_footage, suggest_subs_position, tag_candidate_storyboard
+from ..vision import (
+    annotate_cut_footage, annotate_post_footage, suggest_subs_position,
+    tag_candidate_storyboard,
+)
 from ..voice import voice_context
 from ..youtube import YouTubeAPIError, parse_video_url
 from . import pagecache
@@ -1322,6 +1325,7 @@ def open_cut(candidate_id: int):
 
 @app.get("/cut/{cut_id}", response_class=HTMLResponse)
 def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
+    needs_tags = False
     with session_scope() as session:
         cut = session.execute(
             select(Cut)
@@ -1410,6 +1414,21 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         # itself is untagged — it's the set the scheduler falls back to.
         inherited_fmt = [t.strip() for t in (c.format_tags or "").split(",") if t.strip()]
         inherited_subj = [t.strip() for t in (c.visual_traits or "").split(",") if t.strip()]
+        cut_fmt = (cut.format_tags or "").strip()
+        cut_subj = (cut.footage_traits or "").strip()
+        # Already-exported clips that predate export-time tagging: fill in the
+        # background so the next reload shows Format/Subject without waiting
+        # for a re-export.
+        needs_tags = bool(
+            exported and not exporting
+            and cut.footage_tagged_at is None
+            and not cut_fmt and not cut_subj
+            and cut.id not in _cut_annotate_inflight
+        )
+        if needs_tags:
+            _cut_annotate_inflight.add(cut.id)
+            _in_background(_annotate_cut_in_thread, cut.id)
+        trait_source = cut_subj or c.visual_traits or ""
 
     threads_ok = threads_api.is_authenticated()
     instagram_ok = instagram_api.is_authenticated()
@@ -1431,6 +1450,12 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "trait_vocab": trait_vocab,
          "inherited_fmt": inherited_fmt,
          "inherited_subj": inherited_subj,
+         # Content-level shelf life (candidate tag -> category default), shown
+         # and correctable in the rail. Post-level overrides happen later, on
+         # the post page.
+         "shelf_life": resolve_shelf_life(None, c),
+         "shelf_life_tagged": bool((c.shelf_life or "").strip()),
+         "tagging": needs_tags,
          "export_error": (cut.export_error or "") if export_failed else "",
          # Attribution first-comment, editable before the post even exists:
          # prefill from the pending post so requeueing round-trips cleanly.
@@ -1440,10 +1465,10 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
          "subs_position": (
              cut.subs_position if cut.use_subtitles
-             else suggest_subs_position(c.visual_traits)
+             else suggest_subs_position(trait_source)
              or load_settings().get("subtitles.position", "bottom")
          ),
-         "suggested_subs": suggest_subs_position(c.visual_traits),
+         "suggested_subs": suggest_subs_position(trait_source),
          "msg": msg, "active": "dashboard"},
     )
 
@@ -1828,6 +1853,26 @@ def media_thumb(candidate_id: int):
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
+@app.get("/media/cut-thumb/{cut_id}")
+def media_cut_thumb(cut_id: int):
+    """Poster frame pulled from a cut's exported clip, so clip cards show the
+    footage that actually shipped rather than the source video's poster.
+    ``cached_still`` re-extracts when the clip file is newer, so re-exports
+    refresh the card on their own."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path:
+            return JSONResponse({"error": "no clip"}, status_code=404)
+        source = cut.trimmed_clip_path
+    try:
+        path = cached_still(source, f"cut-{cut_id}")
+    except Exception as exc:
+        log.info("No still for cut %s: %s", cut_id, exc)
+        return JSONResponse({"error": "no still"}, status_code=404)
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/media/clip/{cut_id}")
 def media_clip(cut_id: int):
     with session_scope() as session:
@@ -2140,12 +2185,27 @@ def _export_cut_in_thread(cut_id: int) -> None:
                 cut.hook_autodrafted = False
             cut.clip_transcript_path = transcript_sidecar
             cut.use_subtitles = False
-            cut.export_status = ""
-            cut.export_error = ""
+            # New file = new on-screen content; drop stale tags so the vision
+            # pass below can refill Format/Subject for the clip page.
+            cut.format_tags = ""
+            cut.footage_traits = ""
+            cut.footage_tagged_at = None
             if title and not (cut.clip_title or "").strip():
                 cut.clip_title = title
                 if calendar:
                     cut.calendar_name = calendar
+            # Tag before clearing export_status so the Post-step reload sees
+            # Format/Subject already filled (footage content, not captions).
+            try:
+                settings = load_settings()
+                vocab = active_traits_by_facet(session)
+                annotate_cut_footage(cut, settings, vocab["subject"],
+                                     format_traits=vocab["format"])
+            except Exception:
+                log.exception("Cut footage tagging failed for cut %s", cut_id)
+            _sync_cut_tags_to_draft_posts(session, cut)
+            cut.export_status = ""
+            cut.export_error = ""
             if previous:
                 _delete_if_unreferenced(session, previous)
     except ClipExportError as exc:
@@ -3402,6 +3462,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
             "attribution_text": p.attribution_text or "",
+            "attribution_skipped": bool(p.attribution_skipped),
             "attribution_enabled": load_first_reply().get("attribution_enabled", True),
             "first_reply_mode": load_first_reply().get("mode", "citation"),
             # A call to action is written from the brief, not from the source
@@ -3908,9 +3969,76 @@ def _current_month_calendar_data() -> dict:
 pagecache.register("calendar", _current_month_calendar_data)
 
 
+def _week_start_for(day: dt.date) -> dt.date:
+    """The Sunday on or before ``day`` (the calendar is Sunday-first)."""
+    return day - dt.timedelta(days=(day.weekday() + 1) % 7)
+
+
+def _calendar_week_data(week_start: dt.date) -> dict:
+    """One week of window slots for the week view, bucketed by ISO date.
+
+    Separate from the month read because a week can straddle two months, and
+    because the week cards show real stills: exported clips get their own
+    footage via /media/cut-thumb, uploads fall back to a local frame — the
+    month grid never pays for any of that.
+    """
+    start_local = dt.datetime(week_start.year, week_start.month, week_start.day)
+    end_local = start_local + dt.timedelta(days=7)
+
+    week_events: dict[str, list[dict]] = {}
+    with session_scope() as session:
+        plan = build_window_plan(session, start_local, end_local)
+        reel_post_ids = {
+            pk for (pk,) in session.execute(
+                select(InstagramPost.threads_post_pk)
+                .where(InstagramPost.threads_post_pk.is_not(None))
+            ).all()
+        }
+        # Resolve a better still per post than candidate.thumbnail_url alone
+        # (which is all build_window_plan carries): the exported clip's own
+        # frame first, then the source video's local frame for uploads.
+        post_ids = sorted({e["post_id"] for e in plan if e.get("post_id")})
+        thumb_by_post: dict[int, str] = {}
+        if post_ids:
+            rows = session.execute(
+                select(ThreadsPost.id, Cut.id, Cut.trimmed_clip_path,
+                       Candidate.id, Candidate.local_video_path)
+                .select_from(ThreadsPost)
+                .outerjoin(Cut, ThreadsPost.cut_pk == Cut.id)
+                .outerjoin(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+                .where(ThreadsPost.id.in_(post_ids))
+            ).all()
+            for pid, cut_id, clip_path, cand_id, local_video in rows:
+                if cut_id and clip_path:
+                    thumb_by_post[pid] = f"/media/cut-thumb/{cut_id}"
+                elif cand_id and local_video:
+                    thumb_by_post[pid] = f"/media/thumb/{cand_id}"
+        for e in plan:
+            e["has_reel"] = bool(e["kind"] != "rerun" and e.get("post_id")
+                                 and e["post_id"] in reel_post_ids)
+            pid = e.get("post_id")
+            if pid and thumb_by_post.get(pid):
+                e["thumbnail"] = thumb_by_post[pid]
+            week_events.setdefault(e["sort"].date().isoformat(), []).append(e)
+
+    for k in week_events:
+        week_events[k].sort(key=lambda e: e["sort"])
+    return {"week_events": week_events, "week_start": week_start}
+
+
+def _current_week_calendar_data() -> dict:
+    return _calendar_week_data(_week_start_for(dt.date.today()))
+
+
+pagecache.register("calendar-week", _current_week_calendar_data)
+
+
 @app.get("/calendar", response_class=HTMLResponse)
-def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""):
-    """Month grid of window slots + linear posting queue (local time)."""
+def calendar_page(request: Request, year: int = 0, month: int = 0,
+                  start: str = "", msg: str = ""):
+    """Week cards (default), month grid and linear queue of posting windows
+    (local time). ``start`` focuses the week view on any date in that week;
+    ``year``/``month`` page the month grid."""
     import calendar as _cal
 
     now_local = dt.datetime.now()
@@ -3927,6 +4055,24 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
     if (data["year"], data["month"]) != (y, m):
         data = _calendar_data(y, m)
 
+    # Week focus: any date normalizes to its Sunday. Current week stays warm
+    # in the pagecache; paging to other weeks reads live.
+    try:
+        focus = dt.date.fromisoformat(start) if start else now_local.date()
+    except ValueError:
+        focus = now_local.date()
+    week_start = _week_start_for(focus)
+    wdata = pagecache.read("calendar-week")
+    if wdata["week_start"] != week_start:
+        wdata = _calendar_week_data(week_start)
+    week_days = [week_start + dt.timedelta(days=i) for i in range(7)]
+    week_end = week_days[-1]
+    if week_start.month == week_end.month:
+        week_title = f"{week_start.strftime('%b')} {week_start.day} – {week_end.day}, {week_end.year}"
+    else:
+        week_title = (f"{week_start.strftime('%b')} {week_start.day} – "
+                      f"{week_end.strftime('%b')} {week_end.day}, {week_end.year}")
+
     cal = _cal.Calendar(firstweekday=6)  # Sunday-first
     weeks = cal.monthdayscalendar(y, m)
     today = now_local.day if (y == now_local.year and m == now_local.month) else 0
@@ -3936,9 +4082,13 @@ def calendar_page(request: Request, year: int = 0, month: int = 0, msg: str = ""
 
     return templates.TemplateResponse(
         request, "calendar.html",
-        {**data, "weeks": weeks, "today": today,
+        {**data, **wdata, "weeks": weeks, "today": today,
          "month_name": _cal.month_name[m],
          "prev_y": prev_y, "prev_m": prev_m, "next_y": next_y, "next_m": next_m,
+         "week_days": week_days, "week_title": week_title,
+         "today_date": now_local.date(),
+         "week_prev": (week_start - dt.timedelta(days=7)).isoformat(),
+         "week_next": (week_start + dt.timedelta(days=7)).isoformat(),
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
          "windows_local": window_time_labels(),
          "msg": msg, "active": "calendar"},
@@ -4030,6 +4180,31 @@ def set_post_shelf_life(post_id: int, shelf_life: str = Form(""), next: str = Fo
     invalidate_recycle_overview()
     return _flash(dest, f"Shelf life set to {shelf} (your override)" if shelf
                   else "Shelf life reset to the AI's answer")
+
+
+@app.post("/video/{candidate_id}/shelf-life")
+def set_candidate_shelf_life(candidate_id: int, shelf_life: str = Form(""), next: str = Form("")):
+    """Operator corrects the content's shelf life at the video/clip stage.
+
+    Writes the candidate-level tag — the same column the monitor's LLM pass
+    fills — so every clip and future post from this video inherits the
+    correction (posts with their own override still win). Unlike the post
+    route there is no "clear": overwriting the tag IS the correction, and
+    blanking it would silently fall back to the category default.
+    """
+    dest = next if next.startswith("/") else f"/video/{candidate_id}"
+    shelf = (shelf_life or "").strip().lower()
+    if shelf not in SHELF_LIVES:
+        return _flash(dest, f"Unknown shelf life '{shelf}'")
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return _flash("/library", "Video not found")
+        c.shelf_life = shelf
+    # Shelf life gates rerun eligibility; refresh the outlook immediately so
+    # the Recycling card reflects the correction on the very next page load.
+    invalidate_recycle_overview()
+    return _flash(dest, f"Shelf life set to {shelf}")
 
 
 def _apply_trait_tags(session, obj, action: str, tags: list[str], facet: str,
@@ -4145,6 +4320,64 @@ def update_video_tags(candidate_id: int, action: str = Form(...),
     return _tag_flash(dest, action, changed)
 
 
+def _sync_cut_tags_to_draft_posts(session, cut: Cut) -> None:
+    """Push clip tags onto any draft/queued/failed post made from this cut."""
+    for p in session.execute(
+        select(ThreadsPost).where(
+            ThreadsPost.cut_pk == cut.id,
+            ThreadsPost.status.in_(("draft", "queued", "failed")),
+        )
+    ).scalars().all():
+        p.footage_traits = cut.footage_traits
+        p.format_tags = cut.format_tags
+        if (cut.format_tags or "").strip() or (cut.footage_traits or "").strip():
+            p.footage_scored_at = p.footage_scored_at or utcnow()
+            p.footage_rationale = p.footage_rationale or "Tagged on the clip."
+
+
+_cut_annotate_inflight: set[int] = set()
+
+
+def _annotate_cut_in_thread(cut_id: int) -> None:
+    """Backfill Format/Subject for an already-exported clip that has none."""
+    try:
+        with session_scope() as session:
+            cut = session.get(Cut, cut_id)
+            if cut is None:
+                return
+            if cut.footage_tagged_at is not None:
+                return
+            if (cut.format_tags or "").strip() or (cut.footage_traits or "").strip():
+                cut.footage_tagged_at = utcnow()
+                return
+            if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+                return
+            settings = load_settings()
+            vocab = active_traits_by_facet(session)
+            if annotate_cut_footage(cut, settings, vocab["subject"],
+                                    format_traits=vocab["format"]):
+                _sync_cut_tags_to_draft_posts(session, cut)
+    except Exception:
+        log.exception("Background cut tagging failed for cut %s", cut_id)
+    finally:
+        _cut_annotate_inflight.discard(cut_id)
+
+
+@app.get("/cut/{cut_id}/tags-status")
+def cut_tags_status(cut_id: int):
+    """Polled while background tagging runs on an already-exported clip."""
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        tagged = bool(
+            cut.footage_tagged_at is not None
+            or (cut.format_tags or "").strip()
+            or (cut.footage_traits or "").strip()
+        )
+        return {"tagged": tagged, "pending": cut_id in _cut_annotate_inflight and not tagged}
+
+
 @app.post("/cut/{cut_id}/tags")
 def update_cut_tags(cut_id: int, action: str = Form(...),
                     tag: list[str] = Form([]), facet: str = Form("subject"),
@@ -4170,15 +4403,8 @@ def update_cut_tags(cut_id: int, action: str = Form(...),
         changed = _apply_trait_tags(session, cut, action, tags, facet,
                                     "footage_traits", "format_tags")
         if changed:
-            for p in session.execute(
-                select(ThreadsPost).where(
-                    ThreadsPost.cut_pk == cut.id,
-                    ThreadsPost.status.in_(("draft", "queued", "failed")),
-                )
-            ).scalars().all():
-                p.footage_traits = cut.footage_traits
-                p.format_tags = cut.format_tags
-                p.footage_scored_at = p.footage_scored_at or utcnow()
+            cut.footage_tagged_at = cut.footage_tagged_at or utcnow()
+            _sync_cut_tags_to_draft_posts(session, cut)
     return _tag_flash(dest, action, changed)
 
 

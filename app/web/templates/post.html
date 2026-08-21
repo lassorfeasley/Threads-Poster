@@ -701,21 +701,27 @@
     }, 280);
   }
   {% endif %}
-  async function suggestAttribution(btn) {
+  async function suggestAttribution(btn, silent) {
     const ta = document.getElementById('attribution');
     if (!ta) return;
-    const isSparkle = btn.classList.contains('ti-sparkle');
-    const lbl = isSparkle ? null : (btn.querySelector('.lbl') || btn);
+    if (!btn) btn = document.getElementById('attribution-suggest');
+    const isSparkle = btn && btn.classList.contains('ti-sparkle');
+    const lbl = (btn && !isSparkle) ? (btn.querySelector('.lbl') || btn) : null;
     const old = lbl ? lbl.textContent : '';
-    btn.disabled = true;
-    if (isSparkle) btn.classList.add('is-busy');
-    else if (lbl) lbl.textContent = 'Drafting…';
+    if (btn) {
+      btn.disabled = true;
+      if (isSparkle) btn.classList.add('is-busy');
+      else if (lbl) lbl.textContent = 'Drafting…';
+    }
     try {
       const r = await fetch('/post/{{ pid }}/suggest-attribution', { method: 'POST' });
       const d = await r.json();
-      if (!r.ok) { alert(d.error || 'Attribution draft failed.'); return; }
+      if (!r.ok) {
+        if (!silent) alert(d.error || 'Attribution draft failed.');
+        return;
+      }
       if (d.unavailable || !d.text) {
-        alert(d.message || 'No citation drafted — the source data is not available.');
+        if (!silent) alert(d.message || 'No citation drafted — the source data is not available.');
         return;
       }
       ta.value = d.text;
@@ -724,16 +730,25 @@
       if (regen) regen.textContent = 'Regenerate draft';
       const sparkle = document.getElementById('attribution-suggest');
       if (sparkle) sparkle.title = sparkle.ariaLabel = 'Regenerate draft';
-      closeMenu(btn);
-      ta.focus();
+      if (!silent) {
+        closeMenu(btn);
+        ta.focus();
+      }
     } catch (e) {
-      alert('Attribution draft failed: ' + e);
+      if (!silent) alert('Attribution draft failed: ' + e);
     } finally {
-      btn.disabled = false;
-      if (isSparkle) btn.classList.remove('is-busy');
-      else if (lbl && lbl.textContent === 'Drafting…') lbl.textContent = old;
+      if (btn) {
+        btn.disabled = false;
+        if (isSparkle) btn.classList.remove('is-busy');
+        else if (lbl && lbl.textContent === 'Drafting…') lbl.textContent = old;
+      }
     }
   }
+  // Invitation mode: draft into an empty box on load so the operator can
+  // review it. Skip when they deliberately cleared a prior draft.
+  {% if editable and fr_invitation and can_suggest_attribution and not attribution_text and not attribution_skipped %}
+  suggestAttribution(null, true);
+  {% endif %}
   async function recaption(pos) {
     const line = document.getElementById('recap-line');
     const status = document.getElementById('recap-status');

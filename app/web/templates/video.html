@@ -161,18 +161,38 @@
     {% else %}
     <div class="video-clip-list">
       {% for row in cut_rows %}
-      <div class="video-clip">
-        <div class="video-clip-main">
-          <a class="video-clip-title" href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
-            {{ row.cut.clip_title or "Untitled clip #" ~ loop.index }}</a>
-          <div class="badges">
+      {% set cut_href = "/cut/" ~ row.cut.id ~ "?step=" ~ ("post" if row.state.exported else "trim") %}
+      {# Exported clips show their own footage; untrimmed ones fall back to the
+         source video's poster so the card is never a gray box. #}
+      {% set clip_thumb = ("/media/cut-thumb/" ~ row.cut.id) if row.state.exported else thumb_for(c) %}
+      <div class="media-card video-clip">
+        <a class="thumb-wrap{{ '' if clip_thumb else ' is-empty' }}" href="{{ cut_href }}">
+          {% if clip_thumb %}
+          <img src="{{ clip_thumb }}" alt="" loading="lazy"
+               onerror="this.closest('.thumb-wrap').classList.add('is-empty'); this.remove();">
+          {% else %}
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 4v16M9 5.5v13a1 1 0 0 0 1.5.86l9-6.5a1 1 0 0 0 0-1.72l-9-6.5A1 1 0 0 0 9 5.5z"/></svg>
+          {% endif %}
+          <span class="thumb-badge">
             {% if row.state.posted %}<span class="badge supportive">posted</span>
             {% elif row.state.exported %}<span class="badge info">exported</span>
             {% else %}<span class="badge score-lo">not trimmed</span>{% endif %}
             {% if row.state.captioned %}<span class="badge">captioned</span>{% endif %}
-            {% if row.post_count %}<span class="badge" title="Posts from this clip">{{ row.post_count }} post{{ "s" if row.post_count != 1 }}</span>{% endif %}
-          </div>
-          <div class="meta">{{ row.cut.created_at.strftime("%b %-d %H:%M") if row.cut.created_at else "?" }}</div>
+          </span>
+        </a>
+        <form method="post" action="/cut/{{ row.cut.id }}/delete" class="mc-x-form"
+              data-async="Clip deleted" data-async-remove=".video-clip"
+              data-confirm="Delete this clip? Its draft/queued posts are removed; published posts are kept."
+              data-confirm-ok="Delete" data-confirm-variant="danger">
+          <button class="mc-x" title="Delete this clip" aria-label="Delete clip">✕</button>
+        </form>
+        <div class="mc-body">
+          <a class="item-title video-clip-title" href="{{ cut_href }}">
+            {{ row.cut.clip_title or "Untitled clip #" ~ loop.index }}</a>
+          <div class="meta">{{ row.cut.created_at.strftime("%b %-d %H:%M") if row.cut.created_at else "?" }}
+            {%- if row.post_count %} · {{ row.post_count }} post{{ "s" if row.post_count != 1 }}{% endif %}</div>
           {% if row.recycle %}
           {% set rc = row.recycle %}
           <div class="meta">
@@ -184,17 +204,10 @@
             {%- endif %}
           </div>
           {% endif %}
-        </div>
-        <div class="video-clip-actions">
-          <a class="btn sm {{ '' if row.state.posted else 'primary' }}"
-             href="/cut/{{ row.cut.id }}?step={{ 'post' if row.state.exported else 'trim' }}">
-            {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Edit →") }}</a>
-          <form method="post" action="/cut/{{ row.cut.id }}/delete"
-                data-async="Clip deleted" data-async-remove=".video-clip"
-                data-confirm="Delete this clip? Its draft/queued posts are removed; published posts are kept."
-                data-confirm-ok="Delete" data-confirm-variant="danger">
-            <button class="reject sm icon-btn" title="Delete this clip" aria-label="Delete clip">✕</button>
-          </form>
+          <div class="mc-actions">
+            <a class="btn sm {{ '' if row.state.posted else 'primary' }}" href="{{ cut_href }}">
+              {{ "Open" if row.state.posted else ("Post →" if row.state.exported else "Edit →") }}</a>
+          </div>
         </div>
       </div>
       {% endfor %}

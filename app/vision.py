@@ -1,12 +1,16 @@
 """Footage trait tagging — observation only, no good/bad scores.
 
-Two entry points:
+Three entry points:
 
 - ``tag_candidate_storyboard`` — optional pre-download tags from YouTube
   storyboard stills (metadata-only). Neutral labels for triage visibility;
   not used for ranking judgment.
-- ``annotate_post_footage`` — ground truth from the actual posted clip file
-  (ffmpeg contact sheet). This is what the learning loop trains on.
+- ``annotate_cut_footage`` — tags the trimmed clip on export (same contact
+  sheet as posts). Format/subject describe the video content, so this is the
+  natural place to fill them — the clip page can review before queue.
+- ``annotate_post_footage`` — ground truth from the posted clip file when the
+  cut was never tagged. Prefer ``seed_post_tags_from_cut`` when the clip
+  already carries tags.
 """
 from __future__ import annotations
 
@@ -279,13 +283,12 @@ def frames_between(path: str | Path, start: float, end: float,
 
 
 def seed_post_tags_from_cut(post: ThreadsPost, cut: Cut | None) -> bool:
-    """Copy the operator's clip tags onto ``post``, returning whether any were.
+    """Copy clip tags onto ``post``, returning whether any were.
 
-    A hand-tagged clip is better ground truth than the annotation pass can
-    produce — same footage, but judged by someone who watched it rather than by
-    a model reading twelve stills. So the tags come across and the post is
-    stamped annotated, which makes ``annotate_post_footage`` a no-op and saves
-    the call outright. Untagged clips are left alone for the model to handle.
+    Clip tags (AI-filled on export, then optionally corrected by hand) describe
+    the same file the post will ship, so they come across and the post is
+    stamped annotated — ``annotate_post_footage`` becomes a no-op. Untagged
+    clips are left alone for the post-level model pass.
     """
     if cut is None:
         return False
@@ -295,32 +298,19 @@ def seed_post_tags_from_cut(post: ThreadsPost, cut: Cut | None) -> bool:
         return False
     post.format_tags = fmt
     post.footage_traits = subj
-    post.footage_rationale = "Tagged by hand on the clip."
+    post.footage_rationale = "Tagged on the clip."
     post.footage_scored_at = utcnow()
     return True
 
 
-def annotate_post_footage(post: ThreadsPost, settings: Settings,
-                          traits: list[str], force: bool = False,
-                          format_traits: list[str] | None = None) -> dict | None:
-    """Tag a post from its clip file (caller commits). This is the
-    ground-truth signal for learning — traits of what actually ships, paired
-    later with performance. Runs at QUEUE time now (the scheduler's tick
-    annotates queued posts), because the placement variety gate needs the
-    format facet before anything is placed; the publish path keeps calling it
-    as a fallback for posts that slipped through unannotated, and the
-    ``footage_scored_at`` guard keeps the total at one call per post either
-    way. Budget-guarded; returns None when skipped."""
-    if post.footage_scored_at is not None and not force:
-        return None
-    if not post.clip_local_path:
+def _tag_clip_file(path: str, settings: Settings, traits: list[str],
+                   format_traits: list[str] | None, title: str) -> dict | None:
+    """Shared contact-sheet + LLM pass. Returns partitioned tag result or None."""
+    if not path:
         return None
     if not spend.within_budget():
-        log.info("Skipping footage annotation for post %s: daily budget reached", post.id)
         return None
-
-    sheet = clip_contact_sheet(post.clip_local_path,
-                               settings.get("vision.post_frames", 12))
+    sheet = clip_contact_sheet(path, settings.get("vision.post_frames", 12))
     if sheet is None:
         return None
     fmt_vocab = (format_traits if format_traits is not None
@@ -329,18 +319,86 @@ def annotate_post_footage(post: ThreadsPost, settings: Settings,
         result = llm.tag_footage(
             settings.get("vision.model", "claude-haiku-4-5"),
             [sheet], list(traits) + [t for t in fmt_vocab if t not in traits],
-            title=post.caption[:200],
+            title=(title or "")[:200],
         )
     except Exception as exc:
-        log.warning("Footage annotation failed for post %s: %s", post.id, exc)
+        log.warning("Footage tagging failed for %s: %s", path, exc)
+        return None
+    subject, fmt = split_tags_by_facet(result["traits"], fmt_vocab)
+    return {
+        "subject": subject,
+        "format": fmt,
+        "why": result["why"],
+        "format_vocab": fmt_vocab,
+    }
+
+
+def annotate_cut_footage(cut: Cut, settings: Settings, traits: list[str],
+                         force: bool = False,
+                         format_traits: list[str] | None = None) -> dict | None:
+    """Tag a trimmed clip from its exported file (caller commits).
+
+    Format and subject describe on-screen content, not captions, so this runs
+    at export time — the clip page can show and correct tags before queue.
+    Skips when already tagged unless ``force``. Budget-guarded.
+    """
+    if not force and cut.footage_tagged_at is not None:
+        return None
+    if not force and ((cut.format_tags or "").strip() or (cut.footage_traits or "").strip()):
+        # Hand-edited before the vision pass (or legacy rows): treat as done.
+        cut.footage_tagged_at = cut.footage_tagged_at or utcnow()
+        return None
+    if not settings.get("vision.enabled", True):
+        return None
+    path = cut.trimmed_clip_path or ""
+    if not path or not Path(path).expanduser().exists():
+        return None
+    if not spend.within_budget():
+        log.info("Skipping cut footage annotation for cut %s: daily budget reached", cut.id)
         return None
 
-    subject, fmt = split_tags_by_facet(result["traits"], fmt_vocab)
-    post.footage_traits = ",".join(subject)
-    post.format_tags = ",".join(fmt)
-    post.footage_rationale = result["why"]
+    title = (cut.clip_title or "").strip()
+    tagged = _tag_clip_file(path, settings, traits, format_traits, title)
+    if tagged is None:
+        return None
+
+    cut.footage_traits = ",".join(tagged["subject"])
+    cut.format_tags = ",".join(tagged["format"])
+    cut.footage_tagged_at = utcnow()
+    log.info("Footage traits for cut %s: [%s] format=[%s]",
+             cut.id, cut.footage_traits, cut.format_tags)
+    return {"traits": tagged["subject"] + tagged["format"], "why": tagged["why"]}
+
+
+def annotate_post_footage(post: ThreadsPost, settings: Settings,
+                          traits: list[str], force: bool = False,
+                          format_traits: list[str] | None = None) -> dict | None:
+    """Tag a post from its clip file (caller commits). This is the
+    ground-truth signal for learning — traits of what actually ships, paired
+    later with performance. Prefer clip tags via ``seed_post_tags_from_cut``;
+    this remains the fallback for posts that slipped through untagged. The
+    ``footage_scored_at`` guard keeps the total at one call per post.
+    Budget-guarded; returns None when skipped."""
+    if post.footage_scored_at is not None and not force:
+        return None
+    if not post.clip_local_path:
+        return None
+    if not spend.within_budget():
+        log.info("Skipping footage annotation for post %s: daily budget reached", post.id)
+        return None
+
+    tagged = _tag_clip_file(
+        post.clip_local_path, settings, traits, format_traits,
+        (post.caption or "")[:200],
+    )
+    if tagged is None:
+        return None
+
+    post.footage_traits = ",".join(tagged["subject"])
+    post.format_tags = ",".join(tagged["format"])
+    post.footage_rationale = tagged["why"]
     post.footage_score = None  # judgment scores retired
     post.footage_scored_at = utcnow()
     log.info("Footage traits for post %s: [%s] format=[%s]",
              post.id, post.footage_traits, post.format_tags)
-    return result
+    return {"traits": tagged["subject"] + tagged["format"], "why": tagged["why"]}

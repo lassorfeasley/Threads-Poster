@@ -131,6 +131,7 @@ _SCHEMA_SENTINELS = (
     "SELECT last_repost_window_key FROM scheduler_state LIMIT 0",
     "SELECT facet FROM traits LIMIT 0",
     "SELECT format_tags FROM cuts LIMIT 0",
+    "SELECT footage_tagged_at FROM cuts LIMIT 0",
 )
 
 
@@ -274,6 +275,7 @@ def _ensure_new_columns() -> None:
             "export_error": "TEXT DEFAULT ''",
             "format_tags": "TEXT DEFAULT ''",
             "footage_traits": "TEXT DEFAULT ''",
+            "footage_tagged_at": "TIMESTAMP WITH TIME ZONE",
         },
     }
     added: list[tuple[str, str]] = []

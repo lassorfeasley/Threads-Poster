@@ -7,7 +7,7 @@
    Editing is opt-in: pass ``action`` to get remove buttons and an add box.
    All three stages pass it, but they mean different things by it — the video's
    tags are storyboard predictions that steer triage ranking and the variety
-   gate, while the clip's are ground truth about the footage that ships and
+   gate, while the clip's are filled from the exported file (then editable) and
    seed the post. Render read-only by omitting ``action``. #}
 {% macro facet_group(label, hint, tags, facet="", action="", unused=none, next="") %}
 {% if tags or unused %}
