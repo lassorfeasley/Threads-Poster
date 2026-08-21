@@ -19,7 +19,7 @@ import requests
 
 from . import llm, spend
 from .config import Settings
-from .models import Candidate, ThreadsPost, utcnow
+from .models import Candidate, Cut, ThreadsPost, utcnow
 from .storyboard import get_storyboard
 
 log = logging.getLogger("vision")
@@ -276,6 +276,28 @@ def frames_between(path: str | Path, start: float, end: float,
                 continue
             frames.append((round(start + idx * interval, 2), image.read_bytes()))
         return frames
+
+
+def seed_post_tags_from_cut(post: ThreadsPost, cut: Cut | None) -> bool:
+    """Copy the operator's clip tags onto ``post``, returning whether any were.
+
+    A hand-tagged clip is better ground truth than the annotation pass can
+    produce — same footage, but judged by someone who watched it rather than by
+    a model reading twelve stills. So the tags come across and the post is
+    stamped annotated, which makes ``annotate_post_footage`` a no-op and saves
+    the call outright. Untagged clips are left alone for the model to handle.
+    """
+    if cut is None:
+        return False
+    fmt = (cut.format_tags or "").strip()
+    subj = (cut.footage_traits or "").strip()
+    if not fmt and not subj:
+        return False
+    post.format_tags = fmt
+    post.footage_traits = subj
+    post.footage_rationale = "Tagged by hand on the clip."
+    post.footage_scored_at = utcnow()
+    return True
 
 
 def annotate_post_footage(post: ThreadsPost, settings: Settings,

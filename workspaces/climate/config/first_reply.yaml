@@ -1,19 +1,63 @@
 # Auto first-reply posted under every Threads post this app publishes.
 # Editable via the cog on the Replies page; no code changes needed.
 #
-# attribution_enabled: when true, an attribution comment the OPERATOR set on a
-# post (typed, or accepted from the "Suggest a draft" formal citation) is
-# published as the first comment after the post goes live. Nothing is ever
-# drafted or posted automatically — a post whose attribution field is empty
-# publishes without one.
+# mode decides what the "Suggest a draft" button writes into the first-reply box
+# on the cut and post pages:
+#   citation   - a formal credit line for the source publisher (drafted only
+#                when you click Suggest; nothing is written automatically).
+#   invitation - a call to action written from `instruction` below, drafted
+#                automatically for every post so none goes out without one.
+# Either way the drafted text lands in an editable box you review before the
+# post publishes; the first comment is only ever the text sitting in that box.
 #
-# When enabled is true and text is non-empty, that static text is the reply
-# instead — used as the fallback for posts without an attribution. A reply
-# failure never rolls back the post — check the post page and retry there.
+# instruction is your own plain-language brief for invitation mode, passed to
+# the model as the authoritative spec. It is also the ONLY source of factual
+# claims the model may make, so any statistic or figure you want used has to
+# appear here verbatim.
+#
+# attribution_enabled: when false, the first comment never posts, whatever is in
+# the box. When enabled is true and text is non-empty, that static text is the
+# fallback for posts whose box is empty. A reply failure never rolls back the
+# post — check the post page and retry there.
 
-enabled: false
+mode: invitation
+enabled: true
 attribution_enabled: true
-text: Nonprofit Renewables.org allows anyone to invest as little as $25 in Global South solar
-  and get paid back as they generate and sell clean electricity to the grid. You don't earn
-  an interest rate, but dollar-for-dollar, you'll create 550% more carbon avoidance than you
-  would have investing in the Global North.
+instruction: |
+  Write a two-sentence invitation to support Renewables.org.
+
+  Sentence one is a short question offering the reader a way to help the specific
+  thing at stake in the clip they just watched. It asks whether they WANT that
+  thing protected or fixed — it never describes their feelings, never asks what
+  they are experiencing, and never addresses them as if the problem is happening
+  to them. Name the concrete subject of the footage.
+
+  For a clip about England's hedgehogs losing their habitat: "Want to save the
+  hedgehogs?" For a clip about a Spanish reservoir running dry: "Think Spain's
+  reservoirs are worth saving?" Other good shapes are "Care about ...?",
+  "Want to help protect ...?", and "Ready to do something about ...?".
+
+  Keep it under about eight words. Vary the opening across posts — do not start
+  every reply with "Want to".
+
+  Sentence two makes the ask and must contain the URL Renewables.org written
+  exactly that way, with no https:// and no tracking parameters. Say that
+  Renewables.org is a nonprofit and that the money finances solar projects in the
+  Global South. Vary how you phrase this every time — different verbs, different
+  sentence shape, different emphasis — so the same line never appears twice.
+
+  You may also use any of the following facts, but only word them in ways that
+  stay true to them. Rotate which one you include rather than using all of them:
+    - Anyone can invest as little as $25.
+    - Investors are paid back as the panels generate and sell clean electricity
+      to the grid.
+    - You don't earn an interest rate, but dollar-for-dollar you create 550% more
+      carbon avoidance than investing in the Global North would.
+
+  Never promise a financial return. Always call it an investment: never a
+  donation, contribution, gift, or pledge, and never use the verb "donate" or
+  "give". Never state any number that does not appear above.
+text: Nonprofit Renewables.org allows anyone to invest as little as $25 in Global South
+  solar and get paid back as they generate and sell clean electricity to the grid. You
+  don't earn an interest rate, but dollar-for-dollar, you'll create 550% more carbon
+  avoidance than you would have investing in the Global North.

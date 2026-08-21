@@ -82,6 +82,9 @@ from ..models import (
 from ..monitor import run_monitor_once
 from ..publishing import (
     clear_publishing,
+    draft_first_reply,
+    draft_first_reply_for_cut,
+    first_reply_context,
     generate_attribution,
     mark_publishing,
     maybe_post_first_reply,
@@ -1110,6 +1113,7 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
                 transcript_segments = []
 
         has_local = bool(c.local_video_path and Path(c.local_video_path).exists())
+        trait_vocab = active_traits_by_facet(session)
 
     return templates.TemplateResponse(
         request, "video.html",
@@ -1117,6 +1121,7 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
          "cut_rows": cut_rows, "posts": posts,
          "transcript_segments": transcript_segments,
          "has_local": has_local,
+         "trait_vocab": trait_vocab,
          # Same chain the scheduler uses (candidate tag -> category default ->
          # evergreen), so the badge always shows what placement will do.
          "shelf_life": resolve_shelf_life(None, c),
@@ -1400,6 +1405,12 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         ).scalar_one_or_none()
         include_instagram = bool(pending_reel) if pending else True
 
+        trait_vocab = active_traits_by_facet(session)
+        # What the video's storyboard pass guessed, shown only while the clip
+        # itself is untagged — it's the set the scheduler falls back to.
+        inherited_fmt = [t.strip() for t in (c.format_tags or "").split(",") if t.strip()]
+        inherited_subj = [t.strip() for t in (c.visual_traits or "").split(",") if t.strip()]
+
     threads_ok = threads_api.is_authenticated()
     instagram_ok = instagram_api.is_authenticated()
     return templates.TemplateResponse(
@@ -1417,11 +1428,15 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "account_name": threads_api.account_username(),
          "pending_post_status": pending_post_status,
          "pending_post_id": pending_post_id,
+         "trait_vocab": trait_vocab,
+         "inherited_fmt": inherited_fmt,
+         "inherited_subj": inherited_subj,
          "export_error": (cut.export_error or "") if export_failed else "",
          # Attribution first-comment, editable before the post even exists:
          # prefill from the pending post so requeueing round-trips cleanly.
          "attribution_text": (pending.attribution_text or "") if pending else "",
          "attribution_enabled": bool(load_first_reply().get("attribution_enabled")),
+         "first_reply_mode": load_first_reply().get("mode", "citation"),
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
          "subs_position": (
              cut.subs_position if cut.use_subtitles
@@ -2774,6 +2789,7 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
     want_threads, want_ig = _publish_targets(publish_target, include_instagram)
     if not want_threads:
         return _publish_reel_only(cut_id, caption)
+    attribution = _with_first_reply_draft(cut_id, caption, attribution)
     with session_scope() as session:
         ok, wait_min = spacing_allows_publish(session)
         if not ok:
@@ -2838,6 +2854,7 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
     if not caption:
         return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
     want_ig = _wants_instagram(include_instagram)
+    attribution = _with_first_reply_draft(cut_id, caption, attribution)
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
@@ -2917,6 +2934,7 @@ def save_draft(cut_id: int, caption: str = Form(...),
     caption = caption.strip()
     if not caption:
         return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
+    attribution = _with_first_reply_draft(cut_id, caption, attribution)
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
@@ -2932,10 +2950,43 @@ def save_draft(cut_id: int, caption: str = Form(...),
                   "Saved as draft — publish or queue it any time from Posts")
 
 
+def _first_reply_is_invitation() -> bool:
+    return load_first_reply().get("mode") == "invitation"
+
+
+def _with_first_reply_draft(cut_id: int, caption: str, attribution: str) -> str:
+    """The operator's first-reply text, or a call-to-action draft when they left
+    the box empty and invitation mode is on.
+
+    Called BEFORE the ship path opens its session: the draft is a multi-second
+    model call, and running it inside that transaction would hold a pooled
+    database connection the whole time. Never raises — a draft that fails just
+    leaves the box empty, exactly as it would have been.
+    """
+    if attribution.strip() or not _first_reply_is_invitation():
+        return attribution
+    try:
+        return draft_first_reply_for_cut(cut_id, caption) or attribution
+    except Exception:
+        log.exception("First-reply draft failed for cut %s", cut_id)
+        return attribution
+
+
+def _no_suggestion_message(invitation: bool) -> str:
+    """Why the model returned nothing, in the operator's terms."""
+    if invitation:
+        return ("No invitation drafted — check that the brief under Replies "
+                "settings says what the call to action should be.")
+    return ("No citation drafted — the source data available isn't enough for a "
+            "reliable attribution.")
+
+
 @app.post("/cut/{cut_id}/suggest-attribution")
 def suggest_cut_attribution(cut_id: int):
-    """(Re)draft the attribution first-comment while still on the cut page.
-    Returns the suggestion only — it rides along with queue/post/draft."""
+    """(Re)draft the first-comment while still on the cut page — a source
+    citation or a call to action, per the mode on the Replies page. Returns the
+    suggestion only; it rides along with queue/post/draft."""
+    invitation = load_first_reply().get("mode") == "invitation"
     with session_scope() as session:
         cut = session.execute(
             select(Cut)
@@ -2945,15 +2996,25 @@ def suggest_cut_attribution(cut_id: int):
         if cut is None or cut.candidate is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         try:
-            text = generate_attribution(cut.candidate)
+            # Gather inside the session, call the model outside it: see
+            # ``first_reply_context``.
+            if invitation:
+                pending = first_reply_context(session, cut.candidate, cut,
+                                              cut.draft_caption or "")
+            else:
+                text = generate_attribution(cut.candidate)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+    if invitation:
+        try:
+            text = draft_first_reply(pending)
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
     if not text:
         # The model declined rather than guess — surface that honestly instead
         # of proposing a made-up credit.
         return {"text": "", "unavailable": True,
-                "message": ("No citation drafted — the source data available isn't "
-                            "enough for a reliable attribution.")}
+                "message": _no_suggestion_message(invitation)}
     return {"text": text}
 
 
@@ -3342,7 +3403,10 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "created_at": p.created_at,
             "attribution_text": p.attribution_text or "",
             "attribution_enabled": load_first_reply().get("attribution_enabled", True),
-            "can_suggest_attribution": bool(cand),
+            "first_reply_mode": load_first_reply().get("mode", "citation"),
+            # A call to action is written from the brief, not from the source
+            # video, so it can be drafted even for a post with no candidate.
+            "can_suggest_attribution": bool(cand) or _first_reply_is_invitation(),
             "first_reply_id": p.first_reply_id or "",
             "first_reply_text": p.first_reply_text or "",
             "first_reply_error": p.first_reply_error or "",
@@ -3968,59 +4032,154 @@ def set_post_shelf_life(post_id: int, shelf_life: str = Form(""), next: str = Fo
                   else "Shelf life reset to the AI's answer")
 
 
+def _apply_trait_tags(session, obj, action: str, tags: list[str], facet: str,
+                      subject_col: str, format_col: str) -> list[str]:
+    """Add or remove trait names on ``obj``, returning what actually changed.
+
+    Shared by the post, video and clip rails: the three stages keep their tags
+    in differently-named columns but the add/remove semantics are identical, so
+    the caller only has to say which column holds which facet.
+    """
+    changed: list[str] = []
+    for t in tags:
+        # Which facet a name belongs to is a property of the trait, not of
+        # the box it was typed into, so the vocabulary overrules the form
+        # on add. Removal trusts the form: the pill was rendered from one
+        # column and that is the column it has to come out of, however it
+        # got there.
+        t_facet = facet
+        if action == "add":
+            known = session.execute(
+                select(Trait).where(Trait.name == t)
+            ).scalar_one_or_none()
+            if known is not None:
+                t_facet = known.facet
+        col = format_col if t_facet == Trait.FACET_FORMAT else subject_col
+        existing = [x.strip() for x in (getattr(obj, col) or "").split(",") if x.strip()]
+        if action == "add":
+            if t not in existing:
+                existing.append(t)
+                changed.append(t)
+        else:
+            if t in existing:
+                changed.append(t)
+            existing = [x for x in existing if x != t]
+        setattr(obj, col, ",".join(existing))
+    return changed
+
+
+def _clean_tag_form(tag: list[str]) -> list[str]:
+    """Normalize submitted trait names. ``tag`` repeats — the add combo posts
+    every checked name in one go (remove buttons still send a single one)."""
+    tags: list[str] = []
+    for t in tag:
+        t = t.strip().lower().replace(" ", "_")
+        if t and t not in tags:
+            tags.append(t)
+    return tags
+
+
+def _tag_flash(dest: str, action: str, changed: list[str]):
+    if not changed:
+        return _flash(dest, "Already tagged" if action == "add" else "Nothing to remove")
+    return _flash(dest, f"{'Added' if action == 'add' else 'Removed'} {', '.join(changed)}")
+
+
 @app.post("/post/{post_id}/tags")
 def update_post_tags(post_id: int, action: str = Form(...),
                      tag: list[str] = Form([]), facet: str = Form("subject"),
                      next: str = Form("")):
     """Add or remove trait tags on a post.
 
-    ``tag`` may repeat — the add combo submits every checked name in one go
-    (remove buttons still send a single one). ``facet`` picks the column —
-    ``format_tags`` for format, ``footage_traits`` for subject. Each facet has
-    its own add box, so the caller always states which one it meant.
+    ``facet`` picks the column — ``format_tags`` for format, ``footage_traits``
+    for subject. Each facet has its own add box, so the caller always states
+    which one it meant.
     """
     dest = next if next and next.startswith("/") else f"/post/{post_id}"
-    tags: list[str] = []
-    for t in tag:
-        t = t.strip().lower().replace(" ", "_")
-        if t and t not in tags:
-            tags.append(t)
+    tags = _clean_tag_form(tag)
     if not tags:
         return _flash(dest, "No tag selected")
     if action not in ("add", "remove"):
         return _flash(dest, f"Unknown action '{action}'")
-    changed: list[str] = []
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None:
             return _flash("/calendar", "Post not found")
-        for t in tags:
-            # Which facet a name belongs to is a property of the trait, not of
-            # the box it was typed into, so the vocabulary overrules the form
-            # on add. Removal trusts the form: the pill was rendered from one
-            # column and that is the column it has to come out of, however it
-            # got there.
-            t_facet = facet
-            if action == "add":
-                known = session.execute(
-                    select(Trait).where(Trait.name == t)
-                ).scalar_one_or_none()
-                if known is not None:
-                    t_facet = known.facet
-            col = "format_tags" if t_facet == Trait.FACET_FORMAT else "footage_traits"
-            existing = [x.strip() for x in (getattr(p, col) or "").split(",") if x.strip()]
-            if action == "add":
-                if t not in existing:
-                    existing.append(t)
-                    changed.append(t)
-            else:
-                if t in existing:
-                    changed.append(t)
-                existing = [x for x in existing if x != t]
-            setattr(p, col, ",".join(existing))
-    if not changed:
-        return _flash(dest, "Already tagged" if action == "add" else "Nothing to remove")
-    return _flash(dest, f"{'Added' if action == 'add' else 'Removed'} {', '.join(changed)}")
+        changed = _apply_trait_tags(session, p, action, tags, facet,
+                                    "footage_traits", "format_tags")
+        if changed:
+            # A hand-edit is ground truth and outranks the model. The
+            # queue-time annotation pass claims every queued post whose
+            # ``footage_scored_at`` is still null and overwrites both columns,
+            # so without this stamp a draft tagged here would be silently
+            # reverted the moment it was queued.
+            p.footage_scored_at = p.footage_scored_at or utcnow()
+    return _tag_flash(dest, action, changed)
+
+
+@app.post("/video/{candidate_id}/tags")
+def update_video_tags(candidate_id: int, action: str = Form(...),
+                      tag: list[str] = Form([]), facet: str = Form("subject"),
+                      next: str = Form("")):
+    """Add or remove trait tags on a source video.
+
+    These are the storyboard tagger's predictions about the whole video, and
+    the post's own annotation supersedes them — but not before they've had two
+    effects nothing revisits: the subject facet multiplies the candidate's
+    ranking score in triage, and the format facet is what the scheduler's
+    variety gate reads until a post is annotated. Correcting a bad guess here
+    is worth doing on its own.
+    """
+    dest = next if next and next.startswith("/") else f"/video/{candidate_id}"
+    tags = _clean_tag_form(tag)
+    if not tags:
+        return _flash(dest, "No tag selected")
+    if action not in ("add", "remove"):
+        return _flash(dest, f"Unknown action '{action}'")
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return _flash("/", "Video not found")
+        changed = _apply_trait_tags(session, c, action, tags, facet,
+                                    "visual_traits", "format_tags")
+    return _tag_flash(dest, action, changed)
+
+
+@app.post("/cut/{cut_id}/tags")
+def update_cut_tags(cut_id: int, action: str = Form(...),
+                    tag: list[str] = Form([]), facet: str = Form("subject"),
+                    next: str = Form("")):
+    """Add or remove trait tags on a clip.
+
+    The clip is the footage that actually ships, so tagging here is ground
+    truth rather than a prediction: ``seed_post_tags_from_cut`` copies these
+    onto the post at queue time and stamps it annotated, which stands in for
+    the LLM pass entirely. Edits also flow straight through to any draft post
+    already made from this clip, so the two views can't disagree.
+    """
+    dest = next if next and next.startswith("/") else f"/cut/{cut_id}?step=post"
+    tags = _clean_tag_form(tag)
+    if not tags:
+        return _flash(dest, "No tag selected")
+    if action not in ("add", "remove"):
+        return _flash(dest, f"Unknown action '{action}'")
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return _flash("/library", "Clip not found")
+        changed = _apply_trait_tags(session, cut, action, tags, facet,
+                                    "footage_traits", "format_tags")
+        if changed:
+            for p in session.execute(
+                select(ThreadsPost).where(
+                    ThreadsPost.cut_pk == cut.id,
+                    ThreadsPost.status.in_(("draft", "queued", "failed")),
+                )
+            ).scalars().all():
+                p.footage_traits = cut.footage_traits
+                p.format_tags = cut.format_tags
+                p.footage_scored_at = p.footage_scored_at or utcnow()
+    return _tag_flash(dest, action, changed)
 
 
 @app.post("/post/{post_id}/dismiss")
@@ -4249,9 +4408,11 @@ def retry_first_reply(post_id: int, next: str = Form("")):
 
 @app.post("/post/{post_id}/suggest-attribution")
 def suggest_post_attribution(post_id: int):
-    """(Re)draft the attribution first-comment for a post. Returns the suggestion
-    only — it is saved when the operator updates the queue, so nothing changes
-    until they've seen it."""
+    """(Re)draft the first-comment for a post — a source citation or a call to
+    action, per the mode on the Replies page. Returns the suggestion only: it is
+    saved when the operator updates the queue, so nothing changes until they've
+    seen it."""
+    invitation = load_first_reply().get("mode") == "invitation"
     with session_scope() as session:
         p = session.execute(
             select(ThreadsPost)
@@ -4260,21 +4421,31 @@ def suggest_post_attribution(post_id: int):
         ).scalar_one_or_none()
         if p is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        if p.candidate is None:
+        if p.candidate is None and not invitation:
             return JSONResponse(
                 {"error": "No source video on record for this post, so there's "
                           "nothing to attribute from."},
                 status_code=409)
         try:
-            text = generate_attribution(p.candidate)
+            # Gather inside the session, call the model outside it: see
+            # ``first_reply_context``.
+            if invitation:
+                pending = first_reply_context(session, p.candidate, p.cut,
+                                              p.caption or "")
+            else:
+                text = generate_attribution(p.candidate)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+    if invitation:
+        try:
+            text = draft_first_reply(pending)
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
     if not text:
         # The model declined rather than guess — surface that honestly instead
         # of proposing a made-up credit.
         return {"text": "", "unavailable": True,
-                "message": ("No citation drafted — the source data available isn't "
-                            "enough for a reliable attribution.")}
+                "message": _no_suggestion_message(invitation)}
     return {"text": text}
 
 
@@ -4394,25 +4565,35 @@ def first_reply_page(request: Request, msg: str = ""):
         request, "first_reply.html",
         {"enabled": cfg["enabled"], "text": cfg["text"],
          "attribution_enabled": cfg["attribution_enabled"],
+         "mode": cfg["mode"], "instruction": cfg["instruction"],
          "msg": msg, "active": "engagement"},
     )
 
 
 @app.post("/engagement/first-reply")
 def first_reply_save(enabled: str = Form(""), text: str = Form(""),
-                     attribution_enabled: str = Form("")):
+                     attribution_enabled: str = Form(""), mode: str = Form("citation"),
+                     instruction: str = Form("")):
     text = (text or "").strip()
+    instruction = (instruction or "").strip()
+    mode = (mode or "citation").strip().lower()
     on = str(enabled).lower() in ("1", "true", "on", "yes")
     attribution_on = str(attribution_enabled).lower() in ("1", "true", "on", "yes")
     if on and not text:
         return _flash("/engagement/first-reply", "Add reply text before enabling")
     if len(text) > 500:
         return _flash("/engagement/first-reply", f"Reply is {len(text)} characters — Threads limit is 500")
-    save_first_reply(enabled=on, text=text, attribution_enabled=attribution_on)
+    if mode == "invitation" and not instruction:
+        return _flash("/engagement/first-reply",
+                      "Write the brief before switching to call-to-action replies")
+    save_first_reply(enabled=on, text=text, attribution_enabled=attribution_on,
+                     mode=mode, instruction=instruction)
+    drafts = "a call to action" if mode == "invitation" else "a source citation"
     state = "enabled" if on else "disabled"
     attr_state = "on" if attribution_on else "off"
     return _flash("/engagement/first-reply",
-                  f"Saved — attribution comments {attr_state}, static reply {state}")
+                  f"Saved — first replies draft {drafts}, posting {attr_state}, "
+                  f"static fallback {state}")
 
 
 @app.get("/first-reply")

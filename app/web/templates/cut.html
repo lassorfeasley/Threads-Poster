@@ -24,6 +24,7 @@
 {{ ui.pagebar("", crumbs=cut_crumbs, actions=cut_actions) }}
 
 {% import "components/category.html" as catui %}
+{% import "components/tags.html" as tagui %}
 
 {# ============ STEP 1: TRIM ============ #}
 {% if step == "trim" %}
@@ -1928,15 +1929,10 @@ async function retryExport() {
 {# The cut's Post step mirrors the post page: one thread-preview card that
    reads exactly like the Threads post it will become. #}
 {% set handle = account_name or "you" %}
-<div class="post-layout no-side">
+<div class="post-layout">
 <div class="post-main">
 <div class="post-preview">
 <div class="thread-preview">
-
-  {# ---- Programming category (lives on the source video) ---- #}
-  <div class="preview-topbar">
-    {{ catui.field(c.id, c.category, "/cut/" ~ cut.id ~ "?step=post", show_label=false) }}
-  </div>
 
   {# ---- The post: caption edited in place above the clip. ---- #}
   <article class="thread-item">
@@ -2050,8 +2046,10 @@ async function retryExport() {
     </div>
   </article>
 
-  {# ---- The first comment (attribution) — configured here, saved onto the
-       post when it's queued/drafted/published. ---- #}
+  {# ---- The first comment — a source citation or a call to action, per the
+       mode on the Replies page. Configured here, saved onto the post when it's
+       queued/drafted/published. ---- #}
+  {% set fr_invitation = first_reply_mode == "invitation" %}
   <article class="thread-item is-reply">
     <div class="ti-gutter" aria-hidden="true">
       <span class="ti-avatar">{{ handle[0]|upper }}</span>
@@ -2059,7 +2057,7 @@ async function retryExport() {
     <div class="ti-main">
       <div class="ti-head">
         <span class="ti-name">{{ handle }}</span>
-        <span class="ti-type">first reply · attribution</span>
+        <span class="ti-type">first reply · {{ "call to action" if fr_invitation else "attribution" }}</span>
         <span class="ti-tools">
           <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
           <details class="ti-menu">
@@ -2076,7 +2074,7 @@ async function retryExport() {
       </div>
       <div class="ti-text-wrap">
         <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                  placeholder="Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted.">{{ attribution_text }}</textarea>
+                  placeholder="{{ "Invite viewers to act — posts as the first comment right after this publishes. Leave empty and no reply is posted." if fr_invitation else "Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted." }}">{{ attribution_text }}</textarea>
         <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
                 title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
                 aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
@@ -2084,7 +2082,7 @@ async function retryExport() {
         </button>
       </div>
       {% if not attribution_enabled %}
-      <p class="field-hint">Attribution comments are off under
+      <p class="field-hint">First comments are off under
         <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
       {% endif %}
     </div>
@@ -2869,6 +2867,45 @@ async function retryExport() {
   </section>
   {% endif %}
 </div>{# /.post-main #}
+
+{# ============ RAIL: how this clip is classified ============ #}
+{# The same rail the post page carries, one stage earlier. It can live here
+   because the clip IS the footage that ships: tags set now are ground truth,
+   not the storyboard guess the video page holds, and they seed the post at
+   queue time instead of the LLM annotation pass. #}
+<aside class="post-side">
+  {% set cut_fmt = (cut.format_tags or "").split(",")|map("trim")|select|list %}
+  {% set cut_subj = (cut.footage_traits or "").split(",")|map("trim")|select|list %}
+  {% set unused_format = trait_vocab.get("format", [])|reject("in", cut_fmt)|list %}
+  {% set unused_subject = trait_vocab.get("subject", [])|reject("in", cut_subj)|list %}
+  <div class="card tight">
+    {{ catui.field(c.id, c.category, "/cut/" ~ cut.id ~ "?step=post", show_label=false) }}
+    <hr class="div">
+    {{ tagui.facet_group("Format", "Production form — drives the scheduler's variety gate",
+                        cut_fmt, facet="format", action="/cut/" ~ cut.id ~ "/tags",
+                        unused=unused_format,
+                        next="/cut/" ~ cut.id ~ "?step=post") }}
+    {{ tagui.facet_group("Subject", "What's on screen — feeds per-trait performance learning",
+                        cut_subj, facet="subject", action="/cut/" ~ cut.id ~ "/tags",
+                        unused=unused_subject,
+                        next="/cut/" ~ cut.id ~ "?step=post") }}
+    {% if cut_fmt or cut_subj %}
+    <p class="meta" style="margin: 10px 0 0;">Carried onto the post at queue time
+      in place of automatic tagging.</p>
+    {% elif inherited_fmt or inherited_subj %}
+    {# Nothing set here yet, so show what the video's storyboard pass guessed —
+       it's what the scheduler falls back to, and it doubles as a starting
+       point worth correcting rather than retyping. #}
+    <hr class="div">
+    <p class="meta" style="margin: 0 0 8px;">From the source video, until this clip
+      is tagged:</p>
+    {{ tagui.facet_group("Format", "Predicted from the video's storyboard stills",
+                        inherited_fmt) }}
+    {{ tagui.facet_group("Subject", "Predicted from the video's storyboard stills",
+                        inherited_subj) }}
+    {% endif %}
+  </div>
+</aside>
 </div>{# /.post-layout #}
 <script>
   async function copyCaption() {

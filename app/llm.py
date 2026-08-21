@@ -105,9 +105,11 @@ def _parse_json(text: str) -> dict:
     return json.loads(match.group(0))
 
 
-def _json_chat(model: str, system: str, user: str, max_tokens: int = 1000) -> dict:
+def _json_chat(model: str, system: str, user: str, max_tokens: int = 1000,
+               temperature: float = 0.2) -> dict:
     system = system + "\nRespond with a single JSON object only — no prose, no code fences."
-    return _parse_json(_text_chat(model, system, user, max_tokens=max_tokens))
+    return _parse_json(_text_chat(model, system, user, max_tokens=max_tokens,
+                                  temperature=temperature))
 
 
 def score_relevance(model: str, title: str, description: str, matched_keywords: list[str]) -> dict:
@@ -838,6 +840,84 @@ def suggest_attribution(model: str, channel: dict, video_title: str,
     if not data.get("available", bool(text)) or not text:
         return ""
     # Belt-and-braces: strip any @handle the model slipped in despite the rule.
+    text = re.sub(r"@[\w.]+", "", text).strip()
+    return " ".join(text.split())[:480]
+
+
+def suggest_first_reply(model: str, instruction: str, *, video_title: str = "",
+                        description: str = "", transcript: str = "", caption: str = "",
+                        recent_replies: list[str] | None = None) -> str:
+    """Draft the call-to-action first comment for a post, following the
+    operator's own plain-language ``instruction`` from first_reply.yaml.
+
+    DRAFT ONLY: the text lands in the editable first-reply box and posts only
+    once the operator has left it there. ``instruction`` is authoritative and is
+    also the only permitted source of factual claims — the model is told not to
+    invent figures, because this copy pitches a real investment product.
+
+    ``recent_replies`` are the last replies actually posted; the model is told
+    to avoid reusing their phrasing so the same boilerplate doesn't ride under
+    every post. Returns "" when the model declines.
+    """
+    if not (instruction or "").strip():
+        return ""
+    b = _brand()
+    system = (
+        "You write the first comment posted under a short "
+        f"{b['source_kind']} clip on Threads. The comment invites viewers to "
+        "act, and its whole job is to connect what they just watched to that "
+        "invitation.\n\n"
+        "The operator's brief below is authoritative. Follow it exactly:\n"
+        "--- BRIEF ---\n"
+        f"{instruction.strip()}\n"
+        "--- END BRIEF ---\n\n"
+        "Hard rules:\n"
+        "- The opening sentence is a short question tying the invitation to THIS "
+        "specific clip — its subject, place, or stakes. Make it concrete: name "
+        "what is actually on screen, not a generic 'want to help the planet?'\n"
+        "- Every factual claim (figures, percentages, minimums, how the product "
+        "works) must appear in the brief. NEVER invent, round, embellish, or "
+        "infer a statistic, return, or guarantee. Nothing may read as a promise "
+        "of financial return beyond what the brief states.\n"
+        "- Vary the wording from the recent replies you are given: different "
+        "opening, different sentence shape, different verbs. Never reuse a "
+        "previous opening question.\n"
+        "- Keep the question hook for environmental damage, wildlife decline, and "
+        "species loss — that is the normal subject matter here. Drop it ONLY when "
+        "PEOPLE have been killed or injured, or a disaster is actively unfolding; "
+        "there, open with a plain, non-glib sentence instead so the reply never "
+        "sounds like it is marketing off human tragedy.\n"
+        "- No hashtags, no emojis, no @handles. Under 400 characters total.\n"
+        "- If the brief is too thin to write from, return "
+        "{\"available\": false, \"reply\": \"\"}.\n"
+        "JSON shape: {\"available\": true|false, \"reply\": \"...\"}"
+    )
+    payload = {
+        "clip_caption": (caption or "")[:1000],
+        "video_title": (video_title or "")[:500],
+        "video_description": (description or "")[:2000],
+        "clip_transcript": (transcript or "")[:8000],
+        "recent_replies_to_avoid_echoing": [r[:300] for r in (recent_replies or [])[:12]],
+    }
+    # Runs hotter than the rest of the prompts on purpose: this copy goes under
+    # every single post, so near-deterministic sampling made every reply open
+    # the same two or three ways. The flip side is the occasional empty or
+    # non-JSON completion, so a blank draft gets one more roll before giving up
+    # rather than surfacing as a failure on the post page.
+    user = json.dumps(payload)
+    text = ""
+    for _ in range(2):
+        try:
+            data = _json_chat(model, system, user, max_tokens=1000, temperature=0.9)
+        except ValueError:
+            continue
+        text = str(data.get("reply", "")).strip()
+        if not data.get("available", bool(text)):
+            return ""
+        if text:
+            break
+    if not text:
+        return ""
     text = re.sub(r"@[\w.]+", "", text).strip()
     return " ".join(text.split())[:480]
 

@@ -3370,13 +3370,6 @@ body.cal-committing #cal-layout {
   border-radius: var(--radius-lg);
   padding: var(--thread-inset);
 }
-/* Category rail above the post card on the cut Post step. */
-.preview-topbar {
-  margin: 0;
-}
-.preview-topbar .cat-toggle button {
-  padding-block: 7px;
-}
 .thread-item {
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr);

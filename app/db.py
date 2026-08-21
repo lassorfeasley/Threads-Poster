@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "27"
+SCHEMA_VERSION = "28"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -130,6 +130,7 @@ _SCHEMA_SENTINELS = (
     "SELECT first_party FROM channels LIMIT 0",
     "SELECT last_repost_window_key FROM scheduler_state LIMIT 0",
     "SELECT facet FROM traits LIMIT 0",
+    "SELECT format_tags FROM cuts LIMIT 0",
 )
 
 
@@ -271,6 +272,8 @@ def _ensure_new_columns() -> None:
             "ig_draft_caption": "TEXT DEFAULT ''",
             "export_status": "VARCHAR(20) DEFAULT ''",
             "export_error": "TEXT DEFAULT ''",
+            "format_tags": "TEXT DEFAULT ''",
+            "footage_traits": "TEXT DEFAULT ''",
         },
     }
     added: list[tuple[str, str]] = []

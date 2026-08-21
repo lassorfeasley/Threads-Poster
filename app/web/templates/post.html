@@ -161,7 +161,11 @@
     </div>
   </article>
 
-  {# ---- The first comment (attribution) ---- #}
+  {# ---- The first comment: a source citation or a call to action ---- #}
+  {% set fr_invitation = first_reply_mode == "invitation" %}
+  {% set fr_placeholder = ("Invite viewers to act — posts as the first comment right after this publishes. Leave empty and no reply is posted."
+                           if fr_invitation else
+                           "Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted.") %}
   <article class="thread-item is-reply">
     <div class="ti-gutter" aria-hidden="true">
       <span class="ti-avatar">{{ handle[0]|upper }}</span>
@@ -170,7 +174,7 @@
       <div class="ti-head">
         <span class="ti-name">{{ handle }}</span>
         {% if editable %}
-        <span class="ti-type">first reply · attribution</span>
+        <span class="ti-type">first reply · {{ "call to action" if fr_invitation else "attribution" }}</span>
         <span class="ti-tools">
           <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
           <details class="ti-menu">
@@ -214,7 +218,7 @@
       {% if can_suggest_attribution %}
       <div class="ti-text-wrap">
         <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                  placeholder="Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted.">{{ attribution_text }}</textarea>
+                  placeholder="{{ fr_placeholder }}">{{ attribution_text }}</textarea>
         <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
                 title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
                 aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
@@ -223,10 +227,10 @@
       </div>
       {% else %}
       <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                placeholder="Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted.">{{ attribution_text }}</textarea>
+                placeholder="{{ fr_placeholder }}">{{ attribution_text }}</textarea>
       {% endif %}
       {% if not attribution_enabled %}
-      <p class="field-hint">Attribution comments are off under
+      <p class="field-hint">First comments are off under
         <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
       {% endif %}
       {% else %}

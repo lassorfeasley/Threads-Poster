@@ -6,21 +6,53 @@
 
 <div class="card">
   <form method="post" action="/engagement/first-reply">
+    <label class="card-title" style="display:block; margin-bottom: 8px;">What the first reply says</label>
+    <label class="inline-label" style="display:flex; align-items:flex-start; gap:10px; margin-bottom: 4px;">
+      <input type="radio" name="mode" value="citation" {% if mode != 'invitation' %}checked{% endif %}>
+      <span>Source citation — credit the publisher of the clip</span>
+    </label>
+    <p class="meta" style="margin: 0 0 12px 26px;">
+      Nothing is drafted or posted automatically: a citation only goes out if you
+      set it on the post yourself. “Suggest a draft” writes a formal credit from
+      the full source video (never @-tags anyone) and declines when the data
+      can't support one.
+    </p>
+
+    <label class="inline-label" style="display:flex; align-items:flex-start; gap:10px; margin-bottom: 4px;">
+      <input type="radio" name="mode" value="invitation" {% if mode == 'invitation' %}checked{% endif %}>
+      <span>Call to action — invite viewers to act on what they just watched</span>
+    </label>
+    <p class="meta" style="margin: 0 0 10px 26px;">
+      Drafted for every post from the brief below, so none goes out without one.
+      It still lands in the editable first-reply box on the cut and post pages —
+      review or rewrite it there before the post publishes.
+    </p>
+
+    <label for="instruction" class="card-title" style="display:block; margin: 0 0 8px 26px;">Brief</label>
+    <div style="margin-left: 26px;">
+      <textarea name="instruction" id="instruction" rows="10"
+                placeholder="Describe the reply in your own words: what the opening question should do, what the invitation is, the URL, and any figures you want used…">{{ instruction }}</textarea>
+      <p class="meta" style="margin-top: 6px;">
+        Written in plain language and passed to the model as-is. It's also the only
+        source of facts the model may use, so any figure you want in the copy has
+        to appear here verbatim — it won't invent one.
+      </p>
+    </div>
+
+    <hr style="margin: 20px 0; border: none; border-top: 1px solid var(--line);">
+
     <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 6px;">
       <input type="checkbox" name="attribution_enabled" value="1" {% if attribution_enabled %}checked{% endif %}>
-      Post the attribution set on each post as its first comment
+      Post the first-reply text set on each post as its first comment
     </label>
     <p class="meta" style="margin: 0 0 14px 26px;">
-      Nothing is drafted or posted automatically: an attribution only goes out if
-      you set it on the post yourself. “Suggest a draft” on the post page writes a
-      formal citation from the full source video (never @-tags anyone) — and
-      declines when the data can't support one. Posts with an attribution skip
-      the static text below.
+      Turn this off to keep drafting first replies without publishing any of them.
+      Posts that have text in the box skip the static fallback below.
     </p>
 
     <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 14px;">
       <input type="checkbox" name="enabled" value="1" {% if enabled %}checked{% endif %}>
-      Post this static reply after each publish (fallback when a post has no attribution)
+      Post this static reply after each publish (fallback when a post's box is empty)
     </label>
 
     <label for="reply-text" class="card-title" style="display:block; margin-bottom: 8px;">Static reply text</label>

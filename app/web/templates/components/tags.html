@@ -1,13 +1,14 @@
-{# Trait tags grouped by facet, shared by the post and video pages.
+{# Trait tags grouped by facet, shared by the video, clip and post pages.
 
    Vocabulary names run long (talking_head_or_anchor_at_desk), so these render
    as full-width rows rather than pills that wrapped one-per-line anyway. The
    group heading carries the facet, so the rows need no colour coding.
 
    Editing is opt-in: pass ``action`` to get remove buttons and an add box.
-   The video page leaves it off — candidate tags are predictions from
-   storyboard stills that the queue-time annotation supersedes, so hand-editing
-   them would be writing over a guess that gets thrown away. #}
+   All three stages pass it, but they mean different things by it — the video's
+   tags are storyboard predictions that steer triage ranking and the variety
+   gate, while the clip's are ground truth about the footage that ships and
+   seed the post. Render read-only by omitting ``action``. #}
 {% macro facet_group(label, hint, tags, facet="", action="", unused=none, next="") %}
 {% if tags or unused %}
 <div class="tag-group">

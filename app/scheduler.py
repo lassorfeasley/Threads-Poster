@@ -1622,16 +1622,18 @@ def annotate_queued_posts(limit: int = 2) -> int:
     A queued post whose clip file changes after annotation (captions toggled,
     which swaps in the subtitled variant) is re-annotated: the requeue path
     clears ``footage_scored_at`` when it swaps the file.
+
+    A clip the operator tagged by hand short-circuits the model: those tags
+    describe the same file and were set by someone who watched it, so they are
+    copied over and the call is skipped. That runs even with vision disabled,
+    and before the per-tick ``limit``, since it costs nothing.
     """
     settings = load_settings()
-    if not settings.get("vision.enabled", True):
-        return 0
     from .db import active_traits_by_facet
-    from .vision import annotate_post_footage
+    from .vision import annotate_post_footage, seed_post_tags_from_cut
 
     done = 0
     with session_scope() as session:
-        vocab = active_traits_by_facet(session)
         posts = session.execute(
             select(ThreadsPost).where(
                 ThreadsPost.status == STATUS_QUEUED,
@@ -1639,7 +1641,16 @@ def annotate_queued_posts(limit: int = 2) -> int:
                 ThreadsPost.clip_local_path != "",
             ).order_by(ThreadsPost.created_at.asc())
         ).scalars().all()
+        pending = []
         for post in posts:
+            if seed_post_tags_from_cut(post, post.cut):
+                done += 1
+            else:
+                pending.append(post)
+        if not settings.get("vision.enabled", True):
+            return done
+        vocab = active_traits_by_facet(session)
+        for post in pending:
             if done >= limit:
                 break
             if not Path(post.clip_local_path).expanduser().exists():

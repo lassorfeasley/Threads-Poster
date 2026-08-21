@@ -122,42 +122,65 @@ FIRST_REPLY_HEADER = """\
 # Auto first-reply posted under every Threads post this app publishes.
 # Editable via the cog on the Replies page; no code changes needed.
 #
-# attribution_enabled: when true, an attribution comment the OPERATOR set on a
-# post (typed, or accepted from the "Suggest a draft" formal citation) is
-# published as the first comment after the post goes live. Nothing is ever
-# drafted or posted automatically — a post whose attribution field is empty
-# publishes without one.
+# mode decides what the "Suggest a draft" button writes into the first-reply box
+# on the cut and post pages:
+#   citation   - a formal credit line for the source publisher (drafted only
+#                when you click Suggest; nothing is written automatically).
+#   invitation - a call to action written from `instruction` below, drafted
+#                automatically for every post so none goes out without one.
+# Either way the drafted text lands in an editable box you review before the
+# post publishes; the first comment is only ever the text sitting in that box.
 #
-# When enabled is true and text is non-empty, that static text is the reply
-# instead — used as the fallback for posts without an attribution. A reply
-# failure never rolls back the post — check the post page and retry there.
+# instruction is your own plain-language brief for invitation mode, passed to
+# the model as the authoritative spec. It is also the ONLY source of factual
+# claims the model may make, so any statistic or figure you want used has to
+# appear here verbatim.
+#
+# attribution_enabled: when false, the first comment never posts, whatever is in
+# the box. When enabled is true and text is non-empty, that static text is the
+# fallback for posts whose box is empty. A reply failure never rolls back the
+# post — check the post page and retry there.
 
 """
 
+FIRST_REPLY_MODES = ("citation", "invitation")
+
 
 def load_first_reply() -> dict[str, Any]:
-    """Return ``{enabled: bool, text: str, attribution_enabled: bool}`` for the
-    auto first-reply."""
+    """Return the auto first-reply config: ``{enabled, text, attribution_enabled,
+    mode, instruction}``."""
     data = _load_yaml(CONFIG_DIR / "first_reply.yaml")
-    text = data.get("text") or ""
-    if isinstance(text, str):
-        text = text.strip()
-    else:
-        text = str(text).strip()
+
+    def _text(key: str) -> str:
+        val = data.get(key) or ""
+        return val.strip() if isinstance(val, str) else str(val).strip()
+
+    mode = _text("mode").lower() or "citation"
+    if mode not in FIRST_REPLY_MODES:
+        mode = "citation"
     return {
         "enabled": bool(data.get("enabled", False)),
-        "text": text,
+        "text": _text("text"),
         "attribution_enabled": bool(data.get("attribution_enabled", True)),
+        "mode": mode,
+        "instruction": _text("instruction"),
     }
 
 
-def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = True) -> None:
+def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = True,
+                     mode: str = "citation", instruction: str = "") -> None:
+    mode = (mode or "citation").strip().lower()
+    if mode not in FIRST_REPLY_MODES:
+        mode = "citation"
     payload = {
+        "mode": mode,
         "enabled": bool(enabled),
         "attribution_enabled": bool(attribution_enabled),
+        "instruction": (instruction or "").strip(),
         "text": (text or "").strip(),
     }
-    body = yaml.safe_dump(payload, default_flow_style=False, allow_unicode=True, width=88)
+    body = yaml.safe_dump(payload, default_flow_style=False, allow_unicode=True, width=88,
+                          sort_keys=False)
     (CONFIG_DIR / "first_reply.yaml").write_text(FIRST_REPLY_HEADER + body)
 
 

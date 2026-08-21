@@ -17,7 +17,7 @@ from sqlalchemy import select
 from .config import load_first_reply, load_settings, scheduler_timezone
 from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
 from .instagram_api import publish_reel
-from .llm import caption_attributes, suggest_attribution
+from .llm import caption_attributes, suggest_attribution, suggest_first_reply
 from .models import Candidate, Cut, InstagramPost, ThreadsPost, utcnow
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import publish_text_reply, publish_video
@@ -87,6 +87,11 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         # recorded no duration at all.
         clip_length_seconds=_clip_duration_seconds(clip),
     )
+    # Tags the operator set on the clip are ground truth about this exact file,
+    # so they carry over now and spare the post the annotation pass entirely.
+    from .vision import seed_post_tags_from_cut
+
+    seed_post_tags_from_cut(post, cut)
     session.add(post)
     session.flush()
     # Freeze the LLM draft, so the diff against the operator's final caption
@@ -99,9 +104,12 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
             session, cut.id if cut else None, caption, post_pk=post.id)
     except Exception:
         log.exception("Caption proposal resolution failed for post %s", post.id)
-    # Attribution first-comment: only ever the operator's own text (typed or an
-    # accepted "Suggest" draft). Nothing is auto-drafted here — an empty field
-    # means this post gets no attribution comment.
+    # First comment: only ever text the caller already has in hand — the
+    # operator's own, or a call-to-action draft the ship path produced via
+    # ``draft_first_reply_for_cut`` before opening this session. Nothing is
+    # drafted here, because a model call inside this transaction would hold a
+    # pooled connection for the seconds it takes. An empty field means this post
+    # gets no first comment beyond whatever static fallback is configured.
     if attribution.strip():
         post.attribution_text = attribution.strip()
     # Upload now, while the file is guaranteed to be on this machine, so a
@@ -140,6 +148,111 @@ def generate_attribution(candidate: Candidate) -> str:
                       if candidate.published_at else ""),
         video_url=candidate.url or "",
     )
+
+
+def _clip_transcript_text(cut: Cut | None) -> str:
+    """Plain text of the trimmed clip's Whisper word stream, when one was already
+    saved. Never transcribes: this runs on the record path, where a Whisper pass
+    would be far too slow, so a missing sidecar just falls back to the source
+    video's transcript."""
+    if cut is None or not cut.clip_transcript_path:
+        return ""
+    from .subtitles import load_clip_words, words_to_plain
+    try:
+        words = load_clip_words(cut.clip_transcript_path)
+    except Exception:
+        return ""
+    return words_to_plain(words).strip() if words else ""
+
+
+def _recent_first_replies(session, limit: int = 12) -> list[str]:
+    """The most recent first comments, newest first, fed to the drafting prompt so
+    a fresh invitation doesn't echo the ones around it.
+
+    Covers posted replies AND the text still sitting in unpublished posts' boxes:
+    a queue drafted in one sitting publishes days apart, so looking only at what
+    has already gone out would let every post in that batch open the same way.
+    """
+    rows = session.execute(
+        select(ThreadsPost.first_reply_text, ThreadsPost.attribution_text)
+        .where((ThreadsPost.first_reply_text != "") | (ThreadsPost.attribution_text != ""))
+        .order_by(ThreadsPost.id.desc())
+        .limit(limit)
+    ).all()
+    seen: list[str] = []
+    for posted, pending in rows:
+        text = (posted or "").strip() or (pending or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+    return seen
+
+
+def first_reply_context(session, candidate: Candidate | None, cut: Cut | None,
+                        caption: str = "") -> dict | None:
+    """Snapshot everything the call-to-action prompt needs as plain values.
+
+    Split from the model call on purpose: the draft takes several seconds, and
+    doing it mid-session pinned a pooled database connection for the whole of
+    it. Returns None when invitation mode is off or has no brief.
+    """
+    cfg = load_first_reply()
+    instruction = (cfg.get("instruction") or "").strip()
+    if cfg.get("mode") != "invitation" or not instruction:
+        return None
+    transcript = _clip_transcript_text(cut)
+    if not transcript and candidate is not None:
+        transcript = (candidate.transcript_text or "").strip()
+    return {
+        "instruction": instruction,
+        "fallback": (cfg.get("text") or "").strip(),
+        "video_title": candidate.title if candidate else "",
+        "description": candidate.description if candidate else "",
+        "transcript": transcript,
+        "caption": caption or "",
+        "recent_replies": _recent_first_replies(session),
+    }
+
+
+def draft_first_reply(context: dict | None) -> str:
+    """Run the call-to-action draft for a ``first_reply_context`` snapshot.
+
+    Holds no database connection: callers gather the context in a short session,
+    let it close, then call this. It is only ever a DRAFT — the text lands in the
+    editable first-reply box and the operator can rewrite or clear it before the
+    post publishes.
+    """
+    if not context:
+        return ""
+    settings = load_settings()
+    text = suggest_first_reply(
+        settings.get("engagement.draft_model", "claude-sonnet-5"),
+        context["instruction"],
+        video_title=context.get("video_title", ""),
+        description=context.get("description", ""),
+        transcript=context.get("transcript", ""),
+        caption=context.get("caption", ""),
+        recent_replies=context.get("recent_replies") or [],
+    )
+    # The whole point of invitation mode is that the call to action rides under
+    # every post, so a clip the model declines to write a custom opener for
+    # falls back to the configured static pitch rather than to nothing.
+    return text or context.get("fallback", "")
+
+
+def draft_first_reply_for_cut(cut_id: int, caption: str = "") -> str:
+    """Call-to-action draft for a cut, from outside any caller's transaction.
+
+    Used by the ship paths (post now / queue / save draft) before they open the
+    session that records the post, so the model call never runs with a
+    connection checked out. Returns "" when invitation mode is off.
+    """
+    from .db import session_scope
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return ""
+        context = first_reply_context(session, cut.candidate, cut, caption)
+    return draft_first_reply(context)
 
 
 def post_time_attributes(when: dt.datetime) -> tuple[str, int]:
@@ -485,13 +598,14 @@ def _annotate_footage(session, post: ThreadsPost) -> None:
 def _no_first_comment_reason(post: ThreadsPost, cfg: dict) -> str:
     """Plain-language reason a published post carries no first comment, stored on
     the post so it shows up on the post page instead of looking untouched."""
+    kind = "call to action" if cfg.get("mode") == "invitation" else "attribution"
     if (post.attribution_text or "").strip() and not cfg.get("attribution_enabled"):
-        return ("No first comment: this post has attribution text, but attribution "
-                "comments are switched off under Replies settings.")
+        return (f"No first comment: this post has {kind} text, but first comments "
+                "are switched off under Replies settings.")
     if post.attribution_skipped:
-        return ("No first comment: the attribution was cleared for this post, and "
+        return (f"No first comment: the {kind} was cleared for this post, and "
                 "no static reply text is enabled under Replies settings.")
-    return ("No first comment: no attribution was set on this post, and no static "
+    return (f"No first comment: no {kind} was set on this post, and no static "
             "reply text is enabled under Replies settings.")
 
 

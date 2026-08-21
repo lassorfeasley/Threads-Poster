@@ -220,17 +220,21 @@
 <aside class="video-rail">
   {% set fmt_tags = (c.format_tags or "").split(",")|map("trim")|select|list %}
   {% set subj_tags = (c.visual_traits or "").split(",")|map("trim")|select|list %}
+  {% set unused_format = trait_vocab.get("format", [])|reject("in", fmt_tags)|list %}
+  {% set unused_subject = trait_vocab.get("subject", [])|reject("in", subj_tags)|list %}
 
   <div class="card tight">
     {# Heading-free, matching the post page: sections divide with rules
        instead of all-caps labels. #}
     {{ catui.field(c.id, c.category, "/video/" ~ c.id, show_label=false) }}
-    {% if fmt_tags or subj_tags %}<hr class="div">{% endif %}
+    {% if fmt_tags or subj_tags or unused_format or unused_subject %}<hr class="div">{% endif %}
 
     {{ tagui.facet_group("Format", "Production form — drives the scheduler's variety gate",
-                        fmt_tags) }}
+                        fmt_tags, facet="format", action="/video/" ~ c.id ~ "/tags",
+                        unused=unused_format, next="/video/" ~ c.id) }}
     {{ tagui.facet_group("Subject", "What's on screen — feeds per-trait performance learning",
-                        subj_tags) }}
+                        subj_tags, facet="subject", action="/video/" ~ c.id ~ "/tags",
+                        unused=unused_subject, next="/video/" ~ c.id) }}
 
     {% if shelf_life %}
     <hr class="div">
