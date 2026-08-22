@@ -32,7 +32,6 @@
   </span>
   <span class="cal-wk-body">
     <span class="cal-wk-title">{{ (label or '(post)')[:90] }}</span>
-    {% if e.has_reel or e.kind == 'rerun' or e.get('relax_step') or e.get('score_parts') %}
     <span class="cal-wk-chips">
       {% if e.has_reel %}<span class="cal-ev-reel" title="Also queued as an Instagram Reel">+IG</span>{% endif %}
       {% if e.kind == 'rerun' %}<span class="cal-ev-rerun" title="Projected rerun — displaced automatically by any fresh content">↻ rerun</span>{% endif %}
@@ -49,7 +48,6 @@
             data-relax="{{ e.get('relax_step') or 0 }}">Σ</span>
       {% endif %}
     </span>
-    {% endif %}
   </span>
 {% endmacro %}
 
@@ -67,7 +65,7 @@
       {% set evs = week_events.get(d.isoformat(), []) %}
       <div class="cal-week-col{{ ' today' if d == today_date }}">
         <div class="cal-week-day">
-          <span class="cal-week-dow">{{ dow[loop.index0] }}</span>
+          <span class="cal-week-dow">{{ d.strftime('%a') }}</span>
           <span class="cal-week-date">{{ d.strftime('%b') ~ ' ' if (loop.first or d.day == 1) }}{{ d.day }}</span>
         </div>
         <div class="cal-week-stack">

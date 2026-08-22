@@ -3970,8 +3970,13 @@ pagecache.register("calendar", _current_month_calendar_data)
 
 
 def _week_start_for(day: dt.date) -> dt.date:
-    """The Sunday on or before ``day`` (the calendar is Sunday-first)."""
-    return day - dt.timedelta(days=(day.weekday() + 1) % 7)
+    """The first column of the week view: ``day`` itself.
+
+    Unlike the month grid (Sunday-first), the week view is a rolling seven-day
+    window that always leads with the focus date — today on a bare visit —
+    so "what's coming up" starts on the left.
+    """
+    return day
 
 
 def _calendar_week_data(week_start: dt.date) -> dict:
@@ -4037,7 +4042,7 @@ pagecache.register("calendar-week", _current_week_calendar_data)
 def calendar_page(request: Request, year: int = 0, month: int = 0,
                   start: str = "", msg: str = ""):
     """Week cards (default), month grid and linear queue of posting windows
-    (local time). ``start`` focuses the week view on any date in that week;
+    (local time). ``start`` is the left column of the rolling week view;
     ``year``/``month`` page the month grid."""
     import calendar as _cal
 
@@ -4055,8 +4060,8 @@ def calendar_page(request: Request, year: int = 0, month: int = 0,
     if (data["year"], data["month"]) != (y, m):
         data = _calendar_data(y, m)
 
-    # Week focus: any date normalizes to its Sunday. Current week stays warm
-    # in the pagecache; paging to other weeks reads live.
+    # Week focus: the focus date IS the left column (rolling 7-day window).
+    # Current window (starting today) stays warm; paging reads live.
     try:
         focus = dt.date.fromisoformat(start) if start else now_local.date()
     except ValueError:

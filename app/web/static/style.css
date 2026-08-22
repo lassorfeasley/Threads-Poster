@@ -3129,14 +3129,23 @@ body.cal-committing #cal-layout {
 .cal-week-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 10px;
-  align-items: start;
+  gap: 0;
+  align-items: stretch;
 }
 .cal-week-col {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  padding: 8px 6px 10px;
+  border-radius: var(--radius);
+}
+/* Alternating day columns so the seven days read as lanes, not one field. */
+.cal-week-col:nth-child(odd) {
+  background: var(--bg);
+}
+.cal-week-col:nth-child(even) {
+  background: var(--panel);
 }
 .cal-week-day {
   display: flex;
@@ -3159,10 +3168,14 @@ body.cal-committing #cal-layout {
 }
 .cal-week-col.today .cal-week-dow,
 .cal-week-col.today .cal-week-date { color: var(--accent); }
+.cal-week-col.today {
+  background: var(--accent-soft);
+}
 .cal-week-stack {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  flex: 1 1 auto;
 }
 .cal-week-none {
   padding: 10px 4px;
@@ -3194,13 +3207,16 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
 .cal-wk-link {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   color: inherit;
   text-decoration: none;
 }
 .cal-wk-thumb {
   position: relative;
   display: block;
+  flex: 0 0 auto;
   aspect-ratio: 16 / 9;
   background: var(--panel2);
   border-bottom: 1px solid var(--border);
@@ -3227,12 +3243,16 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
   background: rgba(0, 0, 0, 0.72);
   color: #fff;
 }
+/* Fixed body band so every card is the same height: 2-line title + chip row. */
 .cal-wk-body {
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 7px 8px 8px;
   min-width: 0;
+  flex: 0 0 auto;
+  height: 62px;
+  box-sizing: border-box;
 }
 .cal-wk-title {
   font-size: 12px;
@@ -3241,15 +3261,19 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
   color: var(--text);
   overflow: hidden;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  height: calc(1.3em * 2);
 }
 .cal-event.cal-wk-card.pub .cal-wk-title { color: var(--text-dim); }
 .cal-wk-chips {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-height: 14px;
+  margin-top: auto;
+  overflow: hidden;
 }
 
 /* Slim slots for windows without a post: open (drop target) and missed. */
@@ -3271,7 +3295,10 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
 
 @media (max-width: 860px) {
   /* One day per row: the column header becomes a row label. */
-  .cal-week-grid { grid-template-columns: 1fr; gap: 14px; }
+  .cal-week-grid { grid-template-columns: 1fr; gap: 8px; }
+  .cal-week-col:nth-child(odd),
+  .cal-week-col:nth-child(even) { background: var(--panel); }
+  .cal-week-col.today { background: var(--accent-soft); }
   .cal-week-stack {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
