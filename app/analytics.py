@@ -31,6 +31,55 @@ def _last_snapshot_times(session, post_ids: list[int]) -> dict[int, dt.datetime]
     return {pk: last for pk, last in rows if last is not None}
 
 
+def _aware(when: dt.datetime | None) -> dt.datetime | None:
+    if when is not None and when.tzinfo is None:
+        return when.replace(tzinfo=dt.timezone.utc)
+    return when
+
+
+def _add_snapshot(session, post: ThreadsPost) -> bool:
+    """Pull insights for one post and record a snapshot. False when the API
+    returned nothing (a post too fresh for insights, or a transient failure)."""
+    data = fetch_insights(post.threads_media_id)
+    if not data:
+        return False
+    session.add(MetricSnapshot(post_pk=post.id, **{m: data.get(m) for m in METRICS}))
+    return True
+
+
+def refresh_metrics_for(session, posts: list[ThreadsPost],
+                        min_interval_minutes: int = 15) -> int:
+    """Snapshot these specific posts unless one was taken very recently.
+
+    Targeted counterpart to the two cadence-driven pollers: the first-reply
+    gates need a post's CURRENT reply and like counts to decide whether to
+    comment, and a post can sit waiting well past
+    ``scheduler.metrics_poll_recency_hours`` — after which the frequent poller
+    drops it and its counts freeze at whatever they were at hour six. Only ever
+    called for the handful of posts actually awaiting a reply.
+    """
+    if not posts:
+        return 0
+    interval = dt.timedelta(minutes=max(1, min_interval_minutes))
+    now = utcnow()
+    last_by_post = _last_snapshot_times(session, [p.id for p in posts])
+    taken = 0
+    for post in posts:
+        if not post.threads_media_id:
+            continue
+        last = _aware(last_by_post.get(post.id))
+        if last is not None and now - last < interval:
+            continue
+        try:
+            if _add_snapshot(session, post):
+                taken += 1
+        except Exception as exc:
+            log.warning("Metrics refresh failed for post %s: %s", post.id, exc)
+    if taken:
+        session.flush()
+    return taken
+
+
 def snapshot_metrics(session) -> int:
     """Re-pull Threads insights for published posts that are due for a snapshot."""
     settings = load_settings()
@@ -57,21 +106,8 @@ def snapshot_metrics(session) -> int:
             if now - last < interval:
                 continue
 
-        data = fetch_insights(post.threads_media_id)
-        if not data:
-            continue
-        session.add(
-            MetricSnapshot(
-                post_pk=post.id,
-                views=data.get("views"),
-                likes=data.get("likes"),
-                replies=data.get("replies"),
-                reposts=data.get("reposts"),
-                quotes=data.get("quotes"),
-                shares=data.get("shares"),
-            )
-        )
-        taken += 1
+        if _add_snapshot(session, post):
+            taken += 1
     session.flush()
     log.info("Metric snapshots taken: %d", taken)
     return taken
@@ -115,24 +151,10 @@ def poll_recent_metrics(session) -> int:
             if now - last < interval:
                 continue
         try:
-            data = fetch_insights(post.threads_media_id)
+            if _add_snapshot(session, post):
+                taken += 1
         except Exception as exc:
             log.warning("Recent metrics poll failed for post %s: %s", post.id, exc)
-            continue
-        if not data:
-            continue
-        session.add(
-            MetricSnapshot(
-                post_pk=post.id,
-                views=data.get("views"),
-                likes=data.get("likes"),
-                replies=data.get("replies"),
-                reposts=data.get("reposts"),
-                quotes=data.get("quotes"),
-                shares=data.get("shares"),
-            )
-        )
-        taken += 1
     if taken:
         session.flush()
         log.info("Recent metric snapshots taken: %d", taken)

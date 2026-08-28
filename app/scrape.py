@@ -93,49 +93,103 @@ def fetch_captions(video_id: str) -> list[dict] | None:
         return None
 
 
-_whisper_model = None
+# faster-whisper models, keyed by size ("base", "small", ...) so the fast pass
+# and the escalation pass can coexist without reloading each other.
+_whisper_models: dict = {}
 
 
-def _get_whisper_model(settings):
-    """Lazily load the faster-whisper model (CPU, int8) once per process."""
-    global _whisper_model
-    if _whisper_model is None:
+def _get_whisper_model(settings, size: str | None = None):
+    """Lazily load a faster-whisper model (CPU, int8) once per process/size."""
+    if size is None:
+        size = settings.get("upload.whisper_model", "base")
+    if size not in _whisper_models:
         from faster_whisper import WhisperModel
 
-        size = settings.get("upload.whisper_model", "base")
         log.info("Loading faster-whisper model %r (first run downloads it)...", size)
-        _whisper_model = WhisperModel(size, device="cpu", compute_type="int8")
-    return _whisper_model
+        _whisper_models[size] = WhisperModel(size, device="cpu", compute_type="int8")
+    return _whisper_models[size]
 
 
-def transcribe_local(media_path: str | Path, settings) -> tuple[list[dict] | None, list[dict] | None]:
-    """Transcribe a local media file with faster-whisper.
+def transcribe_word_stream(media_path: str | Path, settings, *,
+                           start_tier: int = 0) -> tuple[list[dict], list[dict], str]:
+    """Transcribe with an escalation ladder for hard audio (music, sung vocals).
 
-    Returns ``(segments, words)``: segment-level ``[{start, end, text}]`` and
-    the word-level ``[{word, start, end}]`` stream from the same pass. Word
-    timestamps come free with the transcription (no second decode), and they
-    are what clip suggestions and burned-in captions cut against.
-    Both are None when transcription fails or hears nothing.
+    Tier 0 is the historical fast path: default model with VAD on. Silero VAD
+    is trained on speech, so sung vocals over a music bed get stripped before
+    the decoder ever runs — when a tier hears zero words the next tier retries
+    with VAD off, then with a larger model. ``start_tier`` lets a forced retry
+    skip straight to the strongest pass.
+
+    Returns ``(segments, words, tier_name)``; both lists empty when every tier
+    heard nothing. Word timestamps come free with the transcription (no second
+    decode), and they are what clip suggestions and burned-in captions cut
+    against.
     """
-    try:
-        model = _get_whisper_model(settings)
-        # language pinned to English — see transcribe_words in subtitles.py:
-        # auto-detect can misread noisy audio as Welsh and derail the output.
-        segments, _info = model.transcribe(str(media_path), language="en",
-                                           word_timestamps=True, vad_filter=True)
-        out: list[dict] = []
-        words: list[dict] = []
-        for s in segments:
-            out.append({"start": float(s.start), "end": float(s.end),
-                        "text": (s.text or "").strip()})
+    fast_size = settings.get("upload.whisper_model", "base")
+    fallback_size = settings.get("upload.whisper_fallback_model", "small")
+    # Relaxed decode params for tiers 1+: no VAD gate, per-window no-speech
+    # threshold loosened, and the standard temperature fallback ladder so a
+    # low-confidence window gets re-decoded instead of dropped.
+    relaxed = dict(vad_filter=False, condition_on_previous_text=False,
+                   no_speech_threshold=0.3, temperature=[0.0, 0.2, 0.4, 0.6])
+    tiers: list[tuple[str, str, dict]] = [
+        (f"{fast_size}+vad", fast_size, dict(vad_filter=True)),
+        (fast_size, fast_size, relaxed),
+        (fallback_size, fallback_size, relaxed),
+    ]
+    # A distinct fallback model is the whole point of tier 2; drop it when the
+    # operator configured both sizes the same.
+    if fallback_size == fast_size:
+        tiers.pop()
+
+    segments: list[dict] = []
+    words: list[dict] = []
+    tier_name = ""
+    for tier_name, size, params in tiers[start_tier:]:
+        model = _get_whisper_model(settings, size)
+        # language pinned to English: Whisper's auto-detect samples the first
+        # ~30s and infamously misreads noisy/archival British audio as Welsh,
+        # then "transcribes" the whole clip in fluent Welsh. All channel
+        # content is English, so force it (even more important with VAD off).
+        raw_segments, _info = model.transcribe(str(media_path), language="en",
+                                               word_timestamps=True, **params)
+        segments = []
+        words = []
+        for s in raw_segments:
+            segments.append({"start": float(s.start), "end": float(s.end),
+                             "text": (s.text or "").strip()})
             for w in s.words or []:
                 text = (w.word or "").strip()
                 if text:
                     words.append({"word": text, "start": float(w.start),
                                   "end": float(w.end)})
-        return (out or None), (words or None)
-    except Exception as exc:
-        log.warning("Local transcription failed for %s: %s", media_path, exc)
+        if words:
+            if tier_name != tiers[0][0]:
+                log.info("Whisper pass %r heard %d words in %s after quieter "
+                         "tiers heard nothing", tier_name, len(words),
+                         Path(media_path).name)
+            return segments, words, tier_name
+        log.info("Whisper pass %r heard no words in %s", tier_name,
+                 Path(media_path).name)
+    # Every tier came up empty on words; surface the last tier's segments (if
+    # any) so a text-only transcript is still better than nothing.
+    return [s for s in segments if s.get("text")], [], tier_name
+
+
+def transcribe_local(media_path: str | Path, settings) -> tuple[list[dict] | None, list[dict] | None]:
+    """Transcribe a local media file with faster-whisper, escalating on silence.
+
+    Returns ``(segments, words)``: segment-level ``[{start, end, text}]`` and
+    the word-level ``[{word, start, end}]`` stream from the same pass.
+    Both are None when transcription fails or hears nothing.
+    """
+    try:
+        segments, words, _tier = transcribe_word_stream(media_path, settings)
+        return (segments or None), (words or None)
+    except Exception:
+        # Whisper failing must never fail an archive; log with traceback so a
+        # crash is distinguishable from true silence.
+        log.exception("Local transcription failed for %s", media_path)
         return None, None
 
 

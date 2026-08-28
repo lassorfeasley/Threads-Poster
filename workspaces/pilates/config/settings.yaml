@@ -261,6 +261,15 @@ scrape:
   # yt-dlp format selection for the full segment.
   ytdlp_format: "bv*[height<=1080]+ba/b[height<=1080]"
 
+upload:
+  # faster-whisper model for the fast transcription pass (CPU, int8). Bigger
+  # models hear more but are much slower: tiny < base < small < medium.
+  whisper_model: base
+  # Escalation model when the fast pass hears nothing (music beds, sung
+  # vocals). Runs with VAD off and relaxed thresholds; ~460MB download on
+  # first use. Set equal to whisper_model to skip the model escalation.
+  whisper_fallback_model: small
+
 threads:
   # Threads user id is discovered automatically after OAuth; leave blank.
   user_id: ""

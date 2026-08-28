@@ -23,6 +23,7 @@ from .config import load_settings
 from .models import utcnow
 from .subtitles import (
     FONT_DIR,
+    NoSpeechError,
     SubtitleError,
     _hex_to_rgba,
     _load_fonts,
@@ -158,13 +159,14 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
 
     try:
         words, _sidecar = ensure_clip_words(clip, transcript_path)
-    except SubtitleError as exc:
+    except NoSpeechError:
         # Silent / music-only clips still get a vertical frame — just no
-        # burned-in captions. Any other Whisper failure stays fatal.
-        if "No speech" not in str(exc):
-            raise VerticalCompositeError(str(exc)) from exc
+        # burned-in captions.
         log.info("vertical: no speech in %s — composing without captions", clip.name)
         words = []
+    except SubtitleError as exc:
+        # Any other Whisper failure stays fatal.
+        raise VerticalCompositeError(str(exc)) from exc
     groups = group_words(words, max_words=max_words) if words else []
     fonts = _load_fonts(max(18, caption_px), caption_font_name) if groups else None
 

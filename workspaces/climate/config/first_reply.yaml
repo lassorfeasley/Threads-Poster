@@ -19,10 +19,40 @@
 # the box. When enabled is true and text is non-empty, that static text is the
 # fallback for posts whose box is empty. A reply failure never rolls back the
 # post — check the post page and retry there.
+#
+# WHEN the first comment posts. By default it goes out seconds after the post,
+# which makes it the first thing under every clip — and a promotional comment
+# sitting in that slot can smother the audience replies that would otherwise
+# start the conversation. These four hold it back until the post has a
+# conversation of its own:
+#   delay_minutes  - don't comment until the post is at least this old
+#   min_replies    - ...and until this many OTHER people have replied
+#   min_likes      - ...and until it has at least this many likes
+#   deadline_hours - comment anyway once the post is this old, so a post that
+#                    never got replies still gets its call to action
+#                    (0 = wait indefinitely)
+# All four at 0 restores the original behavior: comment immediately on publish.
+#
+# The deadline fires only on posts that FLOPPED — a post that got its replies
+# was commented under long before. Left unqualified it therefore attaches the
+# pitch to your weakest posts and only your weakest posts, which is backwards:
+# nobody is reading the comments on a post nobody engaged with, so the ask earns
+# nothing, while a Threads post that revives days later shows new arrivals a
+# pitch before anyone has had a chance to reply. These two put a floor under it:
+#   deadline_min_views - at the deadline, comment only if the post cleared this
+#   deadline_min_likes - ...or this (either one is enough)
+# A post under both is skipped for good rather than commented on. Both at 0
+# means no floor: the deadline comments on everything it reaches.
 
 mode: invitation
 enabled: true
 attribution_enabled: true
+delay_minutes: 120
+min_replies: 1
+min_likes: 0
+deadline_hours: 12
+deadline_min_views: 500
+deadline_min_likes: 50
 instruction: |
   Write a two-sentence invitation to support Renewables.org.
 

@@ -85,6 +85,8 @@ from ..publishing import (
     draft_first_reply,
     draft_first_reply_for_cut,
     first_reply_context,
+    first_reply_gate,
+    first_reply_is_deferred,
     generate_attribution,
     mark_publishing,
     maybe_post_first_reply,
@@ -96,10 +98,12 @@ from ..publishing import (
     queue_clip,
     record_instagram_post,
     record_post,
+    resolve_first_reply_text,
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_expr, sort_candidates
 from ..scheduler import (
+    PIN_HORIZON_DAYS,
     build_window_plan,
     expired_queued_posts,
     invalidate_recycle_overview,
@@ -107,6 +111,7 @@ from ..scheduler import (
     projected_slot_for_post,
     recycle_overview,
     recycle_status,
+    reschedule_windows_for_post,
     resolve_shelf_life,
     scheduler_status,
     shelf_life_outlook,
@@ -357,8 +362,8 @@ _WRITE_SCOPE: dict[str, tuple[str, ...]] = {
     # Calendar drag-and-drop: pins only reorder upcoming windows. Shelf-life
     # expiry (what attention/notifications watch) is content-age-based and
     # unaffected by which window a post is pinned to.
-    "/post/{post_id}/pin-window": ("calendar",),
-    "/post/{post_id}/unpin": ("calendar",),
+    "/post/{post_id}/pin-window": ("calendar", "calendar-queue", "calendar-week"),
+    "/post/{post_id}/unpin": ("calendar", "calendar-queue", "calendar-week"),
     # One metric snapshot row: of the cached pages, only the library surfaces
     # per-post metrics (analytics lives on its own TTL, volatile=False).
     "/post/{post_id}/refresh-stats": ("library",),
@@ -1462,6 +1467,9 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "attribution_text": (pending.attribution_text or "") if pending else "",
          "attribution_enabled": bool(load_first_reply().get("attribution_enabled")),
          "first_reply_mode": load_first_reply().get("mode", "citation"),
+         # Whether the comment rides along with the publish or is held back
+         # until the post has replies of its own — the box says which.
+         "first_reply_deferred": first_reply_is_deferred(),
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
          "subs_position": (
              cut.subs_position if cut.use_subtitles
@@ -2007,7 +2015,7 @@ def download_post_clip(post_id: int):
         if not path or not Path(path).exists():
             return JSONResponse({"error": "no clip"}, status_code=404)
         if p.cut:
-            kind = "captioned" if path and str(path).endswith("_subs.mp4") else ""
+            kind = "captioned" if _is_captioned_file(str(path)) else ""
             name = _cut_download_filename(p.cut, kind=kind)
         else:
             name = f"threads-post-{p.id}.mp4"
@@ -2016,13 +2024,27 @@ def download_post_clip(post_id: int):
 
 # --- Trim / export ----------------------------------------------------------------
 
+def _is_captioned_file(path: str) -> bool:
+    """True for burned-caption renders: ``<stem>_subs.mp4`` or the versioned
+    ``<stem>_subs_<stamp>.mp4`` names that regeneration writes."""
+    if not path:
+        return False
+    stem = Path(path).stem
+    return stem.endswith("_subs") or "_subs_" in stem
+
+
 def _delete_if_unreferenced(session, paths: list[str]) -> None:
-    """Remove superseded clip files that no ThreadsPost or InstagramPost still
-    points at.
+    """Remove superseded clip files that no post — and no cut — still points at.
 
     Exports are versioned per run, so a pending post keeps the exact file it was
     queued with. We only reclaim the disk space when nothing references the old
-    file any more."""
+    file any more.
+
+    Cut references count too: recaptioning a post that sat on the plain trim
+    used to put ``cut.trimmed_clip_path`` itself in the superseded list and
+    delete it — permanently killing the caption toggle (and any future
+    re-caption) for that clip until a re-export recreated the file.
+    """
     for path in {p for p in paths if p}:
         referenced = session.execute(
             select(ThreadsPost.id).where(ThreadsPost.clip_local_path == path).limit(1)
@@ -2031,6 +2053,14 @@ def _delete_if_unreferenced(session, paths: list[str]) -> None:
             referenced = session.execute(
                 select(InstagramPost.id)
                 .where(InstagramPost.clip_local_path == path).limit(1)
+            ).scalar_one_or_none()
+        if referenced is None:
+            referenced = session.execute(
+                select(Cut.id).where(or_(
+                    Cut.trimmed_clip_path == path,
+                    Cut.subtitled_clip_path == path,
+                    Cut.vertical_clip_path == path,
+                )).limit(1)
             ).scalar_one_or_none()
         if referenced is not None:
             continue
@@ -2276,17 +2306,53 @@ def cut_export_status(cut_id: int):
         }
 
 
+@app.post("/cut/{cut_id}/subs-mode")
+def set_subs_mode(cut_id: int, mode: str = Form("")):
+    """Persist a caption-toggle flip that needs no render (AJAX).
+
+    ``none`` turns burned-in captions off; ``bottom``/``top`` re-selects an
+    already-rendered captioned file when its position matches. Burns persist
+    inside ``/cut/{id}/subtitles`` — without this endpoint the other flips
+    lived only in the hidden ``use_subtitles`` form field, so "No captions"
+    silently reverted on reload unless the operator resubmitted the queue
+    form. Like a re-burn, this never moves a pending post off the exact file
+    it was queued with — that stays behind "Update queue".
+    """
+    mode = (mode or "").strip().lower()
+    if mode not in ("none", "bottom", "top"):
+        return JSONResponse({"error": f"bad mode {mode!r}"}, status_code=400)
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if mode == "none":
+            cut.use_subtitles = False
+        else:
+            if not (cut.subtitled_clip_path
+                    and Path(cut.subtitled_clip_path).exists()
+                    and (cut.subs_position or "bottom") == mode):
+                return JSONResponse(
+                    {"error": "No captioned render at that position — generate one"},
+                    status_code=409)
+            cut.use_subtitles = True
+        cut.updated_at = utcnow()
+    return JSONResponse({"ok": True, "mode": mode})
+
+
 @app.post("/cut/{cut_id}/subtitles")
-def generate_subtitles(cut_id: int, position: str = Form("")):
+def generate_subtitles(cut_id: int, position: str = Form(""), force: str = Form("")):
     """Generate the stylized-caption variant of the exported clip (AJAX).
 
     Runs whisper word timestamps + the Pillow/ffmpeg burn; takes roughly
     10-60s for a typical clip, longer on the first run while the whisper
     model downloads. Persists the Whisper word stream so Suggest caption /
     Copy transcript can use the same source as the burned-in captions.
+
+    ``force`` (the UI's "Try again" after a no-speech failure) skips the cached
+    word sidecar and re-runs Whisper at its strongest tier.
     """
     from ..subtitles import (
-        SubtitleError, clip_transcript_path_for, create_subtitled_clip,
+        NoSpeechError, SubtitleError, clip_transcript_path_for, create_subtitled_clip,
     )
 
     with session_scope() as session:
@@ -2300,7 +2366,12 @@ def generate_subtitles(cut_id: int, position: str = Form("")):
     stamp = utcnow().strftime("%Y%m%dT%H%M%S")
     out_path = Path(clip_path).with_name(f"{Path(clip_path).stem}_subs_{stamp}.mp4")
     try:
-        out = create_subtitled_clip(clip_path, position=position or None, out_path=out_path)
+        out = create_subtitled_clip(clip_path, position=position or None,
+                                    out_path=out_path, force_transcribe=bool(force))
+    except NoSpeechError as exc:
+        # Not a server fault: every Whisper tier heard nothing. The UI offers
+        # a "Try again" that re-posts with force=1.
+        return JSONResponse({"error": str(exc), "no_speech": True}, status_code=409)
     except SubtitleError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     except Exception as exc:
@@ -2499,7 +2570,7 @@ def _ensure_whisper_clip_transcript(cut: Cut) -> tuple[list[dict], str]:
     Used by Suggest caption when the operator asks before (or without) burning
     captions in — still the same audio source the burned-in captions use.
     """
-    from ..subtitles import SubtitleError, ensure_clip_words, words_to_lines, words_to_plain
+    from ..subtitles import NoSpeechError, ensure_clip_words, words_to_lines, words_to_plain
 
     lines, plain = _load_whisper_clip_transcript(cut)
     if plain.strip():
@@ -2511,7 +2582,9 @@ def _ensure_whisper_clip_transcript(cut: Cut) -> tuple[list[dict], str]:
             cut.trimmed_clip_path,
             cut.clip_transcript_path or None,
         )
-    except SubtitleError:
+    except NoSpeechError:
+        # True silence is an empty transcript; any other SubtitleError (missing
+        # font, ffprobe failure) propagates instead of masquerading as silence.
         return [], ""
     cut.clip_transcript_path = str(path)
     lines = words_to_lines(words)
@@ -3260,7 +3333,7 @@ def post_status(post_id: int):
 
 
 @app.post("/post/{post_id}/recaption")
-def post_recaption(post_id: int, position: str = Form("bottom")):
+def post_recaption(post_id: int, position: str = Form("bottom"), force: str = Form("")):
     """Switch a not-yet-published post between no burned-in captions and
     captions at the top or bottom.
 
@@ -3269,10 +3342,15 @@ def post_recaption(post_id: int, position: str = Form("bottom")):
     fresh file and moves the post onto it. Renders are versioned, so this is
     an explicit opt-in — unlike a passive re-export, which deliberately leaves
     a queued post on the clip it was queued with.
+
+    ``force`` (the UI's "Try again" after a no-speech failure) skips the cached
+    word sidecar and re-runs Whisper at its strongest tier.
     """
     from ..publishing import _object_key
     from ..storage_supabase import upload_trimmed_clip
-    from ..subtitles import SubtitleError, clip_transcript_path_for, create_subtitled_clip
+    from ..subtitles import (
+        NoSpeechError, SubtitleError, clip_transcript_path_for, create_subtitled_clip,
+    )
 
     raw = str(position).strip().lower()
     if raw in ("none", "off", "plain"):
@@ -3318,7 +3396,12 @@ def post_recaption(post_id: int, position: str = Form("bottom")):
     stamp = utcnow().strftime("%Y%m%dT%H%M%S")
     out_path = Path(plain_path).with_name(f"{Path(plain_path).stem}_subs_{stamp}.mp4")
     try:
-        out = create_subtitled_clip(plain_path, position=mode, out_path=out_path)
+        out = create_subtitled_clip(plain_path, position=mode, out_path=out_path,
+                                    force_transcribe=bool(force))
+    except NoSpeechError as exc:
+        # Not a server fault: every Whisper tier heard nothing. The UI offers
+        # a "Try again" that re-posts with force=1.
+        return JSONResponse({"error": str(exc), "no_speech": True}, status_code=409)
     except SubtitleError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     except Exception as exc:
@@ -3350,6 +3433,24 @@ def post_recaption(post_id: int, position: str = Form("bottom")):
 _POST_METRICS = ("views", "likes", "replies", "reposts", "quotes", "shares")
 
 
+def _first_reply_wait(session, post, metrics: dict | None) -> str:
+    """Why a published post's first comment hasn't gone out yet, or "".
+
+    Only ever the LIVE, still-changing reason. Anything already settled — the
+    reply posted, an attempt that failed, a comment the scheduler passed over —
+    has its own message recorded on the post, and re-deriving it here would let
+    the page contradict what actually happened. ``metrics`` is the post's newest
+    snapshot, already loaded by the page, so the gates don't re-query it.
+    """
+    if post.status != "published" or post.first_reply_id or post.first_reply_error:
+        return ""
+    cfg = load_first_reply()
+    if not resolve_first_reply_text(post, cfg):
+        return ""
+    gate = first_reply_gate(session, post, cfg, metrics=metrics or {})
+    return "" if gate.ready else gate.reason
+
+
 @app.get("/post/{post_id}", response_class=HTMLResponse)
 def post_detail(request: Request, post_id: int, msg: str = ""):
     """A single post's profile: manage the queue before it publishes, and once
@@ -3376,9 +3477,10 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             elif cut.trimmed_clip_path and Path(cut.trimmed_clip_path).exists():
                 clip_path = cut.trimmed_clip_path
         has_clip = bool(clip_path)
-        # Burnt-in captions live in *_subs.mp4; surface that on the post page
-        # so the plain Threads text caption isn't confused with video subs.
-        has_burned_captions = bool(clip_path and clip_path.endswith("_subs.mp4"))
+        # Burnt-in captions live in *_subs*.mp4 renders (versioned since the
+        # switch to stamped filenames); surface that on the post page so the
+        # plain Threads text caption isn't confused with video subs.
+        has_burned_captions = _is_captioned_file(clip_path)
         _clip_lines, clip_transcript_text = _load_clip_transcript(cut)
         snap = session.execute(
             select(MetricSnapshot).where(MetricSnapshot.post_pk == p.id)
@@ -3401,10 +3503,9 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             for c in comments
             if c.comment_id != first_reply_cid or not first_reply_cid
         ]
-        # Projected publishing slot (same plan the calendar shows), so a queued
-        # post says exactly when it's expected to go out. Reschedule from the
-        # calendar — no move/unpin controls here.
+        # Projected publishing slot (same plan the calendar shows).
         schedule = None
+        reschedule_windows: list[dict] = []
         if p.status == "queued":
             slot = projected_slot_for_post(session, p.id)
             if slot is None:
@@ -3412,7 +3513,9 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             else:
                 schedule = {"when": slot.get("sort"), "time": slot.get("time"),
                             "window_index": slot.get("window_index"),
+                            "window_key": slot.get("window_key", ""),
                             "pinned": bool(slot.get("pinned"))}
+            reschedule_windows = reschedule_windows_for_post(session, p.id)
         ctx = {
             "pid": p.id, "status": p.status, "caption": p.caption or "",
             "account_name": threads_api.account_username(),
@@ -3465,6 +3568,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "attribution_skipped": bool(p.attribution_skipped),
             "attribution_enabled": load_first_reply().get("attribution_enabled", True),
             "first_reply_mode": load_first_reply().get("mode", "citation"),
+            "first_reply_deferred": first_reply_is_deferred(),
             # A call to action is written from the brief, not from the source
             # video, so it can be drafted even for a post with no candidate.
             "can_suggest_attribution": bool(cand) or _first_reply_is_invitation(),
@@ -3472,10 +3576,19 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "first_reply_text": p.first_reply_text or "",
             "first_reply_error": p.first_reply_error or "",
             "first_reply_at": p.first_reply_at,
+            # Why a published post has no first comment YET. Deferral writes
+            # nothing to the post (a wait isn't a failure), so the reason is
+            # derived here from the gates — otherwise the page would show a
+            # bare "No first reply." on a post that's simply biding its time.
+            "first_reply_wait": _first_reply_wait(session, p, metrics),
+            # A comment the scheduler passed over on purpose reads the same as
+            # one that failed unless the page is told which it was.
+            "first_reply_skipped": bool(p.first_reply_skipped),
             "metrics": metrics, "metrics_captured": snap.captured_at if snap else None,
             "snapshot_count": snapshot_count,
             "comments": comment_rows,
             "schedule": schedule,
+            "reschedule_windows": reschedule_windows,
             "giphy_enabled": giphy_configured(),
         }
         # Paired Instagram reel (queued alongside this post, publishes with it).
@@ -3917,7 +4030,6 @@ def _calendar_data(y: int, m: int) -> dict:
     events: dict[int, list[dict]] = {}
     drafts_count = 0
     queue_count = 0
-    linear: list[dict] = []
     status = {}
     windows_et: list[str] = []
     with session_scope() as session:
@@ -3949,16 +4061,38 @@ def _calendar_data(y: int, m: int) -> dict:
             # Calendar grid: published history + upcoming filled/open windows.
             events.setdefault(e["day"], []).append(e)
 
-        # Linear queue: upcoming windows only (not published history).
-        linear = [e for e in plan if e["kind"] in ("queued", "open", "rerun")]
-        # Cap the linear list to the next ~21 slots so it stays scannable.
-        linear = linear[:21]
-
     for day in events:
         events[day].sort(key=lambda e: e["sort"])
 
     return {"events": events, "drafts_count": drafts_count, "queue_count": queue_count,
-            "linear": linear, "windows_et": windows_et, "year": y, "month": m}
+            "windows_et": windows_et, "year": y, "month": m}
+
+
+def _calendar_queue_data() -> dict:
+    """Full upcoming queue: every window for the next ``PIN_HORIZON_DAYS`` days.
+
+    Separate from the month grid because the queue must show posts that fall
+    outside the current month or week view — not a truncated slice of them.
+    """
+    now_local = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = now_local + dt.timedelta(days=PIN_HORIZON_DAYS + 1)
+    linear: list[dict] = []
+    with session_scope() as session:
+        plan = build_window_plan(
+            session, now_local, end_local, horizon_days=PIN_HORIZON_DAYS,
+        )
+        reel_post_ids = {
+            pk for (pk,) in session.execute(
+                select(InstagramPost.threads_post_pk)
+                .where(InstagramPost.threads_post_pk.is_not(None))
+            ).all()
+        }
+        for e in plan:
+            e["has_reel"] = bool(e["kind"] != "rerun" and e.get("post_id")
+                                 and e["post_id"] in reel_post_ids)
+            if e["kind"] in ("queued", "open", "rerun"):
+                linear.append(e)
+    return {"linear": linear}
 
 
 def _current_month_calendar_data() -> dict:
@@ -3967,6 +4101,7 @@ def _current_month_calendar_data() -> dict:
 
 
 pagecache.register("calendar", _current_month_calendar_data)
+pagecache.register("calendar-queue", _calendar_queue_data)
 
 
 def _week_start_for(day: dt.date) -> dt.date:
@@ -4059,6 +4194,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0,
     data = pagecache.read("calendar")
     if (data["year"], data["month"]) != (y, m):
         data = _calendar_data(y, m)
+    qdata = pagecache.read("calendar-queue")
 
     # Week focus: the focus date IS the left column (rolling 7-day window).
     # Current window (starting today) stays warm; paging reads live.
@@ -4087,13 +4223,14 @@ def calendar_page(request: Request, year: int = 0, month: int = 0,
 
     return templates.TemplateResponse(
         request, "calendar.html",
-        {**data, **wdata, "weeks": weeks, "today": today,
+        {**data, **wdata, **qdata, "weeks": weeks, "today": today,
          "month_name": _cal.month_name[m],
          "prev_y": prev_y, "prev_m": prev_m, "next_y": next_y, "next_m": next_m,
          "week_days": week_days, "week_title": week_title,
          "today_date": now_local.date(),
          "week_prev": (week_start - dt.timedelta(days=7)).isoformat(),
          "week_next": (week_start + dt.timedelta(days=7)).isoformat(),
+         "pin_horizon_days": PIN_HORIZON_DAYS,
          "dow": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
          "windows_local": window_time_labels(),
          "msg": msg, "active": "calendar"},
@@ -4797,19 +4934,56 @@ def first_reply_page(request: Request, msg: str = ""):
         {"enabled": cfg["enabled"], "text": cfg["text"],
          "attribution_enabled": cfg["attribution_enabled"],
          "mode": cfg["mode"], "instruction": cfg["instruction"],
+         "delay_minutes": cfg["delay_minutes"], "min_replies": cfg["min_replies"],
+         "min_likes": cfg["min_likes"], "deadline_hours": cfg["deadline_hours"],
+         "deadline_min_views": cfg["deadline_min_views"],
+         "deadline_min_likes": cfg["deadline_min_likes"],
          "msg": msg, "active": "engagement"},
     )
+
+
+def _timing_summary(delay: int, min_replies: int, min_likes: int, deadline: int,
+                    floor_views: int, floor_likes: int) -> str:
+    """How the saved gates read back, so the flash confirms the actual rule
+    rather than just that something was written."""
+    waits = []
+    if delay:
+        waits.append(f"{delay} min")
+    if min_replies:
+        waits.append(f"{min_replies} repl{'y' if min_replies == 1 else 'ies'}")
+    if min_likes:
+        waits.append(f"{min_likes} likes")
+    if not waits:
+        return "posting immediately after each publish"
+    if not deadline:
+        return "waiting for " + " + ".join(waits) + ", with no deadline"
+    floor = " or ".join(filter(None, [
+        f"{floor_views} views" if floor_views else "",
+        f"{floor_likes} likes" if floor_likes else "",
+    ]))
+    tail = (f", then after {deadline}h only if it reached {floor}" if floor
+            else f", or after {deadline}h regardless")
+    return "waiting for " + " + ".join(waits) + tail
 
 
 @app.post("/engagement/first-reply")
 def first_reply_save(enabled: str = Form(""), text: str = Form(""),
                      attribution_enabled: str = Form(""), mode: str = Form("citation"),
-                     instruction: str = Form("")):
+                     instruction: str = Form(""), delay_minutes: int = Form(0),
+                     min_replies: int = Form(0), min_likes: int = Form(0),
+                     deadline_hours: int = Form(0), deadline_min_views: int = Form(0),
+                     deadline_min_likes: int = Form(0)):
     text = (text or "").strip()
     instruction = (instruction or "").strip()
     mode = (mode or "citation").strip().lower()
     on = str(enabled).lower() in ("1", "true", "on", "yes")
     attribution_on = str(attribution_enabled).lower() in ("1", "true", "on", "yes")
+    delay_minutes = max(0, delay_minutes)
+    min_replies = max(0, min_replies)
+    min_likes = max(0, min_likes)
+    deadline_hours = max(0, deadline_hours)
+    deadline_min_views = max(0, deadline_min_views)
+    deadline_min_likes = max(0, deadline_min_likes)
     if on and not text:
         return _flash("/engagement/first-reply", "Add reply text before enabling")
     if len(text) > 500:
@@ -4817,14 +4991,32 @@ def first_reply_save(enabled: str = Form(""), text: str = Form(""),
     if mode == "invitation" and not instruction:
         return _flash("/engagement/first-reply",
                       "Write the brief before switching to call-to-action replies")
+    # A deadline shorter than the delay would fire first and make the delay
+    # meaningless — the reply would go out on every post at the deadline.
+    if deadline_hours and delay_minutes > deadline_hours * 60:
+        return _flash("/engagement/first-reply",
+                      f"The {delay_minutes} min wait is longer than the {deadline_hours}h "
+                      "deadline, so the deadline would always win — shorten the wait "
+                      "or push the deadline out")
+    # A floor with no deadline gates nothing: it only ever applies at one.
+    if (deadline_min_views or deadline_min_likes) and not deadline_hours:
+        return _flash("/engagement/first-reply",
+                      "The views/likes floor only applies at the deadline — set "
+                      "'post anyway after' or clear the floor")
     save_first_reply(enabled=on, text=text, attribution_enabled=attribution_on,
-                     mode=mode, instruction=instruction)
+                     mode=mode, instruction=instruction, delay_minutes=delay_minutes,
+                     min_replies=min_replies, min_likes=min_likes,
+                     deadline_hours=deadline_hours,
+                     deadline_min_views=deadline_min_views,
+                     deadline_min_likes=deadline_min_likes)
     drafts = "a call to action" if mode == "invitation" else "a source citation"
     state = "enabled" if on else "disabled"
     attr_state = "on" if attribution_on else "off"
+    timing = _timing_summary(delay_minutes, min_replies, min_likes, deadline_hours,
+                             deadline_min_views, deadline_min_likes)
     return _flash("/engagement/first-reply",
                   f"Saved — first replies draft {drafts}, posting {attr_state}, "
-                  f"static fallback {state}")
+                  f"static fallback {state}; {timing}")
 
 
 @app.get("/first-reply")

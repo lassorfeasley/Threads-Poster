@@ -10,9 +10,10 @@ import datetime as dt
 import logging
 import subprocess
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 
 from .config import load_first_reply, load_settings, scheduler_timezone
 from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
@@ -381,6 +382,8 @@ def publish_post(session, post: ThreadsPost) -> ThreadsPost:
     _annotate_footage(session, post)
     session.flush()
     log.info("Published Threads post %s (%s)", post.threads_media_id, post.permalink)
+    # A no-op when the reply is gated on a delay or on organic engagement; the
+    # scheduler's sweep posts it once the post has earned it.
     maybe_post_first_reply(session, post)
     return post
 
@@ -610,6 +613,215 @@ def _no_first_comment_reason(post: ThreadsPost, cfg: dict) -> str:
             "reply text is enabled under Replies settings.")
 
 
+def resolve_first_reply_text(post: ThreadsPost, cfg: dict, *,
+                             force: bool = False) -> str:
+    """The text this post's first comment would carry, or "" for none.
+
+    The post's own attribution/call-to-action wins; the configured static text
+    is the fallback. ``force`` is the operator posting by hand, which overrides
+    both "switched off" toggles. Nothing is drafted here — an empty box means
+    an empty result.
+    """
+    attribution = (post.attribution_text or "").strip()
+    static_text = (cfg.get("text") or "").strip()
+    if attribution and (cfg.get("attribution_enabled") or force):
+        return attribution
+    if static_text and (cfg.get("enabled") or force):
+        return static_text
+    return ""
+
+
+# --- When the first comment goes out ----------------------------------------
+#
+# By default: seconds after the post, which puts a promotional comment in the
+# slot the audience's own first reply would otherwise occupy. The gates below
+# hold it back until the post has a conversation of its own — see
+# FIRST_REPLY_HEADER in app/config.py for the operator-facing description.
+
+# A claim this old is treated as abandoned and can be retaken. Normally a claim
+# lives and dies with the transaction that set it; this is the safety valve for
+# one that somehow outlives it, so a comment is never blocked forever by a
+# claim no process is acting on.
+FIRST_REPLY_CLAIM_STALE = dt.timedelta(minutes=10)
+
+
+@dataclass(frozen=True)
+class FirstReplyGate:
+    """Whether a published post's first comment may go out yet.
+
+    Three outcomes, not two: ready, still waiting, and ``skipped`` — a final
+    decision that this post gets no comment at all. ``reason`` is a finished
+    sentence for the post page, so a comment that is waiting or was passed over
+    reads as deliberate rather than as a post that silently got nothing.
+    """
+    ready: bool
+    reason: str = ""
+    deadline_at: dt.datetime | None = None
+    skipped: bool = False
+
+
+def first_reply_is_deferred(cfg: dict | None = None) -> bool:
+    """Whether any gate can hold a first comment back after publishing.
+
+    ``deadline_hours`` alone doesn't defer anything — it only ends a wait the
+    other three started — so it isn't counted here.
+    """
+    cfg = cfg or load_first_reply()
+    return any(int(cfg.get(k, 0) or 0)
+               for k in ("delay_minutes", "min_replies", "min_likes"))
+
+
+def first_reply_needs_metrics(cfg: dict | None = None) -> bool:
+    """Whether any gate decides on a post's counts, so a caller knows whether
+    it has to have fresh insights in hand before asking."""
+    cfg = cfg or load_first_reply()
+    return any(int(cfg.get(k, 0) or 0) for k in
+               ("min_replies", "min_likes", "deadline_min_views", "deadline_min_likes"))
+
+
+def _clock(when: dt.datetime) -> str:
+    """A gate time as an operator-local wall clock, for the waiting message."""
+    return when.astimezone().strftime("%-I:%M %p")
+
+
+def first_reply_gate(session, post: ThreadsPost, cfg: dict | None = None,
+                     *, metrics: dict | None = None) -> FirstReplyGate:
+    """Whether ``post`` is ready for its first comment yet.
+
+    Ready when the post has cleared the configured delay AND carries the
+    configured organic engagement — or when ``deadline_hours`` has run out on a
+    post that at least cleared the traction floor.
+
+    The floor is what keeps the deadline honest. By construction the deadline
+    only ever fires on posts that flopped: anything that got its replies was
+    commented under hours earlier. Without a floor the pitch would land on the
+    weakest posts and *only* the weakest posts — earning nothing, since nobody
+    is reading the comments on a post nobody engaged with, while still sitting
+    there for whoever arrives if the post revives days later. Below the floor
+    the comment is dropped for good instead (``skipped``).
+
+    ``metrics`` (a ``{metric: value}`` mapping from the post's newest snapshot)
+    can be passed in by a caller that already has it; otherwise it's read here,
+    and only when a count actually gates the decision.
+    """
+    cfg = cfg or load_first_reply()
+    delay = int(cfg.get("delay_minutes", 0) or 0)
+    min_replies = int(cfg.get("min_replies", 0) or 0)
+    min_likes = int(cfg.get("min_likes", 0) or 0)
+    deadline_hours = int(cfg.get("deadline_hours", 0) or 0)
+    if not (delay or min_replies or min_likes):
+        return FirstReplyGate(True)
+
+    published = post.published_at
+    if published is None:
+        return FirstReplyGate(True)
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=dt.timezone.utc)
+    now = utcnow()
+    deadline_at = (published + dt.timedelta(hours=deadline_hours)
+                   if deadline_hours else None)
+
+    resolved = metrics
+
+    def counts() -> dict:
+        """The post's newest snapshot, read at most once per call."""
+        nonlocal resolved
+        if resolved is None:
+            from .analytics import latest_metrics_bulk
+            resolved = latest_metrics_bulk(session, [post.id]).get(post.id) or {}
+        return resolved
+
+    if deadline_at is not None and now >= deadline_at:
+        floor_views = int(cfg.get("deadline_min_views", 0) or 0)
+        floor_likes = int(cfg.get("deadline_min_likes", 0) or 0)
+        if not (floor_views or floor_likes):
+            return FirstReplyGate(True, deadline_at=deadline_at)
+        seen = counts()
+        views = seen.get("views") or 0
+        likes = seen.get("likes") or 0
+        # Either signal is enough: both answer "did anyone actually see this".
+        if (floor_views and views >= floor_views) or (floor_likes and likes >= floor_likes):
+            return FirstReplyGate(True, deadline_at=deadline_at)
+        bar = " or ".join(filter(None, [
+            f"{floor_views} views" if floor_views else "",
+            f"{floor_likes} likes" if floor_likes else "",
+        ]))
+        return FirstReplyGate(
+            False,
+            f"No first comment: {deadline_hours}h on, this post had {views} views "
+            f"and {likes} likes — short of the {bar} a late comment needs. Nobody "
+            "is reading the replies on a post this quiet, so it was passed over "
+            "rather than left carrying a pitch. Post it by hand if you disagree.",
+            deadline_at, skipped=True)
+
+    if delay:
+        ready_at = published + dt.timedelta(minutes=delay)
+        if now < ready_at:
+            return FirstReplyGate(
+                False,
+                f"Holding the first comment until {_clock(ready_at)} "
+                f"({delay} min after publishing) so it doesn't take the slot "
+                "the audience's own first reply would.",
+                deadline_at)
+
+    if min_replies or min_likes:
+        # The escape hatch, appended to the waiting message: without it the
+        # page says what the post is waiting for but never that the wait ends.
+        if deadline_at is None:
+            fallback = " No deadline set, so it waits until that happens."
+        elif int(cfg.get("deadline_min_views", 0) or 0) or int(cfg.get("deadline_min_likes", 0) or 0):
+            fallback = (f" At {_clock(deadline_at)} it posts anyway if the post "
+                        "found an audience, and is dropped if it didn't.")
+        else:
+            fallback = f" Posts anyway by {_clock(deadline_at)}."
+        seen = counts()
+        replies = seen.get("replies") or 0
+        likes = seen.get("likes") or 0
+        short: list[str] = []
+        if replies < min_replies:
+            short.append(f"{replies} of {min_replies} replies")
+        if likes < min_likes:
+            short.append(f"{likes} of {min_likes} likes")
+        if short:
+            return FirstReplyGate(
+                False,
+                "Waiting for the conversation to start — "
+                + " and ".join(short) + " so far." + fallback,
+                deadline_at)
+
+    return FirstReplyGate(True)
+
+
+def _claim_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:
+    """Take exclusive ownership of posting this post's first comment.
+
+    A deferred reply is decided by whichever scheduler happens to tick — and
+    both the dashboard thread and the Actions cron sweep the same due posts —
+    so the decision has to be a conditional UPDATE, not a read followed by a
+    write. Losers see rowcount 0 and leave the post alone. ``force`` is the
+    operator asking by hand, which takes over a claim of any age.
+    """
+    now = utcnow()
+    where = [ThreadsPost.id == post.id, ThreadsPost.first_reply_id == ""]
+    if not force:
+        where.append(or_(
+            ThreadsPost.first_reply_claimed_at.is_(None),
+            ThreadsPost.first_reply_claimed_at < now - FIRST_REPLY_CLAIM_STALE,
+        ))
+    # synchronize_session=False because the staleness test compares timestamps:
+    # SQLAlchemy's default tries to re-evaluate the criteria in Python against
+    # the identity map, and SQLite hands back naive datetimes where ``now`` is
+    # aware — which raises rather than claiming anything. The row is expired
+    # below instead, so the in-memory copy still refreshes.
+    won = session.execute(
+        update(ThreadsPost).where(*where).values(first_reply_claimed_at=now)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if won == 1:
+        session.expire(post, ["first_reply_claimed_at"])
+    return won == 1
+
+
 def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:
     """Post the first reply under a published post: the post's own attribution
     comment when the operator set one, else the static configured text. Never
@@ -617,8 +829,12 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
     simply publishes without an attribution comment.
 
     Returns True if a reply was posted. Skips when disabled / already posted
-    (unless ``force``), recording why on the post either way. Never raises —
-    stores ``first_reply_error`` so a reply hiccup cannot undo a publish.
+    (unless ``force``), recording why on the post either way. A post still
+    inside its timing gates is skipped silently and left for
+    ``scheduler.run_first_reply_sweep`` to pick up later — deliberately writing
+    nothing, because a wait is not a failure and must not read as one. Never
+    raises — stores ``first_reply_error`` so a reply hiccup cannot undo a
+    publish.
     """
     if post.status != "published" or not post.threads_media_id:
         return False
@@ -626,13 +842,7 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
         return False
 
     cfg = load_first_reply()
-    attribution = (post.attribution_text or "").strip()
-    static_text = (cfg.get("text") or "").strip()
-    text = ""
-    if attribution and (cfg.get("attribution_enabled") or force):
-        text = attribution
-    elif static_text and (cfg.get("enabled") or force):
-        text = static_text
+    text = resolve_first_reply_text(post, cfg, force=force)
     if not text:
         # Record why, always — not just on ``force``. Publishing with no first
         # comment used to write nothing anywhere, so four posts in a row went out
@@ -643,17 +853,45 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
                     post.id, post.first_reply_error)
         return False
 
+    if not force:
+        gate = first_reply_gate(session, post, cfg)
+        if gate.skipped:
+            # Final, and recorded: the reason belongs on the page, and writing
+            # ``first_reply_error`` is also what drops the post out of the
+            # sweep — otherwise it would be re-judged (and its insights
+            # re-polled) every tick until the horizon ran out. Deliberately not
+            # revisited if the post revives later: a post that comes back days
+            # on is exactly the case where a pitch under it greets new arrivals
+            # before anyone has had a chance to reply.
+            post.first_reply_error = gate.reason
+            post.first_reply_skipped = True
+            session.flush()
+            log.info("First comment skipped for post %s: %s", post.id, gate.reason)
+            return False
+        if not gate.ready:
+            log.debug("First reply for post %s deferred: %s", post.id, gate.reason)
+            return False
+
+    if not _claim_first_reply(session, post, force=force):
+        log.debug("First reply for post %s already claimed elsewhere", post.id)
+        return False
+
     try:
         result = publish_text_reply(text, post.threads_media_id)
         post.first_reply_id = result["media_id"]
         post.first_reply_text = text
         post.first_reply_error = ""
+        # Both paths below clear the skip flag: whatever the scheduler decided
+        # earlier, an operator posting by hand has overruled it, and the row
+        # must not keep claiming the post was passed over.
+        post.first_reply_skipped = False
         post.first_reply_at = utcnow()
         session.flush()
         log.info("Posted first reply %s under %s", post.first_reply_id, post.threads_media_id)
         return True
     except Exception as exc:
         post.first_reply_error = str(exc)[:1000]
+        post.first_reply_skipped = False
         session.flush()
         log.warning("First reply failed for post %s: %s", post.id, exc)
         return False

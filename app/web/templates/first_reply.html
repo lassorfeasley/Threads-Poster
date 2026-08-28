@@ -63,6 +63,53 @@
       <span id="char-count">{{ text|length }} / 500</span>
     </div>
 
+    <hr style="margin: 20px 0; border: none; border-top: 1px solid var(--line);">
+
+    <label class="card-title" style="display:block; margin-bottom: 4px;">When it posts</label>
+    <p class="meta" style="margin: 0 0 14px;">
+      Left at zero, the first comment goes out seconds after the post — which puts
+      it in the slot the audience's own first reply would have taken. Hold it back
+      until the post has a conversation of its own, then let it land under that.
+    </p>
+
+    <div class="form-row" style="margin-bottom: 6px;">
+      <div class="field grow" style="min-width: 150px;"><label>Wait after publishing</label>
+        <input type="number" name="delay_minutes" min="0" max="4320" step="5"
+               value="{{ delay_minutes }}"></div>
+      <div class="field grow" style="min-width: 130px;"><label>Wait for replies</label>
+        <input type="number" name="min_replies" min="0" max="500" step="1"
+               value="{{ min_replies }}"></div>
+      <div class="field grow" style="min-width: 130px;"><label>Wait for likes</label>
+        <input type="number" name="min_likes" min="0" max="100000" step="10"
+               value="{{ min_likes }}"></div>
+      <div class="field grow" style="min-width: 150px;"><label>Post anyway after</label>
+        <input type="number" name="deadline_hours" min="0" max="72" step="1"
+               value="{{ deadline_hours }}"></div>
+    </div>
+    <p class="hint" style="margin-top: 0;">
+      Minutes, replies, likes, hours. The comment goes out once the wait has passed
+      <em>and</em> the post has that many replies from other people and that many
+      likes — or at the deadline, whichever comes first. Set the deadline to 0 to
+      wait indefinitely instead. You can always post it by hand from the post page.
+    </p>
+
+    <div class="form-row" style="margin: 14px 0 6px;">
+      <div class="field grow" style="min-width: 150px;"><label>Deadline needs views</label>
+        <input type="number" name="deadline_min_views" min="0" max="1000000" step="50"
+               value="{{ deadline_min_views }}"></div>
+      <div class="field grow" style="min-width: 150px;"><label>…or likes</label>
+        <input type="number" name="deadline_min_likes" min="0" max="100000" step="5"
+               value="{{ deadline_min_likes }}"></div>
+    </div>
+    <p class="hint" style="margin-top: 0;">
+      The deadline only ever fires on posts that flopped — anything that got its
+      replies was commented under hours earlier. So left unqualified it attaches the
+      comment to your weakest posts and only your weakest posts. These set a floor:
+      at the deadline the comment goes out only if the post cleared <em>either</em>
+      number, and a post under both is passed over for good rather than left carrying
+      a pitch nobody will read. Both at 0 = no floor.
+    </p>
+
     <div class="btn-group" style="margin-top: 16px;">
       <button class="primary" type="submit">Save</button>
     </div>

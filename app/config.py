@@ -140,15 +140,48 @@ FIRST_REPLY_HEADER = """\
 # the box. When enabled is true and text is non-empty, that static text is the
 # fallback for posts whose box is empty. A reply failure never rolls back the
 # post — check the post page and retry there.
+#
+# WHEN the first comment posts. By default it goes out seconds after the post,
+# which makes it the first thing under every clip — and a promotional comment
+# sitting in that slot can smother the audience replies that would otherwise
+# start the conversation. These four hold it back until the post has a
+# conversation of its own:
+#   delay_minutes  - don't comment until the post is at least this old
+#   min_replies    - ...and until this many OTHER people have replied
+#   min_likes      - ...and until it has at least this many likes
+#   deadline_hours - comment anyway once the post is this old, so a post that
+#                    never got replies still gets its call to action
+#                    (0 = wait indefinitely)
+# All four at 0 restores the original behavior: comment immediately on publish.
+#
+# The deadline fires only on posts that FLOPPED — a post that got its replies
+# was commented under long before. Left unqualified it therefore attaches the
+# pitch to your weakest posts and only your weakest posts, which is backwards:
+# nobody is reading the comments on a post nobody engaged with, so the ask earns
+# nothing, while a Threads post that revives days later shows new arrivals a
+# pitch before anyone has had a chance to reply. These two put a floor under it:
+#   deadline_min_views - at the deadline, comment only if the post cleared this
+#   deadline_min_likes - ...or this (either one is enough)
+# A post under both is skipped for good rather than commented on. Both at 0
+# means no floor: the deadline comments on everything it reaches.
 
 """
 
 FIRST_REPLY_MODES = ("citation", "invitation")
 
 
+def _positive_int(value: Any, default: int = 0) -> int:
+    """Non-negative int from YAML/form input; anything unparseable is 0."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def load_first_reply() -> dict[str, Any]:
     """Return the auto first-reply config: ``{enabled, text, attribution_enabled,
-    mode, instruction}``."""
+    mode, instruction, delay_minutes, min_replies, min_likes, deadline_hours,
+    deadline_min_views, deadline_min_likes}``."""
     data = _load_yaml(CONFIG_DIR / "first_reply.yaml")
 
     def _text(key: str) -> str:
@@ -164,11 +197,26 @@ def load_first_reply() -> dict[str, Any]:
         "attribution_enabled": bool(data.get("attribution_enabled", True)),
         "mode": mode,
         "instruction": _text("instruction"),
+        # Timing gates. Absent from older config files, and 0 there means
+        # "post on publish" — the behavior those files were written for.
+        "delay_minutes": _positive_int(data.get("delay_minutes")),
+        "min_replies": _positive_int(data.get("min_replies")),
+        "min_likes": _positive_int(data.get("min_likes")),
+        "deadline_hours": _positive_int(data.get("deadline_hours")),
+        # Traction floor under the deadline. Absent from older config files,
+        # where 0 means the deadline comments unconditionally — what those
+        # files were written for.
+        "deadline_min_views": _positive_int(data.get("deadline_min_views")),
+        "deadline_min_likes": _positive_int(data.get("deadline_min_likes")),
     }
 
 
 def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = True,
-                     mode: str = "citation", instruction: str = "") -> None:
+                     mode: str = "citation", instruction: str = "",
+                     delay_minutes: int = 0, min_replies: int = 0,
+                     min_likes: int = 0, deadline_hours: int = 0,
+                     deadline_min_views: int = 0,
+                     deadline_min_likes: int = 0) -> None:
     mode = (mode or "citation").strip().lower()
     if mode not in FIRST_REPLY_MODES:
         mode = "citation"
@@ -176,6 +224,12 @@ def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = Tr
         "mode": mode,
         "enabled": bool(enabled),
         "attribution_enabled": bool(attribution_enabled),
+        "delay_minutes": _positive_int(delay_minutes),
+        "min_replies": _positive_int(min_replies),
+        "min_likes": _positive_int(min_likes),
+        "deadline_hours": _positive_int(deadline_hours),
+        "deadline_min_views": _positive_int(deadline_min_views),
+        "deadline_min_likes": _positive_int(deadline_min_likes),
         "instruction": (instruction or "").strip(),
         "text": (text or "").strip(),
     }

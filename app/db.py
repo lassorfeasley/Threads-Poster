@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "28"
+SCHEMA_VERSION = "30"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -132,6 +132,8 @@ _SCHEMA_SENTINELS = (
     "SELECT facet FROM traits LIMIT 0",
     "SELECT format_tags FROM cuts LIMIT 0",
     "SELECT footage_tagged_at FROM cuts LIMIT 0",
+    "SELECT first_reply_claimed_at FROM threads_posts LIMIT 0",
+    "SELECT first_reply_skipped FROM threads_posts LIMIT 0",
 )
 
 
@@ -228,6 +230,8 @@ def _ensure_new_columns() -> None:
             "first_reply_text": "TEXT DEFAULT ''",
             "first_reply_error": "TEXT DEFAULT ''",
             "first_reply_at": "TIMESTAMP WITH TIME ZONE",
+            "first_reply_claimed_at": "TIMESTAMP WITH TIME ZONE",
+            "first_reply_skipped": "BOOLEAN DEFAULT FALSE",
             "suggested_caption": "TEXT DEFAULT ''",
             "footage_traits": "TEXT DEFAULT ''",
             "footage_score": "FLOAT",

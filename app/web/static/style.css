@@ -4059,6 +4059,38 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
   font-weight: 600;
 }
 .post-side .post-ship-actions .ta-schedule .schedule-ic { color: var(--accent); display: inline-flex; }
+.post-reschedule {
+  margin: 0 0 12px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+}
+.post-reschedule-label {
+  display: block;
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-dim);
+}
+.post-reschedule-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.post-reschedule-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+.post-reschedule-row .btn.sm {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.post-reschedule-unpin {
+  margin: 8px 0 0;
+}
+.post-reschedule-unpin .btn {
+  width: 100%;
+}
 .post-side .post-ship-buttons {
   display: flex;
   gap: var(--sp-2);

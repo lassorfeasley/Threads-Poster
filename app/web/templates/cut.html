@@ -2063,6 +2063,9 @@ async function retryExport() {
        mode on the Replies page. Configured here, saved onto the post when it's
        queued/drafted/published. ---- #}
   {% set fr_invitation = first_reply_mode == "invitation" %}
+  {% set fr_when = ("held back until the post has replies of its own (see Reply settings)"
+                    if first_reply_deferred else
+                    "posts as the first comment right after this publishes") %}
   <article class="thread-item is-reply">
     <div class="ti-gutter" aria-hidden="true">
       <span class="ti-avatar">{{ handle[0]|upper }}</span>
@@ -2087,7 +2090,7 @@ async function retryExport() {
       </div>
       <div class="ti-text-wrap">
         <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                  placeholder="{{ "Invite viewers to act — posts as the first comment right after this publishes. Leave empty and no reply is posted." if fr_invitation else "Credit the source — posts as the first comment right after this publishes. Leave empty and no attribution is posted." }}">{{ attribution_text }}</textarea>
+                  placeholder="{{ ("Invite viewers to act — " ~ fr_when ~ ". Leave empty and no reply is posted.") if fr_invitation else ("Credit the source — " ~ fr_when ~ ". Leave empty and no attribution is posted.") }}">{{ attribution_text }}</textarea>
         <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
                 title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
                 aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
@@ -2353,13 +2356,25 @@ async function retryExport() {
     function setSubsMode(mode) {
       // Captions belong to the Threads file — snap the preview back to it.
       if (platformMode === 'instagram') setPlatformPreview('threads');
-      if (mode === 'none') { markSubsMode('none'); swapPreview(false); return; }
-      if (hasSubs && subsPos === mode) { markSubsMode(mode); swapPreview(true); return; }
+      if (mode === 'none') { persistSubsMode('none'); markSubsMode('none'); swapPreview(false); return; }
+      if (hasSubs && subsPos === mode) { persistSubsMode(mode); markSubsMode(mode); swapPreview(true); return; }
       markSubsMode(mode);
       generateSubtitles(mode);
     }
 
-    async function generateSubtitles(position, after) {
+    // Persist toggle flips that don't need a render (captions off, or back
+    // onto an existing render). Burns persist inside /cut/{id}/subtitles;
+    // without this, "No captions" lived only in the hidden form field and
+    // reverted on reload unless the operator resubmitted the queue form.
+    async function persistSubsMode(mode) {
+      try {
+        const fd = new FormData();
+        fd.append('mode', mode);
+        await fetch('/cut/{{ cut.id }}/subs-mode', { method: 'POST', body: fd });
+      } catch (e) { /* hidden field still persists on the next queue submit */ }
+    }
+
+    async function generateSubtitles(position, after, force) {
       const status = document.getElementById('subs-status');
       const msgEl = document.getElementById('subs-status-msg');
       const bar = document.getElementById('subs-progress-bar');
@@ -2374,7 +2389,14 @@ async function retryExport() {
       // Wall-clock estimates, not server progress. Word timings already exist
       // by now (sliced from the archive-time stream at export), so this request
       // only groups them, renders caption frames and re-encodes.
-      const phases = [
+      // A forced retry re-runs Whisper at its strongest tier first, which can
+      // dominate the wall time (and may download a larger model on first use).
+      const phases = force ? [
+        { at: 0,  pct: 8,  msg: 'Re-running speech recognition (slower, more sensitive)…' },
+        { at: 45, pct: 40, msg: 'Still listening — this pass can take a few minutes…' },
+        { at: 120, pct: 62, msg: 'Rendering caption frames…' },
+        { at: 150, pct: 84, msg: 'Encoding captioned clip…' },
+      ] : [
         { at: 0,  pct: 10, msg: 'Preparing caption text…' },
         { at: 4,  pct: 32, msg: 'Rendering caption frames…' },
         { at: 12, pct: 58, msg: 'Encoding captioned clip…' },
@@ -2406,9 +2428,11 @@ async function retryExport() {
         if (bar) bar.style.width = '0%';
       }
 
+      let noSpeech = false;
       try {
         const fd = new FormData();
         fd.append('position', position || subsPos || 'bottom');
+        if (force) fd.append('force', '1');
         const r = await fetch('/cut/{{ cut.id }}/subtitles', { method: 'POST', body: fd });
         const d = await r.json();
         if (d.url) {
@@ -2426,7 +2450,18 @@ async function retryExport() {
           location.href = location.pathname + '?' + params.toString();
           return;
         }
+        noSpeech = !!d.no_speech;
         finishStatus(false, d.error || 'Caption generation failed');
+        // A no-speech miss on the fast pass is often recoverable (music, sung
+        // vocals): offer a forced retry at the strongest Whisper tier.
+        if (noSpeech && !force && msgEl) {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'ghost-line-btn';
+          retry.textContent = 'Try again (slower, more sensitive)';
+          retry.onclick = () => generateSubtitles(position, after, true);
+          msgEl.append(' ', retry);
+        }
       } catch (e) {
         finishStatus(false, 'Caption generation failed: ' + e);
       }
@@ -2436,11 +2471,15 @@ async function retryExport() {
       // Nothing rendered — snap the toggle back to what's actually in effect.
       const field = document.getElementById('use-subtitles-field');
       markSubsMode(field && field.value === '1' ? subsPos : 'none');
-      // Captions failed: still try to draft from an on-demand Whisper pass.
-      if (after && after.autocaption && typeof suggestCaption === 'function') {
-        suggestCaption(true);
+      // Captions failed on some other error: still try to draft from an
+      // on-demand Whisper pass. Skip on no-speech — the ladder already heard
+      // nothing, so Suggest caption / hook would just re-run it and fail.
+      if (!noSpeech) {
+        if (after && after.autocaption && typeof suggestCaption === 'function') {
+          suggestCaption(true);
+        }
+        if (after && after.autohook) suggestHook(null, true);
       }
-      if (after && after.autohook) suggestHook(null, true);
     }
 
     (function bootPostMedia() {

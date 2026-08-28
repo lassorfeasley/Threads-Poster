@@ -40,6 +40,15 @@ class SubtitleError(RuntimeError):
     pass
 
 
+class NoSpeechError(SubtitleError):
+    """Every Whisper pass heard zero words — the clip is (probably) silent.
+
+    Distinct from SubtitleError so callers can treat true silence as benign
+    (vertical composites render without captions; the UI offers a retry)
+    without string-matching the message.
+    """
+
+
 def _hex_to_rgba(value: str, alpha: int = 255) -> tuple[int, int, int, int]:
     v = value.lstrip("#")
     return (int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16), alpha)
@@ -64,24 +73,19 @@ def clip_transcript_path_for(clip_path: str | Path) -> Path:
     return clip.with_name(f"{clip.stem}_transcript.json")
 
 
-def transcribe_words(clip_path: str | Path) -> list[dict]:
-    """Word-level timestamps for the exported clip: [{word, start, end}]."""
-    from .scrape import _get_whisper_model
+def transcribe_words(clip_path: str | Path, *, start_tier: int = 0) -> list[dict]:
+    """Word-level timestamps for the exported clip: [{word, start, end}].
+
+    Runs the escalation ladder in ``scrape.transcribe_word_stream`` — VAD on
+    first, then VAD off, then a larger model — so music/sung-vocal clips that
+    the fast pass hears as silence still get words. ``start_tier`` lets a
+    forced retry skip straight to the strongest pass.
+    """
+    from .scrape import transcribe_word_stream
 
     settings = load_settings()
-    model = _get_whisper_model(settings)
-    # language pinned to English: Whisper's auto-detect samples the first ~30s
-    # and infamously misreads noisy/archival British audio as Welsh, then
-    # "transcribes" the whole clip in fluent Welsh. All channel content is
-    # English, so force it.
-    segments, _info = model.transcribe(str(clip_path), language="en",
-                                       word_timestamps=True, vad_filter=True)
-    words: list[dict] = []
-    for seg in segments:
-        for w in seg.words or []:
-            text = (w.word or "").strip()
-            if text:
-                words.append({"word": text, "start": float(w.start), "end": float(w.end)})
+    _segments, words, _tier = transcribe_word_stream(clip_path, settings,
+                                                     start_tier=start_tier)
     return words
 
 
@@ -151,7 +155,8 @@ def slice_source_words(source_words: list[dict],
 
 
 def ensure_clip_words(clip_path: str | Path,
-                      transcript_path: str | Path | None = None) -> tuple[list[dict], Path]:
+                      transcript_path: str | Path | None = None,
+                      force: bool = False) -> tuple[list[dict], Path]:
     """Load cached Whisper words for a trim, or transcribe and cache them.
 
     ``transcript_path`` is preferred when set (the cut's stored sidecar); otherwise
@@ -160,16 +165,20 @@ def ensure_clip_words(clip_path: str | Path,
     Exports of videos archived with a word sidecar write the trim's transcript
     up front (see ``_export_cut_in_thread``), so the transcription fallback
     here only runs for clips whose source predates archive-time word streams.
+
+    ``force`` is the operator's "Try again": it ignores any cached sidecar and
+    jumps straight to the strongest Whisper pass (largest model, VAD off) —
+    the quieter tiers already failed or produced the sidecar being rejected.
     """
     clip = Path(clip_path)
     path = Path(transcript_path) if transcript_path else clip_transcript_path_for(clip)
-    if path.exists():
+    if not force and path.exists():
         words = load_clip_words(path)
         if words:
             return words, path
-    words = transcribe_words(clip)
+    words = transcribe_words(clip, start_tier=-1 if force else 0)
     if not words:
-        raise SubtitleError("No speech detected in the clip — nothing to caption.")
+        raise NoSpeechError("No speech detected in the clip — nothing to caption.")
     return words, save_clip_transcript(clip, words)
 
 
@@ -467,13 +476,16 @@ def render_caption_concat(groups: list[list[dict]], tmpdir: Path, *, width: int,
 
 
 def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
-                          out_path: str | Path | None = None) -> Path:
+                          out_path: str | Path | None = None,
+                          force_transcribe: bool = False) -> Path:
     """Generate ``<clip>_subs.mp4`` with burned-in word captions. Returns path.
 
     ``position`` ("top"/"bottom") overrides the ``subtitles.position`` setting
     for this run — the web UI passes the operator's per-clip choice here.
     ``out_path`` overrides the default output name, letting callers version the
     file so a regeneration can't overwrite one a queued post already points at.
+    ``force_transcribe`` ignores any cached word sidecar and re-runs Whisper at
+    the strongest tier (the operator's "Try again" after a no-speech failure).
     """
     clip = Path(clip_path)
     if not clip.exists():
@@ -496,7 +508,7 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
 
     # Reuse a cached Whisper pass when re-rendering at a new position; the
     # sidecar is also what Suggest caption / Copy transcript read from.
-    words, _transcript_path = ensure_clip_words(clip)
+    words, _transcript_path = ensure_clip_words(clip, force=force_transcribe)
     groups = group_words(words, max_words=max_words)
 
     width, height = _video_size(clip)

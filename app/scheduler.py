@@ -11,8 +11,10 @@ given up because of how an earlier post is performing.
 
 Also drives the frequent metrics poller that feeds analytics, the queue-time
 footage annotation pass that gives placement its facets, two staging rotations
-(branded promos, evergreen-winner reposts), and the just-in-time filler that
-re-airs a quiet evergreen post when a due window finds the queue empty.
+(branded promos, evergreen-winner reposts), the just-in-time filler that
+re-airs a quiet evergreen post when a due window finds the queue empty, and the
+sweep that posts deferred first comments once their post has a conversation of
+its own.
 """
 from __future__ import annotations
 
@@ -29,9 +31,9 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import selectinload
 
 from . import threads_api
-from .analytics import poll_recent_metrics
+from .analytics import poll_recent_metrics, refresh_metrics_for
 from .categories import category_by_slug, default_shelf_life, is_first_party
-from .config import load_settings, scheduler_timezone
+from .config import load_first_reply, load_settings, scheduler_timezone
 from .db import session_scope
 from .models import Candidate, Channel, Cut, SchedulerState, ThreadsPost, utcnow
 from .placement import (
@@ -44,11 +46,14 @@ from .placement import (
 )
 from .publishing import (
     clear_publishing,
+    first_reply_needs_metrics,
     is_publish_active,
     mark_publishing,
+    maybe_post_first_reply,
     publish_paired_reel,
     publish_post,
     record_post,
+    resolve_first_reply_text,
 )
 
 log = logging.getLogger("scheduler")
@@ -1703,6 +1708,79 @@ def run_metrics_poll() -> int:
         return n
 
 
+# How long a deferred first comment stays worth posting. Past this the sweep
+# lets it go: the comment would land under a post the feed has finished with,
+# and a reply that keeps failing stops retrying forever rather than burning a
+# call every tick for days.
+_FIRST_REPLY_HORIZON = dt.timedelta(hours=72)
+
+
+def run_first_reply_sweep(limit: int = 5) -> int:
+    """Post the deferred first comments whose gates have come good.
+
+    The counterpart to the deferral in ``publishing.maybe_post_first_reply``:
+    when a first comment is held back so it doesn't occupy the slot the
+    audience's own first reply would, this is what eventually posts it. Returns
+    how many went out.
+
+    Runs whatever the config says rather than only while a gate is set: turning
+    the gates off has to release the posts already waiting behind them, and an
+    early return on ``first_reply_is_deferred`` would instead strand every one
+    of them with no comment and nothing on the page explaining why.
+    """
+    if not threads_api.is_authenticated():
+        return 0
+    cfg = load_first_reply()
+
+    with session_scope() as session:
+        waiting = session.execute(
+            select(ThreadsPost).where(
+                ThreadsPost.status == "published",
+                ThreadsPost.first_reply_id == "",
+                ThreadsPost.threads_media_id != "",
+                ThreadsPost.published_at.is_not(None),
+                ThreadsPost.published_at >= utcnow() - _FIRST_REPLY_HORIZON,
+                # Only posts still waiting for a first attempt. A reply that
+                # was tried and failed keeps its error and its Retry button —
+                # sweeping those too would re-hit Threads every few minutes for
+                # days on a post whose reply can never succeed.
+                ThreadsPost.first_reply_error == "",
+            ).order_by(ThreadsPost.published_at.asc())
+        ).scalars().all()
+        # A post with nothing to say records that reason at publish time, which
+        # takes it out of the query above; this also covers a post whose text
+        # became unavailable when the config changed underneath it.
+        waiting = [p for p in waiting if resolve_first_reply_text(p, cfg)]
+        if not waiting:
+            return 0
+        # The gates read reply, like and view counts, and a post can wait well
+        # past ``metrics_poll_recency_hours`` — after which the frequent poller
+        # drops it and its counts freeze. Refresh the few posts actually
+        # pending, so neither the engagement gates nor the deadline's traction
+        # floor decides on stale numbers. The floor especially: a post judged
+        # on hour-six views would be dropped for a quiet spell it may have
+        # since come out of.
+        if first_reply_needs_metrics(cfg):
+            refresh_metrics_for(session, waiting, int(load_settings().get(
+                "scheduler.metrics_poll_interval_minutes", 15)))
+        pending_ids = [p.id for p in waiting]
+
+    posted = 0
+    for post_id in pending_ids:
+        if posted >= limit:
+            break
+        # One session per post: the claim inside ``maybe_post_first_reply``
+        # holds that row from the conditional UPDATE until commit, and it
+        # shouldn't span another post's reply call.
+        with session_scope() as session:
+            post = session.get(ThreadsPost, post_id)
+            if post is not None and maybe_post_first_reply(session, post):
+                posted += 1
+    if posted:
+        log.info("Posted %d deferred first comment(s)", posted)
+    return posted
+
+
 def scheduler_status(session) -> dict:
     """Snapshot of scheduler state for the Posts UI panel."""
     settings = load_settings()
@@ -2271,8 +2349,55 @@ def projected_slot_for_post(session, post_id: int, horizon_days: int = 60) -> di
     return None
 
 
+def reschedule_windows_for_post(session, post_id: int) -> list[dict]:
+    """Upcoming posting windows for the post-page reschedule picker.
+
+    Each entry carries enough for a grouped ``<select>``: local labels, whether
+    the slot is open, who currently projects there, and whether this post
+    occupies it (pinned or FIFO).
+    """
+    post = session.get(ThreadsPost, post_id)
+    if post is None or post.status != STATUS_QUEUED:
+        return []
+
+    tz = _tz()
+    now = utcnow()
+    today = now.astimezone(tz).date()
+    state = _get_state(session)
+    upcoming = _upcoming_window_slots(
+        today, today + dt.timedelta(days=PIN_HORIZON_DAYS),
+        now=now, last_window_key=state.last_window_key or "",
+    )
+    keys = [k for k, _, _ in upcoming]
+    posts = _queue_regular(session)
+    _clear_stale_pins(posts, set(keys))
+    assignment, _ = _assign_with_mode(session, posts, keys)
+    pinned_key = (post.pinned_window_key or "").strip()
+
+    out: list[dict] = []
+    for key, win_utc, idx in upcoming:
+        local = win_utc.astimezone()
+        occupant = assignment[keys.index(key)]
+        occ_id = occupant.id if occupant is not None else None
+        occ_title = _post_display_title(occupant) if occupant is not None else ""
+        is_current = key == pinned_key or (pinned_key == "" and occ_id == post_id)
+        out.append({
+            "window_key": key,
+            "window_index": idx,
+            "date_label": local.strftime("%a %b %-d"),
+            "date_iso": local.date().isoformat(),
+            "time": local.strftime("%-I:%M %p"),
+            "sort": local,
+            "open": occupant is None,
+            "occupant_post_id": occ_id,
+            "occupant_title": occ_title[:72],
+            "is_current": is_current,
+        })
+    return out
+
+
 def run_tick() -> None:
-    """One scheduler loop iteration: recover → annotate → metrics → window."""
+    """One loop iteration: recover → annotate → metrics → window → first replies."""
     try:
         with session_scope() as session:
             n = recover_stuck_publishing(session, only_inactive=True)
@@ -2303,6 +2428,13 @@ def run_tick() -> None:
             log.info("Window tick: %s", action)
     except Exception:
         log.exception("Window tick failed")
+
+    # After the metrics poll above, so a post whose engagement gate just came
+    # good is judged on this tick's numbers rather than the previous tick's.
+    try:
+        run_first_reply_sweep()
+    except Exception:
+        log.exception("First-reply sweep failed")
 
     # Keep the rerun-outlook cache warm off the request path. The rotation's
     # metric scan (every published post's snapshot series) takes seconds on a

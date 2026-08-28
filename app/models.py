@@ -318,6 +318,21 @@ class ThreadsPost(Base):
     first_reply_error: Mapped[str] = mapped_column(Text, default="")
     first_reply_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Set immediately before the reply API call, as an atomic claim: the reply
+    # can now be deferred for hours, so both schedulers (the dashboard thread
+    # and the Actions cron) sweep for the same due post, and without this they
+    # would each comment under it. A claim older than
+    # ``publishing.FIRST_REPLY_CLAIM_STALE`` can be retaken.
+    first_reply_claimed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+
+    # This post was deliberately passed over for a first comment — it reached
+    # the deadline without clearing the traction floor, so the pitch was never
+    # worth attaching. Separate from ``first_reply_error``, which holds the
+    # explanation either way: only this distinguishes a decision the scheduler
+    # made on purpose from a reply that tried and failed.
+    first_reply_skipped: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     candidate: Mapped[Candidate | None] = relationship(back_populates="threads_posts")
