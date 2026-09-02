@@ -1,17 +1,96 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "components/toolbar.html" as ui %}
-{% set rm_sub %}Scope for turning this local operator tool into something you can distribute — and eventually into software that can run a Threads account with less babysitting. Nothing here is built yet unless marked Done.{% endset %}
+{% set rm_sub %}Scope for turning this local operator tool into something you can sell — and eventually into software that can run a Threads account with less babysitting. Nothing here is built yet unless marked Done. Updated Sept 2026, when the premise changed: there are now interested users who intend to pay, so this stopped being a hypothetical distribution plan and became a critical path.{% endset %}
 {{ ui.pagebar("Product roadmap", sub=rm_sub) }}
 
 <div class="card roadmap-card">
   <div class="card-title" style="margin-bottom: 6px;">North star</div>
   <p class="meta" style="margin: 0 0 10px;">
-    Keep improving the product as a local web UI (easy UX iteration). Host the dashboard so other people can use it without running Python — media creation stays local (Mac app) or becomes upload-your-own. Longer term: optional always-on publishing, shared workspaces, and fuller autopilot. Prefer a hosted web app over Mac App Store; do not plan a Swift rewrite.
+    Split the product in two and host the half that can be hosted. The <strong>factory</strong> (download, trim, subtitle, export, upload) is pinned to the operator's own Mac by ffmpeg, Whisper, and a residential IP. The <strong>control room</strong> (triage, queue, calendar, analytics, connections, engagement) is database reads and API calls, and can run anywhere. Today they are one FastAPI process; the Fly scheduler already proves the control-room half runs detached, because it publishes from Supabase signed URLs without touching a local file. Prefer a hosted web app over Mac App Store; do not plan a Swift rewrite.
   </p>
   <p class="meta" style="margin: 0;">
-    Autonomy goal: the app can operate a Threads account (queue, schedule, engage) with human taste checks as needed. Local media creation and cloud/always-on publishing can stay split — same shape as today's local factory + headless publisher.
+    Autonomy goal: the app can operate a Threads account (queue, schedule, engage) with human taste checks as needed. Local media creation and cloud/always-on publishing stay split — same shape as today's local factory + headless publisher.
   </p>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Critical path — first paying customer</div>
+  <p class="meta" style="margin: 0 0 12px;">
+    Target shape: 5&ndash;15 hand-onboarded paying users who run the local factory themselves and reach a hosted control room over HTTPS. Four tracks, mostly parallel. Track A is first only because it is the one that runs on someone else's clock — every day it is not started is a day added to the end.
+  </p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge score-lo">Blocker</span>
+      <div>
+        <strong>A1. Form the entity</strong>
+        <span class="meta">Three unrelated things converge on it: Meta Business Verification wants a registered business with documents, Stripe wants business details before it will pay out, and publishing broadcasters' footage for money is an exposure worth putting behind a liability boundary. LLC + EIN. Nothing downstream of it can start early, and it is the only item on this page that is pure waiting.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge score-lo">Blocker</span>
+      <div>
+        <strong>A2. Meta Business Verification</strong>
+        <span class="meta">Weeks of lead time; documents and review on Meta's schedule. Start the moment A1 clears. Gates App Review, which gates any customer authorizing their own Threads account.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>A3. Privacy policy + terms of service</strong>
+        <span class="meta">Required twice over: App Review will not pass without a privacy policy URL and data-deletion instructions, and taking subscription money without terms is its own problem. Two static pages, but they block a submission, so write them before they are the last thing standing.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>B1. Colocate the database</strong>
+        <span class="meta">Postgres is in <code>aws-1-us-west-2</code> while the Fly worker is in <code>iad</code> and the operator is on the East Coast, so every query — dashboard, scheduler, and Actions alike — makes a cross-country hop that should be single-digit milliseconds. Move to <code>us-east-1</code> next to Fly. This is the fix for "the UI is slow," and it should land before anything else touches the data layer.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>B2. Separate the factory from the control room</strong>
+        <span class="meta">Audit which routes need local disk, ffmpeg, or yt-dlp and which are pure database + API. The heavy set stays behind <code>python run.py</code> on the operator's machine; the rest gets a <code>Dockerfile.web</code> and an <code>[http_service]</code> block. See the hosting note in Phase 1 for why this is Fly and not Vercel.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>B3. Supabase Auth + the control plane</strong>
+        <span class="meta">Login, sessions, and the <code>users</code> / <code>workspaces</code> / <code>subscriptions</code> tables. See the Auth &amp; control plane card below — this is also where Stripe's subscription state lives, so C1 depends on it.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>B4. Real OAuth callback + Meta's server-to-server endpoints</strong>
+        <span class="meta">Kills the paste-the-<code>?code=</code> ritual and supplies two endpoints App Review requires. Details in the Meta card below.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>C1&ndash;C3. Stripe</strong>
+        <span class="meta">Checkout, Customer Portal, webhooks, and a lapse policy. Broken out in the Billing card below.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>A4. Meta App Review submission</strong>
+        <span class="meta">Last, because it needs almost everything above: a live HTTPS callback, the privacy policy, the deletion and deauthorize endpoints, an app icon, and a screencast demonstrating each scope in use. Budget one resubmission cycle.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>D. Onboarding a customer who is not you</strong>
+        <span class="meta">A local factory install someone else can run (documented CLI first — these are hand-onboarded users who can tolerate a terminal — packaged app much later), a per-customer provisioning runbook, and a log-export button for debugging machines you cannot see. This is the track that decides whether 15 users is pleasant or miserable, and it is the easiest one to underestimate.</span>
+      </div>
+    </li>
+  </ul>
 </div>
 
 <div class="card roadmap-card" style="margin-top: 14px;">
@@ -22,7 +101,21 @@
       <span class="badge supportive">Doing</span>
       <div>
         <strong>UI / UX polish</strong>
-        <span class="meta">Ship small improvements daily in the existing FastAPI + Jinja UI. This <em>is</em> the product UI.</span>
+        <span class="meta">Ship small improvements daily in the existing FastAPI + Jinja UI. This <em>is</em> the product UI. Daily iteration is also the reason the hosted control room beats a packaged Mac app as the next step — see Phase 1b.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge hostile">No</span>
+      <div>
+        <strong>Rewriting the UI as a JS app — parked, not rejected</strong>
+        <span class="meta">A SPA removes no database round trips; it changes when you feel them, trading a slow page for an instant shell and spinners. That is a real perceived-latency win, but it is the most expensive way to buy it: 25 templates, a 3,000-line trimming editor in <code>cut.html</code>, and a 5,000-line stylesheet. Do B1 (colocate) and extend <code>pagecache</code> to the detail pages first, then re-measure. If specific pages still feel bad, the answer is HTMX or Alpine on those pages — the inline scripts already work this way informally — not a rewrite.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>Latency pass: colocate, then cache the rest</strong>
+        <span class="meta">Same item as B1 on the critical path, plus the follow-through. <code>pagecache</code> only registers six datasets (attention, dashboard, library, calendar &times;3, notifications, analytics), so the pages the operator lives in — <code>/video/{id}</code>, <code>/cut/{id}</code>, <code>/post/{id}</code>, <code>/triage</code>, <code>/settings</code> — pay full network cost on every load. Colocation makes each round trip ~30&times; cheaper; caching removes the rest. Measure on a real connection, not hotel or in-flight wifi, before drawing conclusions.</span>
       </div>
     </li>
     <li>
@@ -79,20 +172,21 @@
 
 <div class="card roadmap-card" style="margin-top: 14px;">
   <div class="card-title" style="margin-bottom: 4px;">Phase 1 — Host the dashboard</div>
-  <p class="meta" style="margin: 0 0 12px;">Put the FastAPI app on the internet so a second person can use it without cloning the repo. The dev loop stays local (<code>python run.py dashboard</code>); hosted is a deploy target, not a dev environment. Media creation (yt-dlp, ffmpeg, Whisper) stays local or becomes upload-your-own — the hosted app never downloads YouTube videos. <strong>Deliberately deferred</strong> (Aug 2026): finish the Phase 0 latency pass first — hosting won't fix UI latency (the cost is remote-Postgres round trips, which a hosted UI pays too), and there's no second user waiting yet.</p>
+  <p class="meta" style="margin: 0 0 12px;">Put the FastAPI app on the internet so a second person can use it without cloning the repo. The dev loop stays local (<code>python run.py dashboard</code>); hosted is a deploy target, not a dev environment. Media creation (yt-dlp, ffmpeg, Whisper) stays local — the hosted app never downloads YouTube videos. <strong>Un-deferred Sept 2026.</strong> The August deferral rested on two things that are no longer true: that there was no second user waiting, and that hosting could not help latency. There are users now, and hosting <em>can</em> help latency — the August reasoning assumed the round trip had to stay expensive, when the actual problem is that nothing is colocated with anything (see B1).</p>
   <ul class="roadmap-list">
     <li>
       <span class="badge info">Next</span>
       <div>
-        <strong>Deploy the dashboard to Fly (or Railway / Render)</strong>
-        <span class="meta">The same FastAPI + Jinja app that runs locally, served over HTTPS. Already talks to Postgres and Supabase — no SQLite dependency on the server. One Fly app per workspace (or a single app with workspace routing). Add a <code>Dockerfile.web</code> and an <code>[http_service]</code> block. Config files (<code>workspaces/&lt;slug&gt;/config/</code>) ship in the image; secrets come from <code>fly secrets set</code>. The existing Fly scheduler workers keep running alongside.</span>
+        <strong>Deploy the control room to Fly — not Vercel</strong>
+        <span class="meta">The same FastAPI + Jinja app that runs locally, served over HTTPS. Already talks to Postgres and Supabase — no SQLite dependency on the server. One Fly app per workspace. Add a <code>Dockerfile.web</code> and an <code>[http_service]</code> block. Config files (<code>workspaces/&lt;slug&gt;/config/</code>) ship in the image; secrets come from <code>fly secrets set</code>. The existing Fly scheduler workers keep running alongside.</span>
+        <span class="meta" style="margin-top: 6px;">Vercel is ruled out on architecture, not preference. Request handlers fork daemon threads via <code>_in_background</code> that deliberately outlive the response, and boot already reconciles the ones that die; serverless would kill every one of them. <code>pagecache</code> is in-process memory shared across requests, so a function-per-request model discards exactly the thing that makes list pages fast. And the media stack (ffmpeg, yt-dlp, faster-whisper) is not a serverless bundle. Fly is also already proven here — the schedulers have run on it for months.</span>
       </div>
     </li>
     <li>
       <span class="badge info">Next</span>
       <div>
-        <strong>Auth gate (even for one user)</strong>
-        <span class="meta">The dashboard has no login today — it binds to <code>127.0.0.1</code> and trusts the operator. Hosting it means adding an auth wall before anything else goes public. Simplest v1: a single shared password or invite-only magic link (no user model yet). Just enough to keep the internet out while you use it yourself over HTTPS.</span>
+        <strong>Auth gate — the hard prerequisite</strong>
+        <span class="meta">The dashboard has no login of any kind today: it binds to <code>127.0.0.1</code> and trusts whoever is at the keyboard. (<code>threads_api.is_authenticated()</code> sounds like auth but only means a Threads token exists.) Nothing goes on the public internet before this lands. Design in the Auth &amp; control plane card below.</span>
       </div>
     </li>
     <li>
@@ -120,8 +214,108 @@
 </div>
 
 <div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Auth &amp; the control plane</div>
+  <p class="meta" style="margin: 0 0 12px;">
+    Use Supabase Auth, not an edge proxy. <code>supabase&gt;=2.5</code> is already a dependency and every workspace already has a project, so the auth system is provisioned and idle. Cloudflare Access was considered and dropped: it authenticates at the edge, which means it sits in front of <em>every</em> route indiscriminately and Meta's and Stripe's server-to-server callbacks would hit a login page. In-app auth makes that a per-route decision instead of a bypass policy, and it leaves behind a user table — which billing needs anyway.
+  </p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>One auth-only Supabase project as the control plane</strong>
+        <span class="meta">A single project holding <code>users</code>, <code>workspaces</code>, and <code>subscriptions</code> — who exists, what they own, whether they have paid, and which data project their workspace lives in. Each tenant keeps a separate project for their own data (see Tenancy). JWTs verify locally against a signing secret, so the auth project never has to be the data project. Three payoffs: one login across every deployment for support, customer accounts that survive consolidating the data layer later, and a natural home for Stripe's subscription state.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>Login route + session middleware</strong>
+        <span class="meta">A Jinja <code>/login</code> form, a server-side <code>sign_in_with_password()</code>, and a signed HTTP-only cookie holding the access token. Middleware decodes the JWT and redirects when it is missing or expired. Verification is local (<code>jwt.decode</code> against the project secret), which matters in an app that already pays for too many round trips. Note the friction: Supabase's documented path assumes the JS client manages tokens in the browser, and this is server-rendered Jinja, so the session glue is hand-written rather than copy-pasted.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>The unauthenticated allowlist</strong>
+        <span class="meta">Four kinds of route must skip the session check and verify a signature instead: the Threads/Instagram OAuth callback, Meta's deauthorize callback, Meta's data-deletion callback, and the Stripe webhook. Getting this wrong fails App Review quietly (Meta's servers see a login page) and drops payment events silently. Worth one explicit list in code rather than a decorator people forget.</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Billing — Stripe</div>
+  <p class="meta" style="margin: 0 0 12px;">
+    Hosted everything: Stripe Checkout for starting a subscription, Stripe Customer Portal for changing or cancelling one. No card data touches the app, no PCI scope, and no billing UI to build or maintain — two redirects and a webhook. Depends on the entity (Stripe needs business details before it pays out) and on the control plane (subscription state needs a table to live in).
+  </p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>C1. Checkout + Customer Portal</strong>
+        <span class="meta">One product, one recurring price to start. Signup redirects to a Stripe-hosted Checkout session; a billing page in the dashboard redirects to the Portal for payment method, plan changes, invoices, and cancellation. Both are configuration, not code. Keep test-mode and live-mode keys per environment so a staging deploy can never charge anyone.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>C2. Webhook endpoint</strong>
+        <span class="meta">Unauthenticated by necessity, signature-verified without exception, and on the allowlist above. Handle <code>checkout.session.completed</code> (activate, provision), <code>customer.subscription.updated</code> and <code>.deleted</code> (state changes), and <code>invoice.payment_failed</code> (start the grace period). Store <code>stripe_customer_id</code> and <code>subscription_status</code> on the workspace row in the control plane. Make handlers idempotent — Stripe retries, and a double-provision is worse than a missed one.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>C3. Decide what lapsing actually does</strong>
+        <span class="meta">This is a product decision, not a Stripe one, and it deserves to be made deliberately rather than discovered. Proposal: a failed payment shows a banner and starts a grace period; a cancelled subscription makes the scheduler skip that workspace and the dashboard read-only, but <em>never</em> deletes the queue or the media. Silently dropping a queued post is the one failure this product cannot afford — someone's content calendar has a hole in it and no error to point at.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Provisioning on payment, and tax</strong>
+        <span class="meta">Wire <code>checkout.session.completed</code> to actually create the workspace rather than notifying you to do it by hand — worth automating around the fifth customer, not the first. Stripe Tax once there are customers in more than one jurisdiction.</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 4px;">Tenancy — deliberately deferred</div>
+  <p class="meta" style="margin: 0 0 10px;">
+    <strong>Decision (Sept 2026): keep one Supabase project per tenant for the first few customers.</strong> A project beyond the first runs on the order of ten dollars a month, so one subscription covers several customers' databases — at three users, separate projects cost less than the engineering time to avoid them, and they buy total schema freedom while Instagram, LinkedIn, and the scheduling model are all still moving. The forcing function is somewhere around eight to ten users. Revisit then, not now.
+  </p>
+  <p class="meta" style="margin: 0 0 12px;">
+    Recorded so the eventual decision does not start from scratch. Two candidate models: <strong>schema per tenant</strong> in one project (isolation enforced by Postgres, so a forgotten filter cannot leak; every migration becomes a loop over schemas with no single transaction) or <strong>a <code>workspace_id</code> column on shared tables</strong> (one DDL per change, but tenant scoping becomes a discipline paid on every query written from then on). Schema translation must use SQLAlchemy's <code>schema_translate_map</code>, never <code>SET search_path</code> — the Supabase transaction pooler on port 6543 reuses backends across transactions, so session state leaks between tenants. One product argument favors shared tables: <code>TraitWeight</code> sits in <code>collecting</code> for months on a new account, and aggregate priors across customers would fix that cold start.
+  </p>
+  <ul class="roadmap-list">
+    <li>
+      <span class="badge score-lo">Blocker</span>
+      <div>
+        <strong>What breaks the day the databases merge</strong>
+        <span class="meta">No table in <code>app/models.py</code> has a tenant column. <code>AppToken</code> uses <code>name</code> as its <em>primary key</em>, so <code>AppToken(name="threads")</code> can exist once per database — customer two's token would overwrite customer one's. <code>SchedulerState</code> and <code>AnalyticsDigest</code> are documented singletons. Four unique constraints collide across tenants: <code>Candidate.video_id</code> and <code>Channel.channel_id</code> (two customers in one niche watching the same channel is the expected case, not an edge case), <code>Trait.name</code>, and <code>TraitWeight(trait, metric)</code> — the last silently trains one customer's ranking on another's results.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>Config has to leave the filesystem</strong>
+        <span class="meta">Six YAML files per workspace under <code>workspaces/&lt;slug&gt;/config/</code>, four of them written back from UI pages. A shared database does not help while <code>settings.yaml</code> is a file beside the process. Note the interaction with latency: <code>load_settings()</code> is called 100+ times per calendar render and is cached on file mtime, so moving it to Postgres naively turns a <code>stat()</code> into a round trip. It needs a real cache before it moves.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge">Later</span>
+      <div>
+        <strong>One process serving many tenants</strong>
+        <span class="meta">The end state, and the expensive part. <code>app/config.py</code> resolves <code>WORKSPACE</code> at import and derives <code>CONFIG_DIR</code> and <code>DATA_DIR</code> as module-level constants, so every importing module holds a frozen path. Unwinding that into request-scoped context is the real multi-tenancy project. The models survive both phases unchanged, which is the point — the plumbing gets done twice at most, the schema never.</span>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<div class="card roadmap-card" style="margin-top: 14px;">
   <div class="card-title" style="margin-bottom: 4px;">Phase 1b — Mac app (optional, parallel track)</div>
-  <p class="meta" style="margin: 0 0 12px;">Same local pipeline; hide the plumbing. Only matters if local media creation needs to ship to non-developers. Not a prerequisite for multi-user — the hosted dashboard is.</p>
+  <p class="meta" style="margin: 0 0 12px;">Same local pipeline; hide the plumbing. Only matters if local media creation needs to ship to non-developers. Not a prerequisite for multi-user — the hosted dashboard is. <strong>Explicitly behind the hosted control room (Sept 2026)</strong>, even though the first customers do need the local factory. Packaging would end the daily-iteration loop that Phase 0 depends on, since every change becomes a signed, notarized, auto-updated release; and with paying users on machines you cannot see, central logs and a single deploy that fixes everyone are worth more than a double-click installer. Hand-onboarded users can run a documented CLI in the meantime. Package it when you want to stop hand-onboarding.</p>
   <ul class="roadmap-list">
     <li>
       <span class="badge">Later</span>
@@ -150,21 +344,38 @@
 <div class="card roadmap-card" style="margin-top: 14px;">
   <div class="card-title" style="margin-bottom: 4px;">Meta / Threads for customers (prerequisite for anyone else's account)</div>
   <p class="meta" style="margin: 0 0 10px;">
-    Today's flow is single-operator + tester invite + paste OAuth code from <code>https://localhost/&hellip;</code>. Productized, that admin stays with us once; customers only do OAuth consent. <strong>Sequencing decision:</strong> stay in tester mode and improve the product solo; trigger App Review when a real second user appears. Approval is likely — these scopes are the textbook third-party publishing bundle, and review judges permission usage shown in a working demo, not where the content comes from — but budget one resubmission cycle.
+    Today's flow is single-operator + tester invite + paste OAuth code from <code>https://localhost/&hellip;</code>. Productized, that admin stays with us once; customers only do OAuth consent. <strong>The trigger has fired (Sept 2026):</strong> the previous plan was to stay in tester mode until a real second user appeared, and one has. Approval is likely — these scopes are the textbook third-party publishing bundle, and review judges permission usage shown in a working demo, not where the content comes from — but budget one resubmission cycle.
+  </p>
+  <p class="meta" style="margin: 0 0 10px;">
+    Why this is the real onboarding blocker rather than hosting or login: in tester mode every workspace needs its own developer app, which is why <code>workspaces/climate/.env</code> carries six Meta secrets. Onboarding one customer today means creating a Meta app, configuring the Threads and Instagram products, registering redirect URIs, and walking them through a tester invite — roughly an hour of console work per person, forever. At fifteen customers that is not an onboarding flow, it is a part-time job. One reviewed app collapses those six per-tenant secrets into one global pair and reduces onboarding to a consent screen.
   </p>
   <p class="meta" style="margin: 0 0 12px;">
     Bigger risk than review: posting broadcasters' footage is an account-level IP exposure (complaints / strikes against the Threads or Instagram account), independent of API approval — and amplified once customers pick the source channels. Also: Reels require the customer's Instagram account to be a (free) <em>professional</em> account; Threads takes any normal account.
   </p>
   <ul class="roadmap-list">
     <li>
-      <span class="badge">Later</span>
+      <span class="badge info">Next</span>
       <div>
         <strong>One product Meta app + App Review + publish</strong>
-        <span class="meta">Leave "testers only." Get Advanced Access / review for the scopes we already use: <code>threads_basic</code>, <code>threads_content_publish</code>, <code>threads_manage_replies</code>, <code>threads_read_replies</code>, <code>threads_manage_insights</code>. Use the Threads app ID/secret (not the generic Meta app ID). Platform checklist: privacy policy URL, data-deletion callback/instructions, deauthorize callback, app icon, plus a demo/screencast showing every permission in use. Business Verification has weeks of lead time (documents, possibly an entity) — start that paperwork one step earlier than feels necessary; it parallelizes for free. After publish, any Threads user can authorize — no tester role.</span>
+        <span class="meta">Leave "testers only." Get Advanced Access / review for the scopes we already use: <code>threads_basic</code>, <code>threads_content_publish</code>, <code>threads_manage_replies</code>, <code>threads_read_replies</code>, <code>threads_manage_insights</code>. Use the Threads app ID/secret (not the generic Meta app ID). Platform checklist: privacy policy URL, data-deletion callback/instructions, deauthorize callback, app icon, plus a demo/screencast showing every permission in use. Business Verification has weeks of lead time and wants a registered entity behind the documents — that is A1 on the critical path, and it parallelizes for free. After publish, any Threads user can authorize — no tester role.</span>
       </div>
     </li>
     <li>
-      <span class="badge">Later</span>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>Real OAuth callback — one host, not one per tenant</strong>
+        <span class="meta">There is no callback route today: <code>THREADS_REDIRECT_URI</code> points at <code>https://localhost/threads-callback</code>, which resolves to nothing, and <code>POST /threads/connect</code> takes a hand-pasted <code>?code=</code>. Meta requires every redirect URI to be registered explicitly, so per-tenant subdomains would mean a console entry per customer — reintroducing exactly the per-user admin chore App Review is meant to delete. Instead register one callback host (e.g. <code>https://connect.yourproduct.com/threads/callback</code>), carry the tenant in the OAuth <code>state</code> parameter, exchange server-side, and redirect back to their subdomain. Cheap to design in now, irritating to retrofit.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
+      <div>
+        <strong>Deauthorize + data-deletion endpoints</strong>
+        <span class="meta">Both are App Review requirements and both are called server-to-server by Meta, with no browser and no session — they belong on the unauthenticated allowlist and must verify Meta's signed request. Deauthorize should revoke the stored token and stop that workspace's scheduler; deletion needs a documented path plus a status URL. Easy to leave until last and then discover they fail review.</span>
+      </div>
+    </li>
+    <li>
+      <span class="badge info">Next</span>
       <div>
         <strong>Customer Threads connect (no Meta Developer for them)</strong>
         <span class="meta">Customers click Connect Threads, log in with their normal Instagram/Threads account on Meta's consent screen, and grant permissions — like "Sign in with Google." They never open developers.facebook.com, create an app, copy secrets, register redirect URIs, or accept tester invites. <em>You</em> own one product Meta app; App ID/Secret stay server-side.</span>
@@ -174,7 +385,7 @@
       <span class="badge">Later</span>
       <div>
         <strong>Per-workspace (or per-user) token storage</strong>
-        <span class="meta">Stop the single global <code>AppToken(name=&quot;threads&quot;)</code>. Store long-lived Threads tokens keyed by workspace/user + Threads user id; keep refresh (~60d tokens, refresh when stale). Headless publish (Fly / Actions / scheduler) uses that workspace's token. Enforce Threads' ~250 API posts / 24h per profile in product UX.</span>
+        <span class="meta">Stop the single global <code>AppToken(name=&quot;threads&quot;)</code>. Store long-lived Threads tokens keyed by workspace/user + Threads user id; keep refresh (~60d tokens, refresh when stale). Headless publish (Fly / Actions / scheduler) uses that workspace's token. Enforce Threads' ~250 API posts / 24h per profile in product UX. <strong>Deferred by the tenancy decision:</strong> with one Supabase project per tenant, a primary-keyed <code>AppToken</code> is already one token per customer and this is not urgent. It becomes a hard blocker the day the databases merge — see Tenancy.</span>
       </div>
     </li>
     <li>
@@ -246,6 +457,12 @@
   <div class="card-title" style="margin-bottom: 6px;">Architecture: what runs where</div>
   <p class="meta" style="margin: 0 0 10px;">
     Today you never "installed a companion" because you <em>are</em> the runtime (<code>python run.py dashboard</code>). The product already splits into a local factory (yt-dlp, ffmpeg, Whisper — heavy, on your Mac) and headless cloud services (scheduler on Fly, monitor on Actions — light, always on). Hosting the dashboard is the next layer: the same FastAPI app, served over HTTPS, talking to the same Postgres and Supabase it already uses. The dev loop does not change — <code>python run.py dashboard</code> stays the development environment; the hosted deploy is a build artifact.
+  </p>
+  <p class="meta" style="margin: 0 0 10px;">
+    Target end state, four planes. <strong>Factory</strong> — the customer's Mac: download, trim, subtitle, export, upload to Supabase Storage. Pinned there by ffmpeg, Whisper, and a residential IP (YouTube blocks datacenter IPs), and pinned there deliberately, since hosted downloading is out of scope below. <strong>Control room</strong> — Fly, one app per workspace: triage, queue, calendar, analytics, connections, engagement. <strong>Publisher</strong> — the existing Fly scheduler worker, unchanged. <strong>Control plane</strong> — one auth-only Supabase project: users, workspaces, subscriptions, and the map from a workspace to its data project. Data planes stay one Supabase project per tenant until roughly the eighth customer.
+  </p>
+  <p class="meta" style="margin: 0 0 10px;">
+    One consequence worth stating plainly: because customers need the factory, hosting does not remove their local install. It has to <em>add</em> value beside it — reaching the queue from a phone, publishing while the laptop is shut, and a UI that ships daily instead of per release. If the hosted half is only a mirror of what they already run, it is not worth the two deploy targets.
   </p>
   <p class="meta" style="margin: 0;">
     Customers should not need Meta Developer setup or multiple product accounts for the core loop — Threads (and later YouTube) show up as connected integrations on one workspace after a normal OAuth consent.
