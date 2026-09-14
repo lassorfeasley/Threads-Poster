@@ -119,49 +119,39 @@
       </div>
     </div>
     {% endfor %}
-    {#- Timely posts that went stale while queued. The scheduler never
-        auto-places an expired post, so these need a decision: post anyway,
-        or dismiss (which leaves the post queued but acknowledged). -#}
-    {% for p in expired or [] %}
-    {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
-    {% set thumb = thumb_for(cand) %}
+    {#- Timely posts that went stale while queued, collapsed into ONE line.
+        The overflow rescue schedules expired posts onto consecutive extra
+        windows automatically, so this only shows the residue it couldn't
+        absorb (a backlog deeper than the pin horizon, or overflow off). -#}
+    {% if expired %}
     <div class="post-card is-alert">
-      {% if thumb %}
-      <img class="pc-thumb" src="{{ thumb }}" alt="" loading="lazy"
-           onerror="this.classList.add('is-broken')">
-      {% else %}
       <div class="pc-thumb is-empty" aria-hidden="true">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+          <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
       </div>
-      {% endif %}
       <div class="pc-body">
-        <a class="item-title" href="/post/{{ p.id }}">{{ p.caption[:140] or "(open post)" }}</a>
+        <span class="item-title">{{ expired|length }} timely post{{ 's' if expired|length != 1 }} expired in the queue</span>
         <div class="badges">
-          <span class="badge hostile">expired</span>
-          <span class="meta">Queued {{ p.created_at.strftime("%b %-d %H:%M") if p.created_at else "—" }}</span>
+          <span class="badge hostile">{{ expired|length }} expired</span>
         </div>
         <div class="meta">
-          This clip was timely when it was queued and its moment has passed —
-          the scheduler won't place it automatically anymore. Post it anyway,
-          or dismiss to acknowledge (it stays queued but stops counting here).
+          Their moment passed while queued, and the daily extra window
+          couldn't absorb them yet — they'll be scheduled as overflow days
+          free up. Open one to post it by hand, change its shelf life, or
+          delete it — or dismiss them all to acknowledge (they stay queued):
+          {% for p in expired %}<a href="/post/{{ p.id }}">{{ (p.caption or '(untitled)')[:48] }}</a>{{ " · " if not loop.last }}{% endfor %}
         </div>
         <div class="pc-actions">
-          <form class="inline" method="post" action="/post/{{ p.id }}/publish-now"
-                data-pid="{{ p.id }}" onsubmit="return publishNow(event)">
+          <form class="inline" method="post" action="/notifications/expired/dismiss-all">
             <input type="hidden" name="next" value="/notifications">
-            <button class="sm">Post now</button></form>
-          <form class="inline" method="post" action="/post/{{ p.id }}/dismiss"
-                data-async="Dismissed" data-async-remove=".post-card">
-            <input type="hidden" name="next" value="/notifications">
-            <button class="reject sm" title="Acknowledge and remove from notifications (post stays queued)"
-                    data-confirm="Dismiss this notification? The post stays queued but leaves this list."
-                    data-confirm-ok="Dismiss" data-confirm-variant="danger">Dismiss</button></form>
+            <button class="reject sm" title="Acknowledge all expired posts (they stay queued)"
+                    data-confirm="Dismiss all {{ expired|length }} expired post{{ 's' if expired|length != 1 }}? They stay queued but leave this list."
+                    data-confirm-ok="Dismiss all" data-confirm-variant="danger">Dismiss all</button></form>
         </div>
       </div>
     </div>
-    {% endfor %}
+    {% endif %}
     {% for p in failed %}
     {% set cand = (p.cut.candidate if (p.cut and p.cut.candidate) else p.candidate) %}
     {% set thumb = thumb_for(cand) %}

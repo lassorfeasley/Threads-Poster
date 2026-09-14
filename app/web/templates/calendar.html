@@ -34,6 +34,7 @@
     <span class="cal-wk-title">{{ (label or '(post)')[:90] }}</span>
     <span class="cal-wk-chips">
       {% if e.has_reel %}<span class="cal-ev-reel" title="Also queued as an Instagram Reel">+IG</span>{% endif %}
+      {% if e.get('overflow') %}<span class="cal-ev-relax" title="Extra window — opened to run this timely post before its shelf life expires">⚡ extra</span>{% endif %}
       {% if e.kind == 'rerun' %}<span class="cal-ev-rerun" title="Projected rerun — displaced automatically by any fresh content">↻ rerun</span>{% endif %}
       {% if e.get('relax_step') %}<span class="cal-ev-relax" title="Placed with relaxed gates (step {{ e.get('relax_step') }})">⚠</span>{% endif %}
       {% if e.get('score_parts') %}
@@ -278,6 +279,7 @@
               {% if e.channel %}{{ e.channel }} · {% endif %}
               {% if e.has_reel %}+ Instagram Reel · {% endif %}
               {% if e.pinned %}pinned · {% elif e.kind == 'queued' %}projected · {% endif %}
+              {% if e.get('overflow') %}<span title="Extra window — opened to run this timely post before its shelf life expires">⚡ extra window ·</span> {% endif %}
               {% if e.kind == 'rerun' %}<span title="Nothing fresh is queued for this window, so the scheduler plans to re-air this proven evergreen post. Any new content displaces it automatically.">↻ rerun (projected) ·</span> {% endif %}
               {% if e.get('relax_step') %}<span title="Placed with relaxed gates (step {{ e.get('relax_step') }}) — the queue is too shallow or concentrated to satisfy every spacing rule here">⚠ relaxed ·</span> {% endif %}
               {% if e.get('score_parts') %}

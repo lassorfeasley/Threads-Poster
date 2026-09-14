@@ -235,6 +235,11 @@ class ThreadsPost(Base):
     calendar_name: Mapped[str] = mapped_column(Text, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase Storage object key
     clip_local_path: Mapped[str] = mapped_column(Text, default="")
+    # When the clip's storage copy was last confirmed (uploaded or verified —
+    # see scheduler.repair_clip_uploads). NULL means a headless runner may
+    # find nothing to sign at publish time; the repair sweep re-uploads from
+    # whichever machine still has the local file.
+    clip_uploaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # draft | queued | publishing | published | failed
     # (legacy "scheduled" is migrated to "queued" on startup)
     status: Mapped[str] = mapped_column(String(20), default="draft")
@@ -363,6 +368,8 @@ class InstagramPost(Base):
     caption: Mapped[str] = mapped_column(Text, default="")
     clip_local_path: Mapped[str] = mapped_column(Text, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase object key
+    # Storage copy last confirmed (see ThreadsPost.clip_uploaded_at).
+    clip_uploaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ig_media_id: Mapped[str] = mapped_column(String(60), default="")
     permalink: Mapped[str] = mapped_column(String(300), default="")
     # draft | queued | publishing | published | failed

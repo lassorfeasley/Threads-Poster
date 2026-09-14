@@ -457,10 +457,29 @@ scheduler:
     half_lives:
       breaking: 1.0
       timely: 7.0
-    # A post expires (never auto-placed; surfaces in Notifications instead)
-    # once older than half_life x this. Breaking at 1-day half-life goes stale
-    # in 3 days; timely at 7 days in 3 weeks — one knob, both behaviors.
+    # A post expires (never auto-placed) once older than half_life x this.
+    # Breaking at 1-day half-life goes stale in 3 days; timely at 7 days in
+    # 3 weeks — one knob, both behaviors. Before that happens the overflow
+    # rescue below usually catches it; only what overflow can't absorb
+    # surfaces in Notifications.
     expire_after_half_lives: 3
+    # The overflow rescue. When a timely/breaking post would expire before
+    # any regular window can take it, the scheduler opens ONE extra window
+    # that day — pinned on the calendar like any other card, so it can be
+    # dragged or removed. Posts whose shelf life has ALREADY run out are
+    # lined up on consecutive future extra windows (freshest first), so a
+    # queued post always airs eventually, one per day through this lane.
+    # At most one extra window per day keeps a flood of timely material
+    # from firehosing the account. To stop a specific rescue, change that
+    # post's shelf life or delete it (unpinning alone gets re-rescued on
+    # the next tick).
+    #
+    # ``time`` MUST be after the last regular window (window keys within a
+    # day have to stay in chronological order) and inside active hours, and
+    # should clear the spacing floor after the evening window.
+    overflow:
+      enabled: true
+      time: "21:00"
     # Re-air proven posts: every ``every_days`` days one window may repeat an
     # EVERGREEN published post at least ``min_age_days`` old whose views at
     # the learning comparison age cleared the ``percentile`` of the account

@@ -222,7 +222,9 @@ def _load_attention_count() -> int:
                    + _stranded_reels())
         ).scalar_one())
         try:
-            count += len(expired_queued_posts(session))
+            # Expired posts collapse into ONE notification line however many
+            # there are — the whole point is fewer alarms, not more.
+            count += 1 if expired_queued_posts(session) else 0
         except Exception:
             log.exception("Expired-post check failed")
         return count
@@ -4548,6 +4550,21 @@ def update_cut_tags(cut_id: int, action: str = Form(...),
             cut.footage_tagged_at = cut.footage_tagged_at or utcnow()
             _sync_cut_tags_to_draft_posts(session, cut)
     return _tag_flash(dest, action, changed)
+
+
+@app.post("/notifications/expired/dismiss-all")
+def dismiss_all_expired(next: str = Form("/notifications")):
+    """Acknowledge every currently-expired queued post in one go.
+
+    The notifications page shows expired posts as a single collapsed line, so
+    the dismissal is collapsed to match. The posts stay queued (an operator
+    can still open one and publish it by hand) — they just stop counting."""
+    with session_scope() as session:
+        expired = expired_queued_posts(session)
+        for p in expired:
+            p.attention_dismissed_at = utcnow()
+    n = len(expired)
+    return _flash(next, f"Dismissed {n} expired post{'' if n == 1 else 's'}")
 
 
 @app.post("/post/{post_id}/dismiss")

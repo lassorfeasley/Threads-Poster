@@ -11,7 +11,10 @@ given up because of how an earlier post is performing.
 
 Also drives the frequent metrics poller that feeds analytics, the queue-time
 footage annotation pass that gives placement its facets, two staging rotations
-(branded promos, evergreen-winner reposts), the just-in-time filler that
+(branded promos, evergreen-winner reposts), the overflow rescue that pins a
+timely post to an on-demand extra window rather than letting it expire
+unplaced — and lines already-expired posts up on consecutive extra windows
+(``ensure_overflow_rescues``) — the just-in-time filler that
 re-airs a quiet evergreen post when a due window finds the queue empty, and the
 sweep that posts deferred first comments once their post has a conversation of
 its own.
@@ -153,6 +156,90 @@ def _windows_for_day(day: dt.date, tz: ZoneInfo) -> list[dt.datetime]:
 
 def _window_key(day: dt.date, index: int) -> str:
     return f"{day.isoformat()}#{index}"
+
+
+# --- On-demand overflow window ----------------------------------------------
+#
+# When a timely/breaking post can't win any regular window before its shelf
+# life runs out, the scheduler opens ONE extra window that day and pins the
+# post to it (see ensure_overflow_rescues). The overflow slot sits AFTER the
+# day's last regular window and takes the next index — both halves of that
+# are load-bearing: window keys are compared as strings against the
+# ``last_window_key`` high-water mark, so within a day key order must equal
+# chronological order. An extra window keyed after the evening window but
+# firing before it would mark the evening window as already processed and
+# silently drop it.
+
+
+def _base_window_count() -> int:
+    settings = load_settings()
+    return len(settings.get("scheduler.windows") or ["10:00", "14:30", "19:00"])
+
+
+def _overflow_index() -> int:
+    """The index overflow windows use: one past the day's regular windows, so
+    every regular key keeps its meaning on days that grow an extra slot."""
+    return _base_window_count()
+
+
+def _overflow_config() -> tuple[int, int] | None:
+    """``(hour, minute)`` of the overflow window, or None when off/invalid."""
+    settings = load_settings()
+    if not settings.get("scheduler.placement.overflow.enabled", False):
+        return None
+    try:
+        return _parse_hhmm(str(settings.get(
+            "scheduler.placement.overflow.time", "21:00")))
+    except (ValueError, AttributeError):
+        log.warning("scheduler.placement.overflow.time is unparseable — overflow disabled")
+        return None
+
+
+def _overflow_window_utc(day: dt.date, tz: ZoneInfo) -> dt.datetime | None:
+    """One day's overflow slot as an aware UTC datetime.
+
+    None when the feature is off — or when the configured time isn't strictly
+    after the day's last regular window, which would break the in-day key
+    ordering invariant described above, so it's treated as misconfigured.
+    """
+    cfg = _overflow_config()
+    if cfg is None:
+        return None
+    h, m = cfg
+    win = dt.datetime(day.year, day.month, day.day, h, m,
+                      tzinfo=tz).astimezone(dt.timezone.utc)
+    base = _windows_for_day(day, tz)
+    if base and win <= base[-1]:
+        return None
+    return win
+
+
+def _overflow_key(day: dt.date) -> str:
+    return _window_key(day, _overflow_index())
+
+
+def _is_overflow_key(key: str) -> bool:
+    parsed = _parse_window_key(key)
+    return parsed is not None and parsed[1] >= _base_window_count()
+
+
+def _overflow_pin_days(posts) -> set[dt.date]:
+    """Days whose overflow window exists, i.e. has a queued post pinned to it.
+
+    An overflow window is never free-standing: it materializes when a rescue
+    (or an operator drag onto an existing overflow slot) pins a post there,
+    and evaporates when nothing targets it anymore — so plan builders derive
+    the day set from the queue's pins, the one store every runner shares.
+    """
+    if _overflow_config() is None:
+        return set()
+    threshold = _base_window_count()
+    out: set[dt.date] = set()
+    for p in posts:
+        parsed = _parse_window_key((p.pinned_window_key or "").strip())
+        if parsed is not None and parsed[1] >= threshold:
+            out.add(parsed[0])
+    return out
 
 
 def _get_state(session) -> SchedulerState:
@@ -466,12 +553,14 @@ def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
     now = utcnow()
     state = _get_state(session)
     day = now.astimezone(tz).date()
+    posts = _queue_regular(session)
     # Look far enough ahead that every legal pin is visible (pins can be
     # created up to PIN_HORIZON_DAYS out); a shorter horizon here would wipe
     # farther-out pins as "stale".
     upcoming = _upcoming_window_slots(
         day, day + dt.timedelta(days=PIN_HORIZON_DAYS),
         now=now, last_window_key=state.last_window_key or "",
+        overflow_days=_overflow_pin_days(posts),
     )
     keys = [k for k, _, _ in upcoming]
     # The due window has always already fired by the time the tick evaluates it,
@@ -479,9 +568,10 @@ def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
     # front: pins targeting it must survive _clear_stale_pins, and the
     # assignment must match the calendar plan as it stood before the window
     # fired. (Previously this fell back to the raw FIFO head, ignoring pins.)
+    # Works for overflow keys too — a fired overflow window is re-attached
+    # the same way, so its rescue pin survives and wins the assignment.
     if window_key not in keys:
         keys.insert(0, window_key)
-    posts = _queue_regular(session)
     _clear_stale_pins(posts, set(keys))
     assignment, _ = _assign_with_mode(session, posts, keys)
     return assignment[keys.index(window_key)]
@@ -502,9 +592,11 @@ def pin_post_to_window(session, post_id: int, window_key: str) -> str:
     now = utcnow()
     state = _get_state(session)
     day = now.astimezone(tz).date()
+    posts = _queue_regular(session)
     upcoming = _upcoming_window_slots(
         day, day + dt.timedelta(days=PIN_HORIZON_DAYS),
         now=now, last_window_key=state.last_window_key or "",
+        overflow_days=_overflow_pin_days(posts),
     )
     keys = [k for k, _, _ in upcoming]
     if window_key not in keys:
@@ -514,7 +606,6 @@ def pin_post_to_window(session, post_id: int, window_key: str) -> str:
     if post is None or post.status != STATUS_QUEUED:
         raise ValueError("Only a queued post can be pinned")
 
-    posts = _queue_regular(session)
     _clear_stale_pins(posts, set(keys))
     assignment, _ = _assign_with_mode(session, posts, keys)
 
@@ -1093,6 +1184,111 @@ def ensure_repost_staged() -> str | None:
         return None
 
 
+def ensure_overflow_rescues() -> str | None:
+    """Pin doomed timely/breaking posts to on-demand overflow windows.
+
+    The scored engine never places a post past its expiry, so a queued
+    timely/breaking post that can't win a regular window before it goes
+    stale would just die into a notification. Instead: give a day ONE extra
+    posting window (after the evening window — see the key-ordering note by
+    ``_overflow_index``) and pin the doomed post to it. Staging-by-pin is
+    the same trick the promo/repost rotations use — a persistent pin every
+    scheduler runner reads identically from the shared database, that shows
+    on the calendar as an ordinary pinned card the operator can drag,
+    re-shelve, or delete.
+
+    At most one extra window per day — extra capacity should flex, not
+    firehose. Posts still inside their shelf life get first claim on the days
+    before their deadline; posts whose shelf life already ran out line up on
+    the remaining consecutive days, freshest-expired first (they're already
+    late, so a few more days costs nothing, and airing the freshest first
+    means each airs at its least stale). A queued post therefore always airs
+    eventually — one per day through the overflow lane — and only a backlog
+    deeper than the pin horizon still surfaces in Notifications. Like a
+    manual pin, a rescue bypasses the spacing/variety gates; that mirrors
+    what the expiry notification's "post now" button would have done anyway.
+
+    Safe to call every tick, and idempotent across concurrent runners: the
+    doomed set and its day allocation are computed deterministically from
+    shared state, so racing runners write identical pins.
+    """
+    if _overflow_config() is None:
+        return None
+    tz = _tz()
+    now = utcnow()
+    today = now.astimezone(tz).date()
+    with session_scope() as session:
+        posts = _queue_regular(session)
+        if not posts:
+            return None
+        ctx = build_placement_context(session, posts)
+        if ctx is None:
+            return None  # FIFO mode has no expiry, so nothing to rescue
+        state = _get_state(session)
+        overflow_days = _overflow_pin_days(posts)
+        upcoming = _upcoming_window_slots(
+            today, today + dt.timedelta(days=PIN_HORIZON_DAYS),
+            now=now, last_window_key=state.last_window_key or "",
+            overflow_days=overflow_days,
+        )
+        keys = [k for k, _, _ in upcoming]
+        _clear_stale_pins(posts, set(keys))
+        assignment = assign_posts_to_windows(posts, keys, ctx=ctx)
+        placed = {p.id for p in assignment if p is not None}
+
+        doomed: list[tuple[dt.date, int, ThreadsPost]] = []
+        stale: list[tuple[dt.date, int, ThreadsPost]] = []
+        for p in posts:
+            if p.id in placed:
+                continue
+            f = ctx.facts_for(p.id)
+            if f.half_life_days is None or f.content_date is None:
+                continue  # evergreen never expires; it's just waiting its turn
+            # Last day this post may still air normally (when ctx.expired flips).
+            deadline = f.content_date + dt.timedelta(days=math.floor(
+                f.half_life_days * ctx.settings.expire_after_half_lives))
+            if ctx.expired(p.id, today):
+                stale.append((deadline, p.id, p))
+            else:
+                doomed.append((deadline, p.id, p))
+        if not doomed and not stale:
+            return None
+        # Deadline-bound posts first (soonest deadline first), then the
+        # already-expired backlog, freshest first.
+        doomed.sort(key=lambda t: (t[0], t[1]))
+        stale.sort(key=lambda t: (-t[0].toordinal(), t[1]))
+
+        pinned = 0
+        horizon_end = today + dt.timedelta(days=PIN_HORIZON_DAYS)
+
+        def allocate(p: ThreadsPost, end: dt.date, deadline: dt.date) -> bool:
+            nonlocal pinned
+            d = today
+            while d <= end:
+                if d not in overflow_days:
+                    win = _overflow_window_utc(d, tz)
+                    if win is not None and win > now:
+                        p.pinned_window_key = _overflow_key(d)
+                        overflow_days.add(d)
+                        pinned += 1
+                        log.info(
+                            "Overflow rescue: pinned post %s to %s (shelf-life deadline %s)",
+                            p.id, p.pinned_window_key, deadline.isoformat())
+                        return True
+                d += dt.timedelta(days=1)
+            return False
+
+        for deadline, _pid, p in doomed:
+            # No free day before the deadline leaves the post unpinned; once
+            # its expiry flips it re-enters here through the stale lane.
+            allocate(p, min(deadline, horizon_end), deadline)
+        for deadline, _pid, p in stale:
+            # Already late, so any consecutive future day will do; only a
+            # backlog deeper than the horizon is left for Notifications.
+            allocate(p, horizon_end, deadline)
+        return f"overflow_rescued:{pinned}" if pinned else None
+
+
 def _filler_config() -> dict | None:
     """Just-in-time filler settings, or None when the feature is off.
 
@@ -1512,20 +1708,46 @@ def _within_active_hours(now_local: dt.datetime) -> bool:
     return (start_h * 60 + start_m) <= mins < (end_h * 60 + end_m)
 
 
+def _due_slots_for_day(session, day: dt.date, tz: ZoneInfo) -> list[tuple[str, dt.datetime]]:
+    """One day's window slots for the due check, in chronological order.
+
+    The regular windows always; the day's overflow window when a queued post
+    is pinned to it. Unlike ``_upcoming_window_slots`` this keeps slots whose
+    time has already passed — "due" means fired and not yet spent.
+    """
+    slots = [(_window_key(day, i), win)
+             for i, win in enumerate(_windows_for_day(day, tz))]
+    o_win = _overflow_window_utc(day, tz)
+    if o_win is not None:
+        okey = _overflow_key(day)
+        pinned = session.execute(
+            select(func.count(ThreadsPost.id)).where(
+                ThreadsPost.status == STATUS_QUEUED,
+                ThreadsPost.pinned_window_key == okey,
+            )
+        ).scalar_one()
+        if pinned:
+            slots.append((okey, o_win))
+    return slots
+
+
 def _earliest_due_window(
     day: dt.date,
-    windows: list[dt.datetime],
+    slots: list[tuple[str, dt.datetime]],
     now: dt.datetime,
     last_window_key: str,
-) -> int | None:
-    """Index of the earliest window that has fired and is not yet processed."""
-    for i, win in enumerate(windows):
+) -> str | None:
+    """Key of the earliest window that has fired and is not yet processed.
+
+    ``slots`` must be one day's ``(key, utc_dt)`` pairs in chronological
+    order — which, by the overflow invariant, is also key order.
+    """
+    for key, win in slots:
         if now < win:
             break
-        key = _window_key(day, i)
         if last_window_key and last_window_key.startswith(day.isoformat()) and last_window_key >= key:
             continue
-        return i
+        return key
     return None
 
 
@@ -1553,6 +1775,15 @@ def run_window_tick() -> str | None:
     except Exception:
         log.exception("Repost staging failed")
 
+    # And for overflow rescues: pin timely posts that would otherwise expire
+    # unplaced to on-demand extra windows. Also just queued-row writes.
+    try:
+        staged = ensure_overflow_rescues()
+        if staged:
+            log.info("Overflow rescue: %s", staged)
+    except Exception:
+        log.exception("Overflow rescue staging failed")
+
     if not threads_api.is_authenticated():
         return None
 
@@ -1563,15 +1794,13 @@ def run_window_tick() -> str | None:
         return None
 
     day = now_local.date()
-    windows = _windows_for_day(day, tz)
 
     with session_scope() as session:
         state = _get_state(session)
-        due_index = _earliest_due_window(day, windows, now, state.last_window_key or "")
-        if due_index is None:
+        slots = _due_slots_for_day(session, day, tz)
+        key = _earliest_due_window(day, slots, now, state.last_window_key or "")
+        if key is None:
             return None
-
-        key = _window_key(day, due_index)
 
         if not _spacing_ok(state, now):
             state.last_window_key = key
@@ -1583,6 +1812,14 @@ def run_window_tick() -> str | None:
         if head is not None:
             post_id = head.id
             verb = "publish"
+        elif _is_overflow_key(key):
+            # The rescue this extra window existed for is gone (deleted,
+            # dragged elsewhere, published by hand). The slot only ever
+            # existed for that post, so spend it quietly — no filler.
+            state.last_window_key = key
+            state.last_action = f"empty:{key}"
+            state.updated_at = utcnow()
+            return f"empty:{key}"
         else:
             # Empty queue: re-air an evergreen post rather than going silent
             # (scheduler.placement.filler). Real queued content always wins —
@@ -1666,13 +1903,77 @@ def annotate_queued_posts(limit: int = 2) -> int:
     return done
 
 
-def expired_queued_posts(session) -> list[ThreadsPost]:
-    """Queued posts whose shelf life has run out (scored mode only).
+def repair_clip_uploads(limit: int = 2) -> int:
+    """Confirm queued posts/reels have a storage copy to publish from.
 
-    The placement engine never places an expired post, so without this they
-    would just sink silently. Surfaced in the notifications list instead, for
-    the operator to publish by hand, re-shelve, or delete;
-    ``attention_dismissed_at`` acknowledges one without deleting it.
+    Queue-time uploads are retried but can still fail outright (Supabase
+    hiccup, network drop mid-request). Nothing used to notice until a
+    HEADLESS runner hit the window and got Supabase's 404 signing an object
+    that was never uploaded — the operator then saw a failed post/reel whose
+    manual retry "just worked", because the dashboard machine has the local
+    file and re-uploads it. This sweep does that healing ahead of the
+    window, on whichever machine has the file: probe the object with a
+    signed-URL request, upload it if it's missing, and stamp
+    ``clip_uploaded_at`` so the row never needs probing again. Rows whose
+    file isn't on this machine are skipped — the runner that has it (the
+    operator's laptop dashboard) picks them up on its own tick.
+    """
+    from .models import InstagramPost
+    from .publishing import _object_key, _storage_object_missing
+    from .storage_supabase import signed_clip_url, upload_trimmed_clip
+
+    done = 0
+    with session_scope() as session:
+        posts = session.execute(
+            select(ThreadsPost).where(
+                ThreadsPost.status == STATUS_QUEUED,
+                ThreadsPost.clip_uploaded_at.is_(None),
+            ).order_by(ThreadsPost.created_at.asc())
+        ).scalars().all()
+        reels = session.execute(
+            select(InstagramPost).where(
+                InstagramPost.status == STATUS_QUEUED,
+                InstagramPost.clip_uploaded_at.is_(None),
+            ).order_by(InstagramPost.created_at.asc())
+        ).scalars().all()
+        for row in (*posts, *reels):
+            if done >= limit:
+                break
+            clip = Path(row.clip_local_path or "").expanduser()
+            if not row.clip_local_path or not clip.exists():
+                continue  # not this machine's file — another runner has it
+            try:
+                if not row.clip_object_path:
+                    row.clip_object_path = _object_key(clip)
+                    upload_trimmed_clip(clip, row.clip_object_path)
+                else:
+                    try:
+                        signed_clip_url(row.clip_object_path)  # existence probe
+                    except Exception as exc:
+                        if not _storage_object_missing(exc):
+                            raise
+                        log.info("Upload repair: %s %s missing from storage — re-uploading",
+                                 type(row).__name__, row.id)
+                        upload_trimmed_clip(clip, row.clip_object_path)
+                row.clip_uploaded_at = utcnow()
+                done += 1
+            except Exception as exc:
+                log.warning("Upload repair failed for %s %s: %s",
+                            type(row).__name__, row.id, exc)
+    return done
+
+
+def expired_queued_posts(session) -> list[ThreadsPost]:
+    """Expired queued posts that nothing is going to air (scored mode only).
+
+    The placement engine never places an expired post, but the overflow
+    rescue (``ensure_overflow_rescues``) lines expired posts up on
+    consecutive extra windows — a pinned post is scheduled, not sunk, so it
+    doesn't belong here. What's left is the residue the rescue couldn't
+    absorb (a backlog deeper than the pin horizon, or overflow disabled),
+    surfaced in the notifications list for the operator to publish by hand,
+    re-shelve, or delete; ``attention_dismissed_at`` acknowledges one
+    without deleting it.
     """
     posts = _queue_regular(session)
     if not posts:
@@ -1682,7 +1983,9 @@ def expired_queued_posts(session) -> list[ThreadsPost]:
         return []  # FIFO mode has no expiry
     today = utcnow().astimezone(_tz()).date()
     return [p for p in posts
-            if ctx.expired(p.id, today) and p.attention_dismissed_at is None]
+            if ctx.expired(p.id, today)
+            and p.attention_dismissed_at is None
+            and not (p.pinned_window_key or "").strip()]
 
 
 def run_metrics_poll() -> int:
@@ -1788,22 +2091,22 @@ def scheduler_status(session) -> dict:
     now = utcnow()
     now_local = now.astimezone(tz)
     day = now_local.date()
-    windows = _windows_for_day(day, tz)
+    slots = _due_slots_for_day(session, day, tz)
     state = _get_state(session)
 
-    due_index = _earliest_due_window(day, windows, now, state.last_window_key or "")
+    due_key = _earliest_due_window(day, slots, now, state.last_window_key or "")
     next_window_local = None
     next_window_key = None
     due_now = False
-    if due_index is not None:
-        next_window_local = windows[due_index].astimezone(tz)
-        next_window_key = _window_key(day, due_index)
+    if due_key is not None:
+        next_window_local = dict(slots)[due_key].astimezone(tz)
+        next_window_key = due_key
         due_now = True
     else:
-        for i, win in enumerate(windows):
+        for key, win in slots:
             if now < win:
                 next_window_local = win.astimezone(tz)
-                next_window_key = _window_key(day, i)
+                next_window_key = key
                 break
         if next_window_local is None:
             tomorrow = day + dt.timedelta(days=1)
@@ -1838,14 +2141,25 @@ def _upcoming_window_slots(
     *,
     now: dt.datetime | None = None,
     last_window_key: str = "",
+    overflow_days: frozenset[dt.date] | set[dt.date] = frozenset(),
 ) -> list[tuple[str, dt.datetime, int]]:
-    """Return ``(window_key, utc_dt, index)`` for upcoming (not-yet-processed) windows."""
+    """Return ``(window_key, utc_dt, index)`` for upcoming (not-yet-processed) windows.
+
+    Days in ``overflow_days`` (see ``_overflow_pin_days``) grow one extra slot
+    after their last regular window. Appending keeps the list chronological
+    because ``_overflow_window_utc`` refuses any earlier time.
+    """
     tz = _tz()
     now = now or utcnow()
     slots: list[tuple[str, dt.datetime, int]] = []
     d = start_day
     while d <= end_day:
-        for i, win in enumerate(_windows_for_day(d, tz)):
+        day_slots = list(enumerate(_windows_for_day(d, tz)))
+        if d in overflow_days:
+            o_win = _overflow_window_utc(d, tz)
+            if o_win is not None:
+                day_slots.append((_overflow_index(), o_win))
+        for i, win in day_slots:
             key = _window_key(d, i)
             already = (
                 last_window_key
@@ -2045,11 +2359,17 @@ def build_window_plan(
 
     plan: list[dict] = []
 
+    # Days with an on-demand overflow window (rescue pins; see
+    # ensure_overflow_rescues). Derived from the queue's pins so every view
+    # of the plan agrees with the tick.
+    overflow_days = _overflow_pin_days(regular)
+
     upcoming = _upcoming_window_slots(
         max(start_day, now.astimezone(tz).date()),
         end_day,
         now=now,
         last_window_key=state.last_window_key or "",
+        overflow_days=overflow_days,
     )
     # Only slots that fall inside the requested local range.
     visible = []
@@ -2067,6 +2387,7 @@ def build_window_plan(
     full_upcoming = _upcoming_window_slots(
         today, today + dt.timedelta(days=PIN_HORIZON_DAYS),
         now=now, last_window_key=state.last_window_key or "",
+        overflow_days=overflow_days,
     )
     full_keys = [k for k, _, _ in full_upcoming]
     _clear_stale_pins(regular, set(full_keys))
@@ -2108,7 +2429,9 @@ def build_window_plan(
             if pick["candidate_pk"] is not None:
                 cand_last[pick["candidate_pk"]] = day_of
 
+    base_window_count = _base_window_count()
     for key, _win_utc, idx, local in visible:
+        is_overflow = idx >= base_window_count
         post = post_by_key.get(key)
         rerun = rerun_by_key.get(key) if post is None else None
         if post is None and rerun is not None:
@@ -2135,6 +2458,7 @@ def build_window_plan(
                 "projected": True,
                 "empty": False,
                 "pinned": False,
+                "overflow": is_overflow,
             })
         elif post is None:
             plan.append({
@@ -2156,6 +2480,7 @@ def build_window_plan(
                 "projected": True,
                 "empty": True,
                 "pinned": False,
+                "overflow": is_overflow,
             })
         else:
             decision = decisions.get(key)
@@ -2179,6 +2504,7 @@ def build_window_plan(
                 "projected": True,
                 "empty": False,
                 "pinned": bool((post.pinned_window_key or "").strip()),
+                "overflow": is_overflow,
                 # Scored-mode explainability: which relaxation step filled the
                 # slot (0 = clean; >=1 means gates were loosened, a sign the
                 # queue is shallow or concentrated) and the score breakdown —
@@ -2364,12 +2690,13 @@ def reschedule_windows_for_post(session, post_id: int) -> list[dict]:
     now = utcnow()
     today = now.astimezone(tz).date()
     state = _get_state(session)
+    posts = _queue_regular(session)
     upcoming = _upcoming_window_slots(
         today, today + dt.timedelta(days=PIN_HORIZON_DAYS),
         now=now, last_window_key=state.last_window_key or "",
+        overflow_days=_overflow_pin_days(posts),
     )
     keys = [k for k, _, _ in upcoming]
-    posts = _queue_regular(session)
     _clear_stale_pins(posts, set(keys))
     assignment, _ = _assign_with_mode(session, posts, keys)
     pinned_key = (post.pinned_window_key or "").strip()
@@ -2414,6 +2741,16 @@ def run_tick() -> None:
             log.info("Annotated %d queued post(s) with footage facets", n)
     except Exception:
         log.exception("Queued-post annotation failed")
+
+    # Confirm queued clips actually have a storage copy before their window
+    # fires — heals failed queue-time uploads on the machine that has the
+    # file, so a headless publish never 404s signing a missing object.
+    try:
+        n = repair_clip_uploads()
+        if n:
+            log.info("Upload repair: confirmed storage copies for %d row(s)", n)
+    except Exception:
+        log.exception("Upload repair sweep failed")
 
     try:
         n = run_metrics_poll()

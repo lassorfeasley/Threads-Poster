@@ -10,6 +10,7 @@ import datetime as dt
 import logging
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +66,38 @@ def _object_key(clip: Path) -> str:
     return f"{now.strftime('%Y/%m')}/{clip.stem}_{now.strftime('%Y%m%dT%H%M%S')}.mp4"
 
 
+# Queue-time upload retry schedule (seconds between attempts). Short and
+# synchronous — this runs inside a dashboard request — but enough to ride out
+# the transient Supabase hiccups that otherwise strand a queued post/reel
+# with no storage copy, which a headless runner then can't publish at all
+# ("Object not found" at signing time).
+_UPLOAD_RETRY_DELAYS = (2, 5)
+
+
+def _upload_clip_with_retries(clip: Path, object_key: str) -> str:
+    """``upload_trimmed_clip`` with a couple of quick retries. Raises the last
+    error when every attempt fails."""
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate((*_UPLOAD_RETRY_DELAYS, None)):
+        try:
+            return upload_trimmed_clip(clip, object_key)
+        except Exception as exc:
+            last_exc = exc
+            log.warning("Clip upload attempt %d/%d failed for %s: %s",
+                        attempt + 1, len(_UPLOAD_RETRY_DELAYS) + 1, object_key, exc)
+            if delay is not None:
+                time.sleep(delay)
+    raise last_exc
+
+
+def _storage_object_missing(exc: Exception) -> bool:
+    """Whether an exception is Supabase's 404 for a missing storage object —
+    the signature of a clip whose queue-time upload never happened. Retrying
+    on a machine without the local file can never fix this."""
+    text = str(exc)
+    return "Object not found" in text or "not_found" in text
+
+
 def record_post(session, candidate: Candidate | None, clip_path: str, caption: str,
                 *, status: str, cut: Cut | None = None,
                 attribution: str = "") -> ThreadsPost:
@@ -116,11 +149,15 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         post.attribution_text = attribution.strip()
     # Upload now, while the file is guaranteed to be on this machine, so a
     # headless scheduler (GitHub Actions / cron) can publish later without this
-    # disk. Best-effort: publish_post re-uploads from local when it can.
+    # disk. Retried here, and again by the scheduler's repair sweep while the
+    # post waits (``clip_uploaded_at`` stays NULL until a copy is confirmed) —
+    # a publish on a machine WITHOUT the file can only sign what's already up.
     try:
-        upload_trimmed_clip(clip, post.clip_object_path)
+        _upload_clip_with_retries(clip, post.clip_object_path)
+        post.clip_uploaded_at = utcnow()
     except Exception as exc:
-        log.warning("Queue-time clip upload failed (will retry at publish): %s", exc)
+        log.warning("Queue-time clip upload failed (repair sweep will retry "
+                    "while the post is queued): %s", exc)
     return post
 
 
@@ -359,7 +396,17 @@ def publish_post(session, post: ThreadsPost) -> ThreadsPost:
         if have_local:
             signed_url = upload_trimmed_clip(clip, post.clip_object_path)
         else:
-            signed_url = signed_clip_url(post.clip_object_path)
+            try:
+                signed_url = signed_clip_url(post.clip_object_path)
+            except Exception as exc:
+                if _storage_object_missing(exc):
+                    raise RuntimeError(
+                        "The clip is not in storage (its queue-time upload never "
+                        "completed) and this machine doesn't have the local file "
+                        "to re-upload. Retry from the dashboard on the machine "
+                        f"that exported the clip. ({exc})"
+                    ) from exc
+                raise
         result = publish_video(signed_url, post.caption)
         published_at = utcnow()
         # The clip is live on Threads from here on: persist that fact before
@@ -427,10 +474,16 @@ def record_instagram_post(session, cut: Cut | None, threads_post: ThreadsPost | 
     if ig.clip_local_path != str(clip) or not ig.clip_object_path:
         ig.clip_local_path = str(clip)
         ig.clip_object_path = _object_key(clip)
+        ig.clip_uploaded_at = None
         try:
-            upload_trimmed_clip(clip, ig.clip_object_path)
+            _upload_clip_with_retries(clip, ig.clip_object_path)
+            ig.clip_uploaded_at = utcnow()
         except Exception as exc:
-            log.warning("Queue-time reel upload failed (will retry at publish): %s", exc)
+            # Not fatal here — but a headless publish will 404 signing an
+            # object that never made it up, so the scheduler's repair sweep
+            # keeps retrying from this machine while the reel is queued.
+            log.warning("Queue-time reel upload failed (repair sweep will "
+                        "retry while the reel is queued): %s", exc)
     ig.status = "queued"
     ig.error = ""
     session.flush()
@@ -505,7 +558,18 @@ def publish_instagram_post(session, ig: InstagramPost) -> InstagramPost:
         if have_local:
             signed_url = upload_trimmed_clip(clip, ig.clip_object_path)
         else:
-            signed_url = signed_clip_url(ig.clip_object_path)
+            try:
+                signed_url = signed_clip_url(ig.clip_object_path)
+            except Exception as exc:
+                if _storage_object_missing(exc):
+                    raise RuntimeError(
+                        "The reel's video is not in storage (its queue-time "
+                        "upload never completed) and this machine doesn't have "
+                        "the local composite to re-upload. Retry from the "
+                        "dashboard on the machine that exported the clip. "
+                        f"({exc})"
+                    ) from exc
+                raise
         result = publish_reel(signed_url, ig.caption)
         published_at = utcnow()
         # Live on Instagram from here: persist before anything else can fail.
@@ -539,24 +603,51 @@ def publish_paired_reel(post_id: int) -> InstagramPost | None:
     uncommitted writes. Best-effort by design: the Threads result is already
     on disk, and a reel failure only marks the ``InstagramPost`` row failed —
     it never unwinds the Threads publish. Returns a detached snapshot of the
-    reel row (or None when no reel is paired)."""
+    reel row (or None when no reel is paired).
+
+    Transient failures retry in place, on the same knobs as the Threads
+    window publish (``scheduler.publish_retries`` / ``…_retry_delay_seconds``)
+    — the reel used to get exactly one attempt while its Threads twin got
+    two, so a first-of-day token or Meta-processing hiccup routinely failed
+    only the reel. A missing storage object on a machine without the local
+    composite is permanent (nothing to upload, nothing to sign) and is not
+    retried; the error says to retry from the machine that has the file.
+    """
     from .db import session_scope
 
-    with session_scope() as session:
-        ig = session.execute(
-            select(InstagramPost).where(
-                InstagramPost.threads_post_pk == post_id,
-                InstagramPost.status.in_(["queued", "failed", "publishing"]),
-            ).order_by(InstagramPost.created_at.desc()).limit(1)
-        ).scalar_one_or_none()
-        if ig is None:
-            return None
-        try:
-            publish_instagram_post(session, ig)
-        except Exception as exc:
-            log.warning("Paired Instagram reel failed for post %s: %s", post_id, exc)
-        session.expunge(ig)
-    return ig
+    settings = load_settings()
+    retries = max(0, int(settings.get("scheduler.publish_retries", 1)))
+    retry_delay = max(0, int(settings.get("scheduler.publish_retry_delay_seconds", 30)))
+
+    snapshot: InstagramPost | None = None
+    for attempt in range(retries + 1):
+        retryable = False
+        with session_scope() as session:
+            ig = session.execute(
+                select(InstagramPost).where(
+                    InstagramPost.threads_post_pk == post_id,
+                    InstagramPost.status.in_(["queued", "failed", "publishing"]),
+                ).order_by(InstagramPost.created_at.desc()).limit(1)
+            ).scalar_one_or_none()
+            if ig is None:
+                return snapshot
+            try:
+                publish_instagram_post(session, ig)
+                session.expunge(ig)
+                return ig
+            except Exception as exc:
+                log.warning("Paired Instagram reel attempt %d/%d failed for post %s: %s",
+                            attempt + 1, retries + 1, post_id, exc)
+                have_local = bool(ig.clip_local_path) and \
+                    Path(ig.clip_local_path).expanduser().exists()
+                retryable = (not isinstance(exc, FileNotFoundError)
+                             and not (_storage_object_missing(exc) and not have_local))
+                session.expunge(ig)
+                snapshot = ig
+        if not retryable or attempt >= retries:
+            break
+        time.sleep(retry_delay)
+    return snapshot
 
 
 def publish_reel_now(ig_id: int) -> InstagramPost | None:
