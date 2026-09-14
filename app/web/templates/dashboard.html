@@ -182,10 +182,19 @@
       {% elif state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
-      {% if c.multi_clip_potential %}<span class="badge info" title="{{ 'The clip suggester found more than one story here — stays until you turn it off' if c.multi_clip_auto else 'Marked as having more clips — stays here until turned off' }}">multi-clip{% if c.multi_clip_auto %} (suggested){% endif %}</span>{% endif %}
     </span>
     {% if c.duration_seconds %}
     <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>
+    {% endif %}
+    {# Bookmark marker: icon-only chip, bottom-left. The tooltip carries the
+       explanation the old labelled pill spelled out on every card, in the same
+       words as the toggle that sets it. #}
+    {% if c.multi_clip_potential %}
+    <span class="mc-multi" title="{{ 'Bookmarked for additional clips — the suggester found more than one story here. Stays until you turn the bookmark off.' if c.multi_clip_auto else 'Bookmarked for additional clips. Stays here until you turn the bookmark off.' }}">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="8" width="13" height="13" rx="2"/><path d="M8 3h11a2 2 0 0 1 2 2v11"/></svg>
+    </span>
     {% endif %}
     <button class="mc-x" title="Delete this clip from your workflow" aria-label="Delete clip"
             onclick="event.stopPropagation(); deleteRow({{ c.id }}, this, 'Remove this clip from your workflow? You can restore it later from Archive.')">✕</button>
@@ -233,8 +242,10 @@
   <div class="mc-body">
     <div class="item-title">{{ c.title }}</div>
     {% if c.clip_title %}<div class="meta clip-title" title="Generated clip title">{{ c.clip_title }}</div>{% endif %}
-    <div class="meta">{{ c.channel.call_sign }} · {{ c.channel.market }}
-      {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
+    {# Joined from the non-empty parts: international channels carry no market,
+       and hardcoded separators left a dangling "·" between the two. #}
+    <div class="meta">{{ [c.channel.call_sign, c.channel.market,
+      c.published_at.strftime("%b %-d") if c.published_at else None] | select | join(" · ") }}</div>
   </div>
 </div>
 {% endfor %}
@@ -356,10 +367,12 @@
   </div>
   <div class="mc-body">
     <div class="item-title">{{ c.title }}</div>
+    {# Short category name rather than the emoji, and joined from the non-empty
+       parts — international channels carry no market, and hardcoded separators
+       left a dangling "·" where it would have gone. #}
     <div class="meta">{% set cat = category_by_slug(c.category) -%}
-      {% if cat %}<span title="{{ cat.label }}">{{ cat.emoji }}</span> · {% endif -%}
-      {{ c.channel.call_sign }} · {{ c.channel.market }}
-      {%- if c.published_at %} · {{ c.published_at.strftime("%b %-d") }}{% endif %}</div>
+      {{ [(cat.slug|capitalize) if cat else None, c.channel.call_sign, c.channel.market,
+      c.published_at.strftime("%b %-d") if c.published_at else None] | select | join(" · ") }}</div>
   </div>
 </div>
 {% endfor %}

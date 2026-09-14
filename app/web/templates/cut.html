@@ -1370,23 +1370,35 @@ function renderClipProposals() {
     const row = document.createElement('div');
     row.className = 'proposal-row' + (hoveredProposal === clip.id ? ' hot' : '');
     const segs = view.segments.length;
+    // Bucketed, not printed to the digit: it's the model scoring itself, the
+    // list is already in rank order, and "85% confident" next to "72%
+    // confident" invites a comparison the number can't carry.
     const conf = (clip.confidence || clip.confidence === 0)
-      ? ` · ${Math.round(clip.confidence * 100)}% confident` : '';
+      ? ` · ${clip.confidence >= 0.8 ? 'high' : clip.confidence >= 0.6 ? 'medium' : 'low'} confidence`
+      : '';
+    const meta = `${segs} segment${segs === 1 ? '' : 's'} · ${Math.round(view.seconds)}s${conf}`;
+    // Preview leads: auditioning is the step that comes first and costs
+    // nothing, so it carries the colour. Nothing here is a filled primary —
+    // three suggestions with no recommended one means no "do this" button.
     row.innerHTML = `
       <div class="proposal-story">${escapeHtml(clip.story || 'Suggested clip')}</div>
-      <div class="proposal-meta meta">${segs} segment${segs === 1 ? '' : 's'}
-        · ${Math.round(view.seconds)}s${conf}</div>
+      ${clip.why
+        ? `<details class="proposal-why-toggle">
+             <summary class="proposal-meta meta">${meta}<span class="proposal-why-cue">Why?</span></summary>
+             <div class="proposal-why meta">${escapeHtml(clip.why)}</div>
+           </details>`
+        : `<div class="proposal-meta meta">${meta}</div>`}
       ${view.trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
-      ${clip.why ? `<details class="proposal-why-toggle"><summary>Why?</summary><div class="proposal-why meta">${escapeHtml(clip.why)}</div></details>` : ''}
       <div class="proposal-actions">
-        <button type="button" class="ghost sm proposal-play" data-act="play"
+        <button type="button" class="primary sm proposal-play" data-act="play"
                 title="Play this clip without applying it">
-          <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+          Preview
         </button>
-        <button type="button" class="approve sm" data-act="use"
-                title="Add these segments to the clip you're editing">Use</button>
+        <button type="button" class="sm" data-act="use"
+                title="Append these segments to the clip you're editing">Add to this clip</button>
         <button type="button" class="ghost sm" data-act="new"
-                title="Open this as its own clip on the same video">New clip</button>
+                title="Open this as its own clip on the same video">Open separately</button>
         <button type="button" class="ghost sm" data-act="dismiss">Dismiss</button>
       </div>`;
     row.addEventListener('mouseenter', () => { hoveredProposal = clip.id; row.classList.add('hot'); });
@@ -1828,7 +1840,7 @@ initSegDnd();
         <button type="button" class="ghost" id="export-retry-btn" onclick="retryExport()">Retry save</button>
       </div>
       {% else %}
-      <div class="badges" style="margin-bottom: 8px;">
+      <div class="badges" style="margin-bottom: 8px;" id="export-stage-badges">
         <span class="badge info"><span class="dot"></span> saving clip</span>
       </div>
       <h2 class="export-stage-title" id="export-stage-title">Building your clip</h2>
@@ -1839,7 +1851,7 @@ initSegDnd();
           <i id="export-progress-bar" style="width: 8%"></i>
         </div>
       </div>
-      <p class="meta export-stage-hint">You can leave this page — it picks up when the file is ready.</p>
+      <p class="meta export-stage-hint" id="export-stage-hint">You can leave this page — it picks up when the file is ready.</p>
       {% endif %}
     </div>
   </div>
@@ -1891,6 +1903,13 @@ initSegDnd();
         if (bar) bar.style.width = '100%';
         if (titleEl) titleEl.textContent = 'Clip ready';
         if (msgEl) msgEl.textContent = 'Opening the post editor…';
+        // The in-progress chip and the "you can leave this page" hint both
+        // contradict the finished state — and the badge literally read
+        // "saving clip" under a "Clip ready" heading.
+        for (const id of ['export-stage-badges', 'export-stage-hint']) {
+          const el = document.getElementById(id);
+          if (el) el.hidden = true;
+        }
         const params = new URLSearchParams();
         params.set('step', 'post');
         if (s.autosubs) params.set('autosubs', '1');
@@ -2990,10 +3009,14 @@ async function retryExport() {
     <div class="post-ship-actions has-top-rule">
       <button id="btn-queue" form="post-form" class="approve" style="width: 100%;"
               formaction="/cut/{{ cut.id }}/queue" formnovalidate>{{ "Update queue" if pending_post_status == "queued" else "Add to queue" }}</button>
+      {# Three descending tiers rather than a filled primary over two identical
+         twins: queueing is the default path, publishing live is a deliberate
+         detour, and saving a draft costs nothing. Same weight on the last two
+         made the irreversible one look like the harmless one. #}
       <div class="post-ship-buttons" style="margin-top: 8px;">
-        <button id="btn-draft" form="post-form"
+        <button id="btn-draft" form="post-form" class="ghost"
                 formaction="/cut/{{ cut.id }}/save-draft" formnovalidate>Save as draft</button>
-        <button id="btn-post-now" form="post-form">Post now</button>
+        <button id="btn-post-now" class="primary" form="post-form">Post now</button>
       </div>
     </div>
   </div>
@@ -3042,11 +3065,11 @@ async function retryExport() {
             onclick="document.getElementById('multi-clip-dialog').close()">✕</button>
   </div>
   <p class="meta" style="margin: 0 0 16px;">That's clip <span id="multi-clip-n"></span> exported
-    from this video. It's marked as having more clips, so it stays under
-    “Selected to trim” on the dashboard until the marker is turned off.</p>
+    from this video. It's bookmarked for additional clips, so it stays under
+    “Selected to trim” on the dashboard until the bookmark is turned off.</p>
   <div class="btn-group">
     <button type="button" class="approve" id="multi-clip-off-btn"
-            onclick="multiClipDone()">Done — turn it off</button>
+            onclick="multiClipDone()">Done — remove the bookmark</button>
     <button type="button" class="ghost"
             onclick="document.getElementById('multi-clip-dialog').close()">More clips left — keep it</button>
   </div>

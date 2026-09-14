@@ -1148,38 +1148,44 @@ button.sm.is-loading::after,
 }
 /* Trait tags in the post rail. Vocabulary names run long, so these are
    full-width rows rather than pills that wrapped one-per-line anyway. */
+/* Tags wrap as pills. Short names pair up two to a rail width instead of
+   taking a full row each; a long one still gets its own line and truncates,
+   with the raw name in the title. */
 .tag-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
 }
 .tag-row {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 6px 5px 10px;
+  gap: 3px;
+  max-width: 100%;
+  padding: 3px 5px 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   font-size: 12px;
   background: var(--panel2);
 }
-.tag-row + .tag-row { border-top: 1px solid var(--border); }
 .tag-name {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-dim);
 }
+/* No remove button to sit beside, so the pill needs its right padding back. */
+.tag-row:not(:has(.tag-x)) { padding-right: 9px; }
 .tag-x {
   all: unset;
   flex: none;
   cursor: pointer;
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2499,13 +2505,18 @@ kbd {
   0% { background-position: 100% 0; }
   100% { background-position: -100% 0; }
 }
+/* A display heading, not a section label: opt out of the global h2 treatment
+   (uppercase + the trailing divider rule), which turned "Clip ready" into
+   "CLIP READY" with a line running off the side of it. */
 .export-stage-title {
   margin: 0 0 6px;
   font-size: 1.25rem;
   font-weight: 700;
   letter-spacing: -0.02em;
+  text-transform: none;
   color: var(--text);
 }
+.export-stage-title::after { content: none; }
 .export-stage-msg {
   margin: 0;
   font-size: 13.5px;
@@ -4600,32 +4611,39 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
 }
 /* Explicit display beats the [hidden] UA rule, so restate it. */
 .clip-proposals-foot[hidden] { display: none; }
+/* Suggestions read as a list, not a stack of cards: the panel already boxes
+   them, so a divider does what each row's border, fill and radius were doing.
+   Rows bleed to the panel edge so the hover tint — which ties a row to its
+   segments on the waveform — runs the full width. */
 .proposal-row {
+  margin: 0 -12px;
   padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel2);
-  margin-bottom: 8px;
   font-size: var(--text-body);
 }
-.proposal-row:last-child { margin-bottom: 0; }
-.proposal-row.hot { border-color: rgba(167, 139, 250, 0.8); }
+.proposal-row + .proposal-row { border-top: 1px solid var(--border); }
+.proposal-row.hot {
+  background: rgba(167, 139, 250, 0.1);
+  box-shadow: inset 2px 0 0 rgba(167, 139, 250, 0.85);
+}
 .proposal-story { font-weight: 600; line-height: 1.4; }
 .proposal-why { margin-top: 4px; line-height: 1.4; }
-/* Rationale is on demand: closed by default, one tap on "Why?" opens it. */
+/* Rationale is on demand, and rides the meta line rather than taking a third
+   interactive row per suggestion: the whole line opens it, the cue marks it. */
 .proposal-why-toggle {
   margin-top: 4px;
 }
 .proposal-why-toggle > summary {
   cursor: pointer;
   list-style: none;
-  display: inline-block;
-  color: var(--muted);
-  font-size: var(--text-meta);
-  font-weight: 600;
 }
 .proposal-why-toggle > summary::-webkit-details-marker { display: none; }
 .proposal-why-toggle > summary:hover { color: var(--text); }
+.proposal-why-cue {
+  margin-left: 7px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .proposal-actions {
   display: flex;
   gap: 6px;
@@ -4636,7 +4654,7 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 32px;
+  gap: 5px;
 }
 
 /* --- Ship rail: plain action card at the top of the rail stack (primary
@@ -4729,47 +4747,44 @@ details.panel > .panel-body { padding: 14px 18px; }
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 14px;
-}
-/* Dashboard workflow cards sit in a dense grid — drop the lift shadow so the
-   row reads flat against the panel background. */
-#in-progress-section .media-card,
-#in-progress-section .media-card:hover {
-  box-shadow: none;
+  /* Flat tiles carry no box of their own, so the vertical rhythm comes from
+     the gap rather than card padding — a touch more air between rows. */
+  gap: 20px 14px;
 }
 
+/* Flat media tiles: the thumbnail is the only "object" (rounded, hairline
+   border); title and meta sit as plain text on the page background. The
+   boxed treatment (panel + border + shadow + hover lift on every card)
+   multiplied by a dense grid read as chrome, not content. Hover affordance
+   is the title color change plus a slightly stronger thumb border. */
 .media-card {
   display: flex;
   flex-direction: column;
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: none;
+  border: none;
   border-radius: var(--radius-lg);
-  overflow: hidden;
-  box-shadow: var(--shadow);
   color: inherit;
   text-decoration: none;
-  transition: border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
 }
-.media-card:hover {
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-lift);
-  transform: translateY(-2px);
-  text-decoration: none;
-}
+.media-card:hover { text-decoration: none; }
 .media-card .thumb-wrap {
   position: relative;
   aspect-ratio: 16 / 9;
   background: var(--panel2);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   overflow: hidden;
+  transition: border-color 0.14s ease;
 }
+.media-card:hover .thumb-wrap { border-color: var(--border-strong); }
 .media-card .thumb-wrap img {
   width: 100%; height: 100%;
   object-fit: cover; display: block;
   /* Source stills often carry broadcast letterbox mattes (black bars top and
      bottom). Zoom in a touch so those bars fall outside the frame, leaving a
-     clean edge-to-edge still. */
-  transform: scale(1.16);
+     clean edge-to-edge still. Kept small: news thumbnails burn their headline
+     into the frame, and a heavier zoom clips the first and last word of it. */
+  transform: scale(1.06);
 }
 .media-card .thumb-wrap.is-empty {
   display: grid; place-items: center;
@@ -4788,12 +4803,18 @@ details.panel > .panel-body { padding: 14px 18px; }
 .media-card .mc-body {
   flex: 1 1 auto;
   display: flex; flex-direction: column; gap: 8px;
-  padding: 12px 14px;
+  /* Flat tile: text hangs below the thumb on the page background, so it only
+     needs breathing room from the image, not box padding on every side. */
+  padding: 9px 4px 0;
 }
 .media-card .item-title {
   font-size: 14px; line-height: 1.35;
   display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
   -webkit-box-orient: vertical; overflow: hidden;
+  /* Two lines are always reserved, so a one-line title doesn't pull its meta
+     row up and leave the row's baselines ragged. Flat tiles have no card edge
+     to hide that against. */
+  min-height: calc(1.35em * 2);
 }
 .media-card:hover .item-title { color: var(--blue); }
 .media-card .mc-body .meta { line-height: 1.5; }
@@ -4820,17 +4841,41 @@ details.panel > .panel-body { padding: 14px 18px; }
   max-width: calc(100% - 44px);
 }
 /* Badges are tuned for dark panels: a 12%-opacity tint that vanishes against a
-   bright video frame. Over a thumbnail they get the same dark plate the
-   duration chip uses, keeping only the hue that carries the meaning. Opaque
-   enough that the frame behind it doesn't wash the text out. */
+   bright video frame. Over a thumbnail they get the same borderless dark plate
+   the duration chip uses. Neutral/progress states read white — color is
+   reserved for done (green) and broken (red) so a colored badge always means
+   something. */
 .media-card .thumb-badge .badge {
   background: rgba(0, 0, 0, 0.82);
-  border-color: rgba(255, 255, 255, 0.2);
+  border-color: transparent;
   color: #fff;
 }
 .media-card .thumb-badge .badge.supportive { color: var(--accent); }
 .media-card .thumb-badge .badge.hostile { color: var(--danger); }
-.media-card .thumb-badge .badge.info { color: var(--blue); }
+/* Relevance score: ambient metadata, not an alert. Plated and sized like the
+   duration chip in the opposite corner, since the grid is already ranked by
+   this number. Only a below-threshold score takes a colour — the weak match is
+   the one worth catching in a scan. */
+.media-card .thumb-badge .badge.score-hi,
+.media-card .thumb-badge .badge.score-lo {
+  padding: 1px 6px;
+  border-radius: 5px;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  background: rgba(0, 0, 0, 0.72);
+}
+.media-card .thumb-badge .badge.score-lo { color: var(--warn); }
+/* Icon-only chip for the multi-clip marker (bottom-left, opposite the
+   duration): a stacked-frames glyph instead of a labelled pill, since the
+   marker is ambient state, not something the operator must read every time. */
+.media-card .mc-multi {
+  position: absolute; left: 6px; bottom: 6px;
+  display: grid; place-items: center;
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+}
 .media-card .mc-x {
   position: absolute; top: 6px; right: 6px;
   width: 24px; height: 24px; min-height: 0; padding: 0;

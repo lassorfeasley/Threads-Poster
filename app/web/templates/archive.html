@@ -34,9 +34,9 @@
     <div class="grow stack-sm">
       <a class="item-title" href="/video/{{ c.id }}">{{ c.title }}</a>
       <div class="meta">
-        {{ c.channel.call_sign }} · {{ c.channel.market }} ·
-        archived {{ c.archived_at.strftime("%b %-d, %Y") if c.archived_at else "?" }} ·
-        transcript via {{ c.transcription_method or "?" }}
+        {{ [c.channel.call_sign, c.channel.market,
+        "archived " ~ (c.archived_at.strftime("%b %-d, %Y") if c.archived_at else "?"),
+        "transcript via " ~ (c.transcription_method or "?")] | select | join(" · ") }}
       </div>
       <div class="badges">
         {% if state.posted %}<span class="badge supportive">posted</span>

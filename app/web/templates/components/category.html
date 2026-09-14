@@ -4,9 +4,10 @@
    is the manual override, and the only way to set a reserved category like
    promos. ``next_url`` is where the form returns.
 
-   Renders as a segmented toggle (emoji + short slug label) rather than a
-   dropdown — a handful of options fit a narrow rail, and the full label is in
-   the button title. #}
+   Renders as a segmented toggle of short slug labels rather than a dropdown —
+   a handful of options fit a narrow rail, and the full label is in the button
+   title. Text only: the configured emoji renders differently on every platform
+   and gave four colour accents to a control that carries no urgency. #}
 {% macro field(candidate_id, category, next_url, show_label=true) %}
 <form method="post" action="/video/{{ candidate_id }}/category" class="cat-toggle-form">
   <input type="hidden" name="next" value="{{ next_url }}">
@@ -15,7 +16,7 @@
     {% for opt in category_options() %}
     <button type="submit" name="category" value="{{ opt.slug }}"
             class="{{ 'is-on' if category == opt.slug }}"
-            title="{{ opt.label }}">{{ opt.emoji }} {{ opt.slug|capitalize }}</button>
+            title="{{ opt.label }}">{{ opt.slug|capitalize }}</button>
     {% endfor %}
   </div>
 </form>

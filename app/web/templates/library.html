@@ -216,8 +216,9 @@
     <form method="post" action="/video/{{ row.c.id }}/cuts" class="picker-row">
       <div class="grow">
         <div class="item-title">{{ row.c.title[:90] }}</div>
-        <div class="meta">{{ row.c.channel.call_sign }} · {{ row.c.channel.market }}
-          {%- if row.cut_count %} · {{ row.cut_count }} clip{{ "s" if row.cut_count != 1 }} already{% endif %}</div>
+        <div class="meta">{{ [row.c.channel.call_sign, row.c.channel.market,
+          ("%d clip%s already" % (row.cut_count, "s" if row.cut_count != 1 else ""))
+          if row.cut_count else None] | select | join(" · ") }}</div>
       </div>
       <button class="btn primary sm">Clip this →</button>
     </form>
