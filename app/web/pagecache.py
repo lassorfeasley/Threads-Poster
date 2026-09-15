@@ -111,6 +111,27 @@ def read_or_last(name: str, fallback: Any = None) -> Any:
         return fallback if value is None else value
 
 
+def read_stale(name: str, fallback: Any = None) -> Any:
+    """The last built copy, without waiting for a stale one to be rebuilt.
+
+    For a dataset drawn on every page whose exactness nobody can perceive.
+    ``invalidate`` is blunt and the database is a round trip away, so reading
+    one of those through ``read`` puts its entire rebuild on the request path
+    of every page in the app after any write — to be at most one refresh
+    interval more current than the copy already in hand. Only a cold entry,
+    with nothing to serve yet, waits.
+    """
+    entry = _entries[name]
+    entry.last_read = time.monotonic()
+    if entry.value is not None:
+        return entry.value
+    try:
+        return _rebuild(name, entry)
+    except Exception:
+        log.warning("Serving %s as %r: nothing built yet", name, fallback, exc_info=True)
+        return fallback
+
+
 def is_warm(name: str) -> bool:
     """Would reading this dataset be free right now?"""
     entry = _entries.get(name)
@@ -166,21 +187,37 @@ def start_refresher() -> None:
     if _thread and _thread.is_alive():
         return
 
+    def _due(now: float) -> list[tuple[str, _Entry]]:
+        # A dataset nobody has asked for yet is still worth building, so the
+        # first visit after a restart isn't the slow one. After that, only
+        # keep warm what's in use.
+        return [(name, entry) for name, entry in list(_entries.items())
+                if entry.background
+                and not (entry.value is not None
+                         and now - entry.last_read > ACTIVE_WINDOW_SECONDS)
+                and not _is_fresh(entry, now)]
+
+    def _refresh(name: str, entry: _Entry) -> None:
+        try:
+            _rebuild(name, entry)
+        except Exception:             # a bad read must not kill the refresher
+            log.exception("Could not refresh %s", name)
+
     def _loop() -> None:
         while True:
-            now = time.monotonic()
-            for name, entry in list(_entries.items()):
-                # A dataset nobody has asked for yet is still worth building,
-                # so the first visit after a restart isn't the slow one. After
-                # that, only keep warm what's in use.
-                idle = (entry.value is not None
-                        and now - entry.last_read > ACTIVE_WINDOW_SECONDS)
-                if not entry.background or idle or _is_fresh(entry, now):
-                    continue
-                try:
-                    _rebuild(name, entry)
-                except Exception:     # a bad read must not kill the refresher
-                    log.exception("Could not refresh %s", name)
+            # Every entry is dropped by every write and each one is several
+            # round trips deep, so rebuilding them in turn takes far longer
+            # than the settle window: the sweep was still going when the
+            # operator's next page arrived, and the two then queued behind
+            # each other for the same slow link. They read independently, so
+            # the sweep costs the slowest of them instead of all of them.
+            sweep = [threading.Thread(target=_refresh, args=(name, entry),
+                                      name=f"pagecache-{name}", daemon=True)
+                     for name, entry in _due(time.monotonic())]
+            for worker in sweep:
+                worker.start()
+            for worker in sweep:
+                worker.join()
             _wake.wait(REFRESH_INTERVAL_SECONDS)
             while _wake.is_set():     # woken by a write; let the burst finish
                 _wake.clear()

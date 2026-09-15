@@ -13,6 +13,7 @@ import datetime as dt
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
@@ -216,7 +217,7 @@ def _stranded_reels():
 def _load_attention_count() -> int:
     """Unacknowledged failed posts, failed reels, reels stranded behind an
     already-published post, and queued posts whose shelf life ran out."""
-    with session_scope() as session:
+    with session_scope(read_only=True) as session:
         count = int(session.execute(
             select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost)
                    + _stranded_reels())
@@ -235,8 +236,15 @@ pagecache.register("attention", _load_attention_count)
 
 def _attention_count() -> int:
     """The bell's count. It renders on every page, so it's kept warm in the
-    background and must never raise."""
-    return pagecache.read_or_last("attention", 0)
+    background and must never raise.
+
+    Read stale on purpose: the count costs seven round trips to build (the
+    expiry check walks the whole placement context), and every write drops it,
+    so waiting for a current one would charge that to the first page load
+    after any action anywhere in the app. The refresher has it right again
+    within a refresh interval, and a bell that's a few seconds behind on a
+    count only the operator's own actions move is nobody's emergency."""
+    return pagecache.read_stale("attention", 0)
 
 
 templates.env.globals["attention_count"] = _attention_count
@@ -606,123 +614,178 @@ def _default_date_window(settings) -> tuple[str, str]:
             today.isoformat())
 
 
+def _candidate_rows(settings, threshold, q="", channel_id=0, keyword=(),
+                    region="", country="", scope="", status="new",
+                    date_from="", date_to="", show_hidden=0) -> dict:
+    """The candidate list: the rows matching the filters, ranked, and how many
+    matched before the render cap."""
+    # Order by the blended relevance+visual ranking so the row cap keeps the
+    # top-ranked candidates (not just the most relevant).
+    query = (
+        select(Candidate)
+        .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
+        .order_by(order_expr(settings).desc(), Candidate.published_at.desc())
+    )
+    if status != "all":
+        query = query.where(Candidate.status == status)
+    if q:
+        like = f"%{q}%"
+        query = query.where(
+            Candidate.title.ilike(like)
+            | Candidate.description.ilike(like)
+            | Candidate.matched_keywords.ilike(like)
+        )
+    if channel_id:
+        query = query.where(Candidate.channel_pk == channel_id)
+    if keyword:
+        # matched_keywords is a CSV list; match rows containing ANY selected keyword.
+        query = query.where(or_(
+            *[("," + Candidate.matched_keywords + ",").like(f"%,{k},%") for k in keyword]
+        ))
+    channel_filters = []
+    if region:
+        channel_filters.append(Channel.region == region)
+    if country:
+        channel_filters.append(Channel.country == country)
+    if scope:
+        channel_filters.append(Channel.scope == scope)
+    if channel_filters:
+        query = query.join(Channel, Candidate.channel_pk == Channel.id).where(*channel_filters)
+    start = _parse_date(date_from)
+    if start:
+        query = query.where(Candidate.published_at >= start)
+    end = _parse_date(date_to)
+    if end:
+        query = query.where(Candidate.published_at < end + dt.timedelta(days=1))
+    if status == "new" and not show_hidden:
+        query = query.where(
+            (Candidate.relevance_score.is_(None)) | (Candidate.relevance_score >= threshold)
+        )
+    row_cap = 150
+
+    def _total() -> int:
+        """Total matching the current filters, before the render cap."""
+        with session_scope(read_only=True) as session:
+            return session.execute(
+                select(func.count()).select_from(query.order_by(None).subquery())
+            ).scalar_one()
+
+    def _rows() -> list:
+        with session_scope(read_only=True) as session:
+            return session.execute(query.limit(row_cap)).scalars().all()
+
+    def _weights() -> dict:
+        with session_scope(read_only=True) as session:
+            return load_trait_weights(session)
+
+    # Neither the count nor the weights has any bearing on the row fetch, and
+    # the fetch (rows, then their channels) is the slowest of the three, so
+    # together they cost about what it costs alone.
+    total_matches, candidates, trait_weights = _in_parallel(_total, _rows, _weights)
+    # Re-rank by relevance, nudged by ACTIVE trait verdicts once unlocked. The
+    # rows are detached by now, and none of the columns this reads are deferred.
+    return {"candidates": sort_candidates(candidates, trait_weights, settings),
+            "total_matches": total_matches, "row_cap": row_cap}
+
+
+def _workflow_buckets() -> dict:
+    """Items mid-workflow (shown on the default view only), split into two
+    buckets: clips still awaiting a trim, and clips already trimmed but never
+    posted (a supercut was exported, yet nothing was published)."""
+    in_progress_rows = []       # selected clips still needing a trim
+    trimmed_rows = []           # trimmed clips that were never posted
+    with session_scope(read_only=True) as session:
+        in_progress = session.execute(
+            select(Candidate)
+            .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
+            .where(Candidate.status.in_([STATUS_APPROVED, STATUS_ARCHIVED, "failed"]))
+            .order_by(Candidate.approved_at.desc())
+            .limit(30)
+        ).scalars().all()
+        # One query for all post statuses instead of 2×N per-row lookups.
+        ip_ids = [c.id for c in in_progress]
+        statuses = _post_statuses_by_candidate(session, ip_ids)
+        exported = _exported_cut_candidate_ids(session, ip_ids)
+        handled_statuses = {"published", "queued", "publishing", "draft"}
+        for c in in_progress:
+            post_st = statuses.get(c.id, set())
+            state = workflow_state(session, c, post_statuses=post_st,
+                                   has_exported_cut=c.id in exported)
+            # A candidate with a FAILED post stays visible so it can be
+            # retried; it's already trimmed, so it belongs in "Trimmed".
+            if "failed" in post_st:
+                state["post_failed"] = True
+                trimmed_rows.append((c, state))
+                continue
+            # The multi-clip marker pins the video to "Selected to trim":
+            # more clips are expected, so exports/handled posts don't move
+            # it along until the operator toggles the marker off.
+            if c.multi_clip_potential:
+                in_progress_rows.append((c, state))
+                continue
+            # Hide once published or sitting in the outbound queue/drafts.
+            # If the operator deletes their only draft/queue, post_st is
+            # empty and the clip stays visible so they can re-post.
+            if post_st & handled_statuses:
+                continue
+            # "post" = supercut exported but nothing published yet.
+            if state["current"] == "post":
+                trimmed_rows.append((c, state))
+            else:
+                in_progress_rows.append((c, state))
+    return {"in_progress": in_progress_rows, "trimmed": trimmed_rows}
+
+
+def _monitor_panel() -> dict:
+    """The "refreshing now / last refreshed" strip above the candidate list."""
+    with session_scope(read_only=True) as session:
+        running, result, last_refreshed = _monitor_view_state(session)
+    return {"monitor_running": running, "monitor_result": result,
+            "monitor_last_refreshed": last_refreshed}
+
+
+def _in_parallel(*calls) -> list:
+    """Run independent reads at once, returning their results in order.
+
+    The database is a round trip away, so reads with no bearing on each other
+    cost the sum of their latencies when run in turn — on the dashboard that
+    was most of a cold page load. An exception in any of them surfaces here
+    exactly as it would have in a serial run.
+    """
+    with ThreadPoolExecutor(max_workers=len(calls), thread_name_prefix="read") as pool:
+        return [future.result() for future in [pool.submit(c) for c in calls]]
+
+
 def _dashboard_data(settings, threshold, q="", channel_id=0, keyword=(),
                     region="", country="", scope="", status="new",
                     date_from="", date_to="", show_hidden=0, filtering=False) -> dict:
-    """The dashboard's reads: matching candidates plus the in-progress buckets."""
-    with session_scope() as session:
-        # Order by the blended relevance+visual ranking so the row cap keeps the
-        # top-ranked candidates (not just the most relevant).
-        query = (
-            select(Candidate)
-            .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
-            .order_by(order_expr(settings).desc(), Candidate.published_at.desc())
-        )
-        if status != "all":
-            query = query.where(Candidate.status == status)
-        if q:
-            like = f"%{q}%"
-            query = query.where(
-                Candidate.title.ilike(like)
-                | Candidate.description.ilike(like)
-                | Candidate.matched_keywords.ilike(like)
-            )
-        if channel_id:
-            query = query.where(Candidate.channel_pk == channel_id)
-        if keyword:
-            # matched_keywords is a CSV list; match rows containing ANY selected keyword.
-            query = query.where(or_(
-                *[("," + Candidate.matched_keywords + ",").like(f"%,{k},%") for k in keyword]
-            ))
-        channel_filters = []
-        if region:
-            channel_filters.append(Channel.region == region)
-        if country:
-            channel_filters.append(Channel.country == country)
-        if scope:
-            channel_filters.append(Channel.scope == scope)
-        if channel_filters:
-            query = query.join(Channel, Candidate.channel_pk == Channel.id).where(*channel_filters)
-        start = _parse_date(date_from)
-        if start:
-            query = query.where(Candidate.published_at >= start)
-        end = _parse_date(date_to)
-        if end:
-            query = query.where(Candidate.published_at < end + dt.timedelta(days=1))
-        if status == "new" and not show_hidden:
-            query = query.where(
-                (Candidate.relevance_score.is_(None)) | (Candidate.relevance_score >= threshold)
-            )
-        # Total matching the current filters, before the render cap below.
-        total_matches = session.execute(
-            select(func.count()).select_from(query.order_by(None).subquery())
-        ).scalar_one()
-        row_cap = 150
-        candidates = session.execute(query.limit(row_cap)).scalars().all()
-        # Re-rank by relevance, nudged by ACTIVE trait verdicts once unlocked.
-        trait_weights = load_trait_weights(session)
-        candidates = sort_candidates(candidates, trait_weights, settings)
+    """The dashboard's reads: matching candidates plus the in-progress buckets.
 
-        # Keyword filter chips come from the active keyword list (what we monitor
-        # for), so removed/legacy terms never show up as filters.
-        keywords_options = sorted(load_keywords())
+    These read independently of one another, so they go out together rather
+    than in turn — see ``_in_parallel``. A candidate can appear in both the
+    list and the buckets, and now arrives as a separate row object in each;
+    they're only ever read from, and both are detached by the time the
+    template sees them either way.
+    """
+    reads = [
+        lambda: _candidate_rows(settings, threshold, q=q, channel_id=channel_id,
+                                keyword=keyword, region=region, country=country,
+                                scope=scope, status=status, date_from=date_from,
+                                date_to=date_to, show_hidden=show_hidden),
+        _monitor_panel,
+    ]
+    # The buckets are the default view's alone; a filtered view never draws them.
+    if not filtering:
+        reads.append(_workflow_buckets)
 
-        # Items mid-workflow (shown on the default view only), split into two
-        # buckets: clips still awaiting a trim, and clips already trimmed but
-        # never posted (a supercut was exported, yet nothing was published).
-        in_progress_rows = []   # selected clips still needing a trim
-        trimmed_rows = []       # trimmed clips that were never posted
-        if not filtering:
-            in_progress = session.execute(
-                select(Candidate)
-                .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
-                .where(Candidate.status.in_([STATUS_APPROVED, STATUS_ARCHIVED, "failed"]))
-                .order_by(Candidate.approved_at.desc())
-                .limit(30)
-            ).scalars().all()
-            # One query for all post statuses instead of 2×N per-row lookups.
-            ip_ids = [c.id for c in in_progress]
-            statuses = _post_statuses_by_candidate(session, ip_ids)
-            exported = _exported_cut_candidate_ids(session, ip_ids)
-            handled_statuses = {"published", "queued", "publishing", "draft"}
-            for c in in_progress:
-                post_st = statuses.get(c.id, set())
-                state = workflow_state(session, c, post_statuses=post_st,
-                                       has_exported_cut=c.id in exported)
-                # A candidate with a FAILED post stays visible so it can be
-                # retried; it's already trimmed, so it belongs in "Trimmed".
-                if "failed" in post_st:
-                    state["post_failed"] = True
-                    trimmed_rows.append((c, state))
-                    continue
-                # The multi-clip marker pins the video to "Selected to trim":
-                # more clips are expected, so exports/handled posts don't move
-                # it along until the operator toggles the marker off.
-                if c.multi_clip_potential:
-                    in_progress_rows.append((c, state))
-                    continue
-                # Hide once published or sitting in the outbound queue/drafts.
-                # If the operator deletes their only draft/queue, post_st is
-                # empty and the clip stays visible so they can re-post.
-                if post_st & handled_statuses:
-                    continue
-                # "post" = supercut exported but nothing published yet.
-                if state["current"] == "post":
-                    trimmed_rows.append((c, state))
-                else:
-                    in_progress_rows.append((c, state))
-
-        monitor_running, monitor_result, monitor_last_refreshed = _monitor_view_state(session)
-
-    return {
-        "candidates": candidates, "total_matches": total_matches, "row_cap": row_cap,
-        "in_progress": in_progress_rows, "trimmed": trimmed_rows,
-        "keywords_options": keywords_options,
-        "monitor_running": monitor_running,
-        "monitor_result": monitor_result,
-        "monitor_last_refreshed": monitor_last_refreshed,
-        "date_from": date_from, "date_to": date_to,
-    }
+    data = {"in_progress": [], "trimmed": [],
+            # Keyword filter chips come from the active keyword list (what we
+            # monitor for), so removed/legacy terms never show up as filters.
+            "keywords_options": sorted(load_keywords()),
+            "date_from": date_from, "date_to": date_to}
+    for result in _in_parallel(*reads):
+        data.update(result)
+    return data
 
 
 def _default_dashboard_data() -> dict:
@@ -3767,7 +3830,7 @@ def _library_dataset() -> dict:
     """Everything the Library page draws. The page takes no server-side filters
     (it ships the whole library and narrows it in the browser), so this is one
     cacheable dataset rather than one per view."""
-    with session_scope() as session:
+    with session_scope(read_only=True) as session:
         # --- Videos (downloaded/archived source clips) ---
         videos = session.execute(
             select(Candidate)
@@ -4034,6 +4097,9 @@ def _calendar_data(y: int, m: int) -> dict:
     queue_count = 0
     status = {}
     windows_et: list[str] = []
+    # Not read_only, despite being a cache loader like the others: the plan
+    # builders below clear stale pins as they walk the queue, so this scope
+    # writes on any day one has gone stale.
     with session_scope() as session:
         # One grouped query instead of two counts: round trips are the page's
         # whole cost on a remote database.
@@ -4191,23 +4257,28 @@ def calendar_page(request: Request, year: int = 0, month: int = 0,
     elif m > 12:
         y, m = y + 1, 1
 
-    # Only this month is kept warm; paging back through history is rare enough
-    # to read directly (and the cached month self-corrects after a rollover).
-    data = pagecache.read("calendar")
-    if (data["year"], data["month"]) != (y, m):
-        data = _calendar_data(y, m)
-    qdata = pagecache.read("calendar-queue")
-
     # Week focus: the focus date IS the left column (rolling 7-day window).
-    # Current window (starting today) stays warm; paging reads live.
     try:
         focus = dt.date.fromisoformat(start) if start else now_local.date()
     except ValueError:
         focus = now_local.date()
     week_start = _week_start_for(focus)
-    wdata = pagecache.read("calendar-week")
-    if wdata["week_start"] != week_start:
-        wdata = _calendar_week_data(week_start)
+
+    def _month() -> dict:
+        # Only this month is kept warm; paging back through history is rare
+        # enough to read directly (and the cached month self-corrects after a
+        # rollover). Same for the week: the current one stays warm, paging reads live.
+        data = pagecache.read("calendar")
+        return data if (data["year"], data["month"]) == (y, m) else _calendar_data(y, m)
+
+    def _week() -> dict:
+        wdata = pagecache.read("calendar-week")
+        return wdata if wdata["week_start"] == week_start else _calendar_week_data(week_start)
+
+    # Three datasets, each several round trips deep and none dependent on the
+    # others — read in turn they cost the sum of three cold rebuilds.
+    data, qdata, wdata = _in_parallel(
+        _month, lambda: pagecache.read("calendar-queue"), _week)
     week_days = [week_start + dt.timedelta(days=i) for i in range(7)]
     week_end = week_days[-1]
     if week_start.month == week_end.month:
@@ -4249,7 +4320,7 @@ def posts_page(msg: str = ""):
 
 def _notifications_data() -> dict:
     """Failed posts and reels awaiting a decision, plus reels left behind."""
-    with session_scope() as session:
+    with session_scope(read_only=True) as session:
         failed = session.execute(
             select(ThreadsPost)
             .options(selectinload(ThreadsPost.cut).selectinload(Cut.candidate),

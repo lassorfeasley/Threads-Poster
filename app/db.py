@@ -43,8 +43,23 @@ else:
 
 engine = create_engine(_url, **_engine_kwargs)
 
+# Reads that never write get their own engine, running in AUTOCOMMIT. Against
+# a remote database that halves the cost of a page build's every session: the
+# implicit BEGIN and the ROLLBACK that closes it are two round trips a read
+# has no use for. It has to be a separate engine — setting the level per
+# checkout via execution_options makes SQLAlchemy reset it on checkin, which
+# costs back exactly what it saved (measured: no change at all). Its pool is
+# smaller than the writer's because page builds are short and bursty, and it
+# keeps pool_pre_ping so a sleep-killed connection can't surface as a failed
+# page. See session_scope.
+_read_engine = create_engine(
+    _url, **({**_engine_kwargs, "max_overflow": 10} if not _is_sqlite else _engine_kwargs),
+    isolation_level="AUTOCOMMIT",
+)
+
 if _is_sqlite:
     @event.listens_for(engine, "connect")
+    @event.listens_for(_read_engine, "connect")
     def _sqlite_pragmas(dbapi_conn, _record):
         # WAL lets readers and one writer coexist; busy_timeout retries instead
         # of instantly raising "database is locked" under brief contention.
@@ -55,6 +70,8 @@ if _is_sqlite:
         cursor.close()
 
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+ReadSessionLocal = sessionmaker(bind=_read_engine, expire_on_commit=False,
+                                autoflush=False, future=True)
 
 
 def init_db() -> None:
@@ -483,11 +500,23 @@ def _drop_removed_columns() -> None:
 
 
 @contextmanager
-def session_scope():
-    session: Session = SessionLocal()
+def session_scope(*, read_only: bool = False):
+    """A session, committed on the way out.
+
+    ``read_only=True`` binds to the AUTOCOMMIT engine and never commits, which
+    on a remote database is worth two round trips per scope (roughly half of
+    what a short page build spends).
+
+    Opt-in rather than the default, because writing through one of these would
+    commit statement by statement with no way back — and "this only reads" is
+    easy to believe wrongly. Build a plan, for instance, and you have written:
+    ``build_window_plan`` clears stale pins as it goes.
+    """
+    session: Session = ReadSessionLocal() if read_only else SessionLocal()
     try:
         yield session
-        session.commit()
+        if not read_only:
+            session.commit()
     except Exception:
         session.rollback()
         raise

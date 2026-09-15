@@ -293,9 +293,16 @@ def _spacing_ok(state: SchedulerState, now: dt.datetime) -> bool:
 
 
 def _queue_regular(session) -> list[ThreadsPost]:
-    """Queued posts in FIFO (created_at) order."""
+    """Queued posts in FIFO (created_at) order.
+
+    The candidate and cut come along eagerly: every caller that builds a plan
+    goes on to read them per post, and lazily that was two round trips per
+    queued post — the single biggest cost on the post page, the calendar, the
+    notifications list, and the bell.
+    """
     return list(session.execute(
         select(ThreadsPost)
+        .options(selectinload(ThreadsPost.candidate), selectinload(ThreadsPost.cut))
         .where(ThreadsPost.status == STATUS_QUEUED)
         .order_by(ThreadsPost.created_at.asc())
     ).scalars().all())
