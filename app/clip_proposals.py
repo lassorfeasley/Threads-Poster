@@ -29,7 +29,7 @@ from sqlalchemy import select, update
 
 from . import llm, vision
 from .llm import suggest_clips
-from .models import ClipProposal, Cut, utcnow
+from .models import ClipProposal, ClipRevision, Cut, utcnow
 
 log = logging.getLogger("clip_proposals")
 
@@ -49,6 +49,17 @@ _MATCH_FLOOR = 0.05
 # worth offering at all.
 _MIN_FRAGMENT = 1.5
 _MIN_REMAINING = 5.0
+
+# Why a dismissal happened — the one-click annotation offered right after
+# dismissing, never required. Slugs are the stable vocabulary (labels live in
+# the UI); each names a different fix, which is the point of collecting them:
+# off_topic / not_clipworthy are partition misses, bad_boundaries and too_long
+# are prompt fixes, weak_visuals indicts the opening pass, already_covered
+# means the model ignored (or wasn't shown) what's been posted.
+DISMISS_REASONS = frozenset({
+    "off_topic", "weak_visuals", "bad_boundaries",
+    "too_long", "already_covered", "not_clipworthy",
+})
 
 
 # ---- interval math ----------------------------------------------------------
@@ -129,17 +140,21 @@ def subtract(segments: list[dict], used: list[dict]) -> list[dict]:
     return [p for p in out if p["end"] - p["start"] >= _MIN_FRAGMENT]
 
 
-def used_ranges(session, candidate_pk: int) -> list[dict]:
+def used_ranges(session, candidate_pk: int,
+                exclude_cut_pk: int | None = None) -> list[dict]:
     """Time on this video already claimed by a clip.
 
     Every cut counts, exported or not — segments saved into a cut are a claim
     on that material, which is the same rule the trim editor's dashed overlay
-    already draws.
+    already draws. ``exclude_cut_pk`` leaves one cut out: when revising a cut's
+    own segments, its material is the thing being edited, not a claim against
+    itself.
     """
     spans: list[dict] = []
-    rows = session.execute(
-        select(Cut).where(Cut.candidate_pk == candidate_pk, Cut.trim_segments != "")
-    ).scalars().all()
+    where = [Cut.candidate_pk == candidate_pk, Cut.trim_segments != ""]
+    if exclude_cut_pk is not None:
+        where.append(Cut.id != exclude_cut_pk)
+    rows = session.execute(select(Cut).where(*where)).scalars().all()
     for cut in rows:
         try:
             spans.extend(json.loads(cut.trim_segments) or [])
@@ -249,6 +264,23 @@ def _backstop(start: float, blocked: list[dict]) -> float:
     return floor
 
 
+def _one_line(text: str, limit: int = 150) -> str:
+    """The model's rationale, cut down to a receipt the rail can hold.
+
+    ``pick_opening_frame`` asks for one line and often writes a paragraph, and
+    a hard character cap ends it mid-word. Keep the first sentence — the claim
+    is always there; the frame-by-frame inventory that follows is not worth a
+    rail full of text. The full text still goes to the log.
+    """
+    text = " ".join((text or "").split())
+    if not text:
+        return ""
+    head = text.split(". ")[0].rstrip(". ")
+    if len(head) > limit:
+        return head[:limit].rsplit(" ", 1)[0].rstrip(",;:—-") + "…"
+    return head + "."
+
+
 def refine_opening(candidate, segments: list[dict], settings,
                    blocked: list[dict], story: str = "") -> list[dict]:
     """Pull a clip's start back onto a stronger image, using the actual frames.
@@ -263,10 +295,25 @@ def refine_opening(candidate, segments: list[dict], settings,
     into material another clip already claims. Any failure — no local file, no
     ffmpeg, no answer — leaves the transcript's start exactly as it was.
     """
-    if not segments or not getattr(candidate, "local_video_path", ""):
-        return segments
+    return refine_opening_detail(candidate, segments, settings, blocked, story)[0]
+
+
+def refine_opening_detail(candidate, segments: list[dict], settings,
+                          blocked: list[dict],
+                          story: str = "") -> tuple[list[dict], str]:
+    """``refine_opening`` plus a one-line account of what happened.
+
+    The suggester only needs the segments: a silent no-op is fine while it
+    polishes its own proposal. An operator who pressed a button needs to know
+    which no-op they got — the model looked and kept the start, or it never
+    got to look at all — so every early return here carries a reason.
+    """
+    if not segments:
+        return segments, "Mark a segment first."
+    if not getattr(candidate, "local_video_path", ""):
+        return segments, "The source video isn't on disk, so there are no frames to look at."
     if not settings.get("clips.opening_vision", True):
-        return segments
+        return segments, "Opening-shot vision is switched off (clips.opening_vision)."
 
     lead = float(settings.get("clips.opening_lead_seconds", 4.0))
     hold = float(settings.get("clips.opening_hold_seconds", 3.0))
@@ -278,8 +325,10 @@ def refine_opening(candidate, segments: list[dict], settings,
     start = float(first["start"])
     floor = _backstop(start, normalize(blocked))
     window_start = max(floor, start - lead)
+    no_room = ("No lead-in room before this start — the top of the video, or "
+               "footage another clip already uses, is right there.")
     if start - window_start < interval:
-        return segments  # nowhere to move
+        return segments, no_room
 
     # Sample past the start too: the model can only tell whether a shot HOLDS
     # by seeing what follows it.
@@ -287,30 +336,36 @@ def refine_opening(candidate, segments: list[dict], settings,
     frames = vision.frames_between(candidate.local_video_path, window_start,
                                    window_end, interval)
     if len(frames) < 2:
-        return segments
+        return segments, "Couldn't sample frames from the video file."
     latest = min(range(len(frames)), key=lambda i: abs(frames[i][0] - start))
     if latest <= 0:
-        return segments
+        return segments, no_room
 
     try:
         picked = llm.pick_opening_frame(model, frames, latest, hold,
                                         title=candidate.title, story=story)
     except Exception as exc:
         log.info("Opening frame pick failed for %s: %s", candidate.video_id, exc)
-        return segments
+        return segments, f"The vision model didn't answer: {exc}"
 
+    raw_why = str(picked.get("why", "")).strip()
+    why = _one_line(raw_why)
     index = picked.get("index")
+    kept = (f"Kept your opening — nothing stronger in the {lead:g}s before it."
+            + (f" {why}" if why else ""))
     if index is None or index >= latest:
-        return segments
+        return segments, kept
     new_start = max(floor, frames[index][0])
     if new_start >= start - 0.05:
-        return segments
+        return segments, kept
 
     out = [dict(s) for s in segments]
     out[0]["start"] = round(new_start, 2)
     log.info("Opening for %s moved %.1fs -> %.1fs (%s)", candidate.video_id,
-             start, new_start, picked.get("why", ""))
-    return out
+             start, new_start, raw_why)
+    moved = (f"Opened {start - new_start:.1f}s earlier, at "
+             f"{int(new_start // 60)}:{int(new_start % 60):02d}.")
+    return out, (f"{moved} {why}" if why else moved)
 
 
 def load_transcript(candidate) -> list[dict]:
@@ -417,6 +472,48 @@ def dismiss(session, proposal_id: int) -> bool:
     row.verdict = ClipProposal.VERDICT_DISMISSED
     row.decided_at = utcnow()
     return True
+
+
+def set_dismiss_reason(session, proposal_id: int, reason: str) -> bool:
+    """Attach a why to a dismissal, after the fact.
+
+    Deliberately a separate call from ``dismiss``: the dismissal itself must
+    stay one click, and the reason is a bonus the operator may or may not
+    volunteer. The latest click wins. Only dismissed/superseded rows take one —
+    an accepted clip has nothing to explain.
+    """
+    if reason not in DISMISS_REASONS:
+        return False
+    row = session.get(ClipProposal, proposal_id)
+    if row is None or row.verdict not in (ClipProposal.VERDICT_DISMISSED,
+                                          ClipProposal.VERDICT_SUPERSEDED):
+        return False
+    row.dismiss_reason = reason
+    return True
+
+
+# The one canned instruction, logged verbatim so a year of revisions can be
+# split into "what the operator typed" and "what the opening button did".
+OPENING_INSTRUCTION = "Better opening shot"
+
+
+def log_revision(session, cut_pk: int, candidate_pk: int, instruction: str, *,
+                 before: list[dict], after: list[dict], note: str,
+                 changed: bool, model: str) -> ClipRevision:
+    """Record one prompted edit. Written when the revision is served — kept or
+    not, the instruction is the signal (see ``ClipRevision``)."""
+    row = ClipRevision(
+        cut_pk=cut_pk,
+        candidate_pk=candidate_pk,
+        instruction=instruction[:500],
+        before_segments=json.dumps(before),
+        after_segments=json.dumps(after),
+        note=note[:300],
+        changed=changed,
+        model=model,
+    )
+    session.add(row)
+    return row
 
 
 def dismiss_pending(session, candidate_pk: int) -> int:

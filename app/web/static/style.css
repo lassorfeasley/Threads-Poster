@@ -4657,6 +4657,157 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
   gap: 5px;
 }
 
+/* --- Dismiss reasons: a transient one-click "why?" offered right after a
+   dismissal. The dismissal is already recorded when this appears, so it must
+   read as a bonus, not a gate — quiet fill, small pills, an easy ✕. --- */
+.reason-ask {
+  margin: 0 -12px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--panel2) 60%, transparent);
+  border-bottom: 1px solid var(--border);
+  animation: reason-ask-in 0.18s ease;
+}
+.reason-ask:last-child { border-bottom: none; }
+@keyframes reason-ask-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.reason-ask-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.reason-ask-label {
+  font-size: var(--text-meta);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.reason-ask-optional { font-weight: 400; color: var(--muted); }
+.reason-ask-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.reason-ask-close:hover { color: var(--text); background: var(--panel3); }
+.reason-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+.reason-pill {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 3px 11px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.reason-pill:hover {
+  color: var(--text);
+  border-color: rgba(167, 139, 250, 0.65);
+  background: rgba(167, 139, 250, 0.12);
+}
+
+/* --- Prompted edits: the "tell the AI to change this clip" field under the
+   segment list. Violet is the AI-affordance colour in the trim rail (matching
+   the suggestions panel), so the field only shows it on focus — a quiet input
+   until you're actually talking to the model. --- */
+.revise-box { margin-top: 10px; }
+.revise-form { position: relative; }
+.revise-input {
+  width: 100%;
+  padding: 8px 40px 8px 12px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+.revise-input:focus {
+  outline: none;
+  border-color: rgba(167, 139, 250, 0.7);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.15);
+}
+.revise-send {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: rgba(167, 139, 250, 0.16);
+  color: rgba(167, 139, 250, 0.95);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.revise-send:hover { background: rgba(167, 139, 250, 0.3); color: var(--text); }
+.revise-send:disabled { cursor: default; }
+/* Canned instructions, in the pill shape the dismiss reasons already use —
+   one row, same violet-on-hover AI affordance as the field above them. */
+.revise-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.revise-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 3px 11px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.revise-chip:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(167, 139, 250, 0.65);
+  background: rgba(167, 139, 250, 0.12);
+}
+.revise-chip:disabled { opacity: 0.55; cursor: default; }
+/* Working: the chip itself is the spinner, since the note underneath already
+   says what's happening. */
+.revise-chip.is-busy {
+  opacity: 1;
+  color: rgba(167, 139, 250, 0.95);
+  border-color: rgba(167, 139, 250, 0.5);
+  animation: revise-chip-pulse 0.9s ease-in-out infinite;
+}
+@keyframes revise-chip-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.revise-chip svg { flex: none; }
+
+.revise-note { margin-top: 5px; line-height: 1.4; }
+.revise-note.is-error { color: var(--danger); }
+/* display would beat the [hidden] UA rule after JS un-hides it once. */
+.revise-note[hidden], .revise-box[hidden] { display: none; }
+
 /* --- Ship rail: plain action card at the top of the rail stack (primary
    action full-width, alternatives side by side beneath). --- */
 .ship-rail {

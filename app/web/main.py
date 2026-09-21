@@ -52,6 +52,7 @@ from ..engagement import PacingLimitError, post_approved_reply, sync_comments
 from ..giphy import is_configured as giphy_configured
 from ..history import import_history
 from ..llm import (
+    revise_clip,
     suggest_calendar_name,
     suggest_channel_fields,
     suggest_hook_text,
@@ -120,7 +121,8 @@ from ..scheduler import (
     start_scheduler_thread,
     window_time_labels,
 )
-from ..scrape import PASTED_CHANNEL_URL, archive_candidate, fetch_video_metadata
+from ..scrape import (PASTED_CHANNEL_URL, archive_candidate, fetch_video_metadata,
+                      load_word_transcript)
 from ..vision import (
     annotate_cut_footage, annotate_post_footage, suggest_subs_position,
     tag_candidate_storyboard,
@@ -1064,6 +1066,30 @@ def video_waveform(candidate_id: int):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/video/{candidate_id}/word-snaps")
+def video_word_snaps(candidate_id: int):
+    """Whisper word boundaries for the trim editor's edge snapping.
+
+    Two sorted arrays instead of the raw word list: a clip START should land on
+    the first frame of a word and a clip END right after the last one, so each
+    edge kind snaps against its own array. Videos without a word transcript get
+    empty arrays and the editor simply doesn't snap.
+    """
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        words = load_word_transcript(c)
+    starts, ends = set(), set()
+    for w in words:
+        try:
+            starts.add(round(float(w["start"]), 2))
+            ends.add(round(float(w["end"]), 2))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {"starts": sorted(starts), "ends": sorted(ends)}
+
+
 @app.get("/video/{candidate_id}/storyboard")
 def video_storyboard(candidate_id: int):
     """Filmstrip data for triage: YouTube's own scrub-preview sprite sheets
@@ -1323,6 +1349,122 @@ def dismiss_clip_proposals(candidate_id: int):
     with session_scope() as session:
         n = clip_proposals.dismiss_pending(session, candidate_id)
     return JSONResponse({"ok": True, "dismissed": n})
+
+
+@app.post("/clip-proposal/{proposal_id}/reason")
+def clip_proposal_reason(proposal_id: int, reason: str = Form(...)):
+    """Attach a why to a dismissal — one optional click after the fact, so the
+    dismissal itself stays one click and keeps getting recorded."""
+    with session_scope() as session:
+        if not clip_proposals.set_dismiss_reason(session, proposal_id, reason):
+            return JSONResponse({"error": "Unknown reason or proposal"},
+                                status_code=409)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/cut/{cut_id}/revise")
+def revise_cut_segments(cut_id: int, instruction: str = Form(...),
+                        segments_json: str = Form(...)):
+    """Apply one operator instruction to the clip's segments via the model.
+
+    Operates on the segments the CLIENT sent, not the saved cut — trim edits
+    are unsaved until export, and the instruction refers to what's on screen.
+    Nothing is written to the cut either: the result goes back to the editor,
+    where the undo stack covers it and "Save clip" commits it like any hand
+    edit. Ungated like the other operator-initiated suggest routes — the
+    budget guard exists to stop unattended passes, not a person clicking.
+    """
+    instruction = instruction.strip()
+    if not instruction:
+        return JSONResponse({"error": "Say what to change"}, status_code=400)
+    try:
+        current = json.loads(segments_json) or []
+    except (ValueError, TypeError):
+        current = []
+    if not current:
+        return JSONResponse({"error": "Mark at least one segment first"},
+                            status_code=409)
+
+    settings = load_settings()
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "Clip not found"}, status_code=404)
+        c = session.get(Candidate, cut.candidate_pk)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        transcript = clip_proposals.load_transcript(c)
+        words = clip_proposals.load_words(c)
+        if not transcript and not words:
+            return JSONResponse(
+                {"error": "No transcript for this video — revisions are "
+                          "drafted from what is said in it."},
+                status_code=409)
+        model = settings.get("clips.model",
+                             settings.get("matching.model", "claude-haiku-4-5"))
+        try:
+            result = revise_clip(
+                model, c.title, instruction, current, transcript,
+                words=words,
+                used_ranges=clip_proposals.used_ranges(session, c.id,
+                                                       exclude_cut_pk=cut.id),
+            )
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        clip_proposals.log_revision(
+            session, cut.id, c.id, instruction,
+            before=current, after=result["segments"], note=result["note"],
+            changed=result["changed"], model=model,
+        )
+    return JSONResponse(result)
+
+
+@app.post("/cut/{cut_id}/refine-opening")
+def refine_cut_opening(cut_id: int, segments_json: str = Form(...)):
+    """Put the clip's opening on a frame worth looking at.
+
+    The one instruction that can't be typed: a transcript says nothing about
+    what's on screen, so this samples the footage around the first segment's
+    start and lets the vision model choose the shot to open on. The start only
+    ever moves EARLIER, onto lead-in footage, so nothing said in the clip is
+    lost. Same contract as ``/revise`` — the client's segments in, revised
+    segments out, saved by nothing but the operator's own Save.
+    """
+    try:
+        current = json.loads(segments_json) or []
+    except (ValueError, TypeError):
+        current = []
+    if not current:
+        return JSONResponse({"error": "Mark at least one segment first"},
+                            status_code=409)
+
+    settings = load_settings()
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None:
+            return JSONResponse({"error": "Clip not found"}, status_code=404)
+        c = session.get(Candidate, cut.candidate_pk)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        # This clip's own later segments block the pull-back as firmly as
+        # another clip's material does: an opening must not reach back into
+        # footage the same supercut plays further along.
+        blocked = clip_proposals.used_ranges(session, c.id, exclude_cut_pk=cut.id)
+        blocked = blocked + clip_proposals.normalize(current[1:])
+        model = settings.get("clips.opening_model",
+                             settings.get("vision.model", "claude-haiku-4-5"))
+        try:
+            segments, note = clip_proposals.refine_opening_detail(
+                c, current, settings, blocked, story=cut.clip_title or "")
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        changed = segments != current
+        clip_proposals.log_revision(
+            session, cut.id, c.id, clip_proposals.OPENING_INSTRUCTION,
+            before=current, after=segments, note=note, changed=changed,
+            model=model,
+        )
+    return JSONResponse({"segments": segments, "note": note, "changed": changed})
 
 
 @app.post("/clip-proposal/{proposal_id}/new-cut")

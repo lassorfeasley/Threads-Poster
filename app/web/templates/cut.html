@@ -72,7 +72,7 @@
       </svg>
     </button>
   </div>
-  <canvas id="detail-wave" title="Drag the orange edges to fine-trim. Click to play from there up to the end. The dim sides are lead-in / lead-out room."></canvas>
+  <canvas id="detail-wave" title="Drag the orange edges to fine-trim — they snap to word boundaries (hold ⌥ Alt to place freely; ticks mark word starts/ends). Click to play from there up to the end. The dim sides are lead-in / lead-out room."></canvas>
 </div>
 
 <div class="row trim-layout" style="margin-top: 16px; align-items: flex-start;">
@@ -137,6 +137,36 @@
       </button>
     </div>
     <div id="segments"></div>
+    {# Prompted edits: one instruction in, revised segments out. The result
+       lands through the same undo stack as a hand edit — ⌘Z is the diff. #}
+    <div id="revise-box" class="revise-box" hidden>
+      <form class="revise-form" onsubmit="return submitRevise(event)">
+        <input type="text" id="revise-input" class="revise-input"
+               placeholder="Tell the AI to change this clip…"
+               title='One instruction at a time — e.g. "cut the anchor intro" or "end on the quote about the levee"'
+               autocomplete="off" maxlength="300">
+        <button type="submit" class="revise-send" id="revise-send"
+                title="Revise the clip (Enter)" aria-label="Revise the clip">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+               stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 19V5M5 12l7-7 7 7"/>
+          </svg>
+        </button>
+      </form>
+      {# The one instruction you can't type: only the footage knows what the
+         opening looks like. #}
+      <div class="revise-chips">
+        <button type="button" class="revise-chip" id="chip-opening" onclick="refineOpening()"
+                title="Look at the footage just before this clip starts and move the opening onto a stronger frame. The start only moves earlier, so nothing said is lost.">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/>
+          </svg>
+          Better opening shot
+        </button>
+      </div>
+      <div class="meta revise-note" id="revise-note" aria-live="polite" hidden></div>
+    </div>
     <div id="export-panel" hidden>
     <form method="post" action="/cut/{{ cut.id }}/export" onsubmit="return startExport(event)">
       <input type="hidden" name="segments_json" value="">
@@ -619,7 +649,7 @@ function initSegDnd() {
         frozenSegWin = segWindow(from); frozenSegIdx = from;
         const g = segWaveGeom(from, e.clientX);
         segPtr = { from, x: e.clientX, y: e.clientY, mode: 'edge', edge, pid: e.pointerId };
-        if (g) setSegEdge(from, edge, g.t);
+        if (g) setSegEdge(from, edge, snapEdge(edge, g.t, g.r.width / g.span, e));
         drawWave();
         return;
       }
@@ -653,7 +683,7 @@ function initSegDnd() {
       e.preventDefault();
       const g = segWaveGeom(segPtr.from, e.clientX);
       if (g) {
-        setSegEdge(segPtr.from, segPtr.edge, g.t);
+        setSegEdge(segPtr.from, segPtr.edge, snapEdge(segPtr.edge, g.t, g.r.width / g.span, e));
         drawWave();
       }
       return;
@@ -921,6 +951,45 @@ const wave = document.getElementById('wave');
 const wctx = wave.getContext('2d');
 let wf = null;   // {peaks: [...], duration}
 
+// ---- Word-boundary snapping ----
+// Dragged edges land on Whisper word boundaries so a cut never clips the
+// middle of a word: START edges snap onto the first frame of a word, END
+// edges onto the last. Hold Alt/Option while dragging to place an edge freely.
+// Videos without a word transcript leave this null and nothing snaps.
+let wordSnaps = null;   // {starts: [...], ends: [...]} — both sorted
+
+(async function loadWordSnaps() {
+  try {
+    const r = await fetch('/video/{{ c.id }}/word-snaps');
+    if (!r.ok) return;
+    const body = await r.json();
+    if (body && Array.isArray(body.starts) && body.starts.length) wordSnaps = body;
+  } catch (e) { /* the editor works unsnapped */ }
+})();
+
+function nearestSnap(arr, t) {
+  let lo = 0, hi = arr.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < t) lo = mid + 1; else hi = mid;
+  }
+  const before = arr[Math.max(0, lo - 1)];
+  return Math.abs(before - t) <= Math.abs(arr[lo] - t) ? before : arr[lo];
+}
+
+// Snap a dragged edge time to the nearest word boundary of its kind. The
+// tolerance is pixel-based (what "near" means on screen), so the forgiving
+// overview and the precise detail strip both feel right — but capped in
+// seconds so silence and lead-in room stay freely draggable.
+function snapEdge(edge, t, pxPerSec, ev) {
+  if (!wordSnaps || (ev && ev.altKey)) return t;
+  const arr = edge === 'start' ? wordSnaps.starts : wordSnaps.ends;
+  if (!arr || !arr.length) return t;
+  const tol = Math.min(Math.max(10 / (pxPerSec || 1), 0.05), 1.0);
+  const s = nearestSnap(arr, t);
+  return Math.abs(s - t) <= tol ? s : t;
+}
+
 async function loadWave() {
   try {
     const r = await fetch('/video/{{ c.id }}/waveform');
@@ -1159,8 +1228,9 @@ wave.addEventListener('pointermove', e => {
     dragging.moved = true;
     pushUndo();
   }
-  if (dragging.kind === 'pending') { pending[dragging.edge] = t; renderPending(); }
-  else setSegEdge(dragging.index, dragging.edge, t);
+  const snapped = snapEdge(dragging.edge, t, rect.width / duration(), e);
+  if (dragging.kind === 'pending') { pending[dragging.edge] = snapped; renderPending(); }
+  else setSegEdge(dragging.index, dragging.edge, snapped);
 });
 wave.addEventListener('pointerleave', () => { waveHoverX = null; });
 wave.addEventListener('pointerup', () => {
@@ -1227,8 +1297,10 @@ function syncExportControls() {
   const has = segments.length > 0;
   const segmentsBar = document.getElementById('segments-bar');
   const exportPanel = document.getElementById('export-panel');
+  const reviseBox = document.getElementById('revise-box');
   if (segmentsBar) segmentsBar.hidden = !has;
   if (exportPanel) exportPanel.hidden = !has;
+  if (reviseBox) reviseBox.hidden = !has;
   // Deleting the last segment while previewing would leave a stuck pass.
   if (!has && previewMode) setPreviewMode(false);
 }
@@ -1276,6 +1348,58 @@ let userExpandedProposals = false;
 
 function clipProposalById(id) {
   return suggestedClips.find(c => c.id === id) || null;
+}
+
+// One transient "why?" strip after a dismissal. Optional by design — the
+// dismissal is already recorded when this appears, so ignoring it costs
+// nothing and answering it is one click. A new dismissal replaces the strip.
+let reasonAsk = null;   // {ids: [...]} — the proposals just dismissed
+
+const DISMISS_REASONS = [
+  ['off_topic', 'Off topic'],
+  ['weak_visuals', 'Weak visuals'],
+  ['bad_boundaries', 'Bad boundaries'],
+  ['too_long', 'Too long'],
+  ['already_covered', 'Already covered'],
+  ['not_clipworthy', 'Not clipworthy'],
+];
+
+function renderReasonAsk(list) {
+  if (!reasonAsk) return;
+  const many = reasonAsk.ids.length > 1;
+  const strip = document.createElement('div');
+  strip.className = 'reason-ask';
+  strip.innerHTML = `
+    <div class="reason-ask-head">
+      <span class="reason-ask-label">${many ? `Dismissed ${reasonAsk.ids.length}` : 'Dismissed'} — why? <span class="reason-ask-optional">(optional)</span></span>
+      <button type="button" class="reason-ask-close" title="Skip" aria-label="Skip">
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
+             stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="reason-pills">${DISMISS_REASONS.map(([slug, label]) =>
+      `<button type="button" class="reason-pill" data-reason="${slug}">${label}</button>`).join('')}
+    </div>`;
+  strip.querySelectorAll('.reason-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const reason = btn.dataset.reason;
+      reasonAsk.ids.forEach(id => {
+        fetch(`/clip-proposal/${id}/reason`, {
+          method: 'POST',
+          body: new URLSearchParams({ reason }),
+        }).catch(() => {});
+      });
+      reasonAsk = null;
+      renderClipProposals();
+    });
+  });
+  strip.querySelector('.reason-ask-close').addEventListener('click', () => {
+    reasonAsk = null;
+    renderClipProposals();
+  });
+  list.appendChild(strip);
 }
 
 // Mirror of clip_proposals.subtract / visible_segments on the server. A
@@ -1359,13 +1483,12 @@ function renderClipProposals() {
   // Collapsed = just the one-line header; the actions go with the list.
   foot.hidden = collapsed;
 
-  if (!n) {
-    list.innerHTML = '';
-    return;
-  }
-  if (collapsed) { list.innerHTML = ''; return; }
-
   list.innerHTML = '';
+  // The reason strip survives the dismissal that emptied the list — that's
+  // exactly the moment it's for. A collapsed panel still hides it.
+  if (!collapsed) renderReasonAsk(list);
+  if (!n || collapsed) return;
+
   live.forEach(({ clip, view }) => {
     const row = document.createElement('div');
     row.className = 'proposal-row' + (hoveredProposal === clip.id ? ' hot' : '');
@@ -1461,6 +1584,7 @@ async function clipProposalToNewCut(id) {
 function dismissClipProposal(id) {
   suggestedClips = suggestedClips.filter(c => c.id !== id);
   if (hoveredProposal === id) hoveredProposal = null;
+  reasonAsk = { ids: [id] };
   renderClipProposals();
   fetch(`/clip-proposal/${id}/dismiss`, { method: 'POST' }).catch(() => {});
 }
@@ -1469,6 +1593,7 @@ function dismissClipProposal(id) {
 // clicks to reject is a miss that stops getting recorded.
 function dismissAllClipProposals() {
   if (!suggestedClips.length) return;
+  reasonAsk = { ids: suggestedClips.map(c => c.id) };
   suggestedClips = [];
   hoveredProposal = null;
   renderClipProposals();
@@ -1485,6 +1610,7 @@ async function rerollClipProposals() {
     if (d.clips) {
       suggestedClips = d.clips;
       userExpandedProposals = true;
+      reasonAsk = null;   // a fresh run makes the old strip stale
       renderClipProposals();
       const toggle = document.getElementById('multi-clip-toggle');
       if (toggle) toggle.checked = !!d.multi_clip;
@@ -1495,6 +1621,89 @@ async function rerollClipProposals() {
   } catch (e) { alert('Suggestion failed: ' + e); }
   btn.disabled = false;
   btn.classList.remove('is-busy');
+}
+
+// ---- Prompted edits ------------------------------------------------------
+// One instruction against the segments as they are on screen right now. The
+// result lands through pushUndo like any hand edit, so ⌘Z is the diff view —
+// nothing is saved to the cut until "Save clip", same as dragging an edge.
+let revising = false;
+
+function setRevising(on, chip) {
+  revising = on;
+  document.getElementById('revise-input').disabled = on;
+  document.getElementById('revise-send').disabled = on;
+  document.querySelectorAll('.revise-chip').forEach(b => { b.disabled = on; });
+  if (chip) chip.classList.toggle('is-busy', on);
+}
+
+function reviseNote(text, isError) {
+  const note = document.getElementById('revise-note');
+  note.hidden = false;
+  note.classList.toggle('is-error', !!isError);
+  note.textContent = text;
+}
+
+// The tail both paths share: the model's segments land through pushUndo, same
+// as a hand edit, and the model's own account of the change is the receipt.
+function applyRevision(d) {
+  if (!d.changed) { reviseNote(d.note || 'Nothing changed.'); return; }
+  pushUndo();
+  segments = d.segments.map(s => ({
+    start: +Number(s.start).toFixed(2), end: +Number(s.end).toFixed(2),
+  }));
+  if (selectedSeg !== null && selectedSeg >= segments.length) selectedSeg = null;
+  renderSegments();
+  reviseNote((d.note ? d.note + ' — ' : '') + '⌘Z undoes it');
+}
+
+async function submitRevise(ev) {
+  ev.preventDefault();
+  const input = document.getElementById('revise-input');
+  const send = document.getElementById('revise-send');
+  const instruction = input.value.trim();
+  if (revising || !instruction || !segments.length) return false;
+
+  setRevising(true);
+  send.classList.add('is-loading');
+  reviseNote('Revising…');
+  try {
+    const r = await fetch('/cut/{{ cut.id }}/revise', {
+      method: 'POST',
+      body: new URLSearchParams({ instruction, segments_json: JSON.stringify(segments) }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    applyRevision(d);
+    if (d.changed) input.value = '';
+  } catch (e) {
+    reviseNote(e.message || 'Revision failed', true);
+  }
+  send.classList.remove('is-loading');
+  setRevising(false);
+  return false;
+}
+
+// Same contract as a typed instruction, but this one reads frames instead of
+// words: the transcript can't say whether the clip opens on a burning hillside
+// or on an anchor at a desk.
+async function refineOpening() {
+  if (revising || !segments.length) return;
+  const chip = document.getElementById('chip-opening');
+  setRevising(true, chip);
+  reviseNote('Looking at the footage…');
+  try {
+    const r = await fetch('/cut/{{ cut.id }}/refine-opening', {
+      method: 'POST',
+      body: new URLSearchParams({ segments_json: JSON.stringify(segments) }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    applyRevision(d);
+  } catch (e) {
+    reviseNote(e.message || 'Could not check the opening', true);
+  }
+  setRevising(false, chip);
 }
 
 function selectSegment(i) {
@@ -1649,6 +1858,19 @@ function drawDetailWave() {
     ctx.fillRect(0, mid - 1, W, 2);
   }
 
+  // Snap targets: word starts tick down from the top, word ends up from the
+  // bottom, so you can see where a dragged edge will land.
+  if (wordSnaps) {
+    const tickH = Math.max(3, H * 0.14), tickW = Math.max(1, dpr);
+    ctx.fillStyle = 'rgba(255,255,255,0.28)';
+    for (const t of wordSnaps.starts) {
+      if (t >= win.a && t <= win.b) ctx.fillRect(xOfT(t), 0, tickW, tickH);
+    }
+    for (const t of wordSnaps.ends) {
+      if (t >= win.a && t <= win.b) ctx.fillRect(xOfT(t), H - tickH, tickW, tickH);
+    }
+  }
+
   // Edge handles — thicker than the overview so they're easy to grab.
   ctx.fillStyle = 'rgba(240,180,90,0.95)';
   ctx.fillRect(xOfT(s.start) - 2, 0, 4, H);
@@ -1706,13 +1928,13 @@ function redrawDetailWave(resize) {
     detailHoverX = null;
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic */ }
     const edge = edgeAt(ev.clientX);
-    const { t } = winX(ev.clientX);
+    const { t, r, span } = winX(ev.clientX);
     if (edge) {
       pushUndo(); drag = edge;
       if (previewMode) player.pause();
       frozenSegWin = null; frozenSegIdx = null;
       frozenSegWin = segWindow(i); frozenSegIdx = i;
-      setSegEdge(i, edge, t); drawDetailWave();
+      setSegEdge(i, edge, snapEdge(edge, t, r.width / span, ev)); drawDetailWave();
     } else {
       drag = 'scrub';
       player.currentTime = Math.max(0, t);
@@ -1730,9 +1952,9 @@ function redrawDetailWave(resize) {
       return;
     }
     detailHoverX = null;
-    const { t, i } = winX(ev.clientX);
+    const { t, i, span } = winX(ev.clientX);
     if (drag === 'scrub') player.currentTime = Math.max(0, t);
-    else { setSegEdge(i, drag, t); drawDetailWave(); }
+    else { setSegEdge(i, drag, snapEdge(drag, t, r.width / span, ev)); drawDetailWave(); }
   });
   canvas.addEventListener('pointerleave', () => {
     if (drag) return;

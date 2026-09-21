@@ -472,6 +472,106 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     return clips
 
 
+def revise_clip(model: str, title: str, instruction: str,
+                current_segments: list[dict], transcript_segments: list[dict],
+                words: list[dict] | None = None,
+                used_ranges: list[dict] | None = None,
+                max_segments: int = 8) -> dict:
+    """Apply ONE operator instruction to an existing clip's segments.
+
+    The complement of ``suggest_clips``: that call has to find the story on its
+    own, this one is handed the story and told exactly what's wrong with it.
+    Constrained editing over a small search space — which is why it gets a
+    looser rein than the suggester: no min/max duration and a higher segment
+    cap, because the operator's instruction outranks the house rules.
+
+    The segment list is in PLAY order, which the trim editor lets differ from
+    time order. Output preserves whatever order the model returns and is only
+    coerced/clamped, never sorted or merged — reordering someone's supercut to
+    "fix" it would be a worse bug than any overlap.
+
+    Returns ``{"segments": [...], "note": str, "changed": bool}``. When the
+    model can't comply, ``segments`` is the input unchanged and ``note`` says
+    why. Model/parse failures propagate to the caller.
+    """
+    word_accurate = bool(words)
+    if words:
+        compact = _words_to_clauses(words)[:400]
+    else:
+        compact = []
+        for s in transcript_segments[:400]:
+            try:
+                compact.append({"start": round(float(s["start"]), 1),
+                                "end": round(float(s["end"]), 1),
+                                "text": str(s.get("text", ""))[:200]})
+            except (KeyError, TypeError, ValueError):
+                continue
+    current = []
+    for s in current_segments:
+        try:
+            current.append({"start": round(float(s["start"]), 2),
+                            "end": round(float(s["end"]), 2)})
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not compact or not current:
+        return {"segments": current, "note": "No transcript to edit against.",
+                "changed": False}
+    horizon = max(w["end"] for w in compact)
+
+    used = [{"start": round(float(r["start"]), 1), "end": round(float(r["end"]), 1)}
+            for r in (used_ranges or [])]
+
+    b = _brand()
+    system = (
+        f"You edit a short social clip cut from {b['source_kind']} footage "
+        f"about {b['topic']}. The clip is a list of segments — time windows on "
+        "the source video, played in LIST order (which may differ from time "
+        "order; that ordering is the operator's choice and must be kept).\n"
+        "\n"
+        "The operator gives you ONE instruction. Apply it and change nothing "
+        "else: segments the instruction doesn't touch stay exactly as they "
+        "are, to the hundredth of a second. Only add, remove, split, extend, "
+        "trim or move what the instruction requires.\n"
+        "\n"
+        + ("The transcript timestamps are word-accurate: every entry starts "
+           "and ends exactly on a word boundary. Cut precisely — start a "
+           "segment on the first word you want heard and end it right after "
+           "the last one, using the entry timestamps as-is.\n"
+           if word_accurate else "")
+        + ("Some of this video is already published in other clips — the "
+           "used_ranges in the input. Do not pull any of that material in.\n"
+           if used else "")
+        + "If the instruction can't be done (the material isn't in this video, "
+        "or it's already used elsewhere), return the segments UNCHANGED and "
+        "say why in the note.\n"
+        f"At most {max_segments} segments.\n"
+        "JSON shape: {\"segments\": [{\"start\": n, \"end\": n}], "
+        "\"note\": \"one line on what you changed, or why you couldn't\"}"
+    )
+    payload = {"title": title, "instruction": instruction[:500],
+               "current_segments": current, "transcript": compact}
+    if used:
+        payload["used_ranges"] = used
+    data = _json_chat(model, system, json.dumps(payload), max_tokens=1500)
+
+    # Coerce and clamp only — no sorting, no merging (see docstring).
+    segments: list[dict] = []
+    for item in (data.get("segments") or [])[:max_segments]:
+        try:
+            start = max(0.0, float(item["start"]))
+            end = min(float(horizon), float(item["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end - start < 0.5:
+            continue
+        segments.append({"start": round(start, 2), "end": round(end, 2)})
+    note = str(data.get("note", ""))[:300]
+    if not segments:
+        return {"segments": current, "changed": False,
+                "note": note or "The model returned nothing usable; clip left as-is."}
+    return {"segments": segments, "note": note, "changed": segments != current}
+
+
 def tag_footage(model: str, images: list[bytes], traits: list[str],
                 title: str = "") -> dict:
     """Tag which traits from the vocabulary are visibly present in footage stills.

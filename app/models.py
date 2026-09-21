@@ -644,6 +644,10 @@ class ClipProposal(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     verdict: Mapped[str] = mapped_column(String(20), default=VERDICT_PENDING)
+    # Why a dismissal happened, when the operator volunteered it — one optional
+    # click offered right after dismissing, never required. Empty is the
+    # common, uncomplaining case. Slugs live in clip_proposals.DISMISS_REASONS.
+    dismiss_reason: Mapped[str] = mapped_column(String(30), default="")
     # Filled when the proposal is accepted into a cut (existing or new).
     cut_pk: Mapped[int | None] = mapped_column(ForeignKey("cuts.id"), nullable=True)
 
@@ -660,6 +664,41 @@ class ClipProposal(Base):
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ClipRevision(Base):
+    """One prompted edit to a clip: the operator's instruction, the segments it
+    started from, and what the model returned.
+
+    The instruction is the point of this table. The proposal ledger measures
+    WHERE the model was wrong (IoU, signed deltas); this records the operator
+    saying WHY, in their own words, captured while doing real work instead of
+    answering a survey. Recurring instructions are prompt fixes waiting to be
+    read into the brand's clip guidance.
+
+    Rows are written when a revision is served, not when it's kept: the result
+    lands in the editor behind the undo stack, and whether it survived shows up
+    in the exported cut, which the proposal ledger already scores.
+    """
+
+    __tablename__ = "clip_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cut_pk: Mapped[int] = mapped_column(ForeignKey("cuts.id"))
+    candidate_pk: Mapped[int] = mapped_column(ForeignKey("candidates.id"))
+
+    instruction: Mapped[str] = mapped_column(Text, default="")
+    # JSON [{start, end}, ...], same shape as ``Cut.trim_segments``.
+    before_segments: Mapped[str] = mapped_column(Text, default="")
+    after_segments: Mapped[str] = mapped_column(Text, default="")
+    # The model's one-line account of what it did (or why it couldn't).
+    note: Mapped[str] = mapped_column(Text, default="")
+    # False when the model returned the segments unchanged — a refusal or a
+    # no-op, which is signal about the instruction, not about the boundaries.
+    changed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    model: Mapped[str] = mapped_column(String(60), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AppToken(Base):
