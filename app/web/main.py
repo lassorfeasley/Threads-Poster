@@ -23,6 +23,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import defer, object_session, selectinload
 
+from .. import chapters as chapter_index
 from .. import clip_proposals, instagram_api, spend, threads_api, youtube
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
@@ -68,7 +69,6 @@ from ..models import (
     STATUS_REJECTED,
     Candidate,
     Channel,
-    ClipProposal,
     Cut,
     InstagramPost,
     MetricSnapshot,
@@ -1294,14 +1294,27 @@ def _pending_proposals(session, candidate_pk: int) -> list[dict]:
 
 
 @app.post("/video/{candidate_id}/suggest-clips")
-def video_suggest_clips(candidate_id: int):
+def video_suggest_clips(candidate_id: int, start: float | None = None,
+                        end: float | None = None):
     """Re-run the clip suggester for one video (operator-initiated).
 
     Deliberately ungated, matching the other on-demand suggest routes: the
     budget guard exists to stop an unattended monitor pass from spending the
     day's allowance, not to refuse a person who just clicked a button.
+
+    ``start``/``end`` scope the pass to the stretch the operator is looking at
+    — the chapter they clicked, or a window they zoomed by hand. That is a far
+    smaller question than "what is worth clipping in this hour", and it leaves
+    the suggestions standing for the rest of the video alone.
+
+    ``new`` in the response counts what THIS run proposed. The clips list is
+    everything still pending on the video, so on a section pass it can be
+    non-empty even when the section itself turned up nothing.
     """
     settings = load_settings()
+    window, topic = None, ""
+    if start is not None and end is not None and end > start:
+        window = {"start": max(0.0, start), "end": end}
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c is None:
@@ -1312,13 +1325,54 @@ def video_suggest_clips(candidate_id: int):
                 {"error": "No transcript for this video — clip suggestions are "
                           "drafted from what is said in it."},
                 status_code=409)
+        if window:
+            # What this stretch is about, when the video has been indexed: the
+            # chapter holding the middle of the window.
+            middle = (window["start"] + window["end"]) / 2
+            for ch in chapter_index.load(c):
+                try:
+                    if float(ch["start"]) <= middle < float(ch["end"]):
+                        topic = " — ".join(
+                            p for p in (str(ch.get("topic", "")).strip(),
+                                        str(ch.get("summary", "")).strip()) if p)
+                        break
+                except (KeyError, TypeError, ValueError):
+                    continue
         try:
-            clip_proposals.propose(session, c, settings, transcript)
+            ids = clip_proposals.propose(session, c, settings, transcript,
+                                         window=window, topic=topic)
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
         clips = _pending_proposals(session, candidate_id)
         multi_clip = bool(c.multi_clip_potential)
-    return JSONResponse({"clips": clips, "multi_clip": multi_clip})
+    return JSONResponse({"clips": clips, "multi_clip": multi_clip,
+                         "new": len(ids)})
+
+
+@app.post("/video/{candidate_id}/chapters")
+def video_chapters(candidate_id: int):
+    """Index a video into topical chapters (operator-initiated).
+
+    Ungated like the other on-demand passes: the budget guard is there to stop
+    an unattended monitor run from spending the day's allowance, not a person
+    who just asked what's in a 45-minute video.
+    """
+    settings = load_settings()
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        transcript = clip_proposals.load_transcript(c)
+        if not transcript:
+            return JSONResponse(
+                {"error": "No transcript for this video — chapters are read "
+                          "from what is said in it."},
+                status_code=409)
+        try:
+            found = chapter_index.generate(c, settings, transcript)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"chapters": found})
 
 
 @app.post("/clip-proposal/{proposal_id}/accept")
@@ -1341,14 +1395,6 @@ def dismiss_clip_proposal(proposal_id: int):
         if not clip_proposals.dismiss(session, proposal_id):
             return JSONResponse({"error": "Proposal already decided"}, status_code=409)
     return JSONResponse({"ok": True})
-
-
-@app.post("/video/{candidate_id}/dismiss-clip-proposals")
-def dismiss_clip_proposals(candidate_id: int):
-    """Reject every open proposal on a video at once — "none of these"."""
-    with session_scope() as session:
-        n = clip_proposals.dismiss_pending(session, candidate_id)
-    return JSONResponse({"ok": True, "dismissed": n})
 
 
 @app.post("/clip-proposal/{proposal_id}/reason")
@@ -1465,41 +1511,6 @@ def refine_cut_opening(cut_id: int, segments_json: str = Form(...)):
             model=model,
         )
     return JSONResponse({"segments": segments, "note": note, "changed": changed})
-
-
-@app.post("/clip-proposal/{proposal_id}/new-cut")
-def clip_proposal_new_cut(proposal_id: int):
-    """Open a proposed clip as its own cut — the multi-story path.
-
-    Lands in the trim editor with the segments loaded but nothing exported, so
-    the proposal still has to survive a look before it becomes a clip.
-    """
-    with session_scope() as session:
-        row = session.get(ClipProposal, proposal_id)
-        if row is None or row.verdict != ClipProposal.VERDICT_PENDING:
-            return JSONResponse({"error": "Proposal already decided"}, status_code=409)
-        c = session.get(Candidate, row.candidate_pk)
-        if c is None or c.status != STATUS_ARCHIVED:
-            return JSONResponse({"error": "Download the video before clipping it"},
-                                status_code=409)
-        # Seed the new cut with the unclaimed part only — the stored proposal
-        # predates the clips made since, and a new cut must not re-use footage.
-        try:
-            proposed = json.loads(row.proposed_segments or "[]")
-        except (ValueError, TypeError):
-            proposed = []
-        segments, _ = clip_proposals.visible_segments(
-            proposed, clip_proposals.used_ranges(session, c.id))
-        if not segments:
-            return JSONResponse(
-                {"error": "Your other clips already cover this suggestion."},
-                status_code=409)
-        cut = Cut(candidate_pk=c.id, trim_segments=json.dumps(segments))
-        session.add(cut)
-        session.flush()
-        clip_proposals.accept(session, proposal_id, cut.id)
-        cut_id = cut.id
-    return JSONResponse({"ok": True, "redirect": f"/cut/{cut_id}?step=trim"})
 
 
 @app.get("/video/{candidate_id}/cut")
@@ -1648,6 +1659,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         request, "cut.html",
         {"cut": cut, "c": c, "state": cut_state, "step": active_step,
          "transcript_segments": transcript_segments, "saved_segments": segments,
+         "chapters": chapter_index.load(c),
          "other_cut_segments": other_cut_segments,
          "suggested_clips": suggested_clips,
          "clip_transcript": clip_transcript,

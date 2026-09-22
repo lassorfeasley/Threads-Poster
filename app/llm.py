@@ -260,8 +260,13 @@ def suggest_category(model: str, categories: list[dict], title: str, description
 
 
 def _clean_clip_segments(raw, horizon: float, cap: int,
-                         opening_hold: float = 0.0) -> list[dict]:
+                         opening_hold: float = 0.0,
+                         floor: float = 0.0) -> list[dict]:
     """Coerce, clamp, order and merge one proposed clip's windows.
+
+    ``floor`` and ``horizon`` are the hard bounds every window is clamped into
+    — 0 and the end of the transcript normally, the section's edges when the
+    pass was scoped to one.
 
     Overlapping windows would play the same audio twice in the supercut, so
     they're merged here rather than left for the operator to discover after an
@@ -277,7 +282,7 @@ def _clean_clip_segments(raw, horizon: float, cap: int,
     windows: list[dict] = []
     for item in (raw or []):
         try:
-            start = max(0.0, float(item["start"]))
+            start = max(floor, float(item["start"]))
             end = min(horizon, float(item["end"]))
         except (KeyError, TypeError, ValueError):
             continue
@@ -350,7 +355,8 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
                   opening_hold: float = 3.0,
                   used_ranges: list[dict] | None = None,
                   words: list[dict] | None = None,
-                  description: str = "") -> list[dict]:
+                  description: str = "",
+                  window: dict | None = None, topic: str = "") -> list[dict]:
     """Propose the clips worth cutting from one video. DRAFTS ONLY.
 
     The output is a partition, not a window, because clipping happens on two
@@ -372,6 +378,14 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     exactly on word boundaries, so proposed cuts land between words instead of
     somewhere inside a multi-second caption block.
 
+    ``window`` scopes the whole pass to one stretch of the video — a chapter,
+    or whatever the operator has zoomed to. The transcript is cut down to that
+    stretch and every boundary is clamped to it, so a section pass cannot
+    wander into footage the operator wasn't looking at. Finding the clip inside
+    a section someone already chose is a much smaller question than finding the
+    clips in an hour of footage. ``topic`` is what that stretch is about, when
+    something already knows — a chapter label.
+
     Returns ``[{segments, story, why, confidence, draft_caption}]`` where each
     ``segments`` list is already clamped to the transcript, chronological, and
     non-overlapping — i.e. droppable straight into ``Cut.trim_segments``. An
@@ -379,19 +393,33 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     """
     word_accurate = bool(words)
     if words:
-        compact = _words_to_clauses(words)[:400]
+        compact = _words_to_clauses(words)
     else:
         compact = []
-        for s in transcript_segments[:400]:
+        for s in transcript_segments:
             try:
                 compact.append({"start": round(float(s["start"]), 1),
                                 "end": round(float(s["end"]), 1),
                                 "text": str(s.get("text", ""))[:200]})
             except (KeyError, TypeError, ValueError):
                 continue
+
+    floor, ceiling = 0.0, None
+    if window:
+        floor = max(0.0, float(window["start"]))
+        ceiling = float(window["end"])
+        compact = [w for w in compact if w["end"] > floor and w["start"] < ceiling]
+    # The entry cap goes AFTER the window filter, never before: the first 400
+    # clauses of a 57-minute video are its first quarter, and a section past
+    # that would arrive here with an empty transcript and propose nothing.
+    compact = compact[:400]
     if not compact:
         return []
     horizon = max(w["end"] for w in compact)
+    if ceiling is not None:
+        horizon = min(horizon, ceiling)
+        if horizon - floor < min_seconds:
+            return []   # nothing here long enough to be a clip
 
     used = [{"start": round(float(r["start"]), 1), "end": round(float(r["end"]), 1)}
             for r in (used_ranges or [])]
@@ -400,9 +428,14 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     system = (
         f"You cut short social clips out of {b['source_kind']} footage about "
         f"{b['topic']}. "
-        "Given a full timestamped transcript, propose the clips worth making.\n"
+        "Given a timestamped transcript, propose the clips worth making.\n"
         "\n"
-        "Two levels, and they are NOT the same thing:\n"
+        + (f"You are looking at ONE SECTION of a longer video, "
+           f"{floor:.0f}s to {horizon:.0f}s"
+           + (f" — {topic}" if topic else "") + ". Every segment you propose "
+           "must fall inside it. The rest of the video is not yours to cut, "
+           "and it is being handled separately.\n\n" if window else "")
+        + "Two levels, and they are NOT the same thing:\n"
         "- SEGMENTS within one clip: one story, compressed. Cut the set-up, "
         "filler, repetition and dead air; keep the vivid, concrete, "
         "human beats. Most good clips are 2-4 segments joined together, not "
@@ -440,6 +473,9 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         "\"confidence\": 0.0-1.0, \"draft_caption\": \"...\"}]}"
     )
     payload = {"title": title, "segments": compact}
+    if window:
+        payload["section"] = {"start": round(floor, 1), "end": round(horizon, 1),
+                              "about": topic}
     if description:
         payload["source_video_description"] = description[:2000]
     if used:
@@ -452,7 +488,8 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         if not isinstance(raw, dict):
             continue
         segments = _clean_clip_segments(raw.get("segments"), horizon,
-                                        max_segments_per_clip, opening_hold)
+                                        max_segments_per_clip, opening_hold,
+                                        floor=floor)
         if not segments:
             continue
         # A "clip" of a couple of seconds is a parse artifact, not a proposal.
@@ -570,6 +607,208 @@ def revise_clip(model: str, title: str, instruction: str,
         return {"segments": current, "changed": False,
                 "note": note or "The model returned nothing usable; clip left as-is."}
     return {"segments": segments, "note": note, "changed": segments != current}
+
+
+def _transcript_blocks(segments: list[dict], target: int = 240,
+                       char_cap: int = 260) -> list[dict]:
+    """Compact a whole transcript into roughly ``target`` even blocks.
+
+    Chapter finding needs the WHOLE timeline, so it can't truncate the way the
+    clip suggester does — a 45-minute video would lose its second half and
+    every chapter in it. Neighbouring lines are merged into blocks of roughly
+    equal length instead, which keeps coverage end to end at a bounded token
+    cost. Boundaries then land on block edges, which is fine: a chapter mark a
+    few seconds out is still the right chapter.
+    """
+    clean: list[tuple[float, float, str]] = []
+    for s in segments:
+        try:
+            start, end = float(s["start"]), float(s["end"])
+            text = str(s.get("text", "")).strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end >= start and text:
+            clean.append((start, end, text))
+    if not clean:
+        return []
+    clean.sort(key=lambda row: row[0])
+
+    span = clean[-1][1] - clean[0][0]
+    width = max(1.0, span / max(1, target))
+    blocks: list[dict] = []
+    for start, end, text in clean:
+        if blocks and start - blocks[-1]["start"] < width:
+            block = blocks[-1]
+            block["end"] = max(block["end"], round(end, 1))
+            if len(block["text"]) < char_cap:
+                block["text"] = f"{block['text']} {text}"
+        else:
+            blocks.append({"start": round(start, 1), "end": round(end, 1),
+                           "text": text})
+    for block in blocks:
+        block["text"] = block["text"][:char_cap]
+    return blocks
+
+
+def _chunk_blocks(blocks: list[dict], span: float) -> list[list[dict]]:
+    """Split a compacted transcript into windows of at most ``span`` seconds."""
+    if not blocks or blocks[-1]["end"] - blocks[0]["start"] <= span:
+        return [blocks]
+    windows: list[list[dict]] = []
+    current: list[dict] = []
+    edge = blocks[0]["start"] + span
+    for block in blocks:
+        if current and block["start"] >= edge:
+            windows.append(current)
+            current = []
+            edge = block["start"] + span
+        current.append(block)
+    if current:
+        windows.append(current)
+    return windows
+
+
+def _chapter_marks(model: str, title: str, blocks: list[dict], *, total: float,
+                   max_marks: int, min_seconds: float, section: bool,
+                   description: str = "") -> list[dict]:
+    """One pass of chapter-start finding over one window of transcript."""
+    first, last = blocks[0]["start"], blocks[-1]["end"]
+    b = _brand()
+    system = (
+        f"You index {b['source_kind']} footage so an editor can find their way "
+        "around it. Mark where this video changes subject: a new chapter "
+        "begins where it moves to a different story, place, or speaker.\n"
+        "\n"
+        "Report only the START of each chapter, in seconds, in order. Each "
+        "chapter runs until the next one begins, so they need no end times.\n"
+        + (f"You are reading SECTION {first:.0f}s-{last:.0f}s of a "
+           f"{total:.0f}s video. Mark only starts inside this section; the "
+           "rest of the video is being indexed separately. Read to the end of "
+           "the section — the last minutes of it matter as much as the "
+           "first.\n" if section else
+           "The first chapter starts at 0, and together they cover the whole "
+           "video. Keep marking all the way to the end.\n")
+        + f"At most {max_marks} chapters here, none shorter than "
+        f"{min_seconds:g} seconds. This is a table of contents, not a shot "
+        "list: footage that stays on one subject is one chapter.\n"
+        "Label each with a specific topic of a few words — name the place, "
+        "person or event ('Peat fires in Kalimantan', not 'Environmental "
+        "impacts') — plus one line on what happens in it.\n"
+        "JSON shape: {\"chapters\": [{\"start\": n, \"topic\": \"...\", "
+        "\"summary\": \"one line\"}]}"
+    )
+    payload = {"title": title, "transcript": blocks}
+    if description:
+        payload["source_video_description"] = description[:1000]
+    data = _json_chat(model, system, json.dumps(payload), max_tokens=2000)
+
+    marks: list[dict] = []
+    for item in (data.get("chapters") or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # A mark outside the window is the model reaching into a section it
+        # wasn't shown; the pass that owns that footage gets to place it.
+        if not (first - 0.5 <= start <= last):
+            continue
+        marks.append({"start": round(max(0.0, start), 2),
+                      "topic": str(item.get("topic", "")).strip()[:80],
+                      "summary": str(item.get("summary", "")).strip()[:200]})
+    return marks
+
+
+# Past this, one pass stops reading: on a 57-minute documentary the model
+# marked eleven chapters in the first half hour and called the remaining
+# twenty-three minutes a single subject, while the transcript there ran from a
+# film anecdote to forest loss to a palm oil conglomerate. Windows keep every
+# pass short enough to finish.
+CHAPTER_WINDOW_SECONDS = 900
+
+
+def segment_chapters(model: str, title: str, transcript_segments: list[dict],
+                     max_chapters: int = 12, min_seconds: float = 30.0,
+                     description: str = "") -> list[dict]:
+    """Divide a video into consecutive topical chapters.
+
+    The deliberately easy half of "what is in this video": finding WHERE the
+    subject changes, with none of the judgement that makes clipping hard — no
+    frames to pick, no boundaries to land on words, no self-contained story to
+    tell. A chapter a few seconds out costs nothing, because the operator cuts
+    inside one rather than shipping it.
+
+    STARTS, not spans. Chapters that tile a video end to end are fully
+    determined by where each begins, so a model that only reports starts cannot
+    return a gap, an overlap, or a chapter running backwards. The ends, the 0.0
+    opening and the final end are filled in here.
+
+    Long videos are read in windows (see ``CHAPTER_WINDOW_SECONDS``) and the
+    marks concatenated — which is safe precisely because marks are just points
+    on a shared timeline, and the tiling is built here rather than by the
+    model. Short videos still cost one call.
+
+    Returns ``[{start, end, topic, summary}]``, chronological and contiguous.
+    Returns [] when the video is too short to have chapters, or turns out to
+    hold only one subject — a single band is furniture, not navigation.
+    """
+    blocks = _transcript_blocks(transcript_segments)
+    if not blocks:
+        return []
+    horizon = max(b["end"] for b in blocks)
+    if horizon < 2 * min_seconds:
+        return []   # can't hold two chapters, so it doesn't have any
+
+    windows = _chunk_blocks(blocks, CHAPTER_WINDOW_SECONDS)
+    marks: list[dict] = []
+    for window in windows:
+        span = window[-1]["end"] - window[0]["start"]
+        # A window's share of the budget, plus one so a busy stretch isn't
+        # forced to under-report. The global cap below trims any excess by
+        # merging the shortest chapters, which is the right thing to lose.
+        share = (max_chapters * span / horizon) if horizon > 0 else max_chapters
+        marks.extend(_chapter_marks(
+            model, title, window, total=horizon,
+            max_marks=max(2, round(share) + 1), min_seconds=min_seconds,
+            section=len(windows) > 1, description=description,
+        ))
+    marks = [m for m in marks if m["start"] <= horizon]
+    if not marks:
+        return []
+    marks.sort(key=lambda ch: ch["start"])
+    marks[0]["start"] = 0.0
+
+    chapters: list[dict] = []
+    for i, mark in enumerate(marks):
+        end = marks[i + 1]["start"] if i + 1 < len(marks) else horizon
+        if end <= mark["start"]:
+            continue   # two marks on the same second: the later label wins
+        chapters.append({**mark, "end": round(end, 2)})
+
+    def length(ch: dict) -> float:
+        return ch["end"] - ch["start"]
+
+    def absorb(index: int) -> None:
+        """Fold one chapter into its neighbour, keeping the tiling intact."""
+        gone = chapters.pop(index)
+        if index > 0:
+            chapters[index - 1]["end"] = gone["end"]
+        else:
+            chapters[0]["start"] = gone["start"]
+
+    shrinking = True
+    while shrinking and len(chapters) > 1:
+        shrinking = False
+        for i, ch in enumerate(chapters):
+            if length(ch) < min_seconds:
+                absorb(i)
+                shrinking = True
+                break
+    while len(chapters) > max_chapters:
+        absorb(min(range(len(chapters)), key=lambda i: length(chapters[i])))
+
+    return chapters if len(chapters) > 1 else []
 
 
 def tag_footage(model: str, images: list[bytes], traits: list[str],

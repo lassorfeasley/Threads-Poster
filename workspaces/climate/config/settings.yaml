@@ -73,6 +73,10 @@ clips:
   # filler cut out. Drafts only; nothing is applied until you accept it.
   model: claude-haiku-4-5
   max_clips: 3
+  # Budget for a pass scoped to one chapter (the "Suggest a clip here" button
+  # over the waveform). Lower than max_clips on purpose: one section of a video
+  # is usually one story, and the point of scoping is to stop fishing.
+  section_max_clips: 2
   max_segments: 4
   min_seconds: 15
   max_seconds: 40
@@ -93,6 +97,16 @@ clips:
   # and never into footage another clip already uses.
   opening_lead_seconds: 4.0
   opening_frame_interval: 0.5
+
+chapters:
+  # A video's table of contents, found on demand from its transcript. Chapters
+  # tile the whole timeline (no gaps) and exist for navigation: the trim editor
+  # draws them under the waveform and zooms by them, which is what makes a
+  # 45-minute source workable. Rough boundaries are fine — you cut inside a
+  # chapter, you never ship one.
+  model: claude-haiku-4-5
+  max: 12
+  min_seconds: 30
 
 vision:
   # Optionally tag candidates from YouTube storyboard stills (metadata-only —

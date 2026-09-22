@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "32"
+SCHEMA_VERSION = "33"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -155,6 +155,7 @@ _SCHEMA_SENTINELS = (
     "SELECT clip_uploaded_at FROM instagram_posts LIMIT 0",
     "SELECT dismiss_reason FROM clip_proposals LIMIT 0",
     "SELECT id FROM clip_revisions LIMIT 0",
+    "SELECT chapters FROM candidates LIMIT 0",
 )
 
 
@@ -237,6 +238,7 @@ def _ensure_new_columns() -> None:
             "multi_clip_potential": "BOOLEAN DEFAULT FALSE",
             "multi_clip_auto": "BOOLEAN DEFAULT FALSE",
             "word_transcript_path": "TEXT DEFAULT ''",
+            "chapters": "TEXT DEFAULT ''",
             "shelf_life": "VARCHAR(20) DEFAULT ''",
             "format_tags": "TEXT DEFAULT ''",
         },

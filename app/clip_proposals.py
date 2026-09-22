@@ -200,32 +200,54 @@ def span_deltas(proposed: list[dict], final: list[dict]) -> tuple[float | None, 
 # ---- writing ----------------------------------------------------------------
 
 def policy_version(*, model: str, max_clips: int, max_segments_per_clip: int,
-                   min_seconds: int, max_seconds: int) -> str:
+                   min_seconds: int, max_seconds: int,
+                   scope: str = "video") -> str:
     """Short fingerprint of the regime that produced a partition, so a year of
     proposals can be split by prompt version instead of blended into one
-    unanalyzable pile."""
-    payload = "\x1f".join([
-        model or "", str(max_clips), str(max_segments_per_clip),
-        str(min_seconds), str(max_seconds),
-    ])
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    unanalyzable pile.
+
+    ``scope`` keeps section passes apart from whole-video ones: a different
+    prompt against a hand-picked stretch of footage should not be averaged in
+    with "find the clips in this hour". It only joins the payload when it isn't
+    the default, so fingerprints already in the ledger keep their meaning.
+    """
+    parts = [model or "", str(max_clips), str(max_segments_per_clip),
+             str(min_seconds), str(max_seconds)]
+    if scope != "video":
+        parts.append(scope)
+    return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
 def log_run(session, candidate_pk: int, clips: list[dict], *,
-            model: str, policy: str) -> list[int]:
+            model: str, policy: str, window: dict | None = None) -> list[int]:
     """Record one suggestion pass and return the new row ids.
 
     Any earlier proposal on this video still awaiting a verdict is marked
     ``superseded`` — re-rolling is a soft rejection and shouldn't be left
     looking undecided. Already-accepted rows are untouched, so re-rolling a
     multi-story video keeps the clips already cut.
+
+    A SECTION pass only supersedes what it actually replaces: the pending
+    proposals overlapping ``window``. Asking again about chapter three is not
+    an answer to a suggestion standing for chapter seven.
     """
-    session.execute(
-        update(ClipProposal)
-        .where(ClipProposal.candidate_pk == candidate_pk,
-               ClipProposal.verdict == ClipProposal.VERDICT_PENDING)
-        .values(verdict=ClipProposal.VERDICT_SUPERSEDED, decided_at=utcnow())
-    )
+    if window is None:
+        session.execute(
+            update(ClipProposal)
+            .where(ClipProposal.candidate_pk == candidate_pk,
+                   ClipProposal.verdict == ClipProposal.VERDICT_PENDING)
+            .values(verdict=ClipProposal.VERDICT_SUPERSEDED, decided_at=utcnow())
+        )
+    else:
+        span = normalize([window])
+        for row in pending_for_candidate(session, candidate_pk):
+            try:
+                proposed = json.loads(row.proposed_segments or "[]")
+            except (ValueError, TypeError):
+                continue
+            if _overlap(normalize(proposed), span) > 0:
+                row.verdict = ClipProposal.VERDICT_SUPERSEDED
+                row.decided_at = utcnow()
     run_id = uuid.uuid4().hex[:16]
     ids: list[int] = []
     for index, clip in enumerate(clips):
@@ -386,19 +408,28 @@ def load_words(candidate) -> list[dict]:
     return load_word_transcript(candidate)
 
 
-def propose(session, candidate, settings, transcript_segments: list[dict]) -> list[int]:
+def propose(session, candidate, settings, transcript_segments: list[dict], *,
+            window: dict | None = None, topic: str = "") -> list[int]:
     """Run one suggestion pass for a video and record it. Returns new row ids.
 
     Callers pass the transcript they already have (the archive pass holds it in
     memory; a re-roll reads it back off disk). Model failures propagate so the
     caller can decide between logging a warning and returning an error — this
     only owns the ledger and the two candidate-level side effects.
+
+    ``window`` scopes the pass to one stretch of the video — the chapter the
+    operator is looking at. A section pass gets a smaller clip budget, keeps
+    the proposals standing for the rest of the video, and touches neither of
+    the candidate-level side effects: how many stories a SECTION holds says
+    nothing about whether the VIDEO is worth several clips, and the caption
+    seed belongs to the whole-video pass that wrote it.
     """
     if not transcript_segments:
         return []
     model = settings.get("clips.model",
                          settings.get("matching.model", "claude-haiku-4-5"))
-    max_clips = settings.get("clips.max_clips", 3)
+    max_clips = (settings.get("clips.section_max_clips", 2) if window
+                 else settings.get("clips.max_clips", 3))
     max_segments = settings.get("clips.max_segments", 4)
     min_seconds = settings.get("clips.min_seconds", 15)
     max_seconds = settings.get("clips.max_seconds", 40)
@@ -415,6 +446,7 @@ def propose(session, candidate, settings, transcript_segments: list[dict]) -> li
         # boundaries proposed against it land on word edges.
         words=load_words(candidate),
         description=candidate.description,
+        window=window, topic=topic,
     )
 
     # Put each opening on a frame worth looking at. Sibling clips from this same
@@ -426,10 +458,15 @@ def propose(session, candidate, settings, transcript_segments: list[dict]) -> li
                                           blocked, story=clip.get("story", ""))
         blocked = blocked + clip["segments"]
 
-    ids = log_run(session, candidate.id, clips, model=model, policy=policy_version(
-        model=model, max_clips=max_clips, max_segments_per_clip=max_segments,
-        min_seconds=min_seconds, max_seconds=max_seconds,
-    ))
+    ids = log_run(session, candidate.id, clips, model=model, window=window,
+                  policy=policy_version(
+                      model=model, max_clips=max_clips,
+                      max_segments_per_clip=max_segments,
+                      min_seconds=min_seconds, max_seconds=max_seconds,
+                      scope="section" if window else "video",
+                  ))
+    if window:
+        return ids
 
     if clips and clips[0].get("draft_caption"):
         candidate.draft_caption = clips[0]["draft_caption"]
@@ -514,21 +551,6 @@ def log_revision(session, cut_pk: int, candidate_pk: int, instruction: str, *,
     )
     session.add(row)
     return row
-
-
-def dismiss_pending(session, candidate_pk: int) -> int:
-    """Reject every open proposal on a video in one call — "none of these".
-
-    Run-level rejection is the partition signal, and it has to be one click:
-    a three-clip miss that costs three clicks to reject is a miss that stops
-    getting recorded.
-    """
-    return session.execute(
-        update(ClipProposal)
-        .where(ClipProposal.candidate_pk == candidate_pk,
-               ClipProposal.verdict == ClipProposal.VERDICT_PENDING)
-        .values(verdict=ClipProposal.VERDICT_DISMISSED, decided_at=utcnow())
-    ).rowcount or 0
 
 
 # ---- resolving --------------------------------------------------------------

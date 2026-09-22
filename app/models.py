@@ -115,6 +115,13 @@ class Candidate(Base):
     # slice it by trim windows instead of re-running Whisper per clip.
     word_transcript_path: Mapped[str] = mapped_column(Text, default="")
 
+    # Topical chapters over the whole video, as JSON [{start, end, topic,
+    # summary}] covering the timeline end to end with no gaps. Navigation
+    # furniture for long sources, and the unit the trim editor zooms by —
+    # boundaries only have to be roughly right, because the operator cuts
+    # inside a chapter rather than shipping one. Empty until asked for.
+    chapters: Mapped[str] = mapped_column(Text, default="")
+
     # Video-level caption seed written by the clip-suggestion pass. Deliberately
     # NOT copied into ``Cut.draft_caption`` — captions are drafted per cut from
     # the trimmed clip's own transcript. It survives as the "still the untouched

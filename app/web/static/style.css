@@ -1872,6 +1872,133 @@ canvas#wave {
   touch-action: none;
 }
 
+/* Zoom readout + chapter actions, above the waveform. Quiet: the waveform is
+   the instrument, this row only says which part of the video it's showing. */
+.wave-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.wave-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.wave-bar button[hidden] { display: none; }
+.wave-bar .is-busy { opacity: 0.65; }
+
+/* Key for the washes on the waveform. A swatch and a word — the clips that own
+   the amber are named in the tooltip, not spelled out across three lines. */
+.wave-key {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 6px;
+  font-size: var(--text-meta);
+  color: var(--muted);
+}
+.wave-key[hidden] { display: none; }
+.wave-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: help;
+}
+.wave-key-item[hidden] { display: none; }
+.wave-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+}
+.wave-swatch.is-clipped { background: rgba(240, 180, 90, 0.55); }
+.wave-swatch.is-suggested { background: rgba(167, 139, 250, 0.55); }
+
+/* --- Chapters: the video's table of contents under the waveform. The strip
+   always spans the WHOLE video, even when the waveform above is zoomed into
+   one chapter, so it doubles as the map of where that window sits. Blue is the
+   playhead's colour here — this is navigation, not an edit and not a
+   suggestion, so it borrows neither green, amber nor violet. --- */
+.chapter-strip {
+  position: relative;
+  height: 26px;
+  margin-top: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel2);
+  overflow: hidden;
+}
+.chapter-strip[hidden] { display: none; }
+.chapter-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  /* The global 36px tap-target floor would push these out of a 26px strip. */
+  min-height: 0;
+  padding: 0 3px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--border-strong);
+  border-radius: 0;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.chapter-band:first-child { border-left: none; }
+.chapter-band:nth-child(even) { background: var(--panel3); }
+.chapter-band:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--blue) 22%, transparent);
+}
+/* The chapter the playhead is inside. */
+.chapter-band.is-active { color: var(--text); }
+.chapter-band.is-active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--blue) 12%, transparent);
+  pointer-events: none;
+}
+/* Two marks a band can carry, in the colours they mean everywhere else here:
+   amber underneath for footage already in a clip, violet on top for a
+   suggestion waiting inside. Violet is the only signpost to suggestions now
+   that they live behind a chapter click, so it never fades on hover. */
+.chapter-band.is-clipped { box-shadow: inset 0 -2px 0 rgba(240, 180, 90, 0.8); }
+.chapter-band.has-suggestion { box-shadow: inset 0 2px 0 rgba(167, 139, 250, 0.9); }
+.chapter-band.is-clipped.has-suggestion {
+  box-shadow: inset 0 -2px 0 rgba(240, 180, 90, 0.8),
+              inset 0 2px 0 rgba(167, 139, 250, 0.9);
+}
+.chapter-band-n { color: var(--muted); }
+.chapter-band:hover .chapter-band-n,
+.chapter-band.is-active .chapter-band-n { color: var(--text); }
+/* A chapter can be under twenty pixels wide on an hour-long video; a clipped
+   digit is worse than a clean empty band you can still click. */
+.chapter-band.is-narrow .chapter-band-n { display: none; }
+/* The waveform's window, drawn on the full-video strip. */
+.chapter-view {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 2px;
+  border: 1.5px solid color-mix(in srgb, var(--text) 60%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  pointer-events: none;
+}
+.chapter-view[hidden] { display: none; }
+
 .detail-strip {
   position: relative;
   margin-top: 6px;
@@ -4597,64 +4724,57 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
   border-radius: 2px;
   background: rgba(167, 139, 250, 0.9);
 }
-/* Chevron points down while expanded, right when collapsed. */
-.clip-proposals-chevron { flex: none; }
-.clip-proposals-chevron svg { transition: transform 0.15s ease; }
-.clip-proposals.is-collapsed .clip-proposals-chevron svg { transform: rotate(-90deg); }
 #clip-proposals-list:not(:empty) { margin-top: 10px; }
-/* Panel-level actions live under the list, out of the header's way. */
-.clip-proposals-foot {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-/* Explicit display beats the [hidden] UA rule, so restate it. */
-.clip-proposals-foot[hidden] { display: none; }
 /* Suggestions read as a list, not a stack of cards: the panel already boxes
    them, so a divider does what each row's border, fill and radius were doing.
    Rows bleed to the panel edge so the hover tint — which ties a row to its
-   segments on the waveform — runs the full width. */
+   segments on the waveform — runs the full width. The whole row plays the
+   clip, so it carries the pointer and a hover state of its own. */
 .proposal-row {
+  position: relative;
   margin: 0 -12px;
-  padding: 12px;
+  padding: 12px 34px 12px 12px;
   font-size: var(--text-body);
+  cursor: pointer;
 }
 .proposal-row + .proposal-row { border-top: 1px solid var(--border); }
+.proposal-row:hover,
 .proposal-row.hot {
   background: rgba(167, 139, 250, 0.1);
   box-shadow: inset 2px 0 0 rgba(167, 139, 250, 0.85);
 }
+.proposal-row:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.7);
+  outline-offset: -2px;
+}
 .proposal-story { font-weight: 600; line-height: 1.4; }
 .proposal-why { margin-top: 4px; line-height: 1.4; }
-/* Rationale is on demand, and rides the meta line rather than taking a third
-   interactive row per suggestion: the whole line opens it, the cue marks it. */
-.proposal-why-toggle {
-  margin-top: 4px;
-}
-.proposal-why-toggle > summary {
+/* Dismiss: an ✕ in the corner rather than a button competing with the one
+   action that matters. Always present — a control that appears on hover is a
+   control you have to go looking for. */
+.proposal-x {
+  position: absolute;
+  top: 9px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
   cursor: pointer;
-  list-style: none;
 }
-.proposal-why-toggle > summary::-webkit-details-marker { display: none; }
-.proposal-why-toggle > summary:hover { color: var(--text); }
-.proposal-why-cue {
-  margin-left: 7px;
-  font-weight: 600;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
+.proposal-x:hover { color: var(--text); background: var(--panel3); }
 .proposal-actions {
   display: flex;
   gap: 6px;
   margin-top: 10px;
   flex-wrap: wrap;
-}
-.proposal-play {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
 }
 
 /* --- Dismiss reasons: a transient one-click "why?" offered right after a

@@ -46,20 +46,42 @@
   </div>
 </div>
 
-{# Overview waveform (full video) + detail strip for the selected segment. #}
+{# The waveform WINDOW (zoomable), the chapter strip that maps it against the
+   whole video, and the detail strip for the selected segment. #}
+<div class="wave-bar">
+  <span class="meta wave-range" id="wave-range"></span>
+  {# Scoped to what you're looking at: inside one chapter is a much smaller
+     question for the model than "what is worth clipping in this hour". #}
+  <button type="button" class="ghost sm" id="suggest-here" onclick="suggestClips()">
+    Suggest clips
+  </button>
+  <button type="button" class="ghost sm" id="zoom-reset" onclick="resetZoom()" hidden
+          title="Back to the whole video">Whole video</button>
+  <button type="button" class="ghost sm" id="chapters-btn" onclick="findChapters()"
+          title="Read the transcript and divide this video into topics you can jump to">
+    Find chapters
+  </button>
+</div>
 <div style="margin-top: 6px; position: relative;">
   <canvas id="wave"></canvas>
   <div class="meta" id="wave-hint" style="position: absolute; inset: 0; display: flex;
        align-items: center; justify-content: center; pointer-events: none;">loading waveform…</div>
 </div>
-{% if other_cut_segments %}
-<div class="meta" style="margin-top: 4px;">
-  <span style="color: rgba(240,180,90,0.9);">▧ dashed</span> = already clipped by
-  {{ other_cut_segments | map(attribute="title") | unique | join(", ") }}
-</div>
-{% endif %}
-<div class="meta" id="suggested-legend" style="margin-top: 4px;" hidden>
-  <span style="color: rgba(167,139,250,0.95);">▧ violet</span> = suggested clip — nothing is applied until you accept it
+<div id="chapter-strip" class="chapter-strip" hidden
+     title="Click a chapter to zoom the waveform to it. Over the waveform: ⌘/Ctrl + scroll zooms, Shift + scroll pans."></div>
+{# A key, not a sentence: which wash means what. The clips themselves are
+   named in the tooltip rather than spelled out across three lines. #}
+<div class="wave-key" id="wave-key" hidden>
+  {% if other_cut_segments %}
+  <span class="wave-key-item"
+        title="Already in another clip: {{ other_cut_segments | map(attribute='title') | unique | join(', ') }}">
+    <i class="wave-swatch is-clipped"></i>Clipped
+  </span>
+  {% endif %}
+  <span class="wave-key-item" id="suggested-legend" hidden
+        title="Suggested by the AI — nothing is applied until you use it">
+    <i class="wave-swatch is-suggested"></i>Suggested
+  </span>
 </div>
 <div id="detail-strip" class="detail-strip" hidden>
   <div class="seg-pill detail-pill">
@@ -97,31 +119,16 @@
 
   {# Narrow: clip list + save. #}
   <div class="trim-rail">
-    {# Clips the model proposed. Nothing here touches the clip until accepted —
-       accepting appends the segments above, where the normal editing tools
-       (edge drag, reorder, delete, undo) take over. #}
+    {# What the model proposed inside the chapter you're looking at. Suggestions
+       belong to a place in the video, so they surface in one: the strip marks
+       which chapters hold one, and this appears when you zoom into it.
+       Nothing here touches the clip until you use it. #}
     {% if transcript_segments %}
-    <div id="clip-proposals" class="clip-proposals">
+    <div id="clip-proposals" class="clip-proposals" hidden>
       <div class="clip-proposals-head">
         <span class="clip-proposals-title" id="clip-proposals-title">Suggested clips</span>
-        <button type="button" class="ghost sm icon-btn clip-proposals-chevron" id="clip-proposals-toggle"
-                onclick="toggleClipProposals()" title="Hide suggestions"
-                aria-label="Hide suggestions" hidden>
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M6 9l6 6 6-6"/>
-          </svg>
-        </button>
       </div>
       <div id="clip-proposals-list"></div>
-      <div class="clip-proposals-foot" id="clip-proposals-foot">
-        <button type="button" class="ghost sm" id="clip-proposals-reroll"
-                onclick="rerollClipProposals()"
-                title="Ask the AI to read the transcript and propose clips">Suggest clips</button>
-        <button type="button" class="ghost sm" id="clip-proposals-dismiss-all"
-                onclick="dismissAllClipProposals()"
-                title="Reject every suggestion for this video" hidden>Dismiss all</button>
-      </div>
     </div>
     {% endif %}
 
@@ -218,6 +225,9 @@ const otherSegments = {{ other_cut_segments | tojson }};
 // normal editing tool already works. There is deliberately no second editor.
 let suggestedClips = {{ suggested_clips | tojson }};
 let hoveredProposal = null;   // proposal id emphasized on the waveform
+// The video's chapters, if it has been indexed: [{start, end, topic, summary}]
+// tiling the whole timeline. Navigation only — nothing here edits a clip.
+let chapters = {{ chapters | tojson }};
 // Source transcript (YouTube captions or upload Whisper) — drives the
 // focused 3-line view and keyword search under the player.
 const transcriptLines = {{ transcript_segments | tojson }};
@@ -999,6 +1009,7 @@ async function loadWave() {
     document.getElementById('wave-hint').style.display = 'none';
     sizeWave();
     drawWave();
+    renderChapters();
     redrawDetailWave(true);
     redrawAllSegWaves(true);
   } catch (e) {
@@ -1016,7 +1027,210 @@ window.addEventListener('resize', () => {
 });
 
 const duration = () => (wf && wf.duration) || player.duration || 1;
-const xOf = t => (t / duration()) * wave.width;
+
+// ---- Zoom viewport ----
+// The main waveform draws a WINDOW of the video rather than all of it. On a
+// 45-minute source stretched across this canvas one pixel is twenty seconds:
+// nothing is readable and an 8px grab handle covers half a minute of footage.
+// `view` is that window in seconds; null means the whole video. The chapter
+// strip underneath always spans the whole video, so it stays the map.
+let view = null;
+const MIN_SPAN = 2;   // a couple of seconds across the canvas is far enough
+
+const viewA = () => (view ? view.a : 0);
+const viewB = () => (view ? view.b : duration());
+const viewSpan = () => Math.max(1, viewB() - viewA());
+const xOf = t => ((t - viewA()) / viewSpan()) * wave.width;
+
+function zoomTo(a, b) {
+  const total = duration();
+  const span = Math.max(MIN_SPAN, Math.min(b - a, total));
+  const start = Math.max(0, Math.min(a, total - span));
+  // A window that covers everything IS the whole video — keep one way to say
+  // it, so the reset button and the strip don't have to special-case a view
+  // that merely looks full.
+  view = span >= total - 0.01 ? null : { a: start, b: start + span };
+  syncZoomBar();
+  drawWave();
+  syncProposalScope();
+}
+
+function resetZoom() { zoomTo(0, duration()); }
+
+// Zoom about a fixed point — the pointer, or the playhead — so whatever you
+// were looking at stays where it is on screen.
+function zoomAround(t, factor) {
+  const frac = Math.min(1, Math.max(0, (t - viewA()) / viewSpan()));
+  const span = viewSpan() * factor;
+  zoomTo(t - span * frac, t - span * frac + span);
+}
+
+function panBy(seconds) {
+  if (view) zoomTo(view.a + seconds, view.b + seconds);
+}
+
+// A window the audio has already run out of is worse than no zoom at all.
+function followPlayhead() {
+  if (!view || player.paused) return;
+  const t = player.currentTime;
+  if (t >= view.a && t <= view.b) return;
+  const span = viewSpan();
+  zoomTo(t - span * 0.2, t + span * 0.8);
+}
+
+// ---- Chapters ----
+// The video's table of contents: what it covers, and where. The strip spans
+// the WHOLE video however far the waveform above is zoomed in, which is what
+// makes it the map rather than a second copy of the view. Clicking a chapter
+// zooms the waveform to it.
+let chapterViewBox = null;   // the "you are here" window drawn on the strip
+let lastActiveChapter = -2;  // chapter under the playhead, -1 for none
+
+function renderChapters() {
+  const btn = document.getElementById('chapters-btn');
+  if (btn) btn.textContent = chapters.length ? 'Re-read chapters' : 'Find chapters';
+  const strip = document.getElementById('chapter-strip');
+  if (!strip) return;
+  const total = duration();
+  strip.innerHTML = '';
+  // Two things a band can say about itself: you've already cut from here (the
+  // question a second pass over a long video asks), and there's a suggestion
+  // waiting inside — which is the only signpost to suggestions now that they
+  // live behind a chapter click.
+  const claimed = otherSegments.concat(segments);
+  const suggested = suggestedClips.flatMap(c => visibleProposal(c).segments);
+  const stripWidth = strip.clientWidth || 1;
+  chapters.forEach((ch, i) => {
+    const name = ch.topic || `Chapter ${i + 1}`;
+    const band = document.createElement('button');
+    band.type = 'button';
+    band.className = 'chapter-band';
+    band.style.left = `${(ch.start / total) * 100}%`;
+    band.style.width = `${((ch.end - ch.start) / total) * 100}%`;
+    const holds = suggested.some(s => s.start < ch.end && s.end > ch.start);
+    band.title = `${i + 1}. ${name} · ${txFmt(ch.start)}–${txFmt(ch.end)}`
+      + (ch.summary ? `\n${ch.summary}` : '')
+      + (holds ? '\nA suggested clip is waiting in here' : '')
+      + '\nClick to zoom the waveform here';
+    if (claimed.some(s => s.start < ch.end && s.end > ch.start)) {
+      band.classList.add('is-clipped');
+    }
+    if (holds) band.classList.add('has-suggestion');
+    // Just the number. A chapter can be one percent of an hour wide, and a
+    // title squeezed into that reads "Moun…" — worse than no title, because
+    // it still costs the space. The name goes to the line above instead.
+    band.innerHTML = `<span class="chapter-band-n">${i + 1}</span>`;
+    if (((ch.end - ch.start) / total) * stripWidth < 18) band.classList.add('is-narrow');
+    band.addEventListener('click', () => zoomToChapter(i));
+    band.addEventListener('mouseenter', () => showChapterName(i));
+    band.addEventListener('mouseleave', () => syncZoomBar());
+    strip.appendChild(band);
+  });
+  chapterViewBox = document.createElement('div');
+  chapterViewBox.className = 'chapter-view';
+  chapterViewBox.hidden = true;
+  strip.appendChild(chapterViewBox);
+  lastActiveChapter = -2;   // bands are new; let the next sync light one up
+  syncZoomBar();
+}
+
+function chapterAt(t) {
+  return chapters.find(ch => t >= ch.start && t < ch.end) || null;
+}
+
+// The strip has room for a number and nothing else, so the name belongs here —
+// while you hover a band, and while you're zoomed inside one.
+function showChapterName(i) {
+  const label = document.getElementById('wave-range');
+  const ch = chapters[i];
+  if (label && ch) {
+    label.textContent = `${i + 1}. ${ch.topic} · ${txFmt(ch.start)}–${txFmt(ch.end)}`;
+  }
+}
+
+function zoomToChapter(i) {
+  const ch = chapters[i];
+  if (!ch) return;
+  cancelPlayback();
+  activeStop = null;
+  // A little air on each side, so the chapter's first and last words aren't
+  // pinned against the canvas edge where they can't be grabbed.
+  const pad = Math.min(2, (ch.end - ch.start) * 0.05);
+  zoomTo(ch.start - pad, ch.end + pad);
+  player.currentTime = Math.max(0, ch.start);
+  updateTranscriptFocus(true);
+}
+
+// Everything the zoom level drives: the range readout, the reset button, and
+// the window box on the strip.
+function syncZoomBar() {
+  const total = duration();
+  const label = document.getElementById('wave-range');
+  if (label) {
+    const ch = view ? chapterAt((view.a + view.b) / 2) : null;
+    label.textContent = ch
+      ? `${chapters.indexOf(ch) + 1}. ${ch.topic} · ${txFmt(view.a)}–${txFmt(view.b)}`
+      : view ? `Showing ${txFmt(view.a)}–${txFmt(view.b)} of ${txFmt(total)}`
+      : (chapters.length ? `${chapters.length} chapters · ${txFmt(total)}` : txFmt(total));
+  }
+  const reset = document.getElementById('zoom-reset');
+  if (reset) reset.hidden = !view;
+  // One button whose scope follows the view: inside the chapter you zoomed
+  // into, or the whole video when you haven't.
+  const here = document.getElementById('suggest-here');
+  if (here) {
+    const ch = view ? chapterAt((view.a + view.b) / 2) : null;
+    here.textContent = view ? 'Suggest a clip here' : 'Suggest clips';
+    here.title = view
+      ? (ch ? `Propose a clip from "${ch.topic}"` : 'Propose a clip')
+        + ` — reading only ${txFmt(view.a)}–${txFmt(view.b)}, not the rest of the video`
+      : 'Read the whole transcript and propose the clips this video holds';
+  }
+  // With no chapters the strip still earns its place while zoomed: it's the
+  // only thing saying where this window sits in the video.
+  const strip = document.getElementById('chapter-strip');
+  if (strip) strip.hidden = (!chapters.length && !view) || total <= 1;
+  if (chapterViewBox) {
+    chapterViewBox.hidden = !view;
+    chapterViewBox.style.left = `${(viewA() / total) * 100}%`;
+    chapterViewBox.style.width = `${(viewSpan() / total) * 100}%`;
+  }
+}
+
+// Playhead-driven, so this runs every frame: touch the DOM only when the
+// chapter under the playhead actually changes.
+function syncChapterState() {
+  if (!chapters.length) return;
+  const t = player.currentTime;
+  const idx = chapters.findIndex(ch => t >= ch.start && t < ch.end);
+  if (idx === lastActiveChapter) return;
+  lastActiveChapter = idx;
+  document.querySelectorAll('.chapter-band').forEach((el, i) =>
+    el.classList.toggle('is-active', i === idx));
+}
+
+async function findChapters() {
+  const btn = document.getElementById('chapters-btn');
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  try {
+    const r = await fetch('/video/{{ c.id }}/chapters', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    chapters = d.chapters || [];
+    renderChapters();
+    if (!chapters.length) alert('This video stays on one subject — there is nothing to divide into chapters.');
+  } catch (e) {
+    alert('Could not read the chapters: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
+}
+
+// Bands are placed as a percentage of the duration, so they can't be drawn
+// until something knows it. The waveform normally answers first; this covers a
+// video whose peaks never loaded.
+player.addEventListener('loadedmetadata', () => { if (!wf) renderChapters(); });
 
 function drawWave() {
   if (!wf) return;
@@ -1028,36 +1242,28 @@ function drawWave() {
   const gridColor = css.getPropertyValue('--wave-grid').trim() || 'rgba(255,255,255,0.12)';
   wctx.clearRect(0, 0, W, H);
 
-  // Material already used by the video's other clips: faint amber fill with a
-  // dashed outline, painted first so the active (green) segments sit on top.
+  // Material already used by the video's other clips: a flat amber wash and
+  // nothing else. The fill is the message; outlining every claimed stretch
+  // turned a long video into a fence. Painted first, so the active (green)
+  // segments sit on top.
   otherSegments.forEach(s => {
     const x0 = xOf(s.start), x1 = xOf(s.end);
-    wctx.fillStyle = 'rgba(240,180,90,0.10)';
+    wctx.fillStyle = 'rgba(240,180,90,0.16)';
     wctx.fillRect(x0, 0, x1 - x0, H);
-    wctx.strokeStyle = 'rgba(240,180,90,0.75)';
-    wctx.lineWidth = 1.5;
-    wctx.setLineDash([5 * dpr, 4 * dpr]);
-    wctx.strokeRect(x0 + 1, 1, (x1 - x0) - 2, H - 2);
-    wctx.setLineDash([]);
   });
 
-  // Model proposals awaiting a verdict: violet on a finer dash, so a suggestion
-  // never reads as material already used (dashed amber) or as a real segment
-  // (solid green). Hovering a panel row brightens its clip here, which is how
-  // the list and the timeline point at each other.
+  // Model proposals awaiting a verdict: the same wash in violet, so a
+  // suggestion never reads as material already used. Hovering its card in the
+  // panel deepens it, which is how the list and the timeline point at each
+  // other.
   suggestedClips.forEach(clip => {
     const hot = hoveredProposal === clip.id;
-    // Only the part not already claimed by a clip — the violet overlay and the
-    // dashed "already clipped" one can never describe the same seconds.
+    // Only the part not already claimed by a clip — the violet wash and the
+    // amber one can never describe the same seconds.
     visibleProposal(clip).segments.forEach(s => {
       const x0 = xOf(s.start), x1 = xOf(s.end);
-      wctx.fillStyle = hot ? 'rgba(167,139,250,0.26)' : 'rgba(167,139,250,0.09)';
+      wctx.fillStyle = hot ? 'rgba(167,139,250,0.34)' : 'rgba(167,139,250,0.15)';
       wctx.fillRect(x0, 0, x1 - x0, H);
-      wctx.strokeStyle = hot ? 'rgba(167,139,250,0.95)' : 'rgba(167,139,250,0.5)';
-      wctx.lineWidth = hot ? 2 : 1.5;
-      wctx.setLineDash([2 * dpr, 6 * dpr]);
-      wctx.strokeRect(x0 + 1, 1, (x1 - x0) - 2, H - 2);
-      wctx.setLineDash([]);
     });
   });
 
@@ -1083,7 +1289,8 @@ function drawWave() {
   // pixel step keeps each bar readable against the dark track.
   const n = wf.peaks.length, total = duration(), step = Math.max(2, Math.round(2 * dpr));
   for (let x = 0; x < W; x += step) {
-    const t = (x / W) * total;
+    const t = viewA() + (x / W) * viewSpan();
+    if (t < 0 || t > total) continue;
     const k = Math.min(n - 1, Math.max(0, Math.floor((t / total) * n)));
     const inSeg = segments.some(s => t >= s.start && t <= s.end);
     wctx.fillStyle = inSeg ? barOn : barColor;
@@ -1091,11 +1298,16 @@ function drawWave() {
     wctx.fillRect(x, mid - h / 2, Math.max(1, step * 0.65), h);
   }
 
+  // The grid thins out as you zoom in, so it stays about a dozen marks at any
+  // scale instead of collapsing into a grey band on a long video.
   wctx.fillStyle = gridColor;
   wctx.font = `${10 * dpr}px sans-serif`;
-  for (let t = 30; t < duration(); t += 30) {
+  const gridStep = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900]
+    .find(s => viewSpan() / s <= 12) || 1800;
+  for (let t = Math.ceil(viewA() / gridStep) * gridStep; t < viewB(); t += gridStep) {
+    if (t <= 0) continue;
     wctx.fillRect(xOf(t), 0, 1, H);
-    wctx.fillText(`${t}s`, xOf(t) + 3, H - 4);
+    wctx.fillText(txFmt(t), xOf(t) + 3, H - 4);
   }
 
   segments.forEach((s, i) => {
@@ -1122,7 +1334,9 @@ function drawWave() {
 
 (function tick() {
   enforceBounds();
+  followPlayhead();
   drawWave();
+  syncChapterState();
   updateTranscriptFocus(false);
   if (selectedSeg !== null) drawDetailWave();
   if (!player.paused) redrawAllSegWaves(false);
@@ -1137,13 +1351,13 @@ let detailHoverX = null; // css-px scrub preview on the detail strip
 function timeAt(e) {
   const rect = wave.getBoundingClientRect();
   const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-  return frac * duration();
+  return viewA() + frac * viewSpan();
 }
 
 function handleAt(e) {
   const rect = wave.getBoundingClientRect();
   const x = e.clientX - rect.left;
-  const px = t => (t / duration()) * rect.width;
+  const px = t => ((t - viewA()) / viewSpan()) * rect.width;
   let best = null, bestDist = GRAB_PX + 1;
   for (const edge of ['start', 'end']) {
     if (pending[edge] === null) continue;
@@ -1228,11 +1442,25 @@ wave.addEventListener('pointermove', e => {
     dragging.moved = true;
     pushUndo();
   }
-  const snapped = snapEdge(dragging.edge, t, rect.width / duration(), e);
+  const snapped = snapEdge(dragging.edge, t, rect.width / viewSpan(), e);
   if (dragging.kind === 'pending') { pending[dragging.edge] = snapped; renderPending(); }
   else setSegEdge(dragging.index, dragging.edge, snapped);
 });
 wave.addEventListener('pointerleave', () => { waveHoverX = null; });
+
+// ⌘/Ctrl + wheel zooms about the pointer, Shift + wheel pans. A plain wheel is
+// deliberately left alone: the page has to keep scrolling under the cursor.
+wave.addEventListener('wheel', e => {
+  const d = e.deltaY || e.deltaX;
+  if (!d) return;
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    zoomAround(timeAt(e), d > 0 ? 1.25 : 0.8);
+  } else if (e.shiftKey) {
+    e.preventDefault();
+    panBy(viewSpan() * (d > 0 ? 0.25 : -0.25));
+  }
+}, { passive: false });
 wave.addEventListener('pointerup', () => {
   if (dragging) {
     if ((dragging.kind === 'seg' || dragging.kind === 'pending') && !dragging.moved) {
@@ -1334,17 +1562,14 @@ function renderSegments() {
   updateTotal();
   drawWave();
   syncDetailStrip();
-  renderClipProposals();
+  renderClipProposals();   // which in turn refreshes the chapter strip
 }
 
 // ---- Suggested clips ---------------------------------------------------
-// The model proposes a PARTITION of the video: N clips, each one or more
-// segments of the same story. A proposal is never applied on load — that would
-// make "accepted" and "never looked at it" indistinguishable in the ledger, so
-// every clip here waits for a click.
-// Once real segments exist the panel collapses on its own; this remembers an
-// explicit "Show" so it doesn't snap shut again on the next render.
-let userExpandedProposals = false;
+// One suggestion is one clip: several segments of the same story, cut from one
+// stretch of the video. They surface where they belong — zoom into a chapter
+// and its suggestions appear here — and none is ever applied on load, which
+// would make "accepted" and "never looked at it" the same thing in the ledger.
 
 function clipProposalById(id) {
   return suggestedClips.find(c => c.id === id) || null;
@@ -1447,101 +1672,102 @@ function visibleProposal(clip) {
   return { segments: pieces, seconds, trimmed: seconds < original - 0.05 };
 }
 
-function renderClipProposals() {
-  const panel = document.getElementById('clip-proposals');
-  const legend = document.getElementById('suggested-legend');
-  if (!panel) return;
-  const list = document.getElementById('clip-proposals-list');
-  const title = document.getElementById('clip-proposals-title');
-  const toggle = document.getElementById('clip-proposals-toggle');
-  const foot = document.getElementById('clip-proposals-foot');
-  const reroll = document.getElementById('clip-proposals-reroll');
-  const dismissAll = document.getElementById('clip-proposals-dismiss-all');
-  // A proposal with nothing left after already-clipped material is removed is
-  // not offered at all; it stays pending server-side and resolves on export.
+// The suggestions worth showing right now. A proposal with nothing left after
+// already-clipped material is removed is never offered; it stays pending
+// server-side and resolves on export.
+function proposalsInView() {
   const live = suggestedClips
-    .map(clip => ({ clip, view: visibleProposal(clip) }))
-    .filter(x => x.view.segments.length > 0);
-  const n = live.length;
-
-  // Collapse once there are real segments: past that point the operator is
-  // editing, and the panel must not compete with the work.
-  const collapsed = segments.length > 0 && !userExpandedProposals;
-  if (legend) legend.hidden = !n || collapsed;
-
-  title.textContent = n
-    ? `${n} suggested clip${n === 1 ? '' : 's'}`
-    : 'Suggested clips';
-  reroll.textContent = n ? 'Suggest again' : 'Suggest clips';
-  dismissAll.hidden = !n;
-  toggle.hidden = !n || segments.length === 0;
-  const toggleLabel = collapsed ? 'Show suggestions' : 'Hide suggestions';
-  toggle.title = toggleLabel;
-  toggle.setAttribute('aria-label', toggleLabel);
-  toggle.setAttribute('aria-expanded', String(!collapsed));
-  panel.classList.toggle('is-collapsed', collapsed);
-  // Collapsed = just the one-line header; the actions go with the list.
-  foot.hidden = collapsed;
-
-  list.innerHTML = '';
-  // The reason strip survives the dismissal that emptied the list — that's
-  // exactly the moment it's for. A collapsed panel still hides it.
-  if (!collapsed) renderReasonAsk(list);
-  if (!n || collapsed) return;
-
-  live.forEach(({ clip, view }) => {
-    const row = document.createElement('div');
-    row.className = 'proposal-row' + (hoveredProposal === clip.id ? ' hot' : '');
-    const segs = view.segments.length;
-    // Bucketed, not printed to the digit: it's the model scoring itself, the
-    // list is already in rank order, and "85% confident" next to "72%
-    // confident" invites a comparison the number can't carry.
-    const conf = (clip.confidence || clip.confidence === 0)
-      ? ` · ${clip.confidence >= 0.8 ? 'high' : clip.confidence >= 0.6 ? 'medium' : 'low'} confidence`
-      : '';
-    const meta = `${segs} segment${segs === 1 ? '' : 's'} · ${Math.round(view.seconds)}s${conf}`;
-    // Preview leads: auditioning is the step that comes first and costs
-    // nothing, so it carries the colour. Nothing here is a filled primary —
-    // three suggestions with no recommended one means no "do this" button.
-    row.innerHTML = `
-      <div class="proposal-story">${escapeHtml(clip.story || 'Suggested clip')}</div>
-      ${clip.why
-        ? `<details class="proposal-why-toggle">
-             <summary class="proposal-meta meta">${meta}<span class="proposal-why-cue">Why?</span></summary>
-             <div class="proposal-why meta">${escapeHtml(clip.why)}</div>
-           </details>`
-        : `<div class="proposal-meta meta">${meta}</div>`}
-      ${view.trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
-      <div class="proposal-actions">
-        <button type="button" class="primary sm proposal-play" data-act="play"
-                title="Play this clip without applying it">
-          <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-          Preview
-        </button>
-        <button type="button" class="sm" data-act="use"
-                title="Append these segments to the clip you're editing">Add to this clip</button>
-        <button type="button" class="ghost sm" data-act="new"
-                title="Open this as its own clip on the same video">Open separately</button>
-        <button type="button" class="ghost sm" data-act="dismiss">Dismiss</button>
-      </div>`;
-    row.addEventListener('mouseenter', () => { hoveredProposal = clip.id; row.classList.add('hot'); });
-    row.addEventListener('mouseleave', () => { hoveredProposal = null; row.classList.remove('hot'); });
-    row.querySelectorAll('[data-act]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const act = btn.dataset.act;
-        if (act === 'play') previewClipProposal(clip.id);
-        else if (act === 'use') useClipProposal(clip.id);
-        else if (act === 'new') clipProposalToNewCut(clip.id);
-        else if (act === 'dismiss') dismissClipProposal(clip.id);
-      });
-    });
-    list.appendChild(row);
-  });
+    .map(clip => ({ clip, shown: visibleProposal(clip) }))
+    .filter(({ shown }) => shown.segments.length > 0);
+  // A video with no chapters IS one chapter — on a three-minute news segment
+  // there is nothing to click into, so its suggestions stand on their own.
+  if (!view) return chapters.length ? [] : live;
+  return live.filter(({ shown }) =>
+    shown.segments.some(s => s.end > view.a && s.start < view.b));
 }
 
-function toggleClipProposals() {
-  userExpandedProposals = !userExpandedProposals;
-  renderClipProposals();
+// Zooming changes which suggestions the panel holds, but a wheel-zoom fires
+// dozens of times a second: rebuild the list only when the set really changed,
+// or the cards flicker and lose hover mid-gesture.
+let proposalScopeKey = null;
+
+function syncProposalScope() {
+  if (proposalsInView().map(({ clip }) => clip.id).join(',') !== proposalScopeKey) {
+    renderClipProposals();
+  }
+}
+
+function renderClipProposals() {
+  const panel = document.getElementById('clip-proposals');
+  if (!panel) return;
+  const legend = document.getElementById('suggested-legend');
+  const list = document.getElementById('clip-proposals-list');
+  const live = proposalsInView();
+  proposalScopeKey = live.map(({ clip }) => clip.id).join(',');
+
+  // The reason strip outlives the dismissal that emptied the list — that's
+  // exactly the moment it exists for — so it keeps the panel open too.
+  panel.hidden = !live.length && !reasonAsk;
+  // The key answers for what's painted on the waveform, which is every pending
+  // proposal — not just the ones the panel is listing right now.
+  if (legend) {
+    legend.hidden = !suggestedClips.some(c => visibleProposal(c).segments.length);
+  }
+  // The key only earns its line when it has something to explain.
+  const key = document.getElementById('wave-key');
+  if (key) key.hidden = ![...key.children].some(item => !item.hidden);
+  document.getElementById('clip-proposals-title').textContent = live.length
+    ? `${live.length} suggested clip${live.length === 1 ? '' : 's'}`
+    : 'Suggested clips';
+
+  list.innerHTML = '';
+  if (!panel.hidden) {
+    renderReasonAsk(list);
+    live.forEach(({ clip, shown }) => list.appendChild(proposalCard(clip, shown)));
+  }
+  renderChapters();   // which chapters hold a suggestion just changed
+}
+
+// One suggestion: what it is, and the two things you can do with it. The card
+// itself plays the clip, because auditioning is the step that always comes
+// first and reading two timestamps is no way to judge one.
+function proposalCard(clip, shown) {
+  const row = document.createElement('div');
+  row.className = 'proposal-row' + (hoveredProposal === clip.id ? ' hot' : '');
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
+  row.title = 'Play this clip — nothing is applied until you use it';
+  row.innerHTML = `
+    <button type="button" class="proposal-x" data-act="dismiss"
+            title="Dismiss this suggestion" aria-label="Dismiss this suggestion">
+      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
+           stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18"/>
+      </svg>
+    </button>
+    <div class="proposal-story">${escapeHtml(clip.story || 'Suggested clip')}</div>
+    ${shown.trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
+    <div class="proposal-actions">
+      <button type="button" class="sm" data-act="use"
+              title="Load these segments into the editor, replacing what's there">Use this clip</button>
+    </div>`;
+  row.addEventListener('mouseenter', () => { hoveredProposal = clip.id; row.classList.add('hot'); });
+  row.addEventListener('mouseleave', () => { hoveredProposal = null; row.classList.remove('hot'); });
+  row.addEventListener('click', ev => {
+    if (!ev.target.closest('[data-act]')) previewClipProposal(clip.id);
+  });
+  // Enter only: Space already belongs to the player, everywhere on this page.
+  row.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); previewClipProposal(clip.id); }
+  });
+  row.querySelectorAll('[data-act]').forEach(btn => {
+    btn.addEventListener('click', ev => {
+      ev.stopPropagation();
+      if (btn.dataset.act === 'use') useClipProposal(clip.id);
+      else dismissClipProposal(clip.id);
+    });
+  });
+  return row;
 }
 
 // Audition a proposal without committing it. Judging a clip by reading two
@@ -1551,34 +1777,27 @@ function previewClipProposal(id) {
   if (clip) playSegments(visibleProposal(clip).segments);
 }
 
-// Accept = append into the live segments, then edit with the normal tools.
-// Only the unclaimed part is appended, so accepting can never duplicate
-// footage that's already in another clip.
+// Use = these segments BECOME the clip, then the normal tools take over. It
+// replaces rather than appends: one suggestion is one clip, and joining two of
+// them builds a supercut out of two stories that can't share a caption. ⌘Z
+// puts back whatever was there. Only the unclaimed part is loaded, so using a
+// suggestion can never duplicate footage another clip already published.
 function useClipProposal(id) {
   const clip = clipProposalById(id);
   if (!clip) return;
-  const view = visibleProposal(clip);
-  if (!view.segments.length) return;
+  const shown = visibleProposal(clip);
+  if (!shown.segments.length) return;
   pushUndo();
-  view.segments.forEach(s => segments.push({
+  segments = shown.segments.map(s => ({
     start: +Number(s.start).toFixed(2), end: +Number(s.end).toFixed(2),
   }));
-  selectedSeg = segments.length - 1;
+  selectedSeg = 0;
   suggestedClips = suggestedClips.filter(c => c.id !== id);
   renderSegments();
   fetch(`/clip-proposal/${id}/accept`, {
     method: 'POST',
     body: new URLSearchParams({ cut_id: '{{ cut.id }}' }),
   }).catch(() => {});
-}
-
-async function clipProposalToNewCut(id) {
-  try {
-    const r = await fetch(`/clip-proposal/${id}/new-cut`, { method: 'POST' });
-    const d = await r.json();
-    if (d.redirect) location.href = d.redirect;
-    else alert(d.error || 'Could not open that as a new clip');
-  } catch (e) { alert('Could not open that as a new clip: ' + e); }
 }
 
 function dismissClipProposal(id) {
@@ -1589,38 +1808,47 @@ function dismissClipProposal(id) {
   fetch(`/clip-proposal/${id}/dismiss`, { method: 'POST' }).catch(() => {});
 }
 
-// "None of these" is one click on purpose: a three-clip miss that costs three
-// clicks to reject is a miss that stops getting recorded.
-function dismissAllClipProposals() {
-  if (!suggestedClips.length) return;
-  reasonAsk = { ids: suggestedClips.map(c => c.id) };
-  suggestedClips = [];
-  hoveredProposal = null;
-  renderClipProposals();
-  fetch('/video/{{ c.id }}/dismiss-clip-proposals', { method: 'POST' }).catch(() => {});
-}
-
-async function rerollClipProposals() {
-  const btn = document.getElementById('clip-proposals-reroll');
+// One pass, scoped to whatever is on screen: the chapter you zoomed into, or
+// the whole video when you haven't.
+async function suggestClips() {
+  const btn = document.getElementById('suggest-here');
+  const chapter = view ? chapterAt((view.a + view.b) / 2) : null;
+  const query = view ? `?start=${view.a.toFixed(2)}&end=${view.b.toFixed(2)}` : '';
   btn.disabled = true;
   btn.classList.add('is-busy');
   try {
-    const r = await fetch('/video/{{ c.id }}/suggest-clips', { method: 'POST' });
+    const r = await fetch(`/video/{{ c.id }}/suggest-clips${query}`, { method: 'POST' });
     const d = await r.json();
-    if (d.clips) {
-      suggestedClips = d.clips;
-      userExpandedProposals = true;
-      reasonAsk = null;   // a fresh run makes the old strip stale
-      renderClipProposals();
-      const toggle = document.getElementById('multi-clip-toggle');
-      if (toggle) toggle.checked = !!d.multi_clip;
-      if (!d.clips.length) alert('The model found nothing worth clipping here.');
-    } else {
-      alert(d.error || 'No clips returned');
+    if (!d.clips) throw new Error(d.error || 'No clips returned');
+    suggestedClips = d.clips;
+    reasonAsk = null;   // a fresh run makes the old strip stale
+    // A whole-video pass proposes into chapters you aren't looking at, where
+    // the panel won't show them. Land on the first one instead of leaving the
+    // rail empty and the run looking like it did nothing.
+    if (!view && d.new && suggestedClips.length) zoomToProposal(suggestedClips[0]);
+    renderClipProposals();
+    const toggle = document.getElementById('multi-clip-toggle');
+    if (toggle) toggle.checked = !!d.multi_clip;
+    // What THIS run proposed — the list can still hold suggestions standing
+    // for the rest of the video.
+    if (!d.new) {
+      alert(view
+        ? (chapter ? `Nothing worth clipping in "${chapter.topic}".`
+                   : 'Nothing worth clipping in this stretch.')
+        : 'The model found nothing worth clipping here.');
     }
-  } catch (e) { alert('Suggestion failed: ' + e); }
+  } catch (e) {
+    alert('Suggestion failed: ' + (e.message || e));
+  }
   btn.disabled = false;
   btn.classList.remove('is-busy');
+}
+
+function zoomToProposal(clip) {
+  const segs = visibleProposal(clip).segments;
+  if (!segs.length) return;
+  const pad = Math.max(3, (segs[segs.length - 1].end - segs[0].start) * 0.15);
+  zoomTo(segs[0].start - pad, segs[segs.length - 1].end + pad);
 }
 
 // ---- Prompted edits ------------------------------------------------------
