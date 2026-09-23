@@ -1872,6 +1872,13 @@ canvas#wave {
   touch-action: none;
 }
 
+/* The chapter strip joins the waveform's bottom edge, so the waveform gives up
+   its bottom corners while the strip is up. */
+.wave-wrap.has-strip canvas#wave {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
 /* Zoom readout + chapter actions, above the waveform. Quiet: the waveform is
    the instrument, this row only says which part of the video it's showing. */
 .wave-bar {
@@ -1922,9 +1929,10 @@ canvas#wave {
 .chapter-strip {
   position: relative;
   height: 26px;
-  margin-top: 5px;
+  /* Flush under the waveform, the two borders sharing one line. */
+  margin-top: -1px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 0 0 var(--radius) var(--radius);
   background: var(--panel2);
   overflow: hidden;
 }
@@ -1956,7 +1964,6 @@ canvas#wave {
   transition: background 0.12s ease, color 0.12s ease;
 }
 .chapter-band:first-child { border-left: none; }
-.chapter-band:nth-child(even) { background: var(--panel3); }
 .chapter-band:hover {
   color: var(--text);
   background: color-mix(in srgb, var(--blue) 22%, transparent);
@@ -1986,6 +1993,102 @@ canvas#wave {
 /* A chapter can be under twenty pixels wide on an hour-long video; a clipped
    digit is worse than a clean empty band you can still click. */
 .chapter-band.is-narrow .chapter-band-n { display: none; }
+/* --- Striking frames: the images this stretch of footage holds. Thumbnails
+   because the whole point is that you can't judge a shot from a timestamp —
+   the card plays it, the pill puts it at the front of the clip. --- */
+.frame-strip {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+.frame-strip[hidden] { display: none; }
+.frame-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.frame-strip-label {
+  font-size: var(--text-meta);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.frame-strip-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.frame-strip-close:hover { color: var(--text); background: var(--panel3); }
+.frame-strip-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.frame-card {
+  flex: 0 0 auto;
+  width: 134px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel2);
+  cursor: pointer;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+.frame-card:hover { border-color: var(--blue); transform: translateY(-1px); }
+.frame-card:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.frame-card img {
+  display: block;
+  width: 100%;
+  height: 76px;
+  object-fit: cover;
+  background: #000;
+}
+.frame-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 6px 5px 8px;
+}
+.frame-card-t {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* Green: using one adds a segment, and segments are green everywhere here. */
+.frame-card-use {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  min-height: 0;
+  padding: 2px 9px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.frame-card-use:hover {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
 /* The waveform's window, drawn on the full-video strip. */
 .chapter-view {
   position: absolute;

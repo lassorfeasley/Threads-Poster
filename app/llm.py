@@ -811,6 +811,95 @@ def segment_chapters(model: str, title: str, transcript_segments: list[dict],
     return chapters if len(chapters) > 1 else []
 
 
+def rank_striking_frames(model: str, frames: list[tuple[float, bytes]], *,
+                         title: str = "", topic: str = "", top: int = 6) -> list[dict]:
+    """Out of a scan of the footage, the frames worth opening a clip on.
+
+    The third and widest of the three ways this app looks at a video, and the
+    only one that can answer "where are the images in here":
+
+    - ``suggest_clips`` reads words and cannot see at all.
+    - ``pick_opening_frame`` can see, but only a few seconds either side of a
+      start the transcript already chose.
+    - this scans a whole stretch and judges the pictures on their own terms.
+
+    Judging the IMAGE, not the story, is the point. The most arresting shot in
+    a video is rarely where its words begin, and an operator who can see it
+    listed can open on it and cut to the talking afterwards.
+
+    ``frames`` are ``(timestamp, jpeg)`` in order, each sent as its own
+    labelled image rather than tiled into a sheet — a model asked which cell
+    of a grid it picked is guessing (see ``vision.frames_between``).
+
+    Returns ``[{"index": int, "why": str}]``, strongest first, at most ``top``.
+    """
+    if len(frames) < 2:
+        return []
+    b = _brand()
+    system = (
+        f"You are choosing the opening image for a short social video cut from "
+        f"{b['source_kind']} footage about {b['topic']}. The first frame "
+        "decides whether anyone stops scrolling.\n"
+        "\n"
+        "These frames are a scan of one stretch of a longer video, in order. "
+        f"Pick the {top} worth opening on, strongest first.\n"
+        "\n"
+        f"STRONG openings: {b['strong_openings']}.\n"
+        f"WEAK openings: {b['weak_openings']}, frames caught mid-transition or "
+        "mid-dissolve, motion blur, black or near-black frames.\n"
+        "\n"
+        "Judge the PICTURE, not the story. It does not matter whether the "
+        "clip could sensibly begin there — the editor decides that, and can "
+        "open on an image and cut to the talking straight after.\n"
+        "Never pick two frames from the same shot: near-identical images are "
+        "one choice, not two. Spread your picks across different moments.\n"
+        "If fewer than that many frames are worth anything, return fewer. If "
+        "none are, return an empty list.\n"
+        "Say in one line what is in the frame that earns it — name what is on "
+        "screen, not an adjective.\n"
+        "JSON shape: {\"frames\": [{\"index\": n, \"why\": \"one line\"}]}"
+    )
+
+    blocks: list = [{
+        "type": "text",
+        "text": (f"Video: {title}\n" if title else "")
+        + (f"This stretch is about: {topic}\n" if topic else "")
+        + f"{len(frames)} frames follow, each labelled with its index.",
+    }]
+    for i, (ts, image) in enumerate(frames):
+        blocks.append({"type": "text", "text": f"Frame {i} (t={ts:.1f}s)"})
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(image).decode("ascii"),
+            },
+        })
+
+    resp = _create(model, system + "\nRespond with a single JSON object only — "
+                                   "no prose, no code fences.",
+                   blocks, max_tokens=800, temperature=0.2)
+    data = _parse_json(_text_from(resp))
+
+    out: list[dict] = []
+    seen: set[int] = set()
+    for item in (data.get("frames") or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item["index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (0 <= index < len(frames)) or index in seen:
+            continue
+        seen.add(index)
+        out.append({"index": index, "why": str(item.get("why", "")).strip()[:200]})
+        if len(out) >= top:
+            break
+    return out
+
+
 def tag_footage(model: str, images: list[bytes], traits: list[str],
                 title: str = "") -> dict:
     """Tag which traits from the vocabulary are visibly present in footage stills.

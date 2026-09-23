@@ -24,7 +24,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import chapters as chapter_index
-from .. import clip_proposals, instagram_api, spend, threads_api, youtube
+from .. import clip_proposals, instagram_api, spend, threads_api, vision, youtube
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
 from ..categories import category_by_slug, category_options
@@ -1326,18 +1326,7 @@ def video_suggest_clips(candidate_id: int, start: float | None = None,
                           "drafted from what is said in it."},
                 status_code=409)
         if window:
-            # What this stretch is about, when the video has been indexed: the
-            # chapter holding the middle of the window.
-            middle = (window["start"] + window["end"]) / 2
-            for ch in chapter_index.load(c):
-                try:
-                    if float(ch["start"]) <= middle < float(ch["end"]):
-                        topic = " — ".join(
-                            p for p in (str(ch.get("topic", "")).strip(),
-                                        str(ch.get("summary", "")).strip()) if p)
-                        break
-                except (KeyError, TypeError, ValueError):
-                    continue
+            topic = _topic_for_window(c, window)
         try:
             ids = clip_proposals.propose(session, c, settings, transcript,
                                          window=window, topic=topic)
@@ -1347,6 +1336,73 @@ def video_suggest_clips(candidate_id: int, start: float | None = None,
         multi_clip = bool(c.multi_clip_potential)
     return JSONResponse({"clips": clips, "multi_clip": multi_clip,
                          "new": len(ids)})
+
+
+def _topic_for_window(c: Candidate, window: dict) -> str:
+    """What a stretch of a video is about, when it has been indexed: the
+    chapter holding the middle of the window. Empty when it hasn't."""
+    middle = (float(window["start"]) + float(window["end"])) / 2
+    for ch in chapter_index.load(c):
+        try:
+            if float(ch["start"]) <= middle < float(ch["end"]):
+                return " — ".join(p for p in (str(ch.get("topic", "")).strip(),
+                                              str(ch.get("summary", "")).strip()) if p)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return ""
+
+
+@app.post("/video/{candidate_id}/striking-frames")
+def video_striking_frames(candidate_id: int, start: float | None = None,
+                          end: float | None = None):
+    """Scan a stretch of the footage for the frames worth opening a clip on.
+
+    The one pass that judges pictures rather than words. Scoped to the window
+    the operator is looking at, because sampling decodes the footage it covers
+    — a chapter is seconds of ffmpeg, a whole hour is minutes.
+
+    Ungated like the other on-demand passes. Returns every stored frame inside
+    the window (the scan replaces what that stretch held before) plus ``new``,
+    how many this run found.
+    """
+    settings = load_settings()
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        if not (c.local_video_path and Path(c.local_video_path).exists()):
+            return JSONResponse(
+                {"error": "The video isn't on disk, so there are no frames to "
+                          "look at."}, status_code=409)
+        total = clip_duration(c.local_video_path) or 0.0
+        a = max(0.0, start if start is not None else 0.0)
+        b = end if end is not None else total
+        if not b or b <= a:
+            return JSONResponse({"error": "Nothing to scan"}, status_code=409)
+        window = {"start": a, "end": b}
+        try:
+            found = vision.find_striking_frames(
+                c, settings, start=a, end=b,
+                # Never offer an image out of footage another clip published.
+                used=clip_proposals.used_ranges(session, c.id),
+                topic=_topic_for_window(c, window),
+            )
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        frames = [f for f in vision.load_striking(c)
+                  if a <= float(f.get("t", -1)) < b]
+    return JSONResponse({"frames": frames, "new": len(found)})
+
+
+@app.get("/video/{candidate_id}/frame/{millis}")
+def video_frame(candidate_id: int, millis: int):
+    """One scanned frame's cached JPEG — written when the scan ran, so this
+    never spends ffmpeg on a page that is only looking."""
+    path = vision.frame_thumb_path(candidate_id, millis / 1000)
+    if not path.exists():
+        return JSONResponse({"error": "no frame"}, status_code=404)
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.post("/video/{candidate_id}/chapters")
@@ -1660,6 +1716,8 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         {"cut": cut, "c": c, "state": cut_state, "step": active_step,
          "transcript_segments": transcript_segments, "saved_segments": segments,
          "chapters": chapter_index.load(c),
+         "striking_frames": vision.load_striking(c),
+         "opener_seconds": load_settings().get("clips.opener_seconds", 2.0),
          "other_cut_segments": other_cut_segments,
          "suggested_clips": suggested_clips,
          "clip_transcript": clip_transcript,

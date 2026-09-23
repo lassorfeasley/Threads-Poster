@@ -52,6 +52,11 @@
   <span class="meta wave-range" id="wave-range"></span>
   {# Scoped to what you're looking at: inside one chapter is a much smaller
      question for the model than "what is worth clipping in this hour". #}
+  {# Looks at the pictures, not the words — the only way to reach a shot that
+     sits nowhere near the talking it belongs to. #}
+  <button type="button" class="ghost sm" id="frames-btn" onclick="findStrikingFrames()">
+    Striking frames
+  </button>
   <button type="button" class="ghost sm" id="suggest-here" onclick="suggestClips()">
     Suggest clips
   </button>
@@ -62,13 +67,28 @@
     Find chapters
   </button>
 </div>
-<div style="margin-top: 6px; position: relative;">
+<div class="wave-wrap" id="wave-wrap" style="margin-top: 6px; position: relative;">
   <canvas id="wave"></canvas>
   <div class="meta" id="wave-hint" style="position: absolute; inset: 0; display: flex;
        align-items: center; justify-content: center; pointer-events: none;">loading waveform…</div>
 </div>
 <div id="chapter-strip" class="chapter-strip" hidden
      title="Click a chapter to zoom the waveform to it. Over the waveform: ⌘/Ctrl + scroll zooms, Shift + scroll pans."></div>
+{# The images this stretch of footage holds. Click one to watch it; "Opener"
+   puts it at the front of the clip, ahead of the talking. #}
+<div id="frame-strip" class="frame-strip" hidden>
+  <div class="frame-strip-head">
+    <span class="frame-strip-label" id="frame-strip-label"></span>
+    <button type="button" class="frame-strip-close" onclick="hideFrameStrip()"
+            title="Hide these" aria-label="Hide these">
+      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
+           stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18"/>
+      </svg>
+    </button>
+  </div>
+  <div class="frame-strip-row" id="frame-strip-row"></div>
+</div>
 {# A key, not a sentence: which wash means what. The clips themselves are
    named in the tooltip rather than spelled out across three lines. #}
 <div class="wave-key" id="wave-key" hidden>
@@ -228,6 +248,10 @@ let hoveredProposal = null;   // proposal id emphasized on the waveform
 // The video's chapters, if it has been indexed: [{start, end, topic, summary}]
 // tiling the whole timeline. Navigation only — nothing here edits a clip.
 let chapters = {{ chapters | tojson }};
+// Frames the vision pass judged worth opening on: [{t, why}]. Also navigation
+// until you use one, which is the one action that does edit the clip.
+let strikingFrames = {{ striking_frames | tojson }};
+const OPENER_SECONDS = {{ opener_seconds }};
 // Source transcript (YouTube captions or upload Whisper) — drives the
 // focused 3-line view and keyword search under the player.
 const transcriptLines = {{ transcript_segments | tojson }};
@@ -1186,10 +1210,21 @@ function syncZoomBar() {
         + ` — reading only ${txFmt(view.a)}–${txFmt(view.b)}, not the rest of the video`
       : 'Read the whole transcript and propose the clips this video holds';
   }
+  const framesBtn = document.getElementById('frames-btn');
+  if (framesBtn) {
+    framesBtn.title = view
+      ? `Look through ${txFmt(view.a)}–${txFmt(view.b)} for the images worth opening on`
+      : 'Look through this video for the images worth opening on — on a long '
+        + 'one, zoom into a chapter first';
+  }
   // With no chapters the strip still earns its place while zoomed: it's the
   // only thing saying where this window sits in the video.
   const strip = document.getElementById('chapter-strip');
   if (strip) strip.hidden = (!chapters.length && !view) || total <= 1;
+  // The strip sits flush against the waveform, so the waveform gives up its
+  // bottom corners to it — but only while the strip is actually showing.
+  const wrap = document.getElementById('wave-wrap');
+  if (wrap && strip) wrap.classList.toggle('has-strip', !strip.hidden);
   if (chapterViewBox) {
     chapterViewBox.hidden = !view;
     chapterViewBox.style.left = `${(viewA() / total) * 100}%`;
@@ -1231,6 +1266,112 @@ async function findChapters() {
 // until something knows it. The waveform normally answers first; this covers a
 // video whose peaks never loaded.
 player.addEventListener('loadedmetadata', () => { if (!wf) renderChapters(); });
+
+// ---- Striking frames ----
+// The images this footage holds, wherever they sit. The clip suggester reads
+// words and can't see; the opening pass can see but only a few seconds either
+// side of a start the words chose. This is how a shot a minute away from its
+// talking becomes reachable at all — you look at it and decide.
+let frameStripDismissed = false;
+let frameScopeKey = null;
+
+function framesInView() {
+  return strikingFrames.filter(f => !view || (f.t >= view.a && f.t < view.b));
+}
+
+function renderFrameStrip() {
+  const strip = document.getElementById('frame-strip');
+  if (!strip) return;
+  const live = framesInView();
+  frameScopeKey = live.map(f => f.t).join(',');
+  strip.hidden = !live.length || frameStripDismissed;
+  if (strip.hidden) return;
+  document.getElementById('frame-strip-label').textContent =
+    `${live.length} image${live.length === 1 ? '' : 's'} worth opening on`;
+  const row = document.getElementById('frame-strip-row');
+  row.innerHTML = '';
+  live.forEach(f => row.appendChild(frameCard(f)));
+}
+
+function frameCard(f) {
+  const card = document.createElement('div');
+  card.className = 'frame-card';
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  card.title = (f.why || 'Worth opening on') + '\nClick to watch this shot';
+  card.innerHTML = `
+    <img src="/video/{{ c.id }}/frame/${Math.round(f.t * 1000)}" alt="" loading="lazy">
+    <div class="frame-card-foot">
+      <span class="frame-card-t">${txFmt(f.t)}</span>
+      <button type="button" class="frame-card-use"
+              title="Put this shot at the front of the clip, ahead of the talking">Opener</button>
+    </div>`;
+  const watch = () => playSegments([{ start: f.t, end: Math.min(f.t + OPENER_SECONDS + 1.5, duration()) }]);
+  card.addEventListener('click', ev => { if (!ev.target.closest('button')) watch(); });
+  card.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); watch(); }
+  });
+  card.querySelector('.frame-card-use').addEventListener('click', ev => {
+    ev.stopPropagation();
+    useAsOpener(f.t);
+  });
+  return card;
+}
+
+// The cold open: this shot goes FIRST, ahead of the talking, wherever it sits
+// in the source. Segments play in list order, and both the export and the
+// caption pass follow that order — so an opener from five minutes away lands
+// exactly where you put it, and the words stay lined up behind it.
+function useAsOpener(t) {
+  pushUndo();
+  segments.unshift({
+    start: +t.toFixed(2),
+    end: +Math.min(t + OPENER_SECONDS, duration()).toFixed(2),
+  });
+  selectedSeg = 0;
+  renderSegments();
+  reviseNote(`Opening on ${txFmt(t)} — drag its edge for length, ⌘Z undoes it`);
+}
+
+function hideFrameStrip() {
+  frameStripDismissed = true;
+  renderFrameStrip();
+}
+
+async function findStrikingFrames() {
+  const a = viewA(), b = viewB();
+  // Sampling decodes the stretch it covers, so scanning an hour is a wait a
+  // chapter isn't. Say so before spending it rather than after.
+  if (!view && duration() > 900 && !confirm(
+      `Scanning all ${txFmt(duration())} of this video means decoding the whole `
+      + 'file, which takes a while. Zoom into a chapter to scan just that part. '
+      + 'Scan the whole video anyway?')) {
+    return;
+  }
+  const btn = document.getElementById('frames-btn');
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  try {
+    const r = await fetch(
+      `/video/{{ c.id }}/striking-frames?start=${a.toFixed(2)}&end=${b.toFixed(2)}`,
+      { method: 'POST' });
+    const d = await r.json();
+    if (!d.frames) throw new Error(d.error || `HTTP ${r.status}`);
+    // This stretch's frames are replaced, the rest of the video's are kept —
+    // the same rule the server just applied to the stored index.
+    strikingFrames = strikingFrames
+      .filter(f => f.t < a || f.t >= b)
+      .concat(d.frames)
+      .sort((x, y) => x.t - y.t);
+    frameStripDismissed = false;
+    renderFrameStrip();
+    if (!d.new) alert('Nothing in this stretch worth opening on.');
+  } catch (e) {
+    alert('Could not scan the footage: ' + (e.message || e));
+  }
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
+}
 
 function drawWave() {
   if (!wf) return;
@@ -1521,6 +1662,8 @@ document.addEventListener('keydown', e => {
 });
 
 loadWave();
+renderFrameStrip();   // frames found on an earlier visit are still good
+
 function syncExportControls() {
   const has = segments.length > 0;
   const segmentsBar = document.getElementById('segments-bar');
@@ -1694,6 +1837,9 @@ let proposalScopeKey = null;
 function syncProposalScope() {
   if (proposalsInView().map(({ clip }) => clip.id).join(',') !== proposalScopeKey) {
     renderClipProposals();
+  }
+  if (framesInView().map(f => f.t).join(',') !== frameScopeKey) {
+    renderFrameStrip();
   }
 }
 

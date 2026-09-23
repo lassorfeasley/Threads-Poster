@@ -122,6 +122,13 @@ class Candidate(Base):
     # inside a chapter rather than shipping one. Empty until asked for.
     chapters: Mapped[str] = mapped_column(Text, default="")
 
+    # Frames worth opening a clip on, as JSON [{t, why}] — found by scanning
+    # the footage itself, because a transcript says nothing about what is on
+    # screen and the most arresting image in a video is rarely where its words
+    # begin. Navigation furniture like ``chapters``: nothing here edits a clip
+    # until the operator picks one. Empty until asked for.
+    striking_frames: Mapped[str] = mapped_column(Text, default="")
+
     # Video-level caption seed written by the clip-suggestion pass. Deliberately
     # NOT copied into ``Cut.draft_caption`` — captions are drafted per cut from
     # the trimmed clip's own transcript. It survives as the "still the untouched

@@ -97,6 +97,19 @@ clips:
   # and never into footage another clip already uses.
   opening_lead_seconds: 4.0
   opening_frame_interval: 0.5
+  # "Striking frames": scans the stretch of footage you're looking at and
+  # lists the images worth opening on, wherever they sit in it. The opening
+  # pass above can only improve a start the transcript already chose; this is
+  # how a shot a minute away from the talking becomes reachable at all.
+  # Sampling decodes the stretch it covers, so scan a chapter, not an hour.
+  striking_model: claude-haiku-4-5
+  striking_top: 6            # how many frames to offer
+  striking_max_frames: 90    # sampling cap; the interval falls out of the span
+  striking_min_interval: 1.0
+  striking_width: 256
+  # Length of the silent opening shot inserted when you use one, before the
+  # clip cuts to the talking. Drag its edge afterwards like any segment.
+  opener_seconds: 2.0
 
 chapters:
   # A video's table of contents, found on demand from its transcript. Chapters

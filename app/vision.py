@@ -1,6 +1,10 @@
-"""Footage trait tagging — observation only, no good/bad scores.
+"""Looking at the footage: trait tagging, and finding the images in a video.
 
-Three entry points:
+Trait tagging is observation only — no good/bad scores. ``find_striking_frames``
+is the exception that judges, because picking an opening image is nothing but
+judgement; it stays here because this is where the frame sampling lives.
+
+Three tagging entry points:
 
 - ``tag_candidate_storyboard`` — optional pre-download tags from YouTube
   storyboard stills (metadata-only). Neutral labels for triage visibility;
@@ -14,6 +18,7 @@ Three entry points:
 """
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import tempfile
@@ -22,7 +27,7 @@ from pathlib import Path
 import requests
 
 from . import llm, spend
-from .config import Settings
+from .config import DATA_DIR, Settings
 from .models import Candidate, Cut, ThreadsPost, utcnow
 from .storyboard import get_storyboard
 
@@ -280,6 +285,98 @@ def frames_between(path: str | Path, start: float, end: float,
                 continue
             frames.append((round(start + idx * interval, 2), image.read_bytes()))
         return frames
+
+
+# ---- Striking frames -------------------------------------------------------
+# Where the images are. A transcript says nothing about what is on screen, and
+# the opening-frame pass only looks a few seconds either side of a start the
+# words already chose — so the most arresting shot in a video is invisible to
+# everything else here. This scans the footage and lists candidates; the
+# operator decides.
+
+FRAMES_DIR = DATA_DIR / "frames"
+
+
+def frame_thumb_path(candidate_pk: int, t: float) -> Path:
+    """Where the cached JPEG of one scanned frame lives."""
+    return FRAMES_DIR / f"{candidate_pk}-{int(round(t * 1000))}.jpg"
+
+
+def load_striking(candidate) -> list[dict]:
+    """The video's stored striking frames, or [] when it has none."""
+    try:
+        data = json.loads(candidate.striking_frames or "[]")
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _cache_frame(candidate_pk: int, t: float, jpeg: bytes) -> None:
+    """Keep the JPEG the model judged, so the UI shows that exact frame
+    without paying ffmpeg again."""
+    try:
+        FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+        frame_thumb_path(candidate_pk, t).write_bytes(jpeg)
+    except OSError as exc:
+        log.info("Could not cache frame %.2fs for %s: %s", t, candidate_pk, exc)
+
+
+def find_striking_frames(candidate, settings: Settings, *, start: float,
+                         end: float, used: list[dict] | None = None,
+                         topic: str = "") -> list[dict]:
+    """Scan one stretch of footage for the frames worth opening a clip on.
+
+    Scoped rather than whole-video on purpose: sampling decodes the stretch it
+    covers, so a chapter costs seconds where an hour costs minutes — and the
+    operator already works one chapter at a time. The sampling interval falls
+    out of the span, so a short stretch is read finely and a long one coarsely
+    for the same number of frames and the same price.
+
+    Footage another clip already published is dropped before the model sees
+    it: an image that can't be used is not a suggestion.
+
+    Stores the picks on the candidate — replacing whatever this stretch held
+    before, leaving the rest of the video's alone — and caches each JPEG for
+    the UI. Returns the picks for this stretch. Model failures propagate.
+    """
+    path = getattr(candidate, "local_video_path", "") or ""
+    if not path:
+        return []
+    span = end - start
+    min_interval = float(settings.get("clips.striking_min_interval", 1.0))
+    if span < min_interval * 2:
+        return []
+
+    max_frames = int(settings.get("clips.striking_max_frames", 90))
+    interval = max(min_interval, span / max_frames)
+    frames = frames_between(path, start, end, interval,
+                            int(settings.get("clips.striking_width", 256)))
+    claimed = used or []
+    frames = [(t, jpeg) for t, jpeg in frames
+              if not any(float(u["start"]) <= t < float(u["end"]) for u in claimed)]
+    if len(frames) < 2:
+        return []
+
+    model = settings.get("clips.striking_model",
+                         settings.get("vision.model", "claude-haiku-4-5"))
+    picked = llm.rank_striking_frames(
+        model, frames, title=candidate.title, topic=topic,
+        top=int(settings.get("clips.striking_top", 6)))
+
+    found: list[dict] = []
+    for pick in picked:
+        ts, jpeg = frames[pick["index"]]
+        _cache_frame(candidate.id, ts, jpeg)
+        found.append({"t": round(float(ts), 2), "why": pick["why"]})
+    found.sort(key=lambda f: f["t"])
+
+    kept = [f for f in load_striking(candidate)
+            if not (start <= float(f.get("t", -1)) < end)]
+    candidate.striking_frames = json.dumps(
+        sorted(kept + found, key=lambda f: float(f.get("t", 0))))
+    log.info("Striking frames for %s in %.0f-%.0fs: %d of %d sampled",
+             candidate.video_id, start, end, len(found), len(frames))
+    return found
 
 
 def seed_post_tags_from_cut(post: ThreadsPost, cut: Cut | None) -> bool:
