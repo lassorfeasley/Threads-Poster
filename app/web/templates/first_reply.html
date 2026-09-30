@@ -50,6 +50,20 @@
       Posts that have text in the box skip the static fallback below.
     </p>
 
+    <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 6px;">
+      <input type="checkbox" name="first_party_enabled" value="1" {% if first_party_enabled %}checked{% endif %}>
+      Comment on your own promos too
+    </label>
+    <p class="meta" style="margin: 0 0 14px 26px;">
+      On a promo the clip is already the ad, so a comment repeating the ask adds
+      little — and the timing below can hold it back for hours, long enough for
+      someone to ask where to go and get no answer. Off, promos publish with no
+      first comment and their captions have to carry the
+      <a href="/brand">call-to-action URL</a> themselves. Found footage is
+      unaffected either way, and you can still post a promo's comment by hand
+      from its post page.
+    </p>
+
     <label class="inline-label" style="display:flex; align-items:center; gap:10px; margin-bottom: 14px;">
       <input type="checkbox" name="enabled" value="1" {% if enabled %}checked{% endif %}>
       Post this static reply after each publish (fallback when a post's box is empty)

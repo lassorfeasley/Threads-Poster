@@ -141,6 +141,13 @@ FIRST_REPLY_HEADER = """\
 # fallback for posts whose box is empty. A reply failure never rolls back the
 # post — check the post page and retry there.
 #
+# first_party_enabled: whether the brand's OWN promos get a first comment at all.
+# On those the clip IS the ad, so the call to action belongs in the caption where
+# it lands with the post, not in a comment the timing gates below can hold back
+# for hours — long enough for a viewer to ask where to go and get no answer. Set
+# it false and promo captions have to carry the URL themselves; found footage is
+# unaffected either way.
+#
 # WHEN the first comment posts. By default it goes out seconds after the post,
 # which makes it the first thing under every clip — and a promotional comment
 # sitting in that slot can smother the audience replies that would otherwise
@@ -180,8 +187,8 @@ def _positive_int(value: Any, default: int = 0) -> int:
 
 def load_first_reply() -> dict[str, Any]:
     """Return the auto first-reply config: ``{enabled, text, attribution_enabled,
-    mode, instruction, delay_minutes, min_replies, min_likes, deadline_hours,
-    deadline_min_views, deadline_min_likes}``."""
+    first_party_enabled, mode, instruction, delay_minutes, min_replies,
+    min_likes, deadline_hours, deadline_min_views, deadline_min_likes}``."""
     data = _load_yaml(CONFIG_DIR / "first_reply.yaml")
 
     def _text(key: str) -> str:
@@ -195,6 +202,9 @@ def load_first_reply() -> dict[str, Any]:
         "enabled": bool(data.get("enabled", False)),
         "text": _text("text"),
         "attribution_enabled": bool(data.get("attribution_enabled", True)),
+        # Absent from older config files, where every post got a first comment
+        # regardless of provenance — the behavior those files were written for.
+        "first_party_enabled": bool(data.get("first_party_enabled", True)),
         "mode": mode,
         "instruction": _text("instruction"),
         # Timing gates. Absent from older config files, and 0 there means
@@ -212,6 +222,7 @@ def load_first_reply() -> dict[str, Any]:
 
 
 def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = True,
+                     first_party_enabled: bool = True,
                      mode: str = "citation", instruction: str = "",
                      delay_minutes: int = 0, min_replies: int = 0,
                      min_likes: int = 0, deadline_hours: int = 0,
@@ -224,6 +235,7 @@ def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = Tr
         "mode": mode,
         "enabled": bool(enabled),
         "attribution_enabled": bool(attribution_enabled),
+        "first_party_enabled": bool(first_party_enabled),
         "delay_minutes": _positive_int(delay_minutes),
         "min_replies": _positive_int(min_replies),
         "min_likes": _positive_int(min_likes),
@@ -249,8 +261,8 @@ BRAND_HEADER = """\
 # White-label defaults: what the sidebar/title show when brand.yaml is unset.
 DEFAULT_APP_NAME = "Clip Monitor"
 
-_BRAND_TEXT_FIELDS = ("name", "mission", "audience", "voice_notes", "topic",
-                      "app_name", "logo_file",
+_BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "voice_notes",
+                      "topic", "app_name", "logo_file",
                       # Prompt-framing fields consumed by app/llm.py. Blank
                       # fields fall back to generic phrasing there.
                       "source_kind", "relevance_rules", "false_positives",

@@ -20,6 +20,13 @@
 # fallback for posts whose box is empty. A reply failure never rolls back the
 # post — check the post page and retry there.
 #
+# first_party_enabled: whether the brand's OWN promos get a first comment at all.
+# On those the clip IS the ad, so the call to action belongs in the caption where
+# it lands with the post, not in a comment the timing gates below can hold back
+# for hours — long enough for a viewer to ask where to go and get no answer. Set
+# it false and promo captions have to carry the URL themselves; found footage is
+# unaffected either way.
+#
 # WHEN the first comment posts. By default it goes out seconds after the post,
 # which makes it the first thing under every clip — and a promotional comment
 # sitting in that slot can smother the audience replies that would otherwise
@@ -47,6 +54,7 @@
 mode: invitation
 enabled: true
 attribution_enabled: true
+first_party_enabled: false
 delay_minutes: 120
 min_replies: 1
 min_likes: 0

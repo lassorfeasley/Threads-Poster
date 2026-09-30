@@ -5,6 +5,7 @@ import datetime as dt
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -419,6 +420,10 @@ class SchedulerState(Base):
     # Same marker for the evergreen-winners repost rotation (see
     # app/scheduler.py): a cancelled staged repost must not be re-minted.
     last_repost_window_key: Mapped[str] = mapped_column(String(40), default="")
+    # High-water mark of rerun-slot windows already staged (or skipped), so a
+    # staged rerun the operator deletes leaves its slot to organic placement
+    # instead of being re-minted every tick.
+    last_rerun_slot_key: Mapped[str] = mapped_column(String(40), default="")
     last_publish_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_metrics_poll_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_action: Mapped[str] = mapped_column(String(80), default="")
@@ -712,6 +717,66 @@ class ClipRevision(Base):
     changed: Mapped[bool] = mapped_column(Boolean, default=False)
 
     model: Mapped[str] = mapped_column(String(60), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RerunReview(Base):
+    """A second look at a proven non-evergreen post: could it re-air?
+
+    Both rerun paths only take evergreen clips, and shelf life is judged once,
+    before a clip ever airs. This row holds the hindsight re-judgment (the
+    model's verdict) and the operator's decision on it. Acting on a decision
+    writes the POST's shelf-life override — the input the rerun paths already
+    read — so nothing here is consulted at scheduling time.
+
+    One row per post (the latest airing of its cut, which is what the rerun
+    paths judge). ``decision`` empty = still awaiting the operator.
+    """
+
+    __tablename__ = "rerun_reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    post_pk: Mapped[int] = mapped_column(ForeignKey("threads_posts.id"), unique=True)
+    # evergreen | new_caption | dated | "" (not judged yet)
+    verdict: Mapped[str] = mapped_column(String(20), default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(60), default="")
+    judged_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # evergreen | new_caption | keep | "" (undecided). ``new_caption`` re-airs
+    # only under a freshly drafted caption (scheduler._rerun_caption).
+    decision: Mapped[str] = mapped_column(String(20), default="")
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The post's own shelf-life override before an "evergreen" decision wrote
+    # one, so undoing the decision restores it exactly.
+    prior_override: Mapped[str] = mapped_column(String(20), default="")
+
+    post: Mapped[ThreadsPost] = relationship()
+
+
+class PostingSchedule(Base):
+    """The day's posting windows, as set from the Posting schedule page.
+
+    Lives in the database rather than settings.yaml because every runner
+    (dashboard, Fly worker, Actions cron) has to agree on it, and only the
+    database is shared — the YAML is baked into each deploy. Rows are never
+    edited, only added: each one applies from ``effective_from`` until the next
+    row's date, so past days keep the windows they actually ran on (window keys
+    are ``YYYY-MM-DD#index`` and mean nothing without them). With no row in
+    effect, ``scheduler.windows`` in settings.yaml still applies.
+    """
+
+    __tablename__ = "posting_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # First day (scheduler timezone) these windows apply to. Always a future
+    # day when saved: changing today's windows would renumber windows already
+    # spent.
+    effective_from: Mapped[dt.date] = mapped_column(Date, unique=True)
+    # JSON list of "HH:MM" strings in the scheduler timezone, chronological.
+    windows: Mapped[str] = mapped_column(Text, default="[]")
+    # JSON list of the ``HH:MM`` entries in ``windows`` reserved for reruns.
+    # Times, not indices: indices shift whenever a window is added.
+    rerun_slots: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

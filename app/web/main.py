@@ -12,6 +12,7 @@ import bisect
 import datetime as dt
 import json
 import logging
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,7 +28,7 @@ from .. import chapters as chapter_index
 from .. import clip_proposals, instagram_api, spend, threads_api, vision, youtube
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
-from ..categories import category_by_slug, category_options
+from ..categories import category_by_slug, category_options, is_first_party
 from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
 from ..config import (
     DATA_DIR, DEFAULT_APP_NAME, WORKSPACE, current_workspace, env, load_brand,
@@ -86,6 +87,7 @@ from ..publishing import (
     clear_publishing,
     draft_first_reply,
     draft_first_reply_for_cut,
+    first_comment_suppressed,
     first_reply_context,
     first_reply_gate,
     first_reply_is_deferred,
@@ -104,6 +106,8 @@ from ..publishing import (
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_expr, sort_candidates
+from .. import posting_schedule, rerun_review
+from ..config import scheduler_timezone
 from ..scheduler import (
     PIN_HORIZON_DAYS,
     build_window_plan,
@@ -696,19 +700,31 @@ def _workflow_buckets() -> dict:
     posted (a supercut was exported, yet nothing was published)."""
     in_progress_rows = []       # selected clips still needing a trim
     trimmed_rows = []           # trimmed clips that were never posted
+    handled_statuses = {"published", "queued", "publishing", "draft"}
+
+    def has_post(statuses):
+        return select(ThreadsPost.id).where(
+            ThreadsPost.candidate_pk == Candidate.id,
+            ThreadsPost.status.in_(statuses),
+        ).exists()
+
     with session_scope(read_only=True) as session:
+        # Handled videos are excluded in SQL rather than after fetching: they
+        # outnumber the unfinished ones many times over, so any row cap applied
+        # before this filter silently drops older unfinished work.
         in_progress = session.execute(
             select(Candidate)
             .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
             .where(Candidate.status.in_([STATUS_APPROVED, STATUS_ARCHIVED, "failed"]))
+            .where(or_(Candidate.multi_clip_potential.is_(True),
+                       has_post({"failed"}),
+                       ~has_post(handled_statuses)))
             .order_by(Candidate.approved_at.desc())
-            .limit(30)
         ).scalars().all()
         # One query for all post statuses instead of 2×N per-row lookups.
         ip_ids = [c.id for c in in_progress]
         statuses = _post_statuses_by_candidate(session, ip_ids)
         exported = _exported_cut_candidate_ids(session, ip_ids)
-        handled_statuses = {"published", "queued", "publishing", "draft"}
         for c in in_progress:
             post_st = statuses.get(c.id, set())
             state = workflow_state(session, c, post_statuses=post_st,
@@ -1743,6 +1759,9 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          # prefill from the pending post so requeueing round-trips cleanly.
          "attribution_text": (pending.attribution_text or "") if pending else "",
          "attribution_enabled": bool(load_first_reply().get("attribution_enabled")),
+         # A promo's box stays editable (posting by hand still works) but
+         # nothing in it will auto-post, so the box has to say so.
+         "first_reply_suppressed": first_comment_suppressed(c),
          "first_reply_mode": load_first_reply().get("mode", "citation"),
          # Whether the comment rides along with the publish or is held back
          # until the post has replies of its own — the box says which.
@@ -2940,6 +2959,9 @@ def suggest_caption(cut_id: int):
         max_chars = int(settings.get("engagement.caption_max_chars", 220))
         operator_guide = render_caption_guide()
         target_words = voice.get("target_words")
+        # Promo captions carry the call-to-action URL themselves, because those
+        # posts get no first comment to put it in (``first_party_enabled``).
+        first_party = is_first_party(c)
         try:
             caption = suggest_post_caption(
                 model,
@@ -2949,6 +2971,7 @@ def suggest_caption(cut_id: int):
                 max_chars=max_chars,
                 target_words=target_words,
                 description=c.description,
+                first_party=first_party,
             )
             # The caption field itself is left untouched — this is a proposal
             # until the operator accepts it (/cut/{id}/caption). The DRAFT is
@@ -2960,7 +2983,7 @@ def suggest_caption(cut_id: int):
                 policy=draft_policy_version(
                     model=model, max_chars=max_chars, target_words=target_words,
                     style_guide=voice["style_guide"], operator_guide=operator_guide,
-                    examples=len(voice["examples"]),
+                    examples=len(voice["examples"]), first_party=first_party,
                 ),
                 max_chars=max_chars,
                 target_words=target_words,
@@ -3844,6 +3867,7 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "attribution_text": p.attribution_text or "",
             "attribution_skipped": bool(p.attribution_skipped),
             "attribution_enabled": load_first_reply().get("attribution_enabled", True),
+            "first_reply_suppressed": first_comment_suppressed(cand),
             "first_reply_mode": load_first_reply().get("mode", "citation"),
             "first_reply_deferred": first_reply_is_deferred(),
             # A call to action is written from the brief, not from the source
@@ -4344,8 +4368,13 @@ def _calendar_data(y: int, m: int) -> dict:
     for day in events:
         events[day].sort(key=lambda e: e["sort"])
 
+    # Slots per day, since a saved schedule change gives days on either side
+    # of it a different number of windows.
+    n_days = (next_first_local - first_local).days
+    slot_labels = {d: window_time_labels(dt.date(y, m, d)) for d in range(1, n_days + 1)}
+
     return {"events": events, "drafts_count": drafts_count, "queue_count": queue_count,
-            "windows_et": windows_et, "year": y, "month": m}
+            "windows_et": windows_et, "slot_labels": slot_labels, "year": y, "month": m}
 
 
 def _calendar_queue_data() -> dict:
@@ -4577,10 +4606,72 @@ pagecache.register("notifications", _notifications_data)
 def notifications_page(request: Request, msg: str = ""):
     """Operator alerts — currently failed posts that dropped out of the queue and
     need a decision (retry, re-queue, or dismiss)."""
+    # Only when the review list is already built: computing it ranks every
+    # post's metric series, too slow to put on the notifications page's path.
+    review = pagecache.peek("rerun-review")
     return templates.TemplateResponse(
         request, "notifications.html",
-        {**pagecache.read("notifications"), "msg": msg, "active": "notifications"},
+        {**pagecache.read("notifications"), "msg": msg, "active": "notifications",
+         "rerun_pending": len(review["pending"]) if review else None},
     )
+
+
+def _rerun_review_data() -> dict:
+    with session_scope(read_only=True) as session:
+        return rerun_review.review_queue(session)
+
+
+pagecache.register("rerun-review", _rerun_review_data, background=False)
+
+
+@app.get("/reruns/review", response_class=HTMLResponse)
+def rerun_review_page(request: Request, msg: str = ""):
+    """Proven posts that aren't evergreen, for a second look at whether they
+    could re-air now (see app/rerun_review.py)."""
+    job = rerun_review.judging_status()
+    if job["running"]:
+        pagecache.drop("rerun-review")  # show verdicts as they land
+    return templates.TemplateResponse(
+        request, "rerun_review.html",
+        {**pagecache.read("rerun-review"), "job": job,
+         "msg": msg, "active": "notifications"},
+    )
+
+
+@app.post("/reruns/review/judge")
+def rerun_review_judge():
+    started = rerun_review.start_judging(on_done=pagecache.invalidate)
+    return _flash("/reruns/review", "Asking the model…" if started
+                  else "Already running — refresh in a moment")
+
+
+@app.post("/reruns/review/accept-evergreen")
+def rerun_review_accept_evergreen():
+    with session_scope() as session:
+        n = rerun_review.accept_evergreen_verdicts(session)
+    return _flash("/reruns/review",
+                  f"{n} post{'' if n == 1 else 's'} can now rerun")
+
+
+@app.post("/reruns/review/{post_id}/decide")
+def rerun_review_decide(request: Request, post_id: int, decision: str = Form("")):
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with session_scope() as session:
+        ok = rerun_review.decide(session, post_id, decision)
+    if not ok:
+        return (JSONResponse({"error": "Couldn't save that decision"}, status_code=400)
+                if wants_json else _flash("/reruns/review", "Couldn't save that decision"))
+    msg = {"evergreen": "Evergreen — it can rerun now",
+           "new_caption": "Saved — it will rerun with a new caption",
+           "keep": "Kept as is"}[decision]
+    return JSONResponse({"ok": True, "msg": msg}) if wants_json else _flash("/reruns/review", msg)
+
+
+@app.post("/reruns/review/{post_id}/undo")
+def rerun_review_undo(post_id: int):
+    with session_scope() as session:
+        ok = rerun_review.undo(session, post_id)
+    return _flash("/reruns/review", "Back in the review list" if ok else "Nothing to undo")
 
 
 @app.post("/post/{post_id}/shelf-life")
@@ -5146,14 +5237,19 @@ def brand_page(request: Request, msg: str = ""):
 
 @app.post("/brand")
 async def brand_save(
-    name: str = Form(""), mission: str = Form(""), audience: str = Form(""),
+    name: str = Form(""), cta_url: str = Form(""), mission: str = Form(""),
+    audience: str = Form(""),
     topic: str = Form(""), voice_notes: str = Form(""), app_name: str = Form(""),
     source_kind: str = Form(""), relevance_rules: str = Form(""),
     false_positives: str = Form(""), strong_openings: str = Form(""),
     weak_openings: str = Form(""), clip_guidance: str = Form(""),
     logo: UploadFile | None = File(None),
 ):
-    values = {"name": name, "mission": mission, "audience": audience,
+    # Stored bare so captions can carry it as written: Threads auto-links a
+    # domain, and a scheme or tracking tail only eats characters.
+    cta_url = re.sub(r"^\s*https?://(www\.)?", "", cta_url or "").strip().strip("/")
+    values = {"name": name, "cta_url": cta_url, "mission": mission,
+              "audience": audience,
               "topic": topic, "voice_notes": voice_notes, "app_name": app_name,
               "source_kind": source_kind, "relevance_rules": relevance_rules,
               "false_positives": false_positives,
@@ -5224,6 +5320,79 @@ def keyword_delete(keyword: str = Form(...)):
     return _flash("/keywords", f"Removed '{kw}'")
 
 
+# --- Posting schedule ------------------------------------------------------------
+
+def _schedule_today() -> dt.date:
+    return utcnow().astimezone(scheduler_timezone()).date()
+
+
+@app.get("/schedule", response_class=HTMLResponse)
+def schedule_page(request: Request, msg: str = ""):
+    """Posts per day and their times (app/posting_schedule.py)."""
+    today = _schedule_today()
+    current = posting_schedule.overview(today)
+    latest = current["upcoming"][-1] if current["upcoming"] else current
+    now_tz = utcnow().astimezone(scheduler_timezone())
+    with session_scope(read_only=True) as session:
+        outlook = recycle_overview(session)
+    library = {"size": len(outlook),
+               "ready": sum(1 for f in outlook.values() if f["next_eligible"] <= today)}
+    return templates.TemplateResponse(
+        request, "schedule.html",
+        {"current": current, "latest": latest,
+         "notes": posting_schedule.notes(latest["windows"], latest["reruns"]),
+         "rerun_library": library,
+         "rerun_hours": load_settings().get("scheduler.placement.reruns.stage_ahead_hours", 24),
+         "local_labels": window_time_labels(today),
+         "today": today,
+         "tomorrow": today + dt.timedelta(days=1),
+         "tz_name": str(scheduler_timezone()), "tz_abbr": now_tz.strftime("%Z"),
+         "spacing_floor": int(load_settings().get("scheduler.spacing_floor_minutes", 90)),
+         "max_windows": posting_schedule.MAX_WINDOWS,
+         "msg": msg, "active": "schedule"},
+    )
+
+
+@app.post("/schedule")
+def save_schedule(windows: list[str] = Form(default=[]), kinds: list[str] = Form(default=[]),
+                  effective_from: str = Form("")):
+    today = _schedule_today()
+    try:
+        start = dt.date.fromisoformat(effective_from)
+        times = posting_schedule.normalize(windows)
+        reruns = posting_schedule.normalize(
+            [w for w, k in zip(windows, kinds) if k == "rerun"])
+    except ValueError as exc:
+        return _flash("/schedule", str(exc) if "time" in str(exc) else "Pick a start date")
+    floor = int(load_settings().get("scheduler.spacing_floor_minutes", 90))
+    errs = posting_schedule.problems(times, floor)
+    if errs:
+        return _flash("/schedule", " ".join(errs))
+    try:
+        with session_scope() as session:
+            result = posting_schedule.save(session, start, times, today=today, reruns=reruns)
+    except ValueError as exc:
+        return _flash("/schedule", str(exc))
+    msg = (f"{len(times)} posts a day ({len(reruns)} rerun{'' if len(reruns) == 1 else 's'}) "
+           f"from {'today' if start == today else start.strftime('%b %-d')}")
+    if result["moved"] or result["unpinned"]:
+        msg += (f" — moved {result['moved']} pinned post{'' if result['moved'] == 1 else 's'}"
+                + (f", unpinned {result['unpinned']}" if result["unpinned"] else ""))
+    return _flash("/schedule", msg)
+
+
+@app.post("/schedule/cancel")
+def cancel_schedule(effective_from: str = Form("")):
+    try:
+        start = dt.date.fromisoformat(effective_from)
+    except ValueError:
+        return _flash("/schedule", "Nothing to cancel")
+    with session_scope() as session:
+        result = posting_schedule.cancel(session, start, today=_schedule_today())
+    return _flash("/schedule", "Change cancelled" if result is not None
+                  else "That change already started or doesn't exist")
+
+
 # --- First reply (under Replies) ---------------------------------------------
 
 @app.get("/engagement/first-reply", response_class=HTMLResponse)
@@ -5233,6 +5402,7 @@ def first_reply_page(request: Request, msg: str = ""):
         request, "first_reply.html",
         {"enabled": cfg["enabled"], "text": cfg["text"],
          "attribution_enabled": cfg["attribution_enabled"],
+         "first_party_enabled": cfg["first_party_enabled"],
          "mode": cfg["mode"], "instruction": cfg["instruction"],
          "delay_minutes": cfg["delay_minutes"], "min_replies": cfg["min_replies"],
          "min_likes": cfg["min_likes"], "deadline_hours": cfg["deadline_hours"],
@@ -5268,7 +5438,9 @@ def _timing_summary(delay: int, min_replies: int, min_likes: int, deadline: int,
 
 @app.post("/engagement/first-reply")
 def first_reply_save(enabled: str = Form(""), text: str = Form(""),
-                     attribution_enabled: str = Form(""), mode: str = Form("citation"),
+                     attribution_enabled: str = Form(""),
+                     first_party_enabled: str = Form(""),
+                     mode: str = Form("citation"),
                      instruction: str = Form(""), delay_minutes: int = Form(0),
                      min_replies: int = Form(0), min_likes: int = Form(0),
                      deadline_hours: int = Form(0), deadline_min_views: int = Form(0),
@@ -5278,6 +5450,7 @@ def first_reply_save(enabled: str = Form(""), text: str = Form(""),
     mode = (mode or "citation").strip().lower()
     on = str(enabled).lower() in ("1", "true", "on", "yes")
     attribution_on = str(attribution_enabled).lower() in ("1", "true", "on", "yes")
+    first_party_on = str(first_party_enabled).lower() in ("1", "true", "on", "yes")
     delay_minutes = max(0, delay_minutes)
     min_replies = max(0, min_replies)
     min_likes = max(0, min_likes)
@@ -5304,6 +5477,7 @@ def first_reply_save(enabled: str = Form(""), text: str = Form(""),
                       "The views/likes floor only applies at the deadline — set "
                       "'post anyway after' or clear the floor")
     save_first_reply(enabled=on, text=text, attribution_enabled=attribution_on,
+                     first_party_enabled=first_party_on,
                      mode=mode, instruction=instruction, delay_minutes=delay_minutes,
                      min_replies=min_replies, min_likes=min_likes,
                      deadline_hours=deadline_hours,
@@ -5314,9 +5488,10 @@ def first_reply_save(enabled: str = Form(""), text: str = Form(""),
     attr_state = "on" if attribution_on else "off"
     timing = _timing_summary(delay_minutes, min_replies, min_likes, deadline_hours,
                              deadline_min_views, deadline_min_likes)
+    promos = "" if first_party_on else ", promos excluded"
     return _flash("/engagement/first-reply",
-                  f"Saved — first replies draft {drafts}, posting {attr_state}, "
-                  f"static fallback {state}; {timing}")
+                  f"Saved — first replies draft {drafts}, posting {attr_state}"
+                  f"{promos}, static fallback {state}; {timing}")
 
 
 @app.get("/first-reply")

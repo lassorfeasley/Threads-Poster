@@ -195,6 +195,25 @@
   </div>
 {% endif %}
 
+{#- Not an alert: nothing is broken. Timely posts that did well are locked out
+    of reruns until someone takes a second look. The count only shows when the
+    review list is already built (it's too slow to compute here). -#}
+{% if rerun_pending is none or rerun_pending %}
+<div class="post-card" style="margin-top: 14px;">
+  <div class="pc-thumb is-empty" aria-hidden="true">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+  </div>
+  <div class="pc-body">
+    <a class="item-title" href="/reruns/review">
+      {% if rerun_pending %}{{ rerun_pending }} timely post{{ 's' if rerun_pending != 1 }} might be able to rerun{% else %}Review timely posts that might be able to rerun{% endif %}
+    </a>
+    <div class="meta">Posts that did well but aren't evergreen can never rerun. Take a second look now that their moment has passed.</div>
+  </div>
+</div>
+{% endif %}
+
 <script>
   async function publishNow(ev) {
     ev.preventDefault();

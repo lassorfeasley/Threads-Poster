@@ -51,7 +51,8 @@ def _words(text: str) -> int:
 
 
 def policy_version(*, model: str, max_chars: int, target_words: int | None,
-                   style_guide: str, operator_guide: str, examples: int) -> str:
+                   style_guide: str, operator_guide: str, examples: int,
+                   first_party: bool = False) -> str:
     """Short fingerprint of everything that shaped a draft.
 
     Prompts here are assembled from moving parts — the distilled style guide
@@ -62,7 +63,9 @@ def policy_version(*, model: str, max_chars: int, target_words: int | None,
     payload = "\x1f".join([
         model or "", str(max_chars), str(target_words or ""),
         style_guide or "", operator_guide or "", str(examples),
-    ])
+        # Appended only when set, so the found-footage fingerprints that
+        # predate the promo rule keep matching drafts made under it.
+    ] + (["first_party"] if first_party else []))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 

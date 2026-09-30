@@ -1,0 +1,162 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+{% import "components/toolbar.html" as ui %}
+{{ ui.pagebar("Posting schedule", count=current.windows|length,
+              sub="How many times a day to post, and when. Times are in " ~ tz_name ~ ", the zone the scheduler runs in. Changes start on a future day, so today's posts are never renumbered.") }}
+
+<div class="card">
+  <div class="card-title">Now</div>
+  <p style="margin: 6px 0 4px;">
+    {{ current.windows|length }} post{{ 's' if current.windows|length != 1 }} a day at
+    {% for w in current.windows %}<strong>{{ w }}</strong>{% if w in current.reruns %} <span class="badge">rerun</span>{% endif %}{{ ", " if not loop.last }}{% endfor %}
+    <span class="meta">({{ tz_abbr }})</span>
+  </p>
+  <p class="meta" style="margin: 0;">
+    {% if current.source == 'saved' %}Saved here, in effect since {{ current.since.strftime("%b %-d") }}.
+    {% else %}From <code>scheduler.windows</code> in settings.yaml — nothing saved here yet.{% endif %}
+    Your local time: {{ local_labels|join(", ") }}.
+  </p>
+
+  {% if current.upcoming %}
+  <hr style="margin: 16px 0; border: none; border-top: 1px solid var(--line);">
+  <div class="card-title">Coming up</div>
+  {% for u in current.upcoming %}
+  <div style="display:flex; align-items:center; gap:12px; margin-top: 8px; flex-wrap: wrap;">
+    <span>From <strong>{{ u.effective_from.strftime("%a %b %-d") }}</strong>:
+      {{ u.windows|length }} a day at
+      {% for w in u.windows %}{{ w }}{% if w in u.reruns %} <span class="badge">rerun</span>{% endif %}{{ ", " if not loop.last }}{% endfor %}</span>
+    <form class="inline" method="post" action="/schedule/cancel">
+      <input type="hidden" name="effective_from" value="{{ u.effective_from.isoformat() }}">
+      <button class="sm reject" data-confirm="Cancel the change starting {{ u.effective_from.strftime('%b %-d') }}? Posts pinned to those days move back to the matching slots."
+              data-confirm-ok="Cancel change" data-confirm-variant="danger">Cancel</button></form>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if notes %}
+  <ul class="meta" style="margin: 14px 0 0; padding-left: 18px;">
+    {% for n in notes %}<li>{{ n }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</div>
+
+<div class="card">
+  <form method="post" action="/schedule" id="schedule-form">
+    <div class="card-title">Change it</div>
+
+    <div class="form-row" style="align-items: flex-end; margin: 10px 0 6px;">
+      <div class="field" style="min-width: 130px;"><label>Post every</label>
+        <select id="every">
+          {% for h in [2.5, 3, 4, 5, 6, 8, 12, 24] %}
+          <option value="{{ h }}" {{ 'selected' if h == 4 }}>{{ h|string|replace('.5', '½')|replace('.0', '') }} hours</option>
+          {% endfor %}
+        </select></div>
+      <div class="field" style="min-width: 130px;"><label>Starting at</label>
+        <input type="time" id="first" value="02:00" step="900"></div>
+      <div class="field" style="min-width: 130px;"><label>Until</label>
+        <input type="time" id="last" value="23:59" step="900"></div>
+      <button type="button" class="sm" id="fill">Fill in times</button>
+    </div>
+    <p class="hint" style="margin-top: 0;">Fills the list below; adjust any time by hand afterwards.</p>
+
+    <label class="card-title" style="display:block; margin: 16px 0 8px;">Posting times ({{ tz_abbr }})</label>
+    <div id="times" style="display:flex; flex-wrap: wrap; gap: 8px;">
+      {% for w in latest.windows %}
+      <span class="time-row" style="display:inline-flex; gap:4px; align-items:center;">
+        <input type="time" name="windows" value="{{ w }}" step="300" required style="width: 120px;">
+        <select name="kinds" style="width: auto;">
+          <option value="new">New clip</option>
+          <option value="rerun" {{ 'selected' if w in latest.reruns }}>Rerun</option>
+        </select>
+        <button type="button" class="sm reject" title="Remove" onclick="this.parentElement.remove(); summarize()">✕</button>
+      </span>
+      {% endfor %}
+    </div>
+    <div style="margin-top: 8px;">
+      <button type="button" class="sm" id="add-time">＋ Add a time</button>
+      <span class="meta" id="summary" style="margin-left: 10px;"></span>
+    </div>
+
+    <div class="form-row" style="margin-top: 16px; align-items: flex-end;">
+      <div class="field" style="min-width: 170px;"><label>Starting on</label>
+        <input type="date" name="effective_from" value="{{ tomorrow.isoformat() }}"
+               min="{{ today.isoformat() }}" required></div>
+    </div>
+    <p class="hint" style="margin-top: 0;">
+      Up to {{ max_windows }} posts a day, at least {{ spacing_floor }} minutes apart (including
+      the last post of the day to the first of the next). Posts already pinned to those days
+      move to the nearest new time. If only the new clip / rerun choices change, the change
+      can start today.
+    </p>
+    <p class="hint">
+      <strong>Rerun</strong> slots never take new clips. About {{ rerun_hours }} hours ahead, each one
+      gets a rerun from the library, with a freshly written caption, pinned on the calendar where
+      you can edit, swap or delete it. If no rerun is available, a new clip goes out instead.
+      Rerun library: {{ rerun_library.size }} clip{{ 's' if rerun_library.size != 1 }},
+      {{ rerun_library.ready }} ready to air now.
+    </p>
+
+    <div class="btn-group" style="margin-top: 14px;">
+      <button class="primary" type="submit">Save schedule</button>
+    </div>
+  </form>
+</div>
+
+<template id="time-tpl">
+  <span class="time-row" style="display:inline-flex; gap:4px; align-items:center;">
+    <input type="time" name="windows" step="300" required style="width: 120px;">
+    <select name="kinds" style="width: auto;">
+      <option value="new">New clip</option>
+      <option value="rerun">Rerun</option>
+    </select>
+    <button type="button" class="sm reject" title="Remove" onclick="this.parentElement.remove(); summarize()">✕</button>
+  </span>
+</template>
+
+<script>
+  const MAX = {{ max_windows }};
+  const times = document.getElementById('times');
+  const tpl = document.getElementById('time-tpl');
+  const toMin = (v) => { const [h, m] = v.split(':').map(Number); return h * 60 + m; };
+  const toHHMM = (n) => String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0');
+
+  function addTime(value) {
+    const node = tpl.content.firstElementChild.cloneNode(true);
+    node.querySelector('input').value = value || '';
+    times.appendChild(node);
+    return node;
+  }
+
+  function summarize() {
+    const vals = [...times.querySelectorAll('input')].map(i => i.value).filter(Boolean)
+      .map(toMin).sort((a, b) => a - b);
+    const reruns = [...times.querySelectorAll('select')].filter(s => s.value === 'rerun').length;
+    const out = document.getElementById('summary');
+    if (!vals.length) { out.textContent = ''; return; }
+    const gaps = vals.slice(1).map((v, i) => v - vals[i]);
+    if (vals.length > 1) gaps.push(vals[0] + 1440 - vals[vals.length - 1]);
+    const tight = gaps.length ? Math.min(...gaps) : null;
+    out.textContent = vals.length + ' post' + (vals.length === 1 ? '' : 's') + ' a day'
+      + (reruns ? ' (' + reruns + ' rerun' + (reruns === 1 ? '' : 's') + ')' : '')
+      + (tight !== null ? ' · closest gap ' + Math.floor(tight / 60) + 'h' + (tight % 60 ? ' ' + (tight % 60) + 'm' : '') : '')
+      + (vals.length > MAX ? ' · too many (max ' + MAX + ')' : '');
+    out.style.color = (vals.length > MAX || (tight !== null && tight < {{ spacing_floor }})) ? 'var(--danger)' : '';
+  }
+
+  document.getElementById('fill').addEventListener('click', () => {
+    const step = Math.round(parseFloat(document.getElementById('every').value) * 60);
+    const first = toMin(document.getElementById('first').value || '00:00');
+    const last = toMin(document.getElementById('last').value || '23:59');
+    times.innerHTML = '';
+    for (let t = first, n = 0; t <= last && t < 1440 && n < MAX; t += step, n++) addTime(toHHMM(t));
+    summarize();
+  });
+  document.getElementById('add-time').addEventListener('click', () => {
+    addTime('').querySelector('input').focus();
+    summarize();
+  });
+  times.addEventListener('input', summarize);
+  times.addEventListener('change', summarize);
+  summarize();
+</script>
+{% endblock %}

@@ -86,7 +86,7 @@ def _voice_weight(post: ThreadsPost, has_proposal: bool) -> float:
 def collect_voice_captions(session) -> list[dict]:
     """All published organic captions with their voice weight, newest first.
 
-    First-party (branded) content is left out — derived from the channel's
+    Re-airs are left out, and so is first-party (branded) content — derived from the channel's
     ``first_party`` flag, with the legacy reserved ``promos`` category kept as
     a per-video back-compat path. Promos recycle their caption verbatim on
     every airing, so a single piece of ad copy would otherwise arrive as dozens
@@ -101,6 +101,9 @@ def collect_voice_captions(session) -> list[dict]:
         .where(
             ThreadsPost.status == "published",
             ThreadsPost.caption != "",
+            # Re-airs carry either a copy of an earlier caption or one the
+            # model drafted unattended — neither is a new sample of the voice.
+            ThreadsPost.repost_of_post_pk.is_(None),
             or_(Candidate.category.is_(None),
                 Candidate.category.not_in(reserved_slugs())),
             Channel.first_party.isnot(True),

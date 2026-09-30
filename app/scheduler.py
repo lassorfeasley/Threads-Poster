@@ -38,7 +38,16 @@ from .analytics import poll_recent_metrics, refresh_metrics_for
 from .categories import category_by_slug, default_shelf_life, is_first_party
 from .config import load_first_reply, load_settings, scheduler_timezone
 from .db import session_scope
-from .models import Candidate, Channel, Cut, SchedulerState, ThreadsPost, utcnow
+from .models import (
+    Candidate,
+    Channel,
+    Cut,
+    RerunReview,
+    SchedulerState,
+    ThreadsPost,
+    utcnow,
+)
+from .posting_schedule import is_rerun_slot, rerun_indices_for_date, windows_for_date
 from .placement import (
     SHELF_EVERGREEN,
     PlacementContext,
@@ -143,11 +152,9 @@ def _tz() -> ZoneInfo:
 
 
 def _windows_for_day(day: dt.date, tz: ZoneInfo) -> list[dt.datetime]:
-    """Return today's posting windows as aware UTC datetimes."""
-    settings = load_settings()
-    windows = settings.get("scheduler.windows") or ["10:00", "14:30", "19:00"]
+    """Return ``day``'s posting windows as aware UTC datetimes."""
     out: list[dt.datetime] = []
-    for raw in windows:
+    for raw in windows_for_date(day):
         h, m = _parse_hhmm(str(raw))
         local = dt.datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
         out.append(local.astimezone(dt.timezone.utc))
@@ -171,15 +178,14 @@ def _window_key(day: dt.date, index: int) -> str:
 # silently drop it.
 
 
-def _base_window_count() -> int:
-    settings = load_settings()
-    return len(settings.get("scheduler.windows") or ["10:00", "14:30", "19:00"])
+def _base_window_count(day: dt.date) -> int:
+    return len(windows_for_date(day))
 
 
-def _overflow_index() -> int:
+def _overflow_index(day: dt.date) -> int:
     """The index overflow windows use: one past the day's regular windows, so
     every regular key keeps its meaning on days that grow an extra slot."""
-    return _base_window_count()
+    return _base_window_count(day)
 
 
 def _overflow_config() -> tuple[int, int] | None:
@@ -215,12 +221,12 @@ def _overflow_window_utc(day: dt.date, tz: ZoneInfo) -> dt.datetime | None:
 
 
 def _overflow_key(day: dt.date) -> str:
-    return _window_key(day, _overflow_index())
+    return _window_key(day, _overflow_index(day))
 
 
 def _is_overflow_key(key: str) -> bool:
     parsed = _parse_window_key(key)
-    return parsed is not None and parsed[1] >= _base_window_count()
+    return parsed is not None and parsed[1] >= _base_window_count(parsed[0])
 
 
 def _overflow_pin_days(posts) -> set[dt.date]:
@@ -233,11 +239,10 @@ def _overflow_pin_days(posts) -> set[dt.date]:
     """
     if _overflow_config() is None:
         return set()
-    threshold = _base_window_count()
     out: set[dt.date] = set()
     for p in posts:
         parsed = _parse_window_key((p.pinned_window_key or "").strip())
-        if parsed is not None and parsed[1] >= threshold:
+        if parsed is not None and parsed[1] >= _base_window_count(parsed[0]):
             out.add(parsed[0])
     return out
 
@@ -546,16 +551,30 @@ def _assign_with_mode(
     session,
     posts: list[ThreadsPost],
     keys: list[str],
+    open_keys: frozenset[str] = frozenset(),
 ) -> tuple[list[ThreadsPost | None], PlacementContext | None]:
     """One entry point for every caller (tick head, pin swap, calendar plan),
     so the plan the operator sees and the post the tick publishes can never
-    come from different modes."""
+    come from different modes.
+
+    Rerun slots (Posting schedule page) are held back from organic placement:
+    only a post pinned to one can land there, so an unstaged rerun slot comes
+    back empty and falls to the filler rotation. ``open_keys`` lifts that for
+    specific keys — the tick's fallback when no rerun is available."""
+    pinned = {p.pinned_window_key for p in posts if p.pinned_window_key}
+    usable = [k for k in keys
+              if k in open_keys or k in pinned or not is_rerun_slot(k)]
     ctx = build_placement_context(session, posts)
-    return assign_posts_to_windows(posts, keys, ctx=ctx), ctx
+    if len(usable) == len(keys):
+        return assign_posts_to_windows(posts, keys, ctx=ctx), ctx
+    by_key = dict(zip(usable, assign_posts_to_windows(posts, usable, ctx=ctx)))
+    return [by_key.get(k) for k in keys], ctx
 
 
-def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
-    """Post that should publish at ``window_key`` (pin-aware)."""
+def _queue_head_for_window(session, window_key: str,
+                           organic_fallback: bool = False) -> ThreadsPost | None:
+    """Post that should publish at ``window_key`` (pin-aware). A rerun slot
+    only yields a post pinned to it unless ``organic_fallback``."""
     tz = _tz()
     now = utcnow()
     state = _get_state(session)
@@ -580,7 +599,9 @@ def _queue_head_for_window(session, window_key: str) -> ThreadsPost | None:
     if window_key not in keys:
         keys.insert(0, window_key)
     _clear_stale_pins(posts, set(keys))
-    assignment, _ = _assign_with_mode(session, posts, keys)
+    assignment, _ = _assign_with_mode(
+        session, posts, keys,
+        open_keys=frozenset({window_key}) if organic_fallback else frozenset())
     return assignment[keys.index(window_key)]
 
 
@@ -1028,14 +1049,17 @@ def _repost_pending(session) -> bool:
     """Whether a staged re-air is already on its way out (one in flight, ever —
     same rationale as ``_promo_pending``). Staged re-airs — rotation reposts
     and just-in-time filler alike — are the only posts that carry
-    ``repost_of_post_pk``, so the flag is the marker for both."""
-    row = session.execute(
-        select(ThreadsPost.id).where(
+    ``repost_of_post_pk``, so the flag is the marker for both.
+
+    Reruns staged into rerun slots don't count: those slots are the operator's
+    chosen mix, and a day's worth of them sits queued at all times."""
+    keys = session.execute(
+        select(ThreadsPost.pinned_window_key).where(
             ThreadsPost.status.in_((STATUS_QUEUED, STATUS_PUBLISHING)),
             ThreadsPost.repost_of_post_pk.is_not(None),
-        ).limit(1)
-    ).first()
-    return row is not None
+        )
+    ).scalars().all()
+    return any(not is_rerun_slot(k or "") for k in keys)
 
 
 def _repost_pool(session, cfg: dict, now: dt.datetime) -> list[tuple[Cut, ThreadsPost]]:
@@ -1086,6 +1110,7 @@ def _repost_pool(session, cfg: dict, now: dt.datetime) -> list[tuple[Cut, Thread
         )
     ).scalars().all())
 
+    recaption = _recaption_post_ids(session)
     min_gap = max(cfg["min_age_days"], cfg["min_days_between_repeats"])
     eligible: list[tuple[dt.datetime, Cut, ThreadsPost]] = []
     for cut_pk, airings in by_cut.items():
@@ -1105,8 +1130,10 @@ def _repost_pool(session, cfg: dict, now: dt.datetime) -> list[tuple[Cut, Thread
             continue
         # Evergreen only. This supersedes the old max_age_days ceiling: an
         # evergreen clip never ages out of the pool, and non-evergreen never
-        # enters it at any age.
-        if resolve_shelf_life(last, last.candidate) != SHELF_EVERGREEN:
+        # enters it at any age — unless Rerun Review cleared it to re-air
+        # with a new caption.
+        if (resolve_shelf_life(last, last.candidate) != SHELF_EVERGREEN
+                and not any(p.id in recaption for p in airings)):
             continue
         best = max((views_at_age.get(p.id, 0) for p in airings), default=0)
         if best < threshold or best <= 0:
@@ -1123,20 +1150,109 @@ def _repost_pool(session, cfg: dict, now: dt.datetime) -> list[tuple[Cut, Thread
     return [(cut, prior) for _, cut, prior in eligible]
 
 
-def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str) -> ThreadsPost:
+# Picks tried per staging pass when drafts keep failing for clips that can't
+# fall back to their original caption — each try is an LLM call.
+_RERUN_DRAFT_ATTEMPTS = 3
+
+
+def _rerun_settings() -> dict:
+    settings = load_settings()
+
+    def g(key: str, default):
+        return settings.get(f"scheduler.placement.reruns.{key}", default)
+
+    return {
+        "fresh_captions": bool(g("fresh_captions", True)),
+        "model": str(g("caption_model", "") or settings.get(
+            "engagement.draft_model", "claude-sonnet-5")),
+        "stage_ahead_hours": max(1.0, float(g("stage_ahead_hours", 24) or 24)),
+    }
+
+
+def _recaption_post_ids(session) -> set[int]:
+    """Airings marked "needs a new caption" in Rerun Review: they re-air like
+    evergreen, but only under a freshly drafted caption (``_rerun_caption``)."""
+    from .rerun_review import DECISION_NEW_CAPTION
+
+    return set(session.execute(
+        select(RerunReview.post_pk).where(RerunReview.decision == DECISION_NEW_CAPTION)
+    ).scalars().all())
+
+
+def _draft_rerun_caption(session, cut: Cut, prior: ThreadsPost, model: str) -> str:
+    """Freshly drafted caption for re-airing ``prior``, or "" on any failure."""
+    from . import llm, spend
+    from .publishing import _clip_transcript_text
+    from .voice import voice_context
+
+    if not spend.within_budget():
+        return ""
+    settings = load_settings()
+    cand = prior.candidate
+    channel = cand.channel if cand is not None else None
+    try:
+        voice = voice_context(session, settings)
+    except Exception as exc:
+        log.warning("Voice context failed (rerun caption drafted generic): %s", exc)
+        voice = {"examples": [], "style_guide": "", "target_words": None}
+    first = prior.published_at
+    try:
+        caption = llm.suggest_rerun_caption(
+            model,
+            title=cand.title if cand is not None else "",
+            channel=(channel.channel_title or channel.call_sign) if channel else "",
+            original_caption=prior.caption or "",
+            clip_transcript=_clip_transcript_text(cut)
+            or ((cand.transcript_text or "") if cand is not None else ""),
+            first_aired=first.date().isoformat() if first else "",
+            today=utcnow().date().isoformat(),
+            examples=voice.get("examples"),
+            style_guide=voice.get("style_guide", ""),
+            max_chars=int(settings.get("engagement.caption_max_chars", 220)),
+            target_words=voice.get("target_words"),
+        )
+    except Exception as exc:
+        log.warning("Rerun caption draft failed for post %s: %s", prior.id, exc)
+        return ""
+    caption = (caption or "").strip()
+    return "" if caption == (prior.caption or "").strip() else caption
+
+
+def _rerun_caption(session, cut: Cut, prior: ThreadsPost) -> str | None:
+    """Caption to re-air ``prior`` under: freshly drafted when
+    ``scheduler.placement.reruns.fresh_captions`` is on (falling back to the
+    original if drafting fails), or always drafted for a clip Rerun Review
+    cleared only with a new caption. None when such a clip couldn't get
+    one — it must not air under its dated caption."""
+    needs_new = resolve_shelf_life(prior, prior.candidate) != SHELF_EVERGREEN
+    cfg = _rerun_settings()
+    if cfg["fresh_captions"] or needs_new:
+        drafted = _draft_rerun_caption(session, cut, prior, cfg["model"])
+        if drafted:
+            return drafted
+    return None if needs_new else prior.caption
+
+
+def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str,
+                  caption: str | None = None) -> ThreadsPost:
     """Queue a re-air of ``prior``, pinned to ``window_key``.
 
-    Clones the airing the way ``_stage_promo`` does — caption and clip paths
-    copied, so the clip is already in cloud storage and a headless runner can
-    publish it. Declares itself with ``repost_of_post_pk`` and ships as
-    evergreen: the content's moment already happened, it re-airs on proven
-    performance. Facet annotations are copied too (same file — re-annotating
-    would spend an LLM call to learn the same answer).
+    Clones the airing the way ``_stage_promo`` does — clip paths copied, so
+    the clip is already in cloud storage and a headless runner can publish
+    it. ``caption`` (from ``_rerun_caption``) replaces the original's when
+    given; a drafted caption is also recorded as ``suggested_caption`` so an
+    operator edit to it is visible as one. Declares itself with
+    ``repost_of_post_pk`` and ships as evergreen: the content's moment already
+    happened, it re-airs on proven performance. Facet annotations are copied
+    too (same file — re-annotating would spend an LLM call to learn the same
+    answer).
     """
+    caption = caption if caption is not None else prior.caption
     post = ThreadsPost(
         candidate_pk=cut.candidate_pk,
         cut_pk=cut.id,
-        caption=prior.caption,
+        caption=caption,
+        suggested_caption=caption if caption != prior.caption else "",
         clip_local_path=prior.clip_local_path,
         clip_object_path=prior.clip_object_path,
         clip_length_seconds=prior.clip_length_seconds,
@@ -1174,21 +1290,97 @@ def ensure_repost_staged() -> str | None:
         slots = _upcoming_promo_slots(cfg, now, state.last_repost_window_key or "")
         if not slots:
             return None
-        pool = _repost_pool(session, cfg, now)
-        if not pool:
-            return None
-        cut, prior = pool[0]
         claimed = _claimed_window_keys(session)
-        for window_key, _win in slots:
-            if window_key in claimed:
+        window_key = next((k for k, _win in slots if k not in claimed), None)
+        if window_key is None:
+            return None
+        for cut, prior in _repost_pool(session, cfg, now)[:_RERUN_DRAFT_ATTEMPTS]:
+            caption = _rerun_caption(session, cut, prior)
+            if caption is None:
                 continue
-            post = _stage_repost(session, cut, prior, window_key)
+            post = _stage_repost(session, cut, prior, window_key, caption)
             state.last_repost_window_key = window_key
             state.updated_at = utcnow()
             log.info("Staged repost of post %s (cut %s) as post %s for window %s",
                      prior.id, cut.id, post.id, window_key)
             return f"repost_staged:{window_key}:post={post.id}"
         return None
+
+
+def ensure_rerun_slots_staged() -> str | None:
+    """Stage a rerun into the next rerun slot (Posting schedule page) coming
+    up within ``scheduler.placement.reruns.stage_ahead_hours``. One slot per
+    call; safe every tick.
+
+    Staging ahead, rather than at the window as filler does, puts the rerun
+    and its fresh caption on the calendar while there's still time to edit,
+    swap or delete it. Picks come from the filler rotation — the rerun
+    library with its performance-weighted quiet periods.
+
+    ``last_rerun_slot_key`` marks each slot handled, whether or not a rerun
+    was found, so a deleted rerun isn't re-minted (the slot falls back to
+    filler at the window, then to new clips). Advancing it is also the lock
+    that keeps two runners from staging the same slot.
+    """
+    cfg = _filler_config()
+    if cfg is None:
+        return None
+    rcfg = _rerun_settings()
+    tz = _tz()
+    now = utcnow()
+    horizon = now + dt.timedelta(hours=rcfg["stage_ahead_hours"])
+    with session_scope() as session:
+        state = _get_state(session)
+        done = _parse_window_key(state.last_rerun_slot_key or "")
+        key = next((
+            k for k, win, i in _upcoming_window_slots(
+                now.astimezone(tz).date(), horizon.astimezone(tz).date(), now=now,
+                last_window_key=state.last_window_key or "")
+            if win <= horizon
+            and i in rerun_indices_for_date(window_key_date(k))
+            and (done is None or _parse_window_key(k) > done)
+        ), None)
+        if key is None:
+            return None
+        won = session.execute(
+            update(SchedulerState)
+            .where(SchedulerState.id == state.id,
+                   SchedulerState.last_rerun_slot_key == (state.last_rerun_slot_key or ""))
+            .values(last_rerun_slot_key=key, updated_at=utcnow())
+        ).rowcount
+        if won != 1:
+            return None
+        session.expire(state)
+        if key in _claimed_window_keys(session):
+            return f"rerun_slot_taken:{key}"
+
+        day = window_key_date(key)
+        facts, cand_last = _filler_rotation(session, cfg)
+        # Reruns already pinned count as airings for same-source spacing, or
+        # sibling clips of one video could fill back-to-back rerun slots.
+        for cand_pk, pinned in session.execute(
+            select(ThreadsPost.candidate_pk, ThreadsPost.pinned_window_key).where(
+                ThreadsPost.status == STATUS_QUEUED,
+                ThreadsPost.pinned_window_key != "",
+                ThreadsPost.candidate_pk.is_not(None))
+        ).all():
+            at = window_key_date(pinned)
+            if at is not None and (cand_pk not in cand_last or at > cand_last[cand_pk]):
+                cand_last[cand_pk] = at
+        source_gap = float(_placement_settings(load_settings()).same_source_days)
+        for _ in range(_RERUN_DRAFT_ATTEMPTS):
+            pick = _pick_filler(facts, day, cand_last, source_gap)
+            if pick is None:
+                break
+            caption = _rerun_caption(session, pick["cut"], pick["prior"])
+            if caption is None:
+                facts.remove(pick)
+                continue
+            post = _stage_repost(session, pick["cut"], pick["prior"], key, caption)
+            log.info("Staged rerun of post %s (cut %s) as post %s for rerun slot %s",
+                     pick["prior"].id, pick["cut"].id, post.id, key)
+            return f"rerun_staged:{key}:post={post.id}"
+        return f"rerun_slot_unfilled:{key}"
 
 
 def ensure_overflow_rescues() -> str | None:
@@ -1381,6 +1573,7 @@ def _filler_rotation(session, cfg: dict) -> tuple[list[dict], dict[int, dt.date]
             return 0.0
         return bisect.bisect_left(ranked, value) / (len(ranked) - 1)
 
+    recaption = _recaption_post_ids(session)
     facts: list[dict] = []
     for cut_pk, airings in by_cut.items():
         if cut_pk in booked:
@@ -1389,7 +1582,8 @@ def _filler_rotation(session, cfg: dict) -> tuple[list[dict], dict[int, dt.date]
         last_at, last = airings[-1]
         if last.cut is None or is_first_party(last.candidate):
             continue
-        if resolve_shelf_life(last, last.candidate) != SHELF_EVERGREEN:
+        if (resolve_shelf_life(last, last.candidate) != SHELF_EVERGREEN
+                and not any(p.id in recaption for _, p in airings)):
             continue
         if not (last.caption or "").strip():
             continue
@@ -1598,8 +1792,9 @@ def _stage_filler_jit(session, state: SchedulerState, window_key: str,
     if cfg is None:
         return None
     # One re-air in flight at a time, shared with the repost rotation — the
-    # marker is the same ``repost_of_post_pk`` flag.
-    if _repost_pending(session):
+    # marker is the same ``repost_of_post_pk`` flag. A rerun slot is exempt:
+    # a rerun is what the operator asked that window for.
+    if not is_rerun_slot(window_key) and _repost_pending(session):
         return None
     day = window_key_date(window_key)
     if day is None:
@@ -1608,6 +1803,12 @@ def _stage_filler_jit(session, state: SchedulerState, window_key: str,
     source_gap = float(_placement_settings(load_settings()).same_source_days)
     pick = _pick_filler(facts, day, cand_last, source_gap)
     if pick is None:
+        return None
+    # Drafted before the window lock, so a clip that can't air without a new
+    # caption never spends the window. Racing runners may each draft; only
+    # the lock winner stages.
+    caption = _rerun_caption(session, pick["cut"], pick["prior"])
+    if caption is None:
         return None
 
     won = session.execute(
@@ -1623,7 +1824,7 @@ def _stage_filler_jit(session, state: SchedulerState, window_key: str,
     session.expire(state)
 
     cut, prior = pick["cut"], pick["prior"]
-    post = _stage_repost(session, cut, prior, window_key)
+    post = _stage_repost(session, cut, prior, window_key, caption)
     log.info("Staged filler re-air of post %s (cut %s) as post %s for empty window %s",
              prior.id, cut.id, post.id, window_key)
     return post.id
@@ -1707,12 +1908,30 @@ def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool
     return ok
 
 
+# How long after the day's last window (or its overflow window) publishing
+# stays allowed, so a late tick can still catch up on it.
+_WINDOW_GRACE_MINUTES = 120
+
+
 def _within_active_hours(now_local: dt.datetime) -> bool:
+    """Inside ``scheduler.active_hours``, or inside the span the day's own
+    windows cover — so a schedule with overnight posts isn't silenced by
+    active hours drawn for a daytime one."""
     settings = load_settings()
     start_h, start_m = _parse_hhmm(settings.get("scheduler.active_hours_start", "08:00"))
     end_h, end_m = _parse_hhmm(settings.get("scheduler.active_hours_end", "22:00"))
     mins = now_local.hour * 60 + now_local.minute
-    return (start_h * 60 + start_m) <= mins < (end_h * 60 + end_m)
+    if (start_h * 60 + start_m) <= mins < (end_h * 60 + end_m):
+        return True
+    windows = [_parse_hhmm(w) for w in windows_for_date(now_local.date())]
+    if not windows:
+        return False
+    first = windows[0][0] * 60 + windows[0][1]
+    last = windows[-1][0] * 60 + windows[-1][1]
+    overflow = _overflow_config()
+    if overflow is not None:
+        last = max(last, overflow[0] * 60 + overflow[1])
+    return first <= mins < min(24 * 60, last + _WINDOW_GRACE_MINUTES)
 
 
 def _due_slots_for_day(session, day: dt.date, tz: ZoneInfo) -> list[tuple[str, dt.datetime]]:
@@ -1782,6 +2001,14 @@ def run_window_tick() -> str | None:
     except Exception:
         log.exception("Repost staging failed")
 
+    # And for the rerun slots chosen on the Posting schedule page.
+    try:
+        staged = ensure_rerun_slots_staged()
+        if staged:
+            log.info("Rerun slots: %s", staged)
+    except Exception:
+        log.exception("Rerun slot staging failed")
+
     # And for overflow rescues: pin timely posts that would otherwise expire
     # unplaced to on-demand extra windows. Also just queued-row writes.
     try:
@@ -1833,7 +2060,12 @@ def run_window_tick() -> str | None:
             # this runs only when the plan left this window with nothing.
             post_id = _stage_filler_jit(session, state, key, now)
             verb = "filler_publish"
-            if post_id is None:
+            fallback = (_queue_head_for_window(session, key, organic_fallback=True)
+                        if post_id is None and is_rerun_slot(key) else None)
+            if fallback is not None:
+                # A rerun slot with no rerun to give: a new clip beats silence.
+                post_id, verb = fallback.id, "publish"
+            elif post_id is None:
                 state.last_window_key = key
                 state.last_action = f"empty:{key}"
                 state.updated_at = utcnow()
@@ -2129,7 +2361,7 @@ def scheduler_status(session) -> dict:
     return {
         "enabled": bool(settings.get("scheduler.enabled", True)),
         "timezone": str(tz),
-        "windows": settings.get("scheduler.windows") or [],
+        "windows": windows_for_date(day),
         "next_window_local": next_window_local,
         "next_window_key": next_window_key,
         "due_now": due_now,
@@ -2165,7 +2397,7 @@ def _upcoming_window_slots(
         if d in overflow_days:
             o_win = _overflow_window_utc(d, tz)
             if o_win is not None:
-                day_slots.append((_overflow_index(), o_win))
+                day_slots.append((_overflow_index(d), o_win))
         for i, win in day_slots:
             key = _window_key(d, i)
             already = (
@@ -2436,9 +2668,8 @@ def build_window_plan(
             if pick["candidate_pk"] is not None:
                 cand_last[pick["candidate_pk"]] = day_of
 
-    base_window_count = _base_window_count()
     for key, _win_utc, idx, local in visible:
-        is_overflow = idx >= base_window_count
+        is_overflow = _is_overflow_key(key)
         post = post_by_key.get(key)
         rerun = rerun_by_key.get(key) if post is None else None
         if post is None and rerun is not None:

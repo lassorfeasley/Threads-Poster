@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{% set ns = namespace(unjudged=0, as_is=0) %}
+{% for f in pending %}
+  {% if not (f.review and f.review.verdict) %}{% set ns.unjudged = ns.unjudged + 1 %}{% endif %}
+  {% if f.review and f.review.verdict == 'evergreen' %}{% set ns.as_is = ns.as_is + 1 %}{% endif %}
+{% endfor %}
+{% set waiting = decided|selectattr('review.decision', 'equalto', 'new_caption')|list %}
+{% set settled = decided|rejectattr('review.decision', 'equalto', 'new_caption')|list %}
+
+{% set actions %}
+  {% if ns.unjudged and not job.running %}
+  <form class="inline" method="post" action="/reruns/review/judge">
+    <button class="sm" title="One short model call per post">Ask the model about {{ ns.unjudged }} post{{ 's' if ns.unjudged != 1 }}</button></form>
+  {% endif %}
+  {% if ns.as_is %}
+  <form class="inline" method="post" action="/reruns/review/accept-evergreen">
+    <button class="sm approve"
+            data-confirm="Make all {{ ns.as_is }} post{{ 's' if ns.as_is != 1 }} the model says re-air as-is evergreen? They join the rerun pool right away; each can be undone below."
+            data-confirm-ok="Make evergreen">Accept {{ ns.as_is }} "rerun as-is"</button></form>
+  {% endif %}
+{% endset %}
+{{ ui.pagebar("Rerun review", count=(pending|length), actions=actions,
+              sub="Posts that did well but aren't evergreen, so they can never rerun. Their moment has passed — decide whether each still holds up. Evergreen joins the rerun pool; nothing else changes.") }}
+
+{% if job.running %}
+<meta http-equiv="refresh" content="5">
+<div class="meta busy" style="margin-bottom: 12px;">Asking the model… {{ job.done }} of {{ job.total or '?' }} done. This page refreshes on its own.</div>
+{% elif job.error %}
+<div class="meta" style="color: var(--danger); margin-bottom: 12px;">{{ job.error }}</div>
+{% endif %}
+
+<div class="meta" style="margin-bottom: 14px;">
+  {% if threshold is not none %}
+  Showing published timely and breaking posts aired at least {{ cfg.min_age_days|int }} days ago with at least
+  {{ '{:,}'.format(threshold) }} views at {{ cfg.metric_age_hours }}h (the account's {{ cfg.percentile|int }}th percentile),
+  one card per clip. Thresholds live under <code>scheduler.placement.rerun_review</code> in settings.
+  {% else %}
+  Needs at least 10 published posts with metrics before there's a baseline to compare against ({{ baseline_n }} so far).
+  {% endif %}
+</div>
+
+{% macro thumb(cand) %}
+  {% set src = thumb_for(cand) %}
+  {% if src %}
+  <img class="pc-thumb" src="{{ src }}" alt="" loading="lazy" onerror="this.classList.add('is-broken')">
+  {% else %}
+  <div class="pc-thumb is-empty" aria-hidden="true">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+  </div>
+  {% endif %}
+{% endmacro %}
+
+{% macro facts_line(f) %}
+  <span class="badge">{{ f.shelf_life }}</span>
+  <span class="meta">{{ '{:,}'.format(f.views_at_age) }} views at {{ cfg.metric_age_hours }}h
+    · top {{ [1, ((1 - f.rank) * 100)|round(0, 'ceil')|int]|max }}%
+    · aired {{ f.aired.strftime("%b %-d") }} ({{ f.age_days }} days ago){% if f.airings > 1 %} · {{ f.airings }} airings{% endif %}</span>
+{% endmacro %}
+
+{% if not pending %}
+  <div class="empty">
+    <strong>Nothing to review</strong>
+    No proven timely or breaking posts are waiting. New ones show up here once they're {{ cfg.min_age_days|int }} days past airing.
+  </div>
+{% else %}
+<div class="post-list">
+  {% for f in pending %}
+  {% set r = f.review %}
+  {% set v = r.verdict if r else '' %}
+  <div class="post-card">
+    {{ thumb(f.candidate) }}
+    <div class="pc-body">
+      <a class="item-title" href="/post/{{ f.post.id }}">{{ f.post.caption[:140] or "(open post)" }}</a>
+      <div class="badges">{{ facts_line(f) }}</div>
+      <div class="badges">
+        {% if v == 'evergreen' %}<span class="badge supportive">Model: rerun as-is</span>
+        {% elif v == 'new_caption' %}<span class="badge info">Model: needs a new caption</span>
+        {% elif v == 'dated' %}<span class="badge hostile">Model: tied to the event</span>
+        {% else %}<span class="badge">Not judged yet</span>{% endif %}
+        {% if r and r.reason %}<span class="meta">{{ r.reason }}</span>{% endif %}
+      </div>
+      {% if f.cut and f.cut.clip_title %}<div class="meta">{{ f.cut.clip_title }}</div>{% endif %}
+      <div class="pc-actions">
+        <form class="inline" method="post" action="/reruns/review/{{ f.post.id }}/decide"
+              data-async="" data-async-remove=".post-card">
+          <input type="hidden" name="decision" value="evergreen">
+          <button class="sm approve" title="Joins the rerun pool with its original caption">Make evergreen</button></form>
+        <form class="inline" method="post" action="/reruns/review/{{ f.post.id }}/decide"
+              data-async="" data-async-remove=".post-card">
+          <input type="hidden" name="decision" value="new_caption">
+          <button class="sm" title="Footage holds up but the caption dates it. Reruns with a freshly written caption, never the original.">Needs new caption</button></form>
+        <form class="inline" method="post" action="/reruns/review/{{ f.post.id }}/decide"
+              data-async="" data-async-remove=".post-card">
+          <input type="hidden" name="decision" value="keep">
+          <button class="sm reject" title="Leave it {{ f.shelf_life }}; it won't be asked about again">Keep {{ f.shelf_life }}</button></form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% macro decided_list(rows) %}
+<div class="post-list" style="margin-top: 10px;">
+  {% for f in rows %}
+  {% set d = f.review.decision %}
+  <div class="post-card">
+    {{ thumb(f.candidate) }}
+    <div class="pc-body">
+      <a class="item-title" href="/post/{{ f.post.id }}">{{ f.post.caption[:140] or "(open post)" }}</a>
+      <div class="badges">
+        {% if d == 'evergreen' %}<span class="badge supportive">Made evergreen</span>
+        {% elif d == 'new_caption' %}<span class="badge info">Reruns with a new caption</span>
+        {% else %}<span class="badge">Kept {{ f.shelf_life }}</span>{% endif %}
+        <span class="meta">{{ '{:,}'.format(f.views_at_age) }} views at {{ cfg.metric_age_hours }}h
+          · decided {{ f.review.decided_at.strftime("%b %-d") if f.review.decided_at else "—" }}</span>
+      </div>
+      <div class="pc-actions">
+        {% if d == 'new_caption' %}
+        <form class="inline" method="post" action="/reruns/review/{{ f.post.id }}/decide">
+          <input type="hidden" name="decision" value="evergreen">
+          <button class="sm approve" title="Rerun with the original caption after all">Make evergreen anyway</button></form>
+        {% endif %}
+        <form class="inline" method="post" action="/reruns/review/{{ f.post.id }}/undo">
+          <button class="sm" title="Back to the review list{{ ', restoring its shelf life' if d == 'evergreen' }}">Undo</button></form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{% if waiting %}
+<details style="margin-top: 18px;">
+  <summary>Rerun with a new caption ({{ waiting|length }})</summary>
+  <div class="meta">The footage holds up but the caption dates it. These rerun only with a freshly written caption; if one can't be drafted, the clip is skipped.</div>
+  {{ decided_list(waiting) }}
+</details>
+{% endif %}
+{% if settled %}
+<details style="margin-top: 12px;">
+  <summary>Decided ({{ settled|length }})</summary>
+  {{ decided_list(settled) }}
+</details>
+{% endif %}
+{% endblock %}

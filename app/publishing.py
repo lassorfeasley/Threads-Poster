@@ -16,6 +16,7 @@ from pathlib import Path
 
 from sqlalchemy import or_, select, update
 
+from .categories import is_first_party
 from .config import load_first_reply, load_settings, scheduler_timezone
 from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
 from .instagram_api import publish_reel
@@ -226,6 +227,20 @@ def _recent_first_replies(session, limit: int = 12) -> list[str]:
     return seen
 
 
+def first_comment_suppressed(candidate: Candidate | None,
+                             cfg: dict | None = None) -> bool:
+    """Whether first comments are switched off for this post's provenance.
+
+    Only ever true for the brand's own promos, and only when the operator has
+    turned ``first_party_enabled`` off. Those posts are the ad: their call to
+    action belongs in the caption, visible the moment the post lands, rather
+    than in a comment the timing gates can hold back for hours. Found footage
+    is never affected.
+    """
+    cfg = cfg or load_first_reply()
+    return not cfg.get("first_party_enabled", True) and is_first_party(candidate)
+
+
 def first_reply_context(session, candidate: Candidate | None, cut: Cut | None,
                         caption: str = "") -> dict | None:
     """Snapshot everything the call-to-action prompt needs as plain values.
@@ -283,12 +298,18 @@ def draft_first_reply_for_cut(cut_id: int, caption: str = "") -> str:
 
     Used by the ship paths (post now / queue / save draft) before they open the
     session that records the post, so the model call never runs with a
-    connection checked out. Returns "" when invitation mode is off.
+    connection checked out. Returns "" when invitation mode is off, or when the
+    cut is first-party and first comments are off for those — drafting one
+    there would spend a model call to fill a box nothing will ever post from.
+    The Suggest button stays available on the page either way, since clicking
+    it is the operator asking for the draft on purpose.
     """
     from .db import session_scope
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None:
+            return ""
+        if first_comment_suppressed(cut.candidate):
             return ""
         context = first_reply_context(session, cut.candidate, cut, caption)
     return draft_first_reply(context)
@@ -933,6 +954,20 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
         return False
 
     cfg = load_first_reply()
+    if not force and first_comment_suppressed(post.candidate, cfg):
+        # Final, and recorded like a gate skip is: the post page has to show
+        # this as a decision rather than as a post that silently got nothing,
+        # and writing ``first_reply_error`` is what drops the post out of the
+        # sweep instead of leaving it re-judged every tick.
+        post.first_reply_error = (
+            "No first comment: this is the brand's own promo, and first "
+            "comments are off for those under Replies settings — the call to "
+            "action rides in the caption instead.")
+        post.first_reply_skipped = True
+        session.flush()
+        log.info("First comment suppressed for first-party post %s", post.id)
+        return False
+
     text = resolve_first_reply_text(post, cfg, force=force)
     if not text:
         # Record why, always — not just on ``force``. Publishing with no first

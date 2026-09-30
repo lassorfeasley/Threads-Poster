@@ -543,6 +543,33 @@ scheduler:
       # / (1 + rank). Nothing ever hard-stops recycling; a much-aired clip
       # just waits longer each time. 0 restores the flat quiet period.
       airing_growth: 0.5
+    # Reruns in general: rerun slots (chosen per time on the Posting schedule
+    # page, filled from the filler rotation above), weekly re-airs and filler.
+    reruns:
+      # Draft a new caption in the operator's voice for every re-air, so
+      # followers don't meet the same words twice and nothing reads dated.
+      # Off: re-airs reuse the original caption — except clips Rerun Review
+      # cleared only with a new caption, which are always redrafted.
+      fresh_captions: true
+      # Blank = engagement.draft_model.
+      caption_model: ""
+      # How far ahead a rerun slot gets its rerun staged (and drafted), so it
+      # sits on the calendar for review before it airs.
+      stage_ahead_hours: 24
+    # Rerun review (the "Rerun review" page, linked from Notifications). Both
+    # rerun paths above take evergreen clips only, and shelf life is judged
+    # before a clip ever airs, so timely clips that outlived their news peg
+    # are locked out for good. This lists published non-evergreen posts at
+    # least ``min_age_days`` past airing whose views at the learning age
+    # clear the ``percentile`` of the account baseline; the model re-judges
+    # each with hindsight and the operator decides. "Make evergreen" writes
+    # the post's shelf-life override — nothing else changes.
+    rerun_review:
+      min_age_days: 30
+      percentile: 50
+      model: claude-haiku-4-5
+      # Most posts judged per "Ask the model" click (one short call each).
+      max_per_run: 60
   # How often to re-pull insights for recently published posts. These dense
   # early samples feed the age-normalized comparisons in analytics.
   metrics_poll_interval_minutes: 15

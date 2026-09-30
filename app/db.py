@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "34"
+SCHEMA_VERSION = "37"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -157,6 +157,10 @@ _SCHEMA_SENTINELS = (
     "SELECT id FROM clip_revisions LIMIT 0",
     "SELECT chapters FROM candidates LIMIT 0",
     "SELECT striking_frames FROM candidates LIMIT 0",
+    "SELECT prior_override FROM rerun_reviews LIMIT 0",
+    "SELECT effective_from FROM posting_schedules LIMIT 0",
+    "SELECT rerun_slots FROM posting_schedules LIMIT 0",
+    "SELECT last_rerun_slot_key FROM scheduler_state LIMIT 0",
 )
 
 
@@ -295,9 +299,16 @@ def _ensure_new_columns() -> None:
         "scheduler_state": {
             "last_promo_window_key": "VARCHAR(40) DEFAULT ''",
             "last_repost_window_key": "VARCHAR(40) DEFAULT ''",
+            "last_rerun_slot_key": "VARCHAR(40) DEFAULT ''",
         },
         "clip_proposals": {
             "dismiss_reason": "VARCHAR(30) DEFAULT ''",
+        },
+        "rerun_reviews": {
+            "prior_override": "VARCHAR(20) DEFAULT ''",
+        },
+        "posting_schedules": {
+            "rerun_slots": "TEXT DEFAULT '[]'",
         },
         "cuts": {
             "subs_position": "VARCHAR(10) DEFAULT 'bottom'",

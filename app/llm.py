@@ -47,7 +47,7 @@ def _brand() -> dict:
         if value:
             out[key] = value
     # No generic default makes sense for these; empty just omits the context.
-    for key in ("mission", "audience", "voice_notes"):
+    for key in ("mission", "audience", "voice_notes", "cta_url"):
         out[key] = str(raw.get(key) or "").strip()
     return out
 
@@ -257,6 +257,117 @@ def suggest_category(model: str, categories: list[dict], title: str, description
         shelf = ""
     return {"category": slug, "shelf_life": shelf,
             "rationale": str(data.get("rationale", ""))[:500]}
+
+
+RERUN_VERDICTS = ("evergreen", "new_caption", "dated")
+
+
+def judge_rerun(model: str, *, title: str, channel: str, caption: str,
+                clip_transcript: str, shelf_life: str, video_published: str,
+                first_aired: str, today: str) -> dict:
+    """Second look, with hindsight, at a clip first aired as timely/breaking:
+    could it re-air now?
+
+    ``suggest_category`` judged shelf life BEFORE the clip aired, from the
+    source video. This judges the finished clip after its moment passed, which
+    is a different question: not "is this pegged to an event" but "would a
+    viewer who never saw it lose anything, or be misled, seeing it today".
+
+    Returns {verdict: evergreen | new_caption | dated, reason}. Off-vocabulary
+    answers come back as "" so the post stays unjudged rather than mislabeled.
+    """
+    b = _brand()
+    system = (
+        f"You help run a social account about {b['topic']} that re-airs its "
+        "best past clips to reach people who missed them. This clip was tagged "
+        f"'{shelf_life}' when it first aired — pegged to an event at the time. "
+        "Judge it WITH HINDSIGHT, as of today: could it re-air now?\n"
+        "- evergreen: re-airs as-is. The footage and caption still land for a "
+        "viewer who never saw it; nothing reads as stale or misleading. "
+        "Explainers, science, features, trend stories, recurring phenomena "
+        "(heatwaves, wildfire or hurricane season, droughts), and stories whose "
+        "point outlived their news peg belong here.\n"
+        "- new_caption: the footage holds up, but the CAPTION dates it — it "
+        "says 'today', 'this week', 'just announced', or treats a past event as "
+        "ongoing. It would re-air fine with a rewritten caption. Present "
+        "tense alone doesn't date a caption — an ongoing debate or trend "
+        "described in the present is still evergreen.\n"
+        "- dated: the value IS the event — a specific storm, fire, evacuation, "
+        "ruling or vote as it happened. Re-airing would read as old news or "
+        "mislead viewers about current conditions, whatever the caption says.\n"
+        "When the footage holds up, prefer evergreen or new_caption; answer "
+        "dated only when re-airing would mislead or plainly feel like stale "
+        "news. Judge from the title, channel, dates, caption and clip "
+        "transcript. JSON shape: {\"verdict\": "
+        "\"evergreen|new_caption|dated\", \"reason\": \"one short sentence\"}"
+    )
+    user = json.dumps({
+        "today": today,
+        "video_published": video_published,
+        "first_aired": first_aired,
+        "title": title,
+        "channel": channel,
+        "caption": caption,
+        "clip_transcript": (clip_transcript or "")[:2500],
+    })
+    data = _json_chat(model, system, user, max_tokens=300)
+    verdict = str(data.get("verdict", "")).strip().lower()
+    if verdict not in RERUN_VERDICTS:
+        verdict = ""
+    return {"verdict": verdict, "reason": str(data.get("reason", "")).strip()[:500]}
+
+
+def suggest_rerun_caption(model: str, *, title: str, channel: str,
+                          original_caption: str, clip_transcript: str,
+                          first_aired: str, today: str,
+                          examples: list[str] | None = None,
+                          style_guide: str = "", max_chars: int = 220,
+                          target_words: int | None = None) -> str:
+    """A new caption for a clip re-airing, so followers who saw it the first
+    time don't meet the same words again and nothing reads as dated.
+
+    Unlike ``suggest_post_caption`` this ships without the operator editing it
+    (they can, while it waits on the calendar), so the brief is narrower: same
+    facts as the original, a different line, and no time words that pin the
+    clip to when it first aired.
+    """
+    b = _brand()
+    length = (f"Aim for about {target_words} words — the length this operator "
+              f"actually posts; shorter is fine, longer is not."
+              if target_words else "One or two short lines.")
+    system = (
+        f"You write the caption for a short {b['source_kind']} clip about "
+        f"{b['topic']} that is being RE-AIRED on Threads. It first aired on "
+        "first_aired with original_caption. Write a NEW caption for today:\n"
+        "- A different angle or line than the original — do not paraphrase its "
+        "opening or reuse its hook. Pick another striking detail from the "
+        "transcript.\n"
+        "- Timeless: no 'today', 'this week', 'just', 'breaking', 'new', dates, "
+        "or anything implying the events are happening now. Don't mention that "
+        "it's a rerun either.\n"
+        "- Only facts found in the transcript, title or original caption.\n"
+        f"- {length} Hard ceiling {max_chars} characters. No lists, no blank "
+        "lines.\n"
+    )
+    if examples:
+        system += (
+            "\nVOICE: write as this operator does. Real captions they published "
+            "(match rhythm, punctuation and attitude — not their facts or length):\n"
+            + "\n".join(f"<example>\n{e[:400]}\n</example>" for e in examples[:12])
+        )
+        if style_guide:
+            system += "\n\nStyle notes:\n" + style_guide[:1500]
+    system += "\nJSON shape: {\"caption\": \"...\"}"
+    user = json.dumps({
+        "today": today,
+        "first_aired": first_aired,
+        "title": title,
+        "channel": channel,
+        "original_caption": original_caption,
+        "clip_transcript": (clip_transcript or "")[:3000],
+    })
+    data = _json_chat(model, system, user, max_tokens=400)
+    return _tidy_caption(str(data.get("caption", "")))
 
 
 def _clean_clip_segments(raw, horizon: float, cap: int,
@@ -1059,7 +1170,8 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
                          style_guide: str = "", operator_guide: str = "",
                          max_chars: int = 220,
                          target_words: int | None = None,
-                         description: str = "") -> str:
+                         description: str = "",
+                         first_party: bool = False) -> str:
     """Recommend Threads post text for the operator's trimmed clip. The operator
     reviews/edits before posting — this is a DRAFT, never auto-posted.
 
@@ -1074,8 +1186,17 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     work. ``max_chars`` is only a backstop: stated alone it behaves as a target
     to fill, which is how drafts drifted long enough that the operator rewrote
     nearly all of them.
+
+    ``first_party`` marks the brand's own promo footage, where the clip IS the
+    ad and the caption has to name the destination — those posts get no first
+    comment to carry it (``first_party_enabled`` in first_reply.yaml).
     """
     b = _brand()
+    # The URL is a fixed cost the drafter must not pay for out of the pitch, so
+    # it rides on top of the length budget rather than inside it.
+    cta_url = b["cta_url"] if first_party else ""
+    if cta_url:
+        max_chars += len(cta_url) + 1
     system = (
         f"You draft a Threads caption for a short {b['source_kind']} clip "
         f"about {b['topic']}. The operator will edit it before posting.\n\n"
@@ -1124,6 +1245,16 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
         system += ("Mention the place when it fits the length.\n"
                    if target_words and target_words <= 14
                    else "Mention the place.\n")
+    if cta_url:
+        system += (
+            f"\nThis clip is the brand's OWN promotional footage, not found "
+            f"footage, so the caption is the ad and has to tell the reader where "
+            f"to go. End it with {cta_url} written exactly that way — no "
+            f"https://, no www, no tracking parameters, and nothing after it. "
+            f"Those characters are on top of the length target rather than "
+            f"inside it: write the rest of the caption as short as you otherwise "
+            f"would and append the URL.\n"
+        )
     if examples:
         system += (
             "\n\nVOICE: Write in the operator's own voice. Below are real captions "

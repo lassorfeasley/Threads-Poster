@@ -241,7 +241,11 @@
       <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
                 placeholder="{{ fr_placeholder }}">{{ attribution_text }}</textarea>
       {% endif %}
-      {% if not attribution_enabled %}
+      {% if first_reply_suppressed %}
+      <p class="field-hint">This is your own promo, and first comments are off for
+        those under <a href="/engagement/first-reply">Replies settings</a> — put the
+        call to action in the caption instead.</p>
+      {% elif not attribution_enabled %}
       <p class="field-hint">First comments are off under
         <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
       {% endif %}

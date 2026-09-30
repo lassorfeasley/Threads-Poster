@@ -12,6 +12,17 @@
     <input type="text" id="brand-name" name="name" value="{{ brand.name }}"
            placeholder="e.g. Renewables.org" style="max-width: 460px;">
 
+    <label for="brand-cta-url" class="card-title" style="display:block; margin: 14px 0 6px;">Call-to-action URL</label>
+    <input type="text" id="brand-cta-url" name="cta_url" value="{{ brand.cta_url }}"
+           placeholder="e.g. renewables.org" style="max-width: 460px;">
+    <p class="meta" style="margin: 6px 0 0;">
+      Where you send people. Appended to captions drafted for your own promo
+      footage, which is the only content whose caption has to carry the ask —
+      found-footage clips make it in the first comment instead. Stored bare, with
+      no <code>https://</code> and no tracking parameters; Threads links a plain
+      domain on its own.
+    </p>
+
     <label for="brand-mission" class="card-title" style="display:block; margin: 14px 0 6px;">Mission</label>
     <textarea id="brand-mission" name="mission" rows="2"
               placeholder="What this account exists to do, in a sentence or two.">{{ brand.mission }}</textarea>
