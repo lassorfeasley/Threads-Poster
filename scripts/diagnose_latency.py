@@ -63,13 +63,13 @@ def main() -> None:
     _sched_mod.start_scheduler_thread = lambda *a, **k: None
     _pc_mod.start_refresher = lambda *a, **k: None
 
-    from app.web.main import (_current_month_calendar_data, _default_dashboard_data,
+    from app.web.main import (_current_calendar_data, _default_dashboard_data,
                               _library_dataset, _notifications_data)
 
     for label, fn in (
         ("loader: dashboard", _default_dashboard_data),
         ("loader: library", _library_dataset),
-        ("loader: calendar (build_window_plan)", _current_month_calendar_data),
+        ("loader: calendar (build_window_plan)", _current_calendar_data),
         ("loader: notifications", _notifications_data),
     ):
         timed(label, fn)

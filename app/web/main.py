@@ -112,14 +112,15 @@ from ..scheduler import (
     PIN_HORIZON_DAYS,
     build_window_plan,
     expired_queued_posts,
+    plan_horizon,
     invalidate_recycle_overview,
     pin_post_to_window,
     projected_slot_for_post,
+    published_in_range,
     recycle_overview,
     recycle_status,
     reschedule_windows_for_post,
     resolve_shelf_life,
-    scheduler_status,
     shelf_life_outlook,
     spacing_allows_publish,
     start_scheduler_thread,
@@ -378,8 +379,8 @@ _WRITE_SCOPE: dict[str, tuple[str, ...]] = {
     # Calendar drag-and-drop: pins only reorder upcoming windows. Shelf-life
     # expiry (what attention/notifications watch) is content-age-based and
     # unaffected by which window a post is pinned to.
-    "/post/{post_id}/pin-window": ("calendar", "calendar-queue", "calendar-week"),
-    "/post/{post_id}/unpin": ("calendar", "calendar-queue", "calendar-week"),
+    "/post/{post_id}/pin-window": ("calendar",),
+    "/post/{post_id}/unpin": ("calendar",),
     # One metric snapshot row: of the cached pages, only the library surfaces
     # per-post metrics (analytics lives on its own TTL, volatile=False).
     "/post/{post_id}/refresh-stats": ("library",),
@@ -4323,48 +4324,40 @@ def threads_import_history(next: str = Form("/calendar")):
     )
 
 
-def _calendar_data(y: int, m: int) -> dict:
-    """The reads behind one month of the calendar: slots, queue and counts."""
+def _mark_reels(plan: list[dict], reel_post_ids: set[int]) -> None:
+    """Flag the cards whose post carries a paired Instagram reel."""
+    for e in plan:
+        # Reruns link to their ORIGINAL airing; that post's reel already
+        # went out and won't re-post, so no +IG marker on the rerun card.
+        e["has_reel"] = bool(e["kind"] != "rerun" and e.get("post_id")
+                             and e["post_id"] in reel_post_ids)
+
+
+def _month_range(y: int, m: int) -> tuple[dt.datetime, dt.datetime]:
     first_local = dt.datetime(y, m, 1)
-    next_first_local = dt.datetime(y + 1, 1, 1) if m == 12 else dt.datetime(y, m + 1, 1)
+    return first_local, dt.datetime(y + 1, 1, 1) if m == 12 else dt.datetime(y, m + 1, 1)
 
+
+def _week_range(week_start: dt.date) -> tuple[dt.datetime, dt.datetime]:
+    start_local = dt.datetime(week_start.year, week_start.month, week_start.day)
+    return start_local, start_local + dt.timedelta(days=7)
+
+
+def _queue_range() -> tuple[dt.datetime, dt.datetime]:
+    now_local = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return now_local, now_local + dt.timedelta(days=PIN_HORIZON_DAYS + 1)
+
+
+def _calendar_month_view(session, horizon, published, reel_post_ids: set[int],
+                         y: int, m: int) -> dict:
+    """The month grid: published history + upcoming windows, bucketed by day."""
+    first_local, next_first_local = _month_range(y, m)
+    plan = build_window_plan(session, first_local, next_first_local,
+                             horizon=horizon, published=published)
+    _mark_reels(plan, reel_post_ids)
     events: dict[int, list[dict]] = {}
-    drafts_count = 0
-    queue_count = 0
-    status = {}
-    windows_et: list[str] = []
-    # Not read_only, despite being a cache loader like the others: the plan
-    # builders below clear stale pins as they walk the queue, so this scope
-    # writes on any day one has gone stale.
-    with session_scope() as session:
-        # One grouped query instead of two counts: round trips are the page's
-        # whole cost on a remote database.
-        status_counts = dict(session.execute(
-            select(ThreadsPost.status, func.count())
-            .where(ThreadsPost.status.in_(("draft", "queued")))
-            .group_by(ThreadsPost.status)
-        ).all())
-        drafts_count = status_counts.get("draft", 0)
-        queue_count = status_counts.get("queued", 0)
-        status = scheduler_status(session)
-        windows_et = list(status.get("windows") or [])
-
-        plan = build_window_plan(session, first_local, next_first_local)
-        # Posts that carry a paired Instagram reel get a marker on their card.
-        reel_post_ids = {
-            pk for (pk,) in session.execute(
-                select(InstagramPost.threads_post_pk)
-                .where(InstagramPost.threads_post_pk.is_not(None))
-            ).all()
-        }
-        for e in plan:
-            # Reruns link to their ORIGINAL airing; that post's reel already
-            # went out and won't re-post, so no +IG marker on the rerun card.
-            e["has_reel"] = bool(e["kind"] != "rerun" and e.get("post_id")
-                                 and e["post_id"] in reel_post_ids)
-            # Calendar grid: published history + upcoming filled/open windows.
-            events.setdefault(e["day"], []).append(e)
-
+    for e in plan:
+        events.setdefault(e["day"], []).append(e)
     for day in events:
         events[day].sort(key=lambda e: e["sort"])
 
@@ -4372,45 +4365,109 @@ def _calendar_data(y: int, m: int) -> dict:
     # of it a different number of windows.
     n_days = (next_first_local - first_local).days
     slot_labels = {d: window_time_labels(dt.date(y, m, d)) for d in range(1, n_days + 1)}
-
-    return {"events": events, "drafts_count": drafts_count, "queue_count": queue_count,
-            "windows_et": windows_et, "slot_labels": slot_labels, "year": y, "month": m}
+    return {"events": events, "slot_labels": slot_labels, "year": y, "month": m}
 
 
-def _calendar_queue_data() -> dict:
+def _calendar_queue_view(session, horizon, published, reel_post_ids: set[int]) -> dict:
     """Full upcoming queue: every window for the next ``PIN_HORIZON_DAYS`` days.
 
     Separate from the month grid because the queue must show posts that fall
     outside the current month or week view — not a truncated slice of them.
     """
-    now_local = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    end_local = now_local + dt.timedelta(days=PIN_HORIZON_DAYS + 1)
-    linear: list[dict] = []
+    start_local, end_local = _queue_range()
+    plan = build_window_plan(session, start_local, end_local, horizon_days=PIN_HORIZON_DAYS,
+                             horizon=horizon, published=published)
+    _mark_reels(plan, reel_post_ids)
+    return {"linear": [e for e in plan if e["kind"] in ("queued", "open", "rerun")]}
+
+
+def _calendar_week_view(session, horizon, published, reel_post_ids: set[int],
+                        week_start: dt.date) -> dict:
+    """One week of window slots for the week view, bucketed by ISO date.
+
+    Separate from the month grid because a week can straddle two months, and
+    because the week cards show real stills: exported clips get their own
+    footage via /media/cut-thumb, uploads fall back to a local frame — the
+    month grid never pays for any of that.
+    """
+    start_local, end_local = _week_range(week_start)
+    plan = build_window_plan(session, start_local, end_local,
+                             horizon=horizon, published=published)
+    _mark_reels(plan, reel_post_ids)
+    # Resolve a better still per post than candidate.thumbnail_url alone
+    # (which is all build_window_plan carries): the exported clip's own
+    # frame first, then the source video's local frame for uploads.
+    post_ids = sorted({e["post_id"] for e in plan if e.get("post_id")})
+    thumb_by_post: dict[int, str] = {}
+    if post_ids:
+        rows = session.execute(
+            select(ThreadsPost.id, Cut.id, Cut.trimmed_clip_path,
+                   Candidate.id, Candidate.local_video_path)
+            .select_from(ThreadsPost)
+            .outerjoin(Cut, ThreadsPost.cut_pk == Cut.id)
+            .outerjoin(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+            .where(ThreadsPost.id.in_(post_ids))
+        ).all()
+        for pid, cut_id, clip_path, cand_id, local_video in rows:
+            if cut_id and clip_path:
+                thumb_by_post[pid] = f"/media/cut-thumb/{cut_id}"
+            elif cand_id and local_video:
+                thumb_by_post[pid] = f"/media/thumb/{cand_id}"
+
+    week_events: dict[str, list[dict]] = {}
+    for e in plan:
+        pid = e.get("post_id")
+        if pid and thumb_by_post.get(pid):
+            e["thumbnail"] = thumb_by_post[pid]
+        week_events.setdefault(e["sort"].date().isoformat(), []).append(e)
+    for k in week_events:
+        week_events[k].sort(key=lambda e: e["sort"])
+    return {"week_events": week_events, "week_start": week_start}
+
+
+def _calendar_data(y: int, m: int, week_start: dt.date) -> dict:
+    """Everything the calendar draws: month grid, week cards, queue and counts.
+
+    One read, not one per view: the queue assignment and rerun projection
+    behind every view span the same full horizon whatever range is drawn, and
+    on a remote database building them three times was most of the page. The
+    reads that don't depend on it go out alongside it on a second connection.
+    """
+    ranges = [_month_range(y, m), _week_range(week_start), _queue_range()]
+
+    def _side_reads() -> tuple[dict, set[int], list]:
+        with session_scope(read_only=True) as rs:
+            # One grouped query instead of two counts: round trips are the
+            # page's whole cost on a remote database.
+            status_counts = dict(rs.execute(
+                select(ThreadsPost.status, func.count())
+                .where(ThreadsPost.status.in_(("draft", "queued")))
+                .group_by(ThreadsPost.status)
+            ).all())
+            reel_post_ids = {
+                pk for (pk,) in rs.execute(
+                    select(InstagramPost.threads_post_pk)
+                    .where(InstagramPost.threads_post_pk.is_not(None))
+                ).all()
+            }
+            published = published_in_range(
+                rs, min(lo for lo, _ in ranges), max(hi for _, hi in ranges))
+            return status_counts, reel_post_ids, published
+
+    # Not read_only, despite being a cache loader like the others:
+    # plan_horizon clears stale pins as it walks the queue, so this scope
+    # writes on any day one has gone stale.
     with session_scope() as session:
-        plan = build_window_plan(
-            session, now_local, end_local, horizon_days=PIN_HORIZON_DAYS,
-        )
-        reel_post_ids = {
-            pk for (pk,) in session.execute(
-                select(InstagramPost.threads_post_pk)
-                .where(InstagramPost.threads_post_pk.is_not(None))
-            ).all()
+        horizon, (status_counts, reel_post_ids, published) = _in_parallel(
+            lambda: plan_horizon(session), _side_reads)
+        return {
+            **_calendar_month_view(session, horizon, published, reel_post_ids, y, m),
+            **_calendar_week_view(session, horizon, published, reel_post_ids, week_start),
+            **_calendar_queue_view(session, horizon, published, reel_post_ids),
+            "drafts_count": status_counts.get("draft", 0),
+            "queue_count": status_counts.get("queued", 0),
+            "windows_et": posting_schedule.windows_for_date(_schedule_today()),
         }
-        for e in plan:
-            e["has_reel"] = bool(e["kind"] != "rerun" and e.get("post_id")
-                                 and e["post_id"] in reel_post_ids)
-            if e["kind"] in ("queued", "open", "rerun"):
-                linear.append(e)
-    return {"linear": linear}
-
-
-def _current_month_calendar_data() -> dict:
-    now_local = dt.datetime.now()
-    return _calendar_data(now_local.year, now_local.month)
-
-
-pagecache.register("calendar", _current_month_calendar_data)
-pagecache.register("calendar-queue", _calendar_queue_data)
 
 
 def _week_start_for(day: dt.date) -> dt.date:
@@ -4423,63 +4480,12 @@ def _week_start_for(day: dt.date) -> dt.date:
     return day
 
 
-def _calendar_week_data(week_start: dt.date) -> dict:
-    """One week of window slots for the week view, bucketed by ISO date.
-
-    Separate from the month read because a week can straddle two months, and
-    because the week cards show real stills: exported clips get their own
-    footage via /media/cut-thumb, uploads fall back to a local frame — the
-    month grid never pays for any of that.
-    """
-    start_local = dt.datetime(week_start.year, week_start.month, week_start.day)
-    end_local = start_local + dt.timedelta(days=7)
-
-    week_events: dict[str, list[dict]] = {}
-    with session_scope() as session:
-        plan = build_window_plan(session, start_local, end_local)
-        reel_post_ids = {
-            pk for (pk,) in session.execute(
-                select(InstagramPost.threads_post_pk)
-                .where(InstagramPost.threads_post_pk.is_not(None))
-            ).all()
-        }
-        # Resolve a better still per post than candidate.thumbnail_url alone
-        # (which is all build_window_plan carries): the exported clip's own
-        # frame first, then the source video's local frame for uploads.
-        post_ids = sorted({e["post_id"] for e in plan if e.get("post_id")})
-        thumb_by_post: dict[int, str] = {}
-        if post_ids:
-            rows = session.execute(
-                select(ThreadsPost.id, Cut.id, Cut.trimmed_clip_path,
-                       Candidate.id, Candidate.local_video_path)
-                .select_from(ThreadsPost)
-                .outerjoin(Cut, ThreadsPost.cut_pk == Cut.id)
-                .outerjoin(Candidate, ThreadsPost.candidate_pk == Candidate.id)
-                .where(ThreadsPost.id.in_(post_ids))
-            ).all()
-            for pid, cut_id, clip_path, cand_id, local_video in rows:
-                if cut_id and clip_path:
-                    thumb_by_post[pid] = f"/media/cut-thumb/{cut_id}"
-                elif cand_id and local_video:
-                    thumb_by_post[pid] = f"/media/thumb/{cand_id}"
-        for e in plan:
-            e["has_reel"] = bool(e["kind"] != "rerun" and e.get("post_id")
-                                 and e["post_id"] in reel_post_ids)
-            pid = e.get("post_id")
-            if pid and thumb_by_post.get(pid):
-                e["thumbnail"] = thumb_by_post[pid]
-            week_events.setdefault(e["sort"].date().isoformat(), []).append(e)
-
-    for k in week_events:
-        week_events[k].sort(key=lambda e: e["sort"])
-    return {"week_events": week_events, "week_start": week_start}
+def _current_calendar_data() -> dict:
+    now_local = dt.datetime.now()
+    return _calendar_data(now_local.year, now_local.month, _week_start_for(now_local.date()))
 
 
-def _current_week_calendar_data() -> dict:
-    return _calendar_week_data(_week_start_for(dt.date.today()))
-
-
-pagecache.register("calendar-week", _current_week_calendar_data)
+pagecache.register("calendar", _current_calendar_data)
 
 
 @app.get("/calendar", response_class=HTMLResponse)
@@ -4505,21 +4511,12 @@ def calendar_page(request: Request, year: int = 0, month: int = 0,
         focus = now_local.date()
     week_start = _week_start_for(focus)
 
-    def _month() -> dict:
-        # Only this month is kept warm; paging back through history is rare
-        # enough to read directly (and the cached month self-corrects after a
-        # rollover). Same for the week: the current one stays warm, paging reads live.
-        data = pagecache.read("calendar")
-        return data if (data["year"], data["month"]) == (y, m) else _calendar_data(y, m)
-
-    def _week() -> dict:
-        wdata = pagecache.read("calendar-week")
-        return wdata if wdata["week_start"] == week_start else _calendar_week_data(week_start)
-
-    # Three datasets, each several round trips deep and none dependent on the
-    # others — read in turn they cost the sum of three cold rebuilds.
-    data, qdata, wdata = _in_parallel(
-        _month, lambda: pagecache.read("calendar-queue"), _week)
+    # Only the current month and week are kept warm; paging through either is
+    # rare enough to read directly (and the cached copy self-corrects after a
+    # rollover).
+    data = pagecache.read("calendar")
+    if (data["year"], data["month"], data["week_start"]) != (y, m, week_start):
+        data = _calendar_data(y, m, week_start)
     week_days = [week_start + dt.timedelta(days=i) for i in range(7)]
     week_end = week_days[-1]
     if week_start.month == week_end.month:
@@ -4537,7 +4534,7 @@ def calendar_page(request: Request, year: int = 0, month: int = 0,
 
     return templates.TemplateResponse(
         request, "calendar.html",
-        {**data, **wdata, **qdata, "weeks": weeks, "today": today,
+        {**data, "weeks": weeks, "today": today,
          "month_name": _cal.month_name[m],
          "prev_y": prev_y, "prev_m": prev_m, "next_y": next_y, "next_m": next_m,
          "week_days": week_days, "week_title": week_title,

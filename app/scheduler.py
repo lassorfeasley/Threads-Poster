@@ -27,11 +27,12 @@ import logging
 import math
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select, update
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from . import threads_api
 from .analytics import poll_recent_metrics, refresh_metrics_for
@@ -336,6 +337,12 @@ _SYNTHETIC_CHANNEL_URLS = ("upload://local", "youtube://pasted")
 # a repost — its moment already happened; it re-airs on proven performance.
 _REPOST_SHELF_LIFE = "evergreen"
 
+# Plan building loads candidates by the hundred, and their transcripts and
+# descriptions are most of what that moves over a remote link — yet no
+# placement, rotation or plan entry reads either. The code that does (caption
+# drafting) runs in a live session, where a deferred column loads on access.
+_PLAN_CANDIDATE_DEFERS = (defer(Candidate.transcript_text), defer(Candidate.description))
+
 
 def _placement_settings(settings) -> PlacementSettings:
     """Resolve the ``scheduler.placement`` block once (load_settings re-parses
@@ -478,7 +485,8 @@ def build_placement_context(session, posts: list[ThreadsPost],
     if cand_ids:
         candidates = {
             c.id: c for c in session.execute(
-                select(Candidate).where(Candidate.id.in_(cand_ids))
+                select(Candidate).options(*_PLAN_CANDIDATE_DEFERS)
+                .where(Candidate.id.in_(cand_ids))
             ).scalars().all()
         }
     exempt_channels = set(session.execute(
@@ -530,7 +538,7 @@ def build_placement_context(session, posts: list[ThreadsPost],
     # first window is judged against what the feed actually just showed.
     recent = session.execute(
         select(ThreadsPost)
-        .options(selectinload(ThreadsPost.candidate))
+        .options(selectinload(ThreadsPost.candidate).options(*_PLAN_CANDIDATE_DEFERS))
         .where(ThreadsPost.status == "published",
                ThreadsPost.published_at.is_not(None))
         .order_by(ThreadsPost.published_at.desc())
@@ -1534,7 +1542,8 @@ def _filler_rotation(session, cfg: dict) -> tuple[list[dict], dict[int, dt.date]
 
     posts = session.execute(
         select(ThreadsPost)
-        .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+        .options(selectinload(ThreadsPost.candidate).options(
+                     *_PLAN_CANDIDATE_DEFERS, selectinload(Candidate.channel)),
                  selectinload(ThreadsPost.cut))
         .where(ThreadsPost.status == "published",
                ThreadsPost.published_at.is_not(None))
@@ -2536,43 +2545,35 @@ def _assign_published_slots(
     return out
 
 
-def build_window_plan(
-    session,
-    start_local: dt.datetime,
-    end_local: dt.datetime,
-    *,
-    horizon_days: int | None = None,
-) -> list[dict]:
-    """Build a linear plan of posting windows with queue assignments + open placeholders.
+@dataclass
+class WindowHorizon:
+    """The range-independent half of a window plan (see ``plan_horizon``)."""
+    now: dt.datetime
+    state: SchedulerState
+    overflow_days: set[dt.date]
+    post_by_key: dict[str, ThreadsPost]
+    decisions: dict
+    rerun_by_key: dict[str, dict]
 
-    Each entry is a slot dict for the calendar/queue UI:
-      kind: open | queued | published
-      window_key, sort (operator-local), time, day, caption, post_id, …
 
-    Upcoming windows always appear (empty = ``open``). Published posts in range
-    are attached when their publish time falls near a window; otherwise they are
-    listed as standalone published entries.
+def plan_horizon(session) -> WindowHorizon:
+    """Queue assignment and rerun projection over the full pin horizon.
+
+    This is most of a window plan's database cost, and none of it depends on
+    the range being viewed, so a page drawing several ranges (the calendar's
+    month, week and queue) builds it once and hands it to each
+    ``build_window_plan`` call. It writes — stale pins are cleared on the
+    queued posts — so the plans built from it must share its session.
     """
     tz = _tz()
     now = utcnow()
     state = _get_state(session)
-    # Normalize range bounds to aware datetimes in the operator-local zone
-    # (calendar passes naive local midnights).
-    if start_local.tzinfo is None:
-        start_local = start_local.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
-    if end_local.tzinfo is None:
-        end_local = end_local.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
-    start_day = start_local.astimezone(tz).date()
-    end_day = (end_local - dt.timedelta(seconds=1)).astimezone(tz).date()
-    if horizon_days is not None:
-        horizon_end = now.astimezone(tz).date() + dt.timedelta(days=horizon_days)
-        if horizon_end < end_day:
-            end_day = horizon_end
 
     queued = session.execute(
         select(ThreadsPost)
         .options(
-            selectinload(ThreadsPost.candidate).selectinload(Candidate.channel),
+            selectinload(ThreadsPost.candidate).options(
+                *_PLAN_CANDIDATE_DEFERS, selectinload(Candidate.channel)),
             selectinload(ThreadsPost.cut),
         )
         .where(ThreadsPost.status == STATUS_QUEUED)
@@ -2580,43 +2581,10 @@ def build_window_plan(
     ).scalars().all()
     regular = list(queued)
 
-    start_utc = start_local.astimezone(dt.timezone.utc)
-    end_utc = end_local.astimezone(dt.timezone.utc)
-    published = session.execute(
-        select(ThreadsPost)
-        .options(
-            selectinload(ThreadsPost.candidate),
-            selectinload(ThreadsPost.cut),
-        )
-        .where(
-            ThreadsPost.status == "published",
-            ThreadsPost.published_at.is_not(None),
-            ThreadsPost.published_at >= start_utc,
-            ThreadsPost.published_at < end_utc,
-        ).order_by(ThreadsPost.published_at.asc())
-    ).scalars().all()
-
-    plan: list[dict] = []
-
     # Days with an on-demand overflow window (rescue pins; see
     # ensure_overflow_rescues). Derived from the queue's pins so every view
     # of the plan agrees with the tick.
     overflow_days = _overflow_pin_days(regular)
-
-    upcoming = _upcoming_window_slots(
-        max(start_day, now.astimezone(tz).date()),
-        end_day,
-        now=now,
-        last_window_key=state.last_window_key or "",
-        overflow_days=overflow_days,
-    )
-    # Only slots that fall inside the requested local range.
-    visible = []
-    for key, win_utc, idx in upcoming:
-        local = win_utc.astimezone()
-        if local < start_local or local >= end_local:
-            continue
-        visible.append((key, win_utc, idx, local))
 
     # Stale-check and assign over the full pin horizon, NOT the requested view
     # range: a narrow view (e.g. one week) must neither wipe pins that target
@@ -2667,6 +2635,107 @@ def build_window_plan(
             pick["last_aired"] = day_of
             if pick["candidate_pk"] is not None:
                 cand_last[pick["candidate_pk"]] = day_of
+
+    return WindowHorizon(now=now, state=state, overflow_days=overflow_days,
+                         post_by_key=post_by_key, decisions=decisions,
+                         rerun_by_key=rerun_by_key)
+
+
+def _aware_local(ts: dt.datetime) -> dt.datetime:
+    """A range bound as an aware datetime (the calendar passes naive local
+    midnights)."""
+    return ts if ts.tzinfo is not None else ts.replace(
+        tzinfo=dt.datetime.now().astimezone().tzinfo)
+
+
+def published_in_range(session, start_local: dt.datetime,
+                       end_local: dt.datetime) -> list[ThreadsPost]:
+    """Published posts in a local range, oldest first, loaded with everything
+    ``build_window_plan`` reads from them — so they stay usable detached."""
+    return list(session.execute(
+        select(ThreadsPost)
+        .options(
+            selectinload(ThreadsPost.candidate).options(
+                *_PLAN_CANDIDATE_DEFERS, selectinload(Candidate.channel)),
+            selectinload(ThreadsPost.cut),
+        )
+        .where(
+            ThreadsPost.status == "published",
+            ThreadsPost.published_at.is_not(None),
+            ThreadsPost.published_at >= _aware_local(start_local).astimezone(dt.timezone.utc),
+            ThreadsPost.published_at < _aware_local(end_local).astimezone(dt.timezone.utc),
+        ).order_by(ThreadsPost.published_at.asc())
+    ).scalars().all())
+
+
+def build_window_plan(
+    session,
+    start_local: dt.datetime,
+    end_local: dt.datetime,
+    *,
+    horizon_days: int | None = None,
+    horizon: WindowHorizon | None = None,
+    published: list[ThreadsPost] | None = None,
+) -> list[dict]:
+    """Build a linear plan of posting windows with queue assignments + open placeholders.
+
+    Each entry is a slot dict for the calendar/queue UI:
+      kind: open | queued | published
+      window_key, sort (operator-local), time, day, caption, post_id, …
+
+    Upcoming windows always appear (empty = ``open``). Published posts in range
+    are attached when their publish time falls near a window; otherwise they are
+    listed as standalone published entries.
+
+    For callers drawing several ranges: ``horizon`` is a ``plan_horizon``
+    built earlier in this same session, and ``published`` a
+    ``published_in_range`` read covering at least this range (from any
+    session). Without them, both are read here.
+    """
+    tz = _tz()
+    if horizon is None:
+        horizon = plan_horizon(session)
+    now = horizon.now
+    state = horizon.state
+    post_by_key = horizon.post_by_key
+    decisions = horizon.decisions
+    rerun_by_key = horizon.rerun_by_key
+    start_local = _aware_local(start_local)
+    end_local = _aware_local(end_local)
+    start_day = start_local.astimezone(tz).date()
+    end_day = (end_local - dt.timedelta(seconds=1)).astimezone(tz).date()
+    if horizon_days is not None:
+        horizon_end = now.astimezone(tz).date() + dt.timedelta(days=horizon_days)
+        if horizon_end < end_day:
+            end_day = horizon_end
+
+    if published is None:
+        published = published_in_range(session, start_local, end_local)
+    else:
+        start_utc = start_local.astimezone(dt.timezone.utc)
+        end_utc = end_local.astimezone(dt.timezone.utc)
+        published = [
+            p for p in published
+            if start_utc <= (p.published_at if p.published_at.tzinfo is not None
+                             else p.published_at.replace(tzinfo=dt.timezone.utc)) < end_utc
+        ]
+
+    plan: list[dict] = []
+
+    upcoming = _upcoming_window_slots(
+        max(start_day, now.astimezone(tz).date()),
+        end_day,
+        now=now,
+        last_window_key=state.last_window_key or "",
+        overflow_days=horizon.overflow_days,
+    )
+    # Only slots that fall inside the requested local range.
+    visible = []
+    for key, win_utc, idx in upcoming:
+        local = win_utc.astimezone()
+        if local < start_local or local >= end_local:
+            continue
+        visible.append((key, win_utc, idx, local))
 
     for key, _win_utc, idx, local in visible:
         is_overflow = _is_overflow_key(key)

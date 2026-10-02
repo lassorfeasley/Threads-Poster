@@ -27,7 +27,7 @@ def main() -> None:
     _sched_mod.start_scheduler_thread = lambda *a, **k: None
     _pc_mod.start_refresher = lambda *a, **k: None
 
-    from app.web.main import (_current_month_calendar_data, _default_dashboard_data,
+    from app.web.main import (_current_calendar_data, _default_dashboard_data,
                               _library_dataset, _notifications_data)
 
     statements: list[str] = []
@@ -39,7 +39,7 @@ def main() -> None:
     for label, fn in (
         ("dashboard", _default_dashboard_data),
         ("library", _library_dataset),
-        ("calendar", _current_month_calendar_data),
+        ("calendar", _current_calendar_data),
         ("notifications", _notifications_data),
     ):
         statements.clear()
@@ -55,7 +55,7 @@ def main() -> None:
     print("\n=== calendar cProfile (top cumulative) ===")
     pr = cProfile.Profile()
     pr.enable()
-    _current_month_calendar_data()
+    _current_calendar_data()
     pr.disable()
     out = io.StringIO()
     pstats.Stats(pr, stream=out).sort_stats("cumulative").print_stats(18)
