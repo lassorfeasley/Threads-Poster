@@ -216,8 +216,47 @@ class TestDailyFloor(unittest.TestCase):
         self.assertEqual(per_day(out), [1, 0, 1])
 
 
+class TestDailyCeiling(unittest.TestCase):
+    def test_ceiling_holds_even_with_credit_and_windows_left(self):
+        posts = [FakePost(i) for i in range(1, 13)]
+        ctx = paced_ctx({i: facts(i, cand=i) for i in range(1, 13)}, 6, days=2,
+                        pace_max_per_day=4)
+        out = assign_posts_to_windows(posts, day_keys(2), ctx=ctx)
+        self.assertEqual(per_day(out), [4, 4])
+
+    def test_ceiling_beats_urgency(self):
+        posts = [FakePost(i) for i in range(1, 7)]
+        f = {i: facts(i, cand=i, half_life=1.0, content_days_ago=2)
+             for i in range(1, 7)}
+        ctx = paced_ctx(f, 3, days=1, pace_max_per_day=3)
+        out = assign_posts_to_windows(posts, day_keys(1), ctx=ctx)
+        self.assertEqual(per_day(out), [3])
+
+    def test_ceiling_counts_what_already_aired_today(self):
+        posts = [FakePost(i) for i in range(1, 7)]
+        ctx = paced_ctx({i: facts(i, cand=i) for i in range(1, 7)}, 4, days=1,
+                        pace_max_per_day=4)
+        ctx.pace_done = {DAY0: 3}
+        out = assign_posts_to_windows(posts, day_keys(1), ctx=ctx)
+        self.assertEqual(per_day(out), [1])
+
+    def test_reopened_window_is_exempt(self):
+        posts = [FakePost(i) for i in range(1, 7)]
+        ctx = paced_ctx({i: facts(i, cand=i) for i in range(1, 7)}, 4, days=1,
+                        pace_max_per_day=4)
+        ctx.pace_done = {DAY0: 4}
+        ctx.pace_open = frozenset({day_keys(1)[-1]})
+        out = assign_posts_to_windows(posts, day_keys(1), ctx=ctx)
+        self.assertEqual(per_day(out), [1])
+
+
 class TestPaceRate(unittest.TestCase):
     CFG = {"fixed": None, "spread_days": 7, "min_per_day": 3}
+
+    def test_capped_at_max_per_day(self):
+        self.assertEqual(scheduler.pace_per_day({**self.CFG, "max_per_day": 4}, 37), 4.0)
+        self.assertEqual(scheduler.pace_per_day(
+            {**self.CFG, "max_per_day": 4, "fixed": 6}, 0), 4)
 
     def test_deep_queue_spreads_over_a_week(self):
         self.assertEqual(scheduler.pace_per_day(self.CFG, 35), 5.0)

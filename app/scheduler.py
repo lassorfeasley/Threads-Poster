@@ -397,6 +397,7 @@ def _pace_config(settings) -> dict | None:
         "fixed": fixed,
         "spread_days": max(1.0, float(g("spread_days", 7))),
         "min_per_day": max(0.0, float(g("min_per_day", 3))),
+        "max_per_day": max(0.0, float(g("max_per_day", 0) or 0)),
     }
 
 
@@ -421,9 +422,12 @@ def pace_per_day(cfg: dict, backlog: int) -> float:
     reaches further out, and everything else falls to reruns. Rounded to
     quarters so one clip airing or arriving doesn't reshuffle the day.
     """
+    cap = cfg.get("max_per_day") or 0
     if cfg["fixed"] is not None:
-        return cfg["fixed"]
+        return min(cfg["fixed"], cap) if cap else cfg["fixed"]
     rate = max(cfg["min_per_day"], backlog / cfg["spread_days"])
+    if cap:
+        rate = min(rate, cap)
     return round(rate * 4) / 4
 
 
@@ -633,7 +637,8 @@ def build_placement_context(session, posts: list[ThreadsPost],
         # Counted as of this morning — today's airings put back — so the rate
         # holds still while the day's windows go out.
         ps = replace(ps, pace_per_day=pace_per_day(pace_cfg, backlog + aired_today),
-                     pace_min_per_day=int(pace_cfg["min_per_day"]))
+                     pace_min_per_day=int(pace_cfg["min_per_day"]),
+                     pace_max_per_day=int(pace_cfg["max_per_day"]))
         pace_windows = _pace_windows(today, PIN_HORIZON_DAYS + 1)
         pace_done = {today: aired_today}
 

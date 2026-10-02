@@ -105,6 +105,9 @@ class PlacementSettings:
     # Hard floor: every day airs at least this many new clips while any are
     # queued, relaxing same-source spacing if that's what stands in the way.
     pace_min_per_day: int = 0
+    # Hard ceiling: no day airs more new clips than this, urgent ones
+    # included — the rest of the day goes to reruns. 0 = no ceiling.
+    pace_max_per_day: int = 0
 
     def half_life_days(self, shelf_life: str) -> float | None:
         """Decay half-life for a resolved shelf life; None = evergreen."""
@@ -246,6 +249,13 @@ class PlacementContext:
         if index not in organic:
             return False
         return len(organic) - organic.index(index) <= missing
+
+    def pace_capped(self, window_key: str, done_today: int) -> bool:
+        """Whether the day already has its ceiling of new clips. A window the
+        tick reopened (no rerun to air) is exempt — better new than empty."""
+        cap = self.settings.pace_max_per_day
+        return (self.pacing and cap > 0 and done_today >= cap
+                and window_key not in self.pace_open)
 
     def deadline(self, post_id: int) -> dt.date | None:
         """Last day the post may still air before it expires; None = evergreen."""
@@ -548,8 +558,11 @@ def assign_posts_to_windows(posts: list, window_keys: list[str], *,
             continue
         must = ctx.pacing and ctx.pace_short(key, done.get(day, 0))
         new_allowed = not ctx.pacing or credit >= 1 or must or key in ctx.pace_open
+        pool = remaining
+        if ctx.pace_capped(key, done.get(day, 0)):
+            pool = [p for p in remaining if not ctx.facts_for(p.id).paced]
         pick, step, score, parts = choose_for_window(
-            ctx, remaining, key, new_allowed=new_allowed, must_fill=must)
+            ctx, pool, key, new_allowed=new_allowed, must_fill=must)
         if pick is None:
             continue
         assignment[i] = pick
