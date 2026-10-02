@@ -46,6 +46,7 @@
             data-patience="{{ e.score_parts.get('patience', 0) }}"
             data-variety="{{ e.score_parts.get('variety_penalty', 0) }}"
             data-repost="{{ e.score_parts.get('repost_penalty', 0) }}"
+            data-sibling="{{ e.score_parts.get('sibling_penalty', '') }}"
             data-relax="{{ e.get('relax_step') or 0 }}">Σ</span>
       {% endif %}
     </span>
@@ -165,7 +166,7 @@
               {% set _ = extras.append(e) %}
             {% endif %}
           {% endfor %}
-          <div class="cal-cell {{ 'today' if day == today }}{{ ' has-extra' if extras }}">
+          <div class="cal-cell {{ 'today' if day == today }}{{ ' has-extra' if extras }}{{ ' dense' if n_windows > 4 }}">
             <div class="cal-slots">
               {% for i in range(n_windows) %}
                 {% set e = win_map.get(i) %}
@@ -214,6 +215,7 @@
                               data-patience="{{ e.score_parts.get('patience', 0) }}"
                               data-variety="{{ e.score_parts.get('variety_penalty', 0) }}"
                               data-repost="{{ e.score_parts.get('repost_penalty', 0) }}"
+            data-sibling="{{ e.score_parts.get('sibling_penalty', '') }}"
                               data-relax="{{ relax or 0 }}">Σ</span>
                         {% endif %}
                       </a>
@@ -292,6 +294,7 @@
                     data-patience="{{ e.score_parts.get('patience', 0) }}"
                     data-variety="{{ e.score_parts.get('variety_penalty', 0) }}"
                     data-repost="{{ e.score_parts.get('repost_penalty', 0) }}"
+            data-sibling="{{ e.score_parts.get('sibling_penalty', '') }}"
                     data-relax="{{ e.get('relax_step') or 0 }}">score {{ "%g"|format(e.score) }}</span> ·
               {% endif %}
               {% if e.kind == 'queued' %}drag to move{% endif %}
@@ -554,6 +557,10 @@
       { label: 'repost',   value: +chip.dataset.repost   || 0, sign: '−',
         hint: 'Small constant so an original beats a staged re-air on a tie.' },
     ];
+    if (chip.dataset.sibling !== undefined && chip.dataset.sibling !== '') {
+      terms.push({ label: 'same video', value: +chip.dataset.sibling || 0, sign: '−',
+        hint: 'Another clip from the same source video airs within a few days — fades to 0 as they move apart, so videos interleave.' });
+    }
     const maxAbs = Math.max(0.001, ...terms.map((t) => Math.abs(t.value)));
     const relax = +chip.dataset.relax || 0;
 

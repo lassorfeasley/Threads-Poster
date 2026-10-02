@@ -6,8 +6,10 @@ claim their window. The rest fill remaining slots either FIFO (the default) or
 via the scored placement engine (``scheduler.placement.mode: scored`` — see
 app/placement.py), which spaces sibling clips of one source video, keeps
 content facets varied, runs timely material before it expires, and relaxes its
-own gates rather than leaving a window empty. Either way, a window is never
-given up because of how an earlier post is performing.
+own gates rather than leaving a window empty — or, with
+``scheduler.placement.pace``, airs new clips at a steady daily rate and leaves
+the other windows to reruns. Either way, a window is never given up because of
+how an earlier post is performing.
 
 Also drives the frequent metrics poller that feeds analytics, the queue-time
 footage annotation pass that gives placement its facets, two staging rotations
@@ -27,11 +29,11 @@ import logging
 import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, not_, or_, select, update
 from sqlalchemy.orm import defer, selectinload
 
 from . import threads_api
@@ -367,7 +369,72 @@ def _placement_settings(settings) -> PlacementSettings:
         # ladder must never trade same-source spacing for a fill — leaving the
         # slot to a rerun beats airing sibling clips back-to-back.
         relax_source_gates=not bool(g("filler.enabled", False)),
+        source_floor_days=int(g("pace.source_floor_days", 2)),
+        sibling_penalty_max=float(g("pace.sibling_penalty_max", 6.0)),
+        pace_urgent_days=int(g("pace.urgent_days", 1)),
     )
+
+
+def _pace_config(settings) -> dict | None:
+    """The ``scheduler.placement.pace`` block, or None when pacing is off.
+
+    Pacing needs the rerun fallback: a window the pace holds back is a window
+    for a re-air, and without filler it would just sit empty.
+    """
+    def g(key: str, default):
+        return settings.get(f"scheduler.placement.pace.{key}", default)
+
+    if not g("enabled", False) or not settings.get("scheduler.placement.filler.enabled", False):
+        return None
+    raw = g("new_per_day", "auto")
+    fixed = None
+    if not (isinstance(raw, str) and raw.strip().lower() == "auto"):
+        try:
+            fixed = max(0.0, float(raw))
+        except (TypeError, ValueError):
+            log.warning("scheduler.placement.pace.new_per_day=%r isn't a number or 'auto'", raw)
+    return {
+        "fixed": fixed,
+        "spread_days": max(1.0, float(g("spread_days", 7))),
+        "min_per_day": max(0.0, float(g("min_per_day", 3))),
+    }
+
+
+def _paced_published_since(session, start: dt.datetime) -> int:
+    """New clips (not re-airs, not promos) published since ``start``."""
+    return session.execute(
+        select(func.count(ThreadsPost.id))
+        .outerjoin(Candidate, ThreadsPost.candidate_pk == Candidate.id)
+        .outerjoin(Channel, Candidate.channel_pk == Channel.id)
+        .where(ThreadsPost.status == "published",
+               ThreadsPost.repost_of_post_pk.is_(None),
+               ThreadsPost.published_at >= start.astimezone(dt.timezone.utc),
+               not_(func.coalesce(_first_party_clause(), False)))
+    ).scalar_one()
+
+
+def pace_per_day(cfg: dict, backlog: int) -> float:
+    """New clips per day: the backlog spread over ``spread_days``.
+
+    Planned from what's actually queued, never from what might be cut — so a
+    small queue airs within a day or two (``min_per_day``), only a deep one
+    reaches further out, and everything else falls to reruns. Rounded to
+    quarters so one clip airing or arriving doesn't reshuffle the day.
+    """
+    if cfg["fixed"] is not None:
+        return cfg["fixed"]
+    rate = max(cfg["min_per_day"], backlog / cfg["spread_days"])
+    return round(rate * 4) / 4
+
+
+def _pace_windows(start: dt.date, days: int) -> dict[dt.date, tuple[int, ...]]:
+    """Each day's organic window indices (rerun slots excluded)."""
+    out = {}
+    for n in range(days + 1):
+        d = start + dt.timedelta(days=n)
+        reruns = rerun_indices_for_date(d)
+        out[d] = tuple(i for i in range(len(windows_for_date(d))) if i not in reruns)
+    return out
 
 
 def _as_utc_date(when: dt.datetime | None) -> dt.date | None:
@@ -444,12 +511,14 @@ def shelf_life_outlook(post: ThreadsPost | None, candidate: Candidate | None) ->
 
     ps = _placement_settings(load_settings())
     half = ps.half_life_days(resolved)
+    queued_date = (_as_utc_date(post.created_at) if post else None) or utcnow().date()
     content_date = (_as_utc_date(candidate.published_at) if candidate else None) \
-        or (_as_utc_date(post.created_at) if post else None)
+        or queued_date
     urgency = 0.0
     expires_on = None
     expired = False
     if half is not None and content_date is not None:
+        content_date = _timeliness_clock(content_date, queued_date, half)
         today = utcnow().date()
         age = max(0, (today - content_date).days)
         urgency = round(ps.urgency_max * 0.5 ** (age / half), 2)
@@ -485,7 +554,8 @@ def build_placement_context(session, posts: list[ThreadsPost],
     if cand_ids:
         candidates = {
             c.id: c for c in session.execute(
-                select(Candidate).options(*_PLAN_CANDIDATE_DEFERS)
+                select(Candidate).options(*_PLAN_CANDIDATE_DEFERS,
+                                          selectinload(Candidate.channel))
                 .where(Candidate.id.in_(cand_ids))
             ).scalars().all()
         }
@@ -498,16 +568,18 @@ def build_placement_context(session, posts: list[ThreadsPost],
         c = candidates.get(p.candidate_pk) if p.candidate_pk else None
         queued_date = _as_utc_date(p.created_at) or now.date()
         content_date = _as_utc_date(c.published_at if c else None) or queued_date
+        half_life = ps.half_life_days(resolve_shelf_life(p, c))
         facts[p.id] = PostFacts(
             post_id=p.id,
             candidate_pk=p.candidate_pk,
             channel_pk=c.channel_pk if c else None,
             facets=resolve_facets(p, c, facet_mode),
-            half_life_days=ps.half_life_days(resolve_shelf_life(p, c)),
-            content_date=content_date,
+            half_life_days=half_life,
+            content_date=_timeliness_clock(content_date, queued_date, half_life),
             queued_date=queued_date,
             is_repost=p.repost_of_post_pk is not None,
             channel_exempt=(c.channel_pk in exempt_channels) if c else False,
+            first_party=is_first_party(c),
         )
 
     # Recent publish history feeds the source/channel gates. The horizon is
@@ -546,13 +618,49 @@ def build_placement_context(session, posts: list[ThreadsPost],
     ).scalars().all()
     trail = [resolve_facets(p, p.candidate, facet_mode) for p in reversed(recent)]
 
+    pace_windows: dict[dt.date, tuple[int, ...]] = {}
+    pace_done: dict[dt.date, int] = {}
+    pace_cfg = _pace_config(settings)
+    if pace_cfg is not None:
+        tz = _tz()
+        today = now.astimezone(tz).date()
+        # Pinned clips have their window already; the pace spreads the rest.
+        probe = PlacementContext(settings=ps, facts=facts)
+        backlog = sum(1 for p in posts
+                      if not (p.pinned_window_key or "").strip()
+                      and probe.facts_for(p.id).paced and not probe.expired(p.id, today))
+        aired_today = _paced_published_since(session, dt.datetime.combine(today, dt.time(), tz))
+        # Counted as of this morning — today's airings put back — so the rate
+        # holds still while the day's windows go out.
+        ps = replace(ps, pace_per_day=pace_per_day(pace_cfg, backlog + aired_today),
+                     pace_min_per_day=int(pace_cfg["min_per_day"]))
+        pace_windows = _pace_windows(today, PIN_HORIZON_DAYS + 1)
+        pace_done = {today: aired_today}
+
     return PlacementContext(
         settings=ps,
         facts=facts,
         candidate_air_dates=candidate_air,
         channel_air_dates=channel_air,
         facet_trail=trail,
+        pace_windows=pace_windows,
+        pace_done=pace_done,
     )
+
+
+def _timeliness_clock(content_date: dt.date, queued_date: dt.date,
+                      half_life: float | None) -> dt.date:
+    """Day a timely/breaking post's shelf life counts from.
+
+    The source video's date, but never more than one half-life before the
+    clip was cut: cutting an old video is the editorial call that it matters
+    now, so a clip from a 2018 video starts half-fresh instead of expired
+    before it ever reaches the queue. Breaking news cut a few days late still
+    reads as days old.
+    """
+    if half_life is None:
+        return content_date
+    return max(content_date, queued_date - dt.timedelta(days=math.floor(half_life)))
 
 
 def _assign_with_mode(
@@ -567,12 +675,15 @@ def _assign_with_mode(
 
     Rerun slots (Posting schedule page) are held back from organic placement:
     only a post pinned to one can land there, so an unstaged rerun slot comes
-    back empty and falls to the filler rotation. ``open_keys`` lifts that for
-    specific keys — the tick's fallback when no rerun is available."""
+    back empty and falls to the filler rotation. Windows the pace holds back
+    come back empty the same way. ``open_keys`` lifts both for specific keys —
+    the tick's fallback when no rerun is available."""
     pinned = {p.pinned_window_key for p in posts if p.pinned_window_key}
     usable = [k for k in keys
               if k in open_keys or k in pinned or not is_rerun_slot(k)]
     ctx = build_placement_context(session, posts)
+    if ctx is not None:
+        ctx.pace_open = frozenset(open_keys)
     if len(usable) == len(keys):
         return assign_posts_to_windows(posts, keys, ctx=ctx), ctx
     by_key = dict(zip(usable, assign_posts_to_windows(posts, usable, ctx=ctx)))
@@ -1448,12 +1559,10 @@ def ensure_overflow_rescues() -> str | None:
         for p in posts:
             if p.id in placed:
                 continue
-            f = ctx.facts_for(p.id)
-            if f.half_life_days is None or f.content_date is None:
-                continue  # evergreen never expires; it's just waiting its turn
             # Last day this post may still air normally (when ctx.expired flips).
-            deadline = f.content_date + dt.timedelta(days=math.floor(
-                f.half_life_days * ctx.settings.expire_after_half_lives))
+            deadline = ctx.deadline(p.id)
+            if deadline is None:
+                continue  # evergreen never expires; it's just waiting its turn
             if ctx.expired(p.id, today):
                 stale.append((deadline, p.id, p))
             else:
@@ -1468,15 +1577,24 @@ def ensure_overflow_rescues() -> str | None:
         pinned = 0
         horizon_end = today + dt.timedelta(days=PIN_HORIZON_DAYS)
 
+        floor = ctx.settings.source_floor_days
+        sibling_days = ctx.candidate_air_dates
+
         def allocate(p: ThreadsPost, end: dt.date, deadline: dt.date) -> bool:
             nonlocal pinned
             d = today
             while d <= end:
-                if d not in overflow_days:
+                # Rescues bypass the gates, but never pack sibling clips of
+                # one video onto consecutive days.
+                near_sibling = p.candidate_pk is not None and any(
+                    abs((d - s).days) < floor for s in sibling_days.get(p.candidate_pk, ()))
+                if d not in overflow_days and not near_sibling:
                     win = _overflow_window_utc(d, tz)
                     if win is not None and win > now:
                         p.pinned_window_key = _overflow_key(d)
                         overflow_days.add(d)
+                        if p.candidate_pk is not None:
+                            sibling_days.setdefault(p.candidate_pk, []).append(d)
                         pinned += 1
                         log.info(
                             "Overflow rescue: pinned post %s to %s (shelf-life deadline %s)",
@@ -2064,15 +2182,15 @@ def run_window_tick() -> str | None:
             state.updated_at = utcnow()
             return f"empty:{key}"
         else:
-            # Empty queue: re-air an evergreen post rather than going silent
-            # (scheduler.placement.filler). Real queued content always wins —
-            # this runs only when the plan left this window with nothing.
+            # The plan left this window with nothing — the queue is empty, it's
+            # a rerun slot, or the pace held it back — so re-air an evergreen
+            # post rather than going silent (scheduler.placement.filler).
             post_id = _stage_filler_jit(session, state, key, now)
             verb = "filler_publish"
             fallback = (_queue_head_for_window(session, key, organic_fallback=True)
-                        if post_id is None and is_rerun_slot(key) else None)
+                        if post_id is None else None)
             if fallback is not None:
-                # A rerun slot with no rerun to give: a new clip beats silence.
+                # No rerun to give: a new clip beats silence.
                 post_id, verb = fallback.id, "publish"
             elif post_id is None:
                 state.last_window_key = key
@@ -2435,6 +2553,8 @@ def _score_detail(decision) -> str:
             f" + patience {p.get('patience', 0):g}"
             f" − variety {p.get('variety_penalty', 0):g}"
             f" − repost {p.get('repost_penalty', 0):g}")
+    if "sibling_penalty" in p:
+        text += f" − same video {p['sibling_penalty']:g}"
     if decision.relax_step:
         text += f" (relaxed gates: step {decision.relax_step})"
     return text

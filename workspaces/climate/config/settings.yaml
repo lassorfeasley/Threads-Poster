@@ -455,8 +455,39 @@ scheduler:
     #              format blocks. Flipped 2026-08-19; set back to category to
     #              revert.
     facet: union
+    # Posting pace: spread the queue of unaired clips evenly over the coming
+    # days and give every other window to a rerun, instead of filling every
+    # window the gates allow (a burst up front) and then pushing what the
+    # gates block weeks out. Plans only from clips actually queued — reruns
+    # cover whatever new clips don't, so nothing depends on cutting more. A
+    # newly cut clip slots in by score: timely ones near the front, evergreen
+    # behind clips that have waited longer. Needs filler.enabled. Added
+    # 2026-10-02; set enabled: false to revert to fill-every-window.
+    pace:
+      enabled: true
+      # New clips per day: a number, or "auto" — the queue spread over
+      # ``spread_days`` (counted as of this morning), never slower than
+      # ``min_per_day``. 35 queued -> 5/day for a week; 6 queued -> 3/day,
+      # gone in two days. Capped by the day's windows.
+      new_per_day: auto
+      spread_days: 7
+      # Also a hard floor: every day airs at least this many new clips until
+      # the queue runs out. When spacing would leave a day short, its last
+      # windows take new clips anyway, siblings of one video on consecutive
+      # days — or the same day as a last resort — rather than over-spacing.
+      min_per_day: 3
+      # With pacing on, same_source_days below becomes a preference: a
+      # sibling clip aired nearby costs up to ``sibling_penalty_max`` score,
+      # fading to 0 at same_source_days, so videos interleave. The hard gate
+      # is ``source_floor_days`` — siblings never air closer than this.
+      source_floor_days: 2
+      sibling_penalty_max: 6.0
+      # A timely clip this many days from expiring may air in a window the
+      # pace would otherwise give to a rerun.
+      urgent_days: 1
     gates:
-      # Days two clips cut from the SAME source video must sit apart.
+      # Days two clips cut from the SAME source video must sit apart (with
+      # pace on: the distance at which the same-video penalty reaches 0).
       same_source_days: 10
       # Days two clips from the same channel must sit apart (operator uploads
       # and pasted links are exempt — those aren't editorial sources).

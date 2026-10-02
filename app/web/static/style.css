@@ -2992,6 +2992,21 @@ kbd {
 /* Keep the bottom card's text clear of the overlaid "+N" pill. */
 .cal-cell.has-extra .cal-slot:last-child .cal-ev { padding-right: 30px; }
 .cal-slot .cal-ev-title { -webkit-line-clamp: 2; }
+/* Five or more windows leave each slot one text line tall: single-line titles
+   with the +IG marker inline, so nothing is clipped top and bottom. */
+.cal-cell.dense .cal-ev-body { flex-direction: row; align-items: center; gap: 4px; }
+.cal-cell.dense .cal-ev-title {
+  display: block; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cal-cell.dense .cal-ev-reel,
+.cal-cell.dense .cal-ev-rerun { flex: none; }
+.cal-cell.dense .cal-event.card .cal-score-chip {
+  position: static; flex: none;
+  margin-left: 3px; padding: 0 4px; line-height: 13px;
+}
+.cal-cell.dense .cal-slot .cal-ev { padding: 0 4px; }
+.cal-cell.dense .cal-slot.empty em { font-size: 10px; }
 .cal-event {
   display: block;
   font-size: 11px; line-height: 1.25;

@@ -28,10 +28,23 @@ rules at the bottom of this docstring:
 The engine reads only ``id`` and ``pinned_window_key`` off the post objects;
 everything else comes from the per-post :class:`PostFacts` in the context, so
 tests can drive it with trivial fakes.
+
+Pacing (``PlacementSettings.pace_per_day``) turns the walk from "fill every
+window the gates allow" into "spread the queue at a steady daily rate". Each
+organic window carries a share of the daily pace; a window whose shares add up
+to a whole clip is *due* one. Due windows take the best eligible new clip,
+everything else is left for the rerun fallback. A due window nothing can fill
+carries its claim to the next window, and a clip about to expire may jump the
+pace. Same-source spacing becomes a preference above a hard floor, so sibling
+clips interleave with other videos instead of queueing ten days apart. The due
+pattern is a pure function of the window's date and position, so every runner
+and the calendar agree on it without shared state, and it holds still as the
+day's windows pass.
 """
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import dataclass, field
 
 # Shelf-life vocabulary. Empty string means "unset" and resolves through the
@@ -45,6 +58,8 @@ SHELF_LIVES = (SHELF_BREAKING, SHELF_TIMELY, SHELF_EVERGREEN)
 # halves the same-source gap rather than dropping it, so step 3 still keeps
 # sibling clips of one video apart — just less far apart. Expiry is never
 # relaxed: a stale news clip should surface for the operator, not air late.
+PACE_CREDIT_BOUND = 2.0
+
 RELAXATION_LADDER: tuple[frozenset[str], ...] = (
     frozenset(),
     frozenset({"variety"}),
@@ -79,6 +94,17 @@ class PlacementSettings:
     half_life_breaking: float = 1.0
     half_life_timely: float = 7.0
     expire_after_half_lives: float = 3.0
+    # New clips per day; None turns pacing off (fill every window the gates
+    # allow). With pacing on, ``same_source_days`` is a score preference and
+    # ``source_floor_days`` the hard gate.
+    pace_per_day: float | None = None
+    source_floor_days: int = 2
+    sibling_penalty_max: float = 6.0
+    # A clip this close to its expiry may air in a window the pace holds back.
+    pace_urgent_days: int = 1
+    # Hard floor: every day airs at least this many new clips while any are
+    # queued, relaxing same-source spacing if that's what stands in the way.
+    pace_min_per_day: int = 0
 
     def half_life_days(self, shelf_life: str) -> float | None:
         """Decay half-life for a resolved shelf life; None = evergreen."""
@@ -110,6 +136,12 @@ class PostFacts:
     queued_date: dt.date | None = None
     is_repost: bool = False
     channel_exempt: bool = False
+    first_party: bool = False
+
+    @property
+    def paced(self) -> bool:
+        """New organic clips count against the pace; re-airs and promos don't."""
+        return not self.is_repost and not self.first_party
 
 
 @dataclass
@@ -145,9 +177,112 @@ class PlacementContext:
     facet_trail: list[frozenset[str]] = field(default_factory=list)
     # window_key -> decision, for the calendar's relaxation markers.
     decisions: dict[str, PlacementDecision] = field(default_factory=dict)
+    # Pacing inputs: each day's organic window indices (rerun slots and
+    # overflow windows excluded), so a window's share of the daily pace never
+    # depends on which windows happen to be left in this walk.
+    pace_windows: dict[dt.date, tuple[int, ...]] = field(default_factory=dict)
+    # Windows the pace may not hold back (the tick's fallback when a held
+    # window found no rerun to air).
+    pace_open: frozenset[str] = frozenset()
+    # New clips already aired per day (today's publishes), toward the floor.
+    pace_done: dict[dt.date, int] = field(default_factory=dict)
+    # Walk state: paced posts not yet placed, in total and per source video.
+    unplaced_paced: int = 0
+    unplaced_by_candidate: dict[int, int] = field(default_factory=dict)
 
     def facts_for(self, post_id: int) -> PostFacts:
         return self.facts.get(post_id) or PostFacts(post_id=post_id)
+
+    @property
+    def pacing(self) -> bool:
+        return self.settings.pace_per_day is not None
+
+    # -- pace ----------------------------------------------------------------
+
+    def pace_due(self, window_key: str) -> bool:
+        """Whether this window's share of the daily pace completes a new clip.
+
+        The running target is ``day_ordinal x rate + (i + 1) x rate / n`` for
+        the i-th of the day's n organic windows; a window is due when it
+        crosses an integer. That spreads ``rate`` clips evenly through each
+        day and carries fractions across days (4.5/day alternates 4s and 5s)
+        with no state beyond the calendar itself. Counting from a fixed epoch
+        rather than today matters: re-anchored daily, today would always get
+        the rate rounded down.
+        """
+        if window_key in self.pace_open:
+            return True
+        day = window_key_date(window_key)
+        rate = self.settings.pace_per_day
+        if day is None or rate is None:
+            return False
+        try:
+            index = int(window_key.partition("#")[2])
+        except ValueError:
+            return False
+        organic = self.pace_windows.get(day, ())
+        if index not in organic:
+            return False
+        n = len(organic)
+        if rate >= n:
+            return True
+        share = rate / n
+        end = round(day.toordinal() * rate + (organic.index(index) + 1) * share, 6)
+        return math.floor(end) > math.floor(round(end - share, 6))
+
+    def pace_short(self, window_key: str, done_today: int) -> bool:
+        """Whether this window must take a new clip to meet the daily floor:
+        the day's organic windows left, this one included, are no more than
+        the clips still missing."""
+        day = window_key_date(window_key)
+        missing = self.settings.pace_min_per_day - done_today
+        if day is None or missing <= 0:
+            return False
+        try:
+            index = int(window_key.partition("#")[2])
+        except ValueError:
+            return False
+        organic = self.pace_windows.get(day, ())
+        if index not in organic:
+            return False
+        return len(organic) - organic.index(index) <= missing
+
+    def deadline(self, post_id: int) -> dt.date | None:
+        """Last day the post may still air before it expires; None = evergreen."""
+        f = self.facts_for(post_id)
+        if f.half_life_days is None or f.content_date is None:
+            return None
+        return f.content_date + dt.timedelta(days=math.floor(
+            f.half_life_days * self.settings.expire_after_half_lives))
+
+    def urgent(self, post_id: int, day: dt.date) -> bool:
+        end = self.deadline(post_id)
+        return end is not None and (end - day).days <= self.settings.pace_urgent_days
+
+    def sibling_gap_days(self, candidate_pk: int) -> float:
+        """The spacing that spreads a video's clips evenly over the queue.
+
+        At the pace, the unplaced queue takes ``left / pace`` days to air; a
+        video with n clips in it gets one every ``that / n`` days. A fixed gap
+        would instead hold siblings back until every other clip had aired and
+        then run them back to back. Clamped to [source_floor_days,
+        same_source_days].
+        """
+        s = self.settings
+        n = max(1, self.unplaced_by_candidate.get(candidate_pk, 0))
+        drain = self.unplaced_paced / s.pace_per_day if s.pace_per_day else 0.0
+        return min(float(s.same_source_days), max(float(s.source_floor_days), drain / n))
+
+    def note_unplaced(self, posts: list, delta: int) -> None:
+        """Track paced posts still to place, for ``sibling_gap_days``."""
+        for p in posts:
+            f = self.facts_for(p.id)
+            if not f.paced:
+                continue
+            self.unplaced_paced += delta
+            if f.candidate_pk is not None:
+                self.unplaced_by_candidate[f.candidate_pk] = (
+                    self.unplaced_by_candidate.get(f.candidate_pk, 0) + delta)
 
     # -- gates ---------------------------------------------------------------
 
@@ -164,7 +299,7 @@ class PlacementContext:
         s = self.settings
 
         if "source" not in relaxed and f.candidate_pk is not None:
-            gap = s.same_source_days
+            gap = s.source_floor_days if self.pacing else s.same_source_days
             if "source_half" in relaxed:
                 gap = (gap + 1) // 2
             if gap > 0 and self._within(
@@ -224,14 +359,27 @@ class PlacementContext:
 
         repost_penalty = s.repost_penalty if f.is_repost else 0.0
 
+        # Paced mode's stand-in for the same-source gate: a sibling clip aired
+        # closer than this video's fair gap costs score, fading to zero at it.
+        sibling_penalty = 0.0
+        if self.pacing and f.candidate_pk is not None:
+            near = min((abs((day - d).days) for d in
+                        self.candidate_air_dates.get(f.candidate_pk, ())), default=None)
+            gap = self.sibling_gap_days(f.candidate_pk)
+            if near is not None and near < gap:
+                sibling_penalty = s.sibling_penalty_max * (1 - near / gap)
+
         parts = {
             "urgency": round(urgency, 6),
             "patience": round(patience, 6),
             "variety_penalty": round(variety_penalty, 6),
             "repost_penalty": round(repost_penalty, 6),
         }
+        if self.pacing:
+            parts["sibling_penalty"] = round(sibling_penalty, 6)
         # Rounded so a libm ULP difference between runners can't flip an order.
-        total = round(urgency + patience - variety_penalty - repost_penalty, 6)
+        total = round(urgency + patience - variety_penalty - repost_penalty
+                      - sibling_penalty, 6)
         return total, parts
 
     # -- plan-so-far bookkeeping ----------------------------------------------
@@ -300,7 +448,9 @@ def _fifo_assign(posts: list, window_keys: list[str]) -> list:
 
 
 def choose_for_window(ctx: PlacementContext, remaining: list,
-                      window_key: str) -> tuple[object | None, int | None, float | None, dict]:
+                      window_key: str, *, new_allowed: bool = True,
+                      must_fill: bool = False,
+                      ) -> tuple[object | None, int | None, float | None, dict]:
     """Best eligible post for one window: ``(post, relax_step, score, parts)``.
 
     Walks the relaxation ladder until a pool survives the gates, then takes
@@ -309,13 +459,24 @@ def choose_for_window(ctx: PlacementContext, remaining: list,
     the queue is empty or everything left has expired. Without it the ladder
     stops before the source steps, and ``None`` can also mean "only sibling
     clips remain" — the window is left for the rerun fallback instead.
+
+    ``new_allowed=False`` is a window the pace holds back: only posts outside
+    the pace (re-airs, promos) or about to expire may take it. ``must_fill``
+    is a window the daily floor needs: the full ladder applies, so siblings
+    may air on consecutive days — and as a last resort the same day — rather
+    than leave the day short.
     """
     day = window_key_date(window_key)
     if day is None:
         return None, None, None, {}
     live = [p for p in remaining if not ctx.expired(p.id, day)]
-    ladder = (RELAXATION_LADDER if ctx.settings.relax_source_gates
-              else RELAXATION_LADDER[:3])
+    if not new_allowed:
+        live = [p for p in live
+                if not ctx.facts_for(p.id).paced or ctx.urgent(p.id, day)]
+    # Paced mode always has a rerun fallback, so its source floor relaxes only
+    # to meet the daily minimum.
+    relax_source = must_fill if ctx.pacing else ctx.settings.relax_source_gates
+    ladder = RELAXATION_LADDER if relax_source else RELAXATION_LADDER[:3]
     for step, relaxed in enumerate(ladder):
         pool = [p for p in live if ctx.gates_pass(p.id, day, relaxed)]
         if not pool:
@@ -366,16 +527,37 @@ def assign_posts_to_windows(posts: list, window_keys: list[str], *,
                 ctx.note_air_dates(p.id, day)
 
     remaining = [p for p in posts if p.id not in placed]
+    # Paced mode: whole new clips owed so far in this walk. A due window adds
+    # one, every new clip placed (pins included) spends one. Bounded both
+    # ways so a dry spell can't bank a burst and a run of pins or urgent
+    # clips can't silence the pace for days.
+    credit = 0.0
+    done = dict(ctx.pace_done)
+    if ctx.pacing:
+        ctx.note_unplaced(remaining, +1)
     for i, key in enumerate(window_keys):
+        day = window_key_date(key)
+        due = ctx.pacing and ctx.pace_due(key)
+        if due:
+            credit = min(credit + 1, PACE_CREDIT_BOUND)
         if assignment[i] is not None:
             ctx.record(assignment[i].id, key, relax_step=None, pinned=True)
+            if ctx.pacing and ctx.facts_for(assignment[i].id).paced:
+                credit = max(credit - 1, -PACE_CREDIT_BOUND)
+                done[day] = done.get(day, 0) + 1
             continue
-        pick, step, score, parts = choose_for_window(ctx, remaining, key)
+        must = ctx.pacing and ctx.pace_short(key, done.get(day, 0))
+        new_allowed = not ctx.pacing or credit >= 1 or must or key in ctx.pace_open
+        pick, step, score, parts = choose_for_window(
+            ctx, remaining, key, new_allowed=new_allowed, must_fill=must)
         if pick is None:
             continue
         assignment[i] = pick
         remaining.remove(pick)
-        day = window_key_date(key)
+        if ctx.pacing and ctx.facts_for(pick.id).paced:
+            credit = max(credit - 1, -PACE_CREDIT_BOUND)
+            ctx.note_unplaced([pick], -1)
+            done[day] = done.get(day, 0) + 1
         if day is not None:
             ctx.note_air_dates(pick.id, day)
         ctx.record(pick.id, key, relax_step=step, score=score, parts=parts)
