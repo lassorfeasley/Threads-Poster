@@ -304,6 +304,9 @@
           Approve the video to download and transcribe it.
         {% else %}
           No transcript for this video.
+          {% if c.local_video_path %}
+          <button type="button" class="btn sm" id="transcribe-btn" onclick="transcribeVideo()">Transcribe</button>
+          {% endif %}
         {% endif %}
       </div>
       {% endif %}
@@ -315,6 +318,25 @@
 </div>{# /.canvas #}
 
 <script>
+async function transcribeVideo() {
+  const btn = document.getElementById('transcribe-btn');
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  btn.textContent = 'Transcribing…';
+  try {
+    const r = await fetch('/video/{{ c.id }}/transcribe', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    location.reload();
+    return;
+  } catch (e) {
+    alert('Could not transcribe: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
+  btn.textContent = 'Transcribe';
+}
+
 async function scoreVisuals() {
   const btn = document.getElementById('score-visuals-btn');
   btn.disabled = true; btn.textContent = 'Tagging…';

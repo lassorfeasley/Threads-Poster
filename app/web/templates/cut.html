@@ -132,7 +132,9 @@
       </div>
       <div id="tx-focus" class="tx-focus" title="Click a line to jump"></div>
       {% if not transcript_segments %}
-      <div class="meta" id="tx-empty">No transcript for this video.</div>
+      <div class="meta" id="tx-empty">No transcript for this video.
+        <button type="button" class="btn sm" id="transcribe-btn" onclick="transcribeVideo()">Transcribe</button>
+      </div>
       {% endif %}
     </div>
   </div>
@@ -1260,6 +1262,25 @@ async function findChapters() {
   }
   btn.disabled = false;
   btn.classList.remove('is-busy');
+}
+
+async function transcribeVideo() {
+  const btn = document.getElementById('transcribe-btn');
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  btn.textContent = 'Transcribing…';
+  try {
+    const r = await fetch('/video/{{ c.id }}/transcribe', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    location.reload();
+    return;
+  } catch (e) {
+    alert('Could not transcribe: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
+  btn.textContent = 'Transcribe';
 }
 
 // Bands are placed as a percentage of the duration, so they can't be drawn

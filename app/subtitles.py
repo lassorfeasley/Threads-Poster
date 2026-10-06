@@ -511,7 +511,18 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
     words, _transcript_path = ensure_clip_words(clip, force=force_transcribe)
     groups = group_words(words, max_words=max_words)
 
-    width, height = _video_size(clip)
+    src_w, src_h = _video_size(clip)
+    # Captions can't be sharper than the frame they're burned into: a 360p
+    # source would get ~40px text that chroma subsampling and the platform's
+    # re-encode smear. Upscale small sources so text renders at full size.
+    min_h = int(settings.get("subtitles.min_output_height", 1080))
+    if 0 < src_h < min_h:
+        height = min_h
+        width = max(2, round(src_w * min_h / src_h / 2) * 2)
+        video_in = f"[0:v]scale={width}:{height}:flags=lanczos,setsar=1[vid]"
+    else:
+        width, height = src_w, src_h
+        video_in = "[0:v]null[vid]"
     strip_h = int(height * STRIP_FRAC)
     font_px = max(18, int(height * font_frac))
     fonts = _load_fonts(font_px, font_name)
@@ -529,7 +540,7 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
                 "-i", str(clip),
                 "-safe", "0", "-f", "concat", "-i", str(concat),
                 "-filter_complex",
-                f"[1:v]format=rgba[cap];[0:v][cap]overlay=x=0:y={0 if position == 'top' else height - strip_h}:eof_action=pass",
+                f"{video_in};[1:v]format=rgba[cap];[vid][cap]overlay=x=0:y={0 if position == 'top' else height - strip_h}:eof_action=pass",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-c:a", "copy", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                 str(out),

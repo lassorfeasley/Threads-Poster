@@ -566,6 +566,9 @@ subtitles:
   highlight_text_color: "#1A4A7D"
   # Caption size as a fraction of video height (0.11 ≈ 120px at 1080p).
   font_size_frac: 0.11
+  # Clips shorter than this are upscaled before captions are burned in, so
+  # low-res sources still get crisp, full-size text.
+  min_output_height: 1080
   # Where captions sit on the frame: "bottom" (default) or "top".
   position: bottom
   # After the last word of a phrase, keep that caption on screen this many

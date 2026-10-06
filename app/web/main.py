@@ -21,7 +21,7 @@ from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import chapters as chapter_index
@@ -71,6 +71,7 @@ from ..models import (
     Candidate,
     Channel,
     Cut,
+    DraftProposal,
     InstagramPost,
     MetricSnapshot,
     MonitorRun,
@@ -127,7 +128,7 @@ from ..scheduler import (
     window_time_labels,
 )
 from ..scrape import (PASTED_CHANNEL_URL, archive_candidate, fetch_video_metadata,
-                      load_word_transcript)
+                      load_word_transcript, retranscribe_candidate)
 from ..vision import (
     annotate_cut_footage, annotate_post_footage, suggest_subs_position,
     tag_candidate_storyboard,
@@ -1446,6 +1447,24 @@ def video_chapters(candidate_id: int):
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse({"chapters": found})
+
+
+@app.post("/video/{candidate_id}/transcribe")
+def video_transcribe(candidate_id: int):
+    """Re-run captions + Whisper on a downloaded video (operator-initiated)."""
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        try:
+            method = retranscribe_candidate(session, c)
+        except Exception as exc:
+            log.exception("Re-transcribe failed for candidate %s", candidate_id)
+            return JSONResponse({"error": str(exc)}, status_code=500)
+    if not method:
+        return JSONResponse(
+            {"error": "Whisper heard no speech in this video."}, status_code=422)
+    return JSONResponse({"method": method})
 
 
 @app.post("/clip-proposal/{proposal_id}/accept")
@@ -3210,6 +3229,33 @@ def _drop_pending_reels(session, cut: Cut) -> None:
         session.delete(ig)
 
 
+def _drop_pending_copies(session, cut: Cut, keep: ThreadsPost) -> None:
+    """Remove the cut's other not-yet-published posts once ``keep`` went live
+    by hand — otherwise a copy queued earlier airs the same clip again days
+    later. Reels paired with a removed copy go too, unless already published."""
+    for extra in session.execute(
+        select(ThreadsPost).where(
+            ThreadsPost.cut_pk == cut.id,
+            ThreadsPost.id != keep.id,
+            ThreadsPost.status.in_(["queued", "draft", "failed"]),
+        )
+    ).scalars().all():
+        for ig in session.execute(
+            select(InstagramPost).where(InstagramPost.threads_post_pk == extra.id)
+        ).scalars().all():
+            if ig.status == "published":
+                ig.threads_post_pk = None
+            else:
+                session.execute(update(DraftProposal)
+                                .where(DraftProposal.ig_post_pk == ig.id)
+                                .values(ig_post_pk=None))
+                session.delete(ig)
+        session.execute(update(DraftProposal)
+                        .where(DraftProposal.post_pk == extra.id)
+                        .values(post_pk=None))
+        session.delete(extra)
+
+
 @app.post("/cut/{cut_id}/post")
 def post_to_threads(cut_id: int, caption: str = Form(...),
                     use_subtitles: str = Form(""), attribution: str = Form(""),
@@ -3249,6 +3295,7 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
                 record_instagram_post(session, cut, post, cut.vertical_clip_path,
                                       caption)
             post = publish_post(session, post)
+            _drop_pending_copies(session, cut, keep=post)
             # Keep the clip's caption in sync with what was actually posted.
             cut.draft_caption = caption
             state = session.get(SchedulerState, 1)

@@ -555,3 +555,43 @@ def archive_candidate(session, candidate: Candidate, with_suggestions: bool = Tr
         log.error("Scrape failed for %s: %s", candidate.video_id, exc)
     finally:
         session.flush()
+
+
+def retranscribe_candidate(session, candidate: Candidate) -> str:
+    """Rebuild the transcript of an already-downloaded video.
+
+    An archive whose captions and Whisper both came up empty is otherwise
+    final — ``archive_candidate`` skips archived rows — so a one-off Whisper
+    crash would leave the video without a transcript forever. Works from the
+    file on disk; never re-downloads. Returns the transcription method, or ""
+    when it still heard nothing. Raises when the media file is missing or
+    Whisper itself fails.
+    """
+    settings = load_settings()
+    video_path = Path(candidate.local_video_path or "")
+    if not candidate.local_video_path or not video_path.exists():
+        raise RuntimeError("The downloaded video file is missing — retry the download.")
+    _video_dir, transcript_dir = _paths_for(candidate, settings)
+    is_upload = (candidate.url or "").startswith("upload://")
+
+    segments = None if is_upload else fetch_captions(candidate.video_id)
+    w_segments, words, _tier = transcribe_word_stream(video_path, settings)
+    if segments and words:
+        method = "captions+whisper"
+    elif segments:
+        method = "captions"
+    else:
+        segments = w_segments or None
+        method = "whisper" if segments else ""
+
+    if segments:
+        json_path, plain = _write_transcript(segments, transcript_dir, candidate.video_id)
+        candidate.transcript_path = str(json_path)
+        candidate.transcript_text = plain
+    candidate.transcription_method = method
+    if words:
+        word_path = _write_word_transcript(words, transcript_dir, candidate.video_id)
+        candidate.word_transcript_path = str(word_path)
+    session.flush()
+    log.info("Re-transcribed %s (%s)", candidate.video_id, method or "nothing heard")
+    return method

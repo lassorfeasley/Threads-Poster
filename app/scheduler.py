@@ -61,6 +61,9 @@ from .placement import (
 )
 from .publishing import (
     clear_publishing,
+    draft_first_reply,
+    first_comment_suppressed,
+    first_reply_context,
     first_reply_needs_metrics,
     is_publish_active,
     mark_publishing,
@@ -1357,8 +1360,33 @@ def _rerun_caption(session, cut: Cut, prior: ThreadsPost) -> str | None:
     return None if needs_new else prior.caption
 
 
+def _rerun_first_reply(session, cut: Cut, prior: ThreadsPost,
+                       caption: str) -> tuple[str, bool]:
+    """``(attribution_text, attribution_skipped)`` for re-airing ``prior``.
+
+    In invitation mode the call to action is drafted fresh against the
+    re-air's caption: the prior airing may predate invitation mode and carry
+    a source citation, which must not ride along onto the rerun. An empty
+    draft leaves the static fallback text to cover it at publish time.
+    Citation mode keeps the original credit."""
+    from . import spend
+
+    cfg = load_first_reply()
+    if cfg.get("mode") != "invitation":
+        return prior.attribution_text or "", bool(prior.attribution_skipped)
+    if first_comment_suppressed(cut.candidate, cfg) or not spend.within_budget():
+        return "", False
+    try:
+        text = draft_first_reply(first_reply_context(session, cut.candidate, cut, caption))
+    except Exception as exc:
+        log.warning("Rerun first-reply draft failed for post %s: %s", prior.id, exc)
+        text = ""
+    return (text or "").strip(), False
+
+
 def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str,
-                  caption: str | None = None) -> ThreadsPost:
+                  caption: str | None = None,
+                  first_reply: tuple[str, bool] | None = None) -> ThreadsPost:
     """Queue a re-air of ``prior``, pinned to ``window_key``.
 
     Clones the airing the way ``_stage_promo`` does — clip paths copied, so
@@ -1369,9 +1397,12 @@ def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str,
     ``repost_of_post_pk`` and ships as evergreen: the content's moment already
     happened, it re-airs on proven performance. Facet annotations are copied
     too (same file — re-annotating would spend an LLM call to learn the same
-    answer).
+    answer). The first comment comes from ``_rerun_first_reply`` (drafted
+    here unless the caller already has it in hand).
     """
     caption = caption if caption is not None else prior.caption
+    attribution, skipped = (first_reply if first_reply is not None
+                            else _rerun_first_reply(session, cut, prior, caption))
     post = ThreadsPost(
         candidate_pk=cut.candidate_pk,
         cut_pk=cut.id,
@@ -1380,8 +1411,8 @@ def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str,
         clip_local_path=prior.clip_local_path,
         clip_object_path=prior.clip_object_path,
         clip_length_seconds=prior.clip_length_seconds,
-        attribution_text=prior.attribution_text,
-        attribution_skipped=prior.attribution_skipped,
+        attribution_text=attribution,
+        attribution_skipped=skipped,
         status=STATUS_QUEUED,
         pinned_window_key=window_key,
         repost_of_post_pk=prior.id,
@@ -1942,6 +1973,7 @@ def _stage_filler_jit(session, state: SchedulerState, window_key: str,
     caption = _rerun_caption(session, pick["cut"], pick["prior"])
     if caption is None:
         return None
+    first_reply = _rerun_first_reply(session, pick["cut"], pick["prior"], caption)
 
     won = session.execute(
         update(SchedulerState)
@@ -1956,7 +1988,7 @@ def _stage_filler_jit(session, state: SchedulerState, window_key: str,
     session.expire(state)
 
     cut, prior = pick["cut"], pick["prior"]
-    post = _stage_repost(session, cut, prior, window_key, caption)
+    post = _stage_repost(session, cut, prior, window_key, caption, first_reply)
     log.info("Staged filler re-air of post %s (cut %s) as post %s for empty window %s",
              prior.id, cut.id, post.id, window_key)
     return post.id
