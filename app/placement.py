@@ -108,6 +108,10 @@ class PlacementSettings:
     # Hard ceiling: no day airs more new clips than this, urgent ones
     # included — the rest of the day goes to reruns. 0 = no ceiling.
     pace_max_per_day: int = 0
+    # The same ceiling as a share of the day's organic windows (0.5 = at most
+    # half), so the new/rerun mix survives a change in posts per day. The
+    # tighter of the two applies. 0 = no share ceiling.
+    pace_max_share: float = 0.0
 
     def half_life_days(self, shelf_life: str) -> float | None:
         """Decay half-life for a resolved shelf life; None = evergreen."""
@@ -250,12 +254,24 @@ class PlacementContext:
             return False
         return len(organic) - organic.index(index) <= missing
 
+    def day_cap(self, day: dt.date | None) -> int | None:
+        """Most new clips ``day`` may air; None = no ceiling."""
+        s = self.settings
+        caps = []
+        if s.pace_max_per_day > 0:
+            caps.append(s.pace_max_per_day)
+        if s.pace_max_share > 0 and day is not None:
+            n = len(self.pace_windows.get(day, ()))
+            caps.append(math.floor(round(s.pace_max_share * n, 6)))
+        return min(caps) if caps else None
+
     def pace_capped(self, window_key: str, done_today: int) -> bool:
         """Whether the day already has its ceiling of new clips. A window the
         tick reopened (no rerun to air) is exempt — better new than empty."""
-        cap = self.settings.pace_max_per_day
-        return (self.pacing and cap > 0 and done_today >= cap
-                and window_key not in self.pace_open)
+        if not self.pacing or window_key in self.pace_open:
+            return False
+        cap = self.day_cap(window_key_date(window_key))
+        return cap is not None and done_today >= cap
 
     def deadline(self, post_id: int) -> dt.date | None:
         """Last day the post may still air before it expires; None = evergreen."""

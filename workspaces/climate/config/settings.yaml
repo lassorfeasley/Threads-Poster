@@ -467,20 +467,26 @@ scheduler:
       enabled: true
       # New clips per day: a number, or "auto" — the queue spread over
       # ``spread_days`` (counted as of this morning), held between
-      # ``min_per_day`` and ``max_per_day``. 35 queued -> 4/day (the cap);
-      # 6 queued -> 3/day, gone in two days.
+      # ``min_per_day`` and the ceilings below. With 6 windows a day:
+      # 46 queued -> 3/day (the share cap); 10 queued -> 1/day, so a short
+      # queue drips out behind reruns instead of airing as soon as it's cut.
       new_per_day: auto
-      spread_days: 7
-      # Hard ceiling: no day airs more new clips than this — not even ones
-      # about to expire. Every other window that day is a rerun, so each day
-      # is a mix of new and old. A timely clip the ceiling crowds out past
-      # its expiry shows up in Notifications. 0 = no ceiling.
+      spread_days: 14
+      # Hard ceiling, as a share of the day's windows: new clips take at most
+      # this fraction, reruns the rest — so the mix holds when the number of
+      # posts per day changes. Not even clips about to expire go over it; a
+      # timely clip crowded out past its expiry shows up in Notifications.
+      # 2026-10-07: 0.5 (was effectively 4 of 6 windows, i.e. 2:1 new).
+      max_share: 0.5
+      # Hard ceiling in clips per day; the tighter of the two applies.
+      # 0 = no absolute ceiling.
       max_per_day: 4
       # Also a hard floor: every day airs at least this many new clips until
       # the queue runs out. When spacing would leave a day short, its last
       # windows take new clips anyway, siblings of one video on consecutive
       # days — or the same day as a last resort — rather than over-spacing.
-      min_per_day: 3
+      # Kept low so a freshly cut clip isn't forced out the same day.
+      min_per_day: 1
       # With pacing on, same_source_days below becomes a preference: a
       # sibling clip aired nearby costs up to ``sibling_penalty_max`` score,
       # fading to 0 at same_source_days, so videos interleave. The hard gate

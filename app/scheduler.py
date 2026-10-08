@@ -401,6 +401,7 @@ def _pace_config(settings) -> dict | None:
         "spread_days": max(1.0, float(g("spread_days", 7))),
         "min_per_day": max(0.0, float(g("min_per_day", 3))),
         "max_per_day": max(0.0, float(g("max_per_day", 0) or 0)),
+        "max_share": min(1.0, max(0.0, float(g("max_share", 0) or 0))),
     }
 
 
@@ -417,15 +418,18 @@ def _paced_published_since(session, start: dt.datetime) -> int:
     ).scalar_one()
 
 
-def pace_per_day(cfg: dict, backlog: int) -> float:
+def pace_per_day(cfg: dict, backlog: int, windows: int = 0) -> float:
     """New clips per day: the backlog spread over ``spread_days``.
 
     Planned from what's actually queued, never from what might be cut — so a
-    small queue airs within a day or two (``min_per_day``), only a deep one
-    reaches further out, and everything else falls to reruns. Rounded to
-    quarters so one clip airing or arriving doesn't reshuffle the day.
+    small queue drips out at ``min_per_day``, only a deep one runs faster, and
+    everything else falls to reruns. ``windows`` (the day's organic windows)
+    applies the ``max_share`` ceiling. Rounded to quarters so one clip airing
+    or arriving doesn't reshuffle the day.
     """
-    cap = cfg.get("max_per_day") or 0
+    caps = [c for c in (cfg.get("max_per_day") or 0,
+                        math.floor((cfg.get("max_share") or 0) * windows)) if c > 0]
+    cap = min(caps) if caps else 0
     if cfg["fixed"] is not None:
         return min(cfg["fixed"], cap) if cap else cfg["fixed"]
     rate = max(cfg["min_per_day"], backlog / cfg["spread_days"])
@@ -637,12 +641,14 @@ def build_placement_context(session, posts: list[ThreadsPost],
                       if not (p.pinned_window_key or "").strip()
                       and probe.facts_for(p.id).paced and not probe.expired(p.id, today))
         aired_today = _paced_published_since(session, dt.datetime.combine(today, dt.time(), tz))
+        pace_windows = _pace_windows(today, PIN_HORIZON_DAYS + 1)
         # Counted as of this morning — today's airings put back — so the rate
         # holds still while the day's windows go out.
-        ps = replace(ps, pace_per_day=pace_per_day(pace_cfg, backlog + aired_today),
+        ps = replace(ps, pace_per_day=pace_per_day(pace_cfg, backlog + aired_today,
+                                                   len(pace_windows.get(today, ()))),
                      pace_min_per_day=int(pace_cfg["min_per_day"]),
-                     pace_max_per_day=int(pace_cfg["max_per_day"]))
-        pace_windows = _pace_windows(today, PIN_HORIZON_DAYS + 1)
+                     pace_max_per_day=int(pace_cfg["max_per_day"]),
+                     pace_max_share=pace_cfg["max_share"])
         pace_done = {today: aired_today}
 
     return PlacementContext(
