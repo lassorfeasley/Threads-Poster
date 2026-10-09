@@ -2000,9 +2000,31 @@ def _stage_filler_jit(session, state: SchedulerState, window_key: str,
     return post.id
 
 
-def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool:
-    """Claim ``window_key`` for the post, publish it, record ``last_publish_at``."""
+def _claim_and_publish(post_id: int, window_key: str, state_action: str,
+                       expected_window_key: str) -> bool | None:
+    """Claim ``window_key`` for the post, publish it, record ``last_publish_at``.
+
+    Returns None when another runner already spent the window, else whether
+    the publish succeeded.
+
+    ``expected_window_key`` is the ``SchedulerState.last_window_key`` the tick
+    based its decision on (or ``window_key`` itself when this runner already
+    took the window by staging filler). The window is consumed by a
+    compare-and-set against it, so a runner whose read went stale — another
+    runner spent the window meanwhile, possibly on a different post — backs
+    off instead of publishing a second post into the same window.
+    """
     with session_scope() as session:
+        won = session.execute(
+            update(SchedulerState)
+            .where(SchedulerState.id == 1,
+                   func.coalesce(SchedulerState.last_window_key, "") == expected_window_key)
+            .values(last_window_key=window_key, updated_at=utcnow())
+        ).rowcount
+        if won != 1:
+            log.info("Window %s already taken by another runner; not publishing post %s",
+                     window_key, post_id)
+            return None
         # Atomic claim: only one scheduler (local dashboard vs headless runner)
         # can win when both tick at the same time.
         claimed = session.execute(
@@ -2015,20 +2037,18 @@ def _claim_and_publish(post_id: int, window_key: str, state_action: str) -> bool
                     published_window_key=window_key)
         ).rowcount
         if claimed != 1:
+            session.rollback()
             return False
-        # Consume the window in the SAME transaction that claims the post, so the
-        # two can never disagree: either this window is spent and a post owns it,
-        # or neither happened and the next tick retries cleanly.
+        # The window is consumed in the SAME transaction that claims the post, so
+        # the two can never disagree: either this window is spent and a post owns
+        # it, or neither happened and the next tick retries cleanly.
         #
-        # Marking the window spent *before* the claim (as this used to) meant any
-        # failure in between silently cost a whole slot: the window was gone, yet
-        # the post was still ``queued``, so it just slid to the next window and
-        # nothing anywhere recorded a skip. A laptop waking from sleep hits this
-        # every time — the first post-wake tick runs the claim on a pooled
-        # connection whose TCP state died during sleep.
-        state = _get_state(session)
-        state.last_window_key = window_key
-        state.updated_at = utcnow()
+        # Marking the window spent in a separate, earlier transaction (as this
+        # used to) meant any failure in between silently cost a whole slot: the
+        # window was gone, yet the post was still ``queued``, so it just slid to
+        # the next window and nothing anywhere recorded a skip. A laptop waking
+        # from sleep hits this every time — the first post-wake tick runs the
+        # claim on a pooled connection whose TCP state died during sleep.
 
     settings = load_settings()
     retries = max(0, int(settings.get("scheduler.publish_retries", 1)))
@@ -2201,8 +2221,9 @@ def run_window_tick() -> str | None:
 
     with session_scope() as session:
         state = _get_state(session)
+        expected_key = state.last_window_key or ""
         slots = _due_slots_for_day(session, day, tz)
-        key = _earliest_due_window(day, slots, now, state.last_window_key or "")
+        key = _earliest_due_window(day, slots, now, expected_key)
         if key is None:
             return None
 
@@ -2232,10 +2253,12 @@ def run_window_tick() -> str | None:
             verb = "filler_publish"
             fallback = (_queue_head_for_window(session, key, organic_fallback=True)
                         if post_id is None else None)
-            if fallback is not None:
+            if post_id is not None:
+                expected_key = key
+            elif fallback is not None:
                 # No rerun to give: a new clip beats silence.
                 post_id, verb = fallback.id, "publish"
-            elif post_id is None:
+            else:
                 state.last_window_key = key
                 state.last_action = f"empty:{key}"
                 state.updated_at = utcnow()
@@ -2247,7 +2270,10 @@ def run_window_tick() -> str | None:
     # slot. (A filler publish already consumed the window when it staged; if
     # it fails the slot is spent, same as the empty window it replaced.)
     action = f"{verb}:{key}:post={post_id}"
-    if _claim_and_publish(post_id, key, action):
+    result = _claim_and_publish(post_id, key, action, expected_key)
+    if result is None:
+        return f"window_taken:{key}"
+    if result:
         log.info("Published queue post %s at window %s", post_id, key)
         return action
 
