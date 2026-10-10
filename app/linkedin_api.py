@@ -189,7 +189,8 @@ def exchange_code(code: str) -> dict:
         "redirect_uri": env("LINKEDIN_REDIRECT_URI"),
     })
     token = _token_from_response(data)
-    _save_token(token)
+    # Resolved before anything is saved: a token stored without a page would
+    # read as "Connected" on the Accounts page yet fail every publish.
     token["organization_urn"] = _resolve_organization(token["access_token"])
     token["organization_name"] = _organization_name(token["access_token"],
                                                     token["organization_urn"])
@@ -224,7 +225,7 @@ def is_authenticated() -> bool:
         token = _peek_token()
     except Exception:
         return False
-    if not token:
+    if not token or not token.get("organization_urn"):
         return False
     expires = _expires_at(token)
     if expires is not None and expires <= dt.datetime.now(dt.timezone.utc) \
