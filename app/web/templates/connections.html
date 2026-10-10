@@ -1,7 +1,7 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel.{% endset %}
+{% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel, LinkedIn for the company-page mirror.{% endset %}
 {{ ui.pagebar("Connected accounts", sub=ta_sub) }}
 
 <div class="card">
@@ -42,6 +42,37 @@
     <form method="post" action="/instagram/connect">
       <input type="hidden" name="next" value="/connections">
       <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
+      <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
+    </form>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 8px;">LinkedIn</div>
+  {% if li_authenticated %}
+    <p class="meta"><span class="badge supportive">Connected</span>
+      Every published Threads post is mirrored to
+      {% if li_info.organization_name %}<strong>{{ li_info.organization_name }}</strong>{% else %}<code>{{ li_info.organization_urn or "the company page" }}</code>{% endif %}
+      with the same caption and clip.
+      {% if not li_enabled %}<span class="badge hostile">Paused</span> <code>linkedin.enabled</code> is off in settings.yaml.{% endif %}</p>
+    {% if li_info.reconnect_in_days is not none %}
+    <p class="meta">{% if li_info.auto_refresh %}Token refreshes automatically; reconnect within {{ li_info.reconnect_in_days }} days.{% else %}Token expires in {{ li_info.reconnect_in_days }} days — reconnect before then.{% endif %}</p>
+    {% endif %}
+  {% elif not li_configured %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not configured</span></p>
+    <p class="meta">Set <code>LINKEDIN_CLIENT_ID</code>, <code>LINKEDIN_CLIENT_SECRET</code> and
+      <code>LINKEDIN_REDIRECT_URI</code> (a redirect URL registered on the LinkedIn app's Auth tab)
+      in <code>.env</code> and restart.</p>
+  {% else %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
+  {% endif %}
+  {% if li_configured and (not li_authenticated or li_info.reconnect_in_days is not none and li_info.reconnect_in_days <= 14) %}
+    <p class="meta">1. <a href="{{ li_auth_url }}" target="_blank">{{ 'Reconnect' if li_authenticated else 'Authorize' }} with LinkedIn ↗</a> as an admin of the company page.<br>
+       2. If you land on this dashboard you're done. Otherwise copy the <code>?code=...</code>
+       from the redirect URL (or the whole URL) and paste it here.</p>
+    <form method="post" action="/linkedin/connect">
+      <input type="hidden" name="next" value="/connections">
+      <input type="text" name="code" placeholder="AQT..." required style="max-width: 460px;">
       <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
     </form>
   {% endif %}

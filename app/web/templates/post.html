@@ -73,6 +73,9 @@
               {% if permalink %}
               <a href="{{ permalink }}" target="_blank">Open on Threads</a>
               {% endif %}
+              {% if li and li.permalink %}
+              <a href="{{ li.permalink }}" target="_blank">Open on LinkedIn</a>
+              {% endif %}
             </div>
           </details>
         </span>

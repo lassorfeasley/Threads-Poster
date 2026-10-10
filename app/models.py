@@ -362,6 +362,9 @@ class ThreadsPost(Base):
     instagram_post: Mapped["InstagramPost | None"] = relationship(
         back_populates="threads_post", uselist=False,
     )
+    linkedin_post: Mapped["LinkedInPost | None"] = relationship(
+        back_populates="threads_post", uselist=False,
+    )
 
 
 class InstagramPost(Base):
@@ -399,6 +402,36 @@ class InstagramPost(Base):
 
     cut: Mapped["Cut | None"] = relationship(back_populates="instagram_posts")
     threads_post: Mapped["ThreadsPost | None"] = relationship(back_populates="instagram_post")
+
+
+class LinkedInPost(Base):
+    """The company-page mirror of a published ThreadsPost.
+
+    Created only once the Threads post is live — every Threads post mirrors,
+    same caption, same clip — so there is no queued state. One row per Threads
+    post (the unique constraint is what stops two runners mirroring twice). A
+    LinkedIn failure never touches the Threads post.
+    """
+
+    __tablename__ = "linkedin_posts"
+    __table_args__ = (UniqueConstraint("threads_post_pk", name="uq_linkedin_threads_post"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    threads_post_pk: Mapped[int] = mapped_column(ForeignKey("threads_posts.id"))
+    caption: Mapped[str] = mapped_column(Text, default="")
+    video_urn: Mapped[str] = mapped_column(String(80), default="")
+    post_urn: Mapped[str] = mapped_column(String(80), default="")
+    permalink: Mapped[str] = mapped_column(String(300), default="")
+    # publishing | published | failed
+    status: Mapped[str] = mapped_column(String(20), default="publishing")
+    error: Mapped[str] = mapped_column(Text, default="")
+    attention_dismissed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    threads_post: Mapped["ThreadsPost"] = relationship(back_populates="linkedin_post")
 
 
 class SchedulerState(Base):

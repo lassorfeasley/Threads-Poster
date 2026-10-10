@@ -1,6 +1,6 @@
 # Fly.io deployment for the CLIMATE workspace's always-on posting scheduler.
-# One Fly app per workspace, same image: only `app` and WORKSPACE differ (see
-# fly.pilates.toml). Deploy with `fly deploy` (this file is the default).
+# One Fly app per workspace, same image: only `app` and WORKSPACE differ.
+# Deploy with `fly deploy` (this file is the default).
 #
 # Intentionally has no [http_service]: this is a worker, not a server. That also
 # means no autostop/autostart — the machine stays up, which is the entire point
@@ -10,7 +10,8 @@
 # Secrets are set out of band, per app, and are NOT in this file:
 #   fly secrets set -a threads-poster-scheduler \
 #       DATABASE_URL=... SUPABASE_URL=... \
-#       SUPABASE_SERVICE_KEY=... ANTHROPIC_API_KEY=...
+#       SUPABASE_SERVICE_KEY=... ANTHROPIC_API_KEY=... \
+#       LINKEDIN_CLIENT_ID=... LINKEDIN_CLIENT_SECRET=...
 #
 # Run exactly one machine per app. Concurrent schedulers are safe by design
 # (the window claim is atomic), so this is about cost, not correctness.

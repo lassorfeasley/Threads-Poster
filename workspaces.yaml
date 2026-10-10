@@ -17,8 +17,3 @@ workspaces:
     port: 8321
     accent: "#1A4A7D"
     enabled: true
-  - slug: pilates
-    label: Pilates Archive
-    port: 8322
-    accent: "#8E4585"
-    enabled: true

@@ -8,9 +8,9 @@ name: Channel monitor
 # spend.
 #
 # Secrets convention: the climate workspace uses the original unsuffixed
-# secrets (DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY); every other
-# workspace suffixes them with its slug (DATABASE_URL_PILATES, ...). A
-# workspace whose database secret is missing is skipped, so a new workspace
+# secrets (DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY); any other
+# workspace added later suffixes them with its slug (DATABASE_URL_<SLUG>, ...).
+# A workspace whose database secret is missing is skipped, so a new workspace
 # can be merged before its infrastructure exists.
 #
 # UTC crons below ≈ 6am / noon / 6pm / midnight ET during EDT.
@@ -28,16 +28,14 @@ jobs:
       cancel-in-progress: false
     strategy:
       fail-fast: false
-      # One workspace at a time: both hit the YouTube API and (for storyboard
+      # One workspace at a time: each hits the YouTube API and (for storyboard
       # sheets) YouTube pages from the runner, and one failing shouldn't block
-      # reruns of the other.
+      # reruns of another.
       max-parallel: 1
       matrix:
         include:
           - workspace: climate
             suffix: ""
-          - workspace: pilates
-            suffix: "_PILATES"
     env:
       WORKSPACE: ${{ matrix.workspace }}
       DATABASE_URL: ${{ secrets[format('DATABASE_URL{0}', matrix.suffix)] }}

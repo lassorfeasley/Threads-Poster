@@ -25,7 +25,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import chapters as chapter_index
-from .. import clip_proposals, instagram_api, spend, threads_api, vision, youtube
+from .. import clip_proposals, instagram_api, linkedin_api, spend, threads_api, vision, youtube
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
 from ..categories import category_by_slug, category_options, is_first_party
@@ -73,6 +73,7 @@ from ..models import (
     Cut,
     DraftProposal,
     InstagramPost,
+    LinkedInPost,
     MetricSnapshot,
     MonitorRun,
     SchedulerState,
@@ -97,6 +98,7 @@ from ..publishing import (
     maybe_post_first_reply,
     publish_clip,
     publish_instagram_post,
+    publish_linkedin_mirror,
     publish_paired_reel,
     publish_post,
     publish_reel_now,
@@ -228,7 +230,7 @@ def _load_attention_count() -> int:
     with session_scope(read_only=True) as session:
         count = int(session.execute(
             select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost)
-                   + _stranded_reels())
+                   + _unacknowledged(LinkedInPost) + _stranded_reels())
         ).scalar_one())
         try:
             # Expired posts collapse into ONE notification line however many
@@ -3321,6 +3323,11 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
             msg += f" · reel live: {ig.permalink or ig.ig_media_id}"
         elif ig is not None:
             msg += f" · reel {ig.status}: {(ig.error or '')[:120]}"
+    li = publish_linkedin_mirror(post_id)
+    if li is not None and li.status == "published":
+        msg += " · LinkedIn live"
+    elif li is not None:
+        msg += f" · LinkedIn {li.status}: {(li.error or '')[:120]}"
     return _flash(f"/cut/{cut_id}?step=post", msg)
 
 
@@ -3630,6 +3637,7 @@ def _publish_in_thread(post_id: int) -> None:
         if published:
             # After the publish transaction commits; see publish_paired_reel.
             publish_paired_reel(post_id)
+            publish_linkedin_mirror(post_id)
     finally:
         clear_publishing(post_id)
 
@@ -3955,6 +3963,11 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "published_at": ig.published_at,
             "video_url": ig_video_url,
         } if ig else None)
+        li = session.execute(
+            select(LinkedInPost).where(LinkedInPost.threads_post_pk == p.id)
+        ).scalar_one_or_none()
+        ctx["li"] = ({"status": li.status, "permalink": li.permalink, "error": li.error}
+                     if li else None)
         instagram_ok = instagram_api.is_authenticated()
         ctx["instagram_ok"] = instagram_ok
         ctx["include_instagram"] = bool(
@@ -4074,15 +4087,40 @@ def instagram_connect(code: str = Form(...), next: str = Form("/connections")):
         return _flash(next, f"Instagram auth failed: {exc}")
 
 
+@app.post("/linkedin/connect")
+def linkedin_connect(code: str = Form(...), next: str = Form("/connections")):
+    try:
+        token = linkedin_api.exchange_code(_clean_auth_code(code))
+        name = token.get("organization_name") or token.get("organization_urn", "")
+        return _flash(next, f"LinkedIn connected — posting as {name}")
+    except Exception as exc:
+        return _flash(next, f"LinkedIn auth failed: {exc}")
+
+
+@app.get("/linkedin/callback")
+def linkedin_callback(code: str = "", state: str = "", error: str = "",
+                      error_description: str = ""):
+    """OAuth redirect target, for when LINKEDIN_REDIRECT_URI points at this
+    dashboard. Otherwise the code is pasted into the Accounts page."""
+    if error:
+        return _flash("/connections", f"LinkedIn auth failed: {error_description or error}")
+    if not linkedin_api.check_state(state):
+        return _flash("/connections", "LinkedIn auth failed: unrecognized state — "
+                      "start again from the Accounts page")
+    return linkedin_connect(code=code, next="/connections")
+
+
 @app.get("/connections", response_class=HTMLResponse)
 def connections_page(request: Request, msg: str = ""):
-    """Threads + Instagram OAuth connection status (Configure area)."""
+    """Threads, Instagram and LinkedIn connection status (Configure area)."""
     authenticated = threads_api.is_authenticated()
     ig_authenticated = instagram_api.is_authenticated()
     try:
         ig_auth_url = instagram_api.authorize_url() if not ig_authenticated else ""
     except Exception:  # missing .env keys shouldn't 500 the page
         ig_auth_url = ""
+    li_configured = linkedin_api.is_configured()
+    li_authenticated = linkedin_api.is_authenticated()
     return templates.TemplateResponse(
         request, "connections.html",
         {"authenticated": authenticated,
@@ -4091,6 +4129,11 @@ def connections_page(request: Request, msg: str = ""):
          "ig_auth_url": ig_auth_url,
          "ig_username": instagram_api.account_username() if ig_authenticated else "",
          "ig_configured": bool(env("INSTAGRAM_APP_ID")),
+         "li_configured": li_configured,
+         "li_authenticated": li_authenticated,
+         "li_auth_url": linkedin_api.authorize_url() if li_configured else "",
+         "li_info": linkedin_api.connection_info() if li_authenticated else {},
+         "li_enabled": bool(load_settings().get("linkedin.enabled", True)),
          "msg": msg, "active": "connections"},
     )
 
@@ -4629,6 +4672,16 @@ def _notifications_data() -> dict:
             .where(*stranded_reel_filters())
             .order_by(InstagramPost.created_at.desc())
         ).scalars().all()
+        li_failed = session.execute(
+            select(LinkedInPost)
+            .options(selectinload(LinkedInPost.threads_post)
+                     .selectinload(ThreadsPost.cut).selectinload(Cut.candidate),
+                     selectinload(LinkedInPost.threads_post)
+                     .selectinload(ThreadsPost.candidate))
+            .where(LinkedInPost.status == "failed",
+                   LinkedInPost.attention_dismissed_at.is_(None))
+            .order_by(LinkedInPost.created_at.desc())
+        ).scalars().all()
         # Timely posts that went stale in the queue. The scored scheduler
         # never auto-places an expired post, so without this they'd sink
         # silently; the operator decides — post now, or delete.
@@ -4640,7 +4693,7 @@ def _notifications_data() -> dict:
             log.exception("Expired-post check failed")
             expired = []
     return {"failed": failed, "ig_failed": ig_failed, "ig_stranded": ig_stranded,
-            "expired": expired}
+            "li_failed": li_failed, "expired": expired}
 
 
 pagecache.register("notifications", _notifications_data)
@@ -5040,6 +5093,37 @@ def cancel_instagram_post(ig_id: int, next: str = Form("/notifications")):
             return _flash(next, "This reel is already live")
         session.delete(ig)
     return _flash(next, "Reel removed — the Threads post is unaffected")
+
+
+@app.post("/lipost/{li_id}/retry")
+def retry_linkedin_post(li_id: int, next: str = Form("/notifications")):
+    """Operator-confirmed retry of a failed LinkedIn mirror. Synchronous —
+    LinkedIn's video processing can take a minute or two."""
+    with session_scope(read_only=True) as session:
+        li = session.get(LinkedInPost, li_id)
+        if li is None:
+            return _flash(next, "LinkedIn post not found")
+        if li.status != "failed":
+            return _flash(next, "This LinkedIn post is not retryable")
+        post_id = li.threads_post_pk
+    li = publish_linkedin_mirror(post_id, force=True)
+    if li is not None and li.status == "published":
+        return _flash(next, f"Posted to LinkedIn: {li.permalink}")
+    return _flash(next, f"LinkedIn post failed: {(li.error if li else '')[:200]}")
+
+
+@app.post("/lipost/{li_id}/dismiss")
+def dismiss_linkedin_attention(request: Request, li_id: int,
+                               next: str = Form("/notifications")):
+    """Acknowledge a failed LinkedIn mirror so it leaves the notifications list."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with session_scope() as session:
+        li = session.get(LinkedInPost, li_id)
+        if li is None:
+            return (JSONResponse({"error": "LinkedIn post not found"}, status_code=404)
+                    if wants_json else _flash("/notifications", "LinkedIn post not found"))
+        li.attention_dismissed_at = utcnow()
+    return JSONResponse({"ok": True}) if wants_json else _flash(next, "Dismissed")
 
 
 # --- Engagement ----------------------------------------------------------------

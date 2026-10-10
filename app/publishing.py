@@ -16,12 +16,15 @@ from pathlib import Path
 
 from sqlalchemy import or_, select, update
 
+import requests
+
+from . import linkedin_api
 from .categories import is_first_party
 from .config import load_first_reply, load_settings, scheduler_timezone
 from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
 from .instagram_api import publish_reel
 from .llm import caption_attributes, suggest_attribution, suggest_first_reply
-from .models import Candidate, Cut, InstagramPost, ThreadsPost, utcnow
+from .models import Candidate, Cut, InstagramPost, LinkedInPost, ThreadsPost, utcnow
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import publish_text_reply, publish_video
 
@@ -48,6 +51,17 @@ def clear_publishing(post_id: int) -> None:
 def is_publish_active(post_id: int) -> bool:
     with _ACTIVE_LOCK:
         return post_id in _ACTIVE_PUBLISHES
+
+
+# LinkedInPost IDs being published in this process, for the same recovery
+# question. Tracked apart from Threads posts because the mirror also runs from
+# paths (Post now, notification retry) that never mark the Threads post.
+_ACTIVE_LINKEDIN: set[int] = set()
+
+
+def is_linkedin_publish_active(li_id: int) -> bool:
+    with _ACTIVE_LOCK:
+        return li_id in _ACTIVE_LINKEDIN
 
 
 def _clip_duration_seconds(path: Path) -> int | None:
@@ -691,6 +705,151 @@ def publish_reel_now(ig_id: int) -> InstagramPost | None:
             log.warning("Instagram-only reel %s failed: %s", ig_id, exc)
         session.expunge(ig)
     return ig
+
+
+# --- LinkedIn company-page mirror ---------------------------------------------
+
+def linkedin_mirror_enabled() -> bool:
+    """Whether published Threads posts should mirror to LinkedIn right now."""
+    return (bool(load_settings().get("linkedin.enabled", True))
+            and linkedin_api.is_authenticated())
+
+
+def _write_li_row(li_id: int, **values) -> None:
+    """Update a LinkedInPost through a fresh connection (see ``_write_ig_row``)."""
+    from sqlalchemy.exc import OperationalError
+
+    from .db import session_scope
+
+    last_exc: Exception | None = None
+    for _ in range(2):
+        try:
+            with session_scope() as s:
+                s.execute(update(LinkedInPost).where(LinkedInPost.id == li_id)
+                          .values(**values))
+            return
+        except OperationalError as exc:
+            last_exc = exc
+    raise last_exc
+
+
+def _claim_linkedin_mirror(post_id: int) -> tuple[int, str, str, str] | None:
+    """Take ownership of mirroring ``post_id``: insert its row, or flip a
+    failed one back to ``publishing``. Returns ``(li_id, caption, local clip,
+    storage key)`` for the winner and None for everyone else — including a
+    second runner whose insert hit the one-row-per-post constraint."""
+    from sqlalchemy.exc import IntegrityError
+
+    from .db import session_scope
+
+    try:
+        with session_scope() as session:
+            post = session.get(ThreadsPost, post_id)
+            if post is None or post.status != "published" or not post.threads_media_id:
+                return None
+            li = session.execute(
+                select(LinkedInPost).where(LinkedInPost.threads_post_pk == post_id)
+            ).scalar_one_or_none()
+            if li is None:
+                li = LinkedInPost(threads_post_pk=post_id, caption=post.caption or "",
+                                  status="publishing")
+                session.add(li)
+                session.flush()
+            else:
+                won = session.execute(
+                    update(LinkedInPost)
+                    .where(LinkedInPost.id == li.id, LinkedInPost.status == "failed")
+                    .values(status="publishing", error="", caption=post.caption or "")
+                ).rowcount
+                if won != 1:
+                    return None
+            return (li.id, post.caption or "", post.clip_local_path or "",
+                    post.clip_object_path or "")
+    except IntegrityError:
+        return None
+
+
+def _linkedin_video(local_path: str, object_path: str) -> bytes | Path:
+    """The exact file the Threads post shipped: the local copy when this
+    machine has it, else the storage copy uploaded at queue time."""
+    clip = Path(local_path).expanduser() if local_path else None
+    if clip is not None and clip.exists():
+        return clip
+    if not object_path:
+        raise FileNotFoundError(f"Clip not found: {local_path} (and no uploaded copy)")
+    resp = requests.get(signed_clip_url(object_path), timeout=300)
+    resp.raise_for_status()
+    return resp.content
+
+
+def _linkedin_retryable(exc: Exception) -> bool:
+    if isinstance(exc, FileNotFoundError) or _storage_object_missing(exc):
+        return False
+    status = getattr(exc, "status", None)
+    # 4xx is LinkedIn rejecting the request (bad token, missing permission,
+    # invalid video) and will fail identically again; 429 is just throttling.
+    return status is None or status >= 500 or status == 429
+
+
+def _linkedin_snapshot(post_id: int) -> LinkedInPost | None:
+    from .db import session_scope
+
+    with session_scope(read_only=True) as session:
+        li = session.execute(
+            select(LinkedInPost).where(LinkedInPost.threads_post_pk == post_id)
+        ).scalar_one_or_none()
+        if li is not None:
+            session.expunge(li)
+        return li
+
+
+def publish_linkedin_mirror(post_id: int, *, force: bool = False) -> LinkedInPost | None:
+    """Mirror a just-published Threads post to the LinkedIn company page.
+
+    Called by every publish path AFTER the Threads publish commits, with the
+    same contract as ``publish_paired_reel``: best-effort, never unwinds the
+    Threads post, state written through fresh connections. ``force`` is the
+    operator retrying by hand, which ignores ``linkedin.enabled``. Returns a
+    detached snapshot of the row (None when nothing was mirrored).
+    """
+    if not force and not linkedin_mirror_enabled():
+        return None
+    claim = _claim_linkedin_mirror(post_id)
+    if claim is None:
+        return _linkedin_snapshot(post_id)
+    li_id, caption, local_path, object_path = claim
+
+    settings = load_settings()
+    retries = max(0, int(settings.get("scheduler.publish_retries", 1)))
+    retry_delay = max(0, int(settings.get("scheduler.publish_retry_delay_seconds", 30)))
+    with _ACTIVE_LOCK:
+        _ACTIVE_LINKEDIN.add(li_id)
+    try:
+        result = None
+        for attempt in range(retries + 1):
+            try:
+                result = linkedin_api.publish_video(
+                    _linkedin_video(local_path, object_path), caption)
+                break
+            except Exception as exc:
+                log.warning("LinkedIn mirror attempt %d/%d failed for post %s: %s",
+                            attempt + 1, retries + 1, post_id, exc)
+                if attempt >= retries or not _linkedin_retryable(exc):
+                    _write_li_row(li_id, status="failed", error=str(exc)[:1000])
+                    break
+                time.sleep(retry_delay)
+        if result is not None:
+            # Outside the retry loop: the post is live, so failing to record
+            # that must never send a second copy.
+            _write_li_row(li_id, post_urn=result["post_urn"],
+                          video_urn=result["video_urn"],
+                          permalink=result["permalink"], status="published",
+                          published_at=utcnow(), error="")
+            log.info("Mirrored post %s to LinkedIn (%s)", post_id, result["permalink"])
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE_LINKEDIN.discard(li_id)
+    return _linkedin_snapshot(post_id)
 
 
 def _annotate_footage(session, post: ThreadsPost) -> None:

@@ -67,6 +67,7 @@ Optional extras:
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Supabase project (Settings → API). Used for the trimmed-clip bucket only. Create a **private** Storage bucket named `trimmed-clips` (or change `storage.trimmed_clip_bucket` in settings). |
 | `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_REDIRECT_URI` | Meta app for the Threads API (below). |
 | `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_REDIRECT_URI` | Optional. Same Meta app with the **Instagram API with Instagram Login** product — required only to queue/publish paired Reels. |
+| `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REDIRECT_URI` | Optional. LinkedIn app with the **Community Management API** — mirrors every published post to the company page. |
 
 ### Threads / Meta app + OAuth
 
@@ -97,6 +98,25 @@ Optional extras:
    Threads post only, or the reel only (a reel shipped on its own creates no
    Threads post and skips the spacing floor). Analytics stay Threads-only until
    Insights is wired up.
+
+### LinkedIn company page (optional, automatic mirror)
+
+1. In the LinkedIn developer portal, the app needs the **Community Management
+   API** product (scopes `w_organization_social`, `r_organization_social`,
+   `rw_organization_admin`) and must be verified by the company page.
+2. On the app's Auth tab, register `http://localhost:8321/linkedin/callback` as a
+   redirect URL, and put the client ID/secret and that URL in `.env`.
+3. Open **Accounts** → "Authorize with LinkedIn" as an admin of the page. The page
+   is found automatically; if the member admins several, set
+   `linkedin.organization_id` in `settings.yaml` first.
+
+From then on every Threads post that publishes — scheduled, Post now, reruns,
+promos — is also posted to the page with the same caption and the same clip. A
+LinkedIn failure never affects the Threads post; it shows up under
+Notifications with a retry button. Pause the mirror with `linkedin.enabled: false`.
+Tokens last 60 days; apps approved for refresh tokens renew themselves (which
+needs `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET` wherever the scheduler runs),
+otherwise the Accounts page prompts you to reconnect two weeks out.
 
 ## Running
 
@@ -147,12 +167,15 @@ fly secrets set \
   DATABASE_URL="..." \
   SUPABASE_URL="..." \
   SUPABASE_SERVICE_KEY="..." \
-  ANTHROPIC_API_KEY="..."
+  ANTHROPIC_API_KEY="..." \
+  LINKEDIN_CLIENT_ID="..." \
+  LINKEDIN_CLIENT_SECRET="..."
 fly deploy
 fly logs                      # confirm "Scheduler database backend: postgresql..."
 ```
 
-Those four are all it needs. `THREADS_APP_ID` / `THREADS_APP_SECRET` /
+The first four are all it needs to publish to Threads; the LinkedIn pair only
+refreshes the LinkedIn token. `THREADS_APP_ID` / `THREADS_APP_SECRET` /
 `THREADS_REDIRECT_URI` are only for the OAuth connect flow in the dashboard, and
 the worker refreshes the Threads token on its own (`th_refresh_token` takes no
 client secret) writing it back to the shared `app_tokens` table.

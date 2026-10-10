@@ -322,6 +322,21 @@ instagram:
   publish_poll_timeout_seconds: 600
   publish_poll_interval_seconds: 10
 
+linkedin:
+  # Company-page mirror (Community Management API): once connected on the
+  # Accounts page, every published Threads post — reruns and promos included —
+  # goes to the page with the same caption and the same 16:9 clip.
+  # Off switch for the mirror without disconnecting.
+  enabled: true
+  # The page to post as. Blank = the one page the connecting member
+  # administers (found at connect time); set it if they admin several.
+  organization_id: ""
+  # LinkedIn-Version header (YYYYMM). LinkedIn retires versions after about a
+  # year, so bump this when the API starts rejecting it.
+  api_version: "202609"
+  publish_poll_timeout_seconds: 600
+  publish_poll_interval_seconds: 10
+
 vertical:
   # 1080x1920 branded composite for Instagram Reels: hook text at the top, the
   # 16:9 clip full-width in the upper-middle, burned-in captions below it, and

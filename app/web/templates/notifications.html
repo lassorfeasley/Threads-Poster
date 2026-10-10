@@ -2,7 +2,7 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {% set n_stranded = (ig_stranded|length if ig_stranded else 0) %}
-{% set n_failed = (failed|length) + (ig_failed|length if ig_failed else 0) %}
+{% set n_failed = (failed|length) + (ig_failed|length if ig_failed else 0) + (li_failed|length if li_failed else 0) %}
 {% set n_expired = (expired|length if expired else 0) %}
 {% set n_total = n_failed + n_stranded + n_expired %}
 {% if n_total %}
@@ -110,6 +110,47 @@
             <button class="sm">Retry reel</button></form>
           {% if ig.cut %}<a class="sm" href="/cut/{{ ig.cut.id }}?step=post">Open clip</a>{% endif %}
           <form class="inline" method="post" action="/igpost/{{ ig.id }}/dismiss"
+                data-async="Dismissed" data-async-remove=".post-card">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="reject sm" title="Acknowledge and remove from notifications (kept in history)"
+                    data-confirm="Dismiss this notification? It stays in your history but leaves this list."
+                    data-confirm-ok="Dismiss" data-confirm-variant="danger">Dismiss</button></form>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+
+    {% for li in li_failed or [] %}
+    {% set tp = li.threads_post %}
+    {% set cand = (tp.cut.candidate if (tp and tp.cut and tp.cut.candidate) else (tp.candidate if tp else None)) %}
+    {% set thumb = thumb_for(cand) %}
+    <div class="post-card is-alert">
+      {% if thumb %}
+      <img class="pc-thumb" src="{{ thumb }}" alt="" loading="lazy"
+           onerror="this.classList.add('is-broken')">
+      {% else %}
+      <div class="pc-thumb is-empty" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
+      </div>
+      {% endif %}
+      <div class="pc-body">
+        <a class="item-title" href="/post/{{ li.threads_post_pk }}">{{ li.caption[:140] or "(open post)" }}</a>
+        <div class="badges">
+          <span class="badge hostile">LinkedIn failed</span>
+          <span class="badge">LinkedIn</span>
+          <span class="meta">Added {{ li.created_at.strftime("%b %-d %H:%M") if li.created_at else "—" }}</span>
+        </div>
+        {% if li.error %}<div class="meta" style="color: var(--danger);">{{ li.error[:240] }}</div>{% endif %}
+        <div class="meta">The Threads post is live — only the LinkedIn copy failed.</div>
+        <div class="pc-actions">
+          <form class="inline" method="post" action="/lipost/{{ li.id }}/retry"
+                data-confirm="Post this clip to the LinkedIn company page now? LinkedIn's processing can take a minute or two."
+                data-confirm-ok="Post to LinkedIn">
+            <input type="hidden" name="next" value="/notifications">
+            <button class="sm">Retry LinkedIn</button></form>
+          <form class="inline" method="post" action="/lipost/{{ li.id }}/dismiss"
                 data-async="Dismissed" data-async-remove=".post-card">
             <input type="hidden" name="next" value="/notifications">
             <button class="reject sm" title="Acknowledge and remove from notifications (kept in history)"

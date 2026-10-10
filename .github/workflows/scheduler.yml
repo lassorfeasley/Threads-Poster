@@ -7,9 +7,12 @@ name: Threads scheduler
 # running dashboard scheduler (or the Fly worker) is safe.
 #
 # Secrets convention: the climate workspace uses the original unsuffixed
-# secrets; every other workspace suffixes them with its slug
-# (DATABASE_URL_PILATES, ...). A workspace whose database secret is missing is
+# secrets; any other workspace added later suffixes them with its slug
+# (DATABASE_URL_<SLUG>, ...). A workspace whose database secret is missing is
 # skipped, so a new workspace can be merged before its infrastructure exists.
+#
+# LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET are only used to refresh the
+# LinkedIn token (stored in the database) when it nears expiry.
 #
 # Schedule notes:
 # - GitHub cron is UTC only; posting windows are ET (see scheduler.windows in
@@ -36,14 +39,14 @@ jobs:
         include:
           - workspace: climate
             suffix: ""
-          - workspace: pilates
-            suffix: "_PILATES"
     env:
       WORKSPACE: ${{ matrix.workspace }}
       DATABASE_URL: ${{ secrets[format('DATABASE_URL{0}', matrix.suffix)] }}
       SUPABASE_URL: ${{ secrets[format('SUPABASE_URL{0}', matrix.suffix)] }}
       SUPABASE_SERVICE_KEY: ${{ secrets[format('SUPABASE_SERVICE_KEY{0}', matrix.suffix)] }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LINKEDIN_CLIENT_ID: ${{ secrets[format('LINKEDIN_CLIENT_ID{0}', matrix.suffix)] }}
+      LINKEDIN_CLIENT_SECRET: ${{ secrets[format('LINKEDIN_CLIENT_SECRET{0}', matrix.suffix)] }}
     steps:
       - uses: actions/checkout@v4
         if: env.DATABASE_URL != ''
