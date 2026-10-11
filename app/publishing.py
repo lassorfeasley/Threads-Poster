@@ -775,7 +775,7 @@ def _claim_linkedin_mirror(post_id: int) -> tuple[int, str, str, str] | None:
 def _linkedin_video(local_path: str, object_path: str):
     """The exact file the Threads post shipped: the local copy when this
     machine has it, else the storage copy streamed to a temp file (deleted on
-    exit) — never held in memory, which the 256 MB worker can't afford."""
+    exit) — never held in memory, which the small Fly worker can't afford."""
     clip = Path(local_path).expanduser() if local_path else None
     if clip is not None and clip.exists():
         yield clip

@@ -354,8 +354,9 @@ def to_commentary(caption: str) -> str:
 def _upload_video(access_token: str, org: str, video: Path) -> str:
     """initializeUpload -> PUT each part -> finalizeUpload. Returns the video URN.
 
-    Reads one part (~4 MB) at a time: the Fly worker has 256 MB, and holding a
-    whole clip plus a sliced copy of it got the process OOM-killed mid-upload.
+    Reads one part (~4 MB) at a time: the Fly worker's memory is small, and
+    holding a whole clip plus a sliced copy of it got the process OOM-killed
+    mid-upload.
     """
     init = _request("POST", "videos?action=initializeUpload", access_token, json={
         "initializeUploadRequest": {

@@ -30,5 +30,7 @@ primary_region = "iad"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "256mb"
+  # 256mb left ~40 MB free with the scheduler idle (~130 MB RSS), and a
+  # publish spike got the process OOM-killed mid-post.
+  memory = "512mb"
   processes = ["app"]
