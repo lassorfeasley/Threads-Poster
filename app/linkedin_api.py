@@ -351,27 +351,33 @@ def to_commentary(caption: str) -> str:
 
 # --- Publishing ----------------------------------------------------------------
 
-def _upload_video(access_token: str, org: str, data: bytes) -> str:
-    """initializeUpload -> PUT each part -> finalizeUpload. Returns the video URN."""
+def _upload_video(access_token: str, org: str, video: Path) -> str:
+    """initializeUpload -> PUT each part -> finalizeUpload. Returns the video URN.
+
+    Reads one part (~4 MB) at a time: the Fly worker has 256 MB, and holding a
+    whole clip plus a sliced copy of it got the process OOM-killed mid-upload.
+    """
     init = _request("POST", "videos?action=initializeUpload", access_token, json={
         "initializeUploadRequest": {
             "owner": org,
-            "fileSizeBytes": len(data),
+            "fileSizeBytes": video.stat().st_size,
             "uploadCaptions": False,
             "uploadThumbnail": False,
         }
     }).json()["value"]
     video_urn = init["video"]
     etags: list[str] = []
-    for part in init.get("uploadInstructions", []):
-        first, last = int(part["firstByte"]), int(part["lastByte"])
-        resp = requests.put(part["uploadUrl"], data=data[first:last + 1],
-                            headers={"Content-Type": "application/octet-stream"},
-                            timeout=300)
-        if resp.status_code >= 400:
-            raise LinkedInError(f"Video part upload failed ({resp.status_code}): "
-                                f"{resp.text[:200]}", status=resp.status_code)
-        etags.append(resp.headers.get("ETag", "").strip('"'))
+    with open(video, "rb") as f:
+        for part in init.get("uploadInstructions", []):
+            first, last = int(part["firstByte"]), int(part["lastByte"])
+            f.seek(first)
+            resp = requests.put(part["uploadUrl"], data=f.read(last - first + 1),
+                                headers={"Content-Type": "application/octet-stream"},
+                                timeout=300)
+            if resp.status_code >= 400:
+                raise LinkedInError(f"Video part upload failed ({resp.status_code}): "
+                                    f"{resp.text[:200]}", status=resp.status_code)
+            etags.append(resp.headers.get("ETag", "").strip('"'))
     _request("POST", "videos?action=finalizeUpload", access_token, json={
         "finalizeUploadRequest": {
             "video": video_urn,
@@ -404,11 +410,10 @@ def permalink_for(post_urn: str) -> str:
     return f"https://www.linkedin.com/feed/update/{post_urn}/" if post_urn else ""
 
 
-def publish_video(video: bytes | Path, caption: str) -> dict:
-    """Post a video to the company page. Returns {post_urn, video_urn, permalink}."""
+def publish_video(video: Path, caption: str) -> dict:
+    """Post a video file to the company page. Returns {post_urn, video_urn, permalink}."""
     access_token, org = _auth()
-    data = video.read_bytes() if isinstance(video, Path) else video
-    video_urn = _upload_video(access_token, org, data)
+    video_urn = _upload_video(access_token, org, video)
     _wait_until_available(access_token, video_urn)
     resp = _request("POST", "posts", access_token, json={
         "author": org,

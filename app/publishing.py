@@ -9,8 +9,10 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import subprocess
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -769,17 +771,24 @@ def _claim_linkedin_mirror(post_id: int) -> tuple[int, str, str, str] | None:
         return None
 
 
-def _linkedin_video(local_path: str, object_path: str) -> bytes | Path:
+@contextmanager
+def _linkedin_video(local_path: str, object_path: str):
     """The exact file the Threads post shipped: the local copy when this
-    machine has it, else the storage copy uploaded at queue time."""
+    machine has it, else the storage copy streamed to a temp file (deleted on
+    exit) — never held in memory, which the 256 MB worker can't afford."""
     clip = Path(local_path).expanduser() if local_path else None
     if clip is not None and clip.exists():
-        return clip
+        yield clip
+        return
     if not object_path:
         raise FileNotFoundError(f"Clip not found: {local_path} (and no uploaded copy)")
-    resp = requests.get(signed_clip_url(object_path), timeout=300)
-    resp.raise_for_status()
-    return resp.content
+    with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
+        with requests.get(signed_clip_url(object_path), stream=True, timeout=300) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                tmp.write(chunk)
+        tmp.flush()
+        yield Path(tmp.name)
 
 
 def _linkedin_retryable(exc: Exception) -> bool:
@@ -828,8 +837,8 @@ def publish_linkedin_mirror(post_id: int, *, force: bool = False) -> LinkedInPos
         result = None
         for attempt in range(retries + 1):
             try:
-                result = linkedin_api.publish_video(
-                    _linkedin_video(local_path, object_path), caption)
+                with _linkedin_video(local_path, object_path) as video:
+                    result = linkedin_api.publish_video(video, caption)
                 break
             except Exception as exc:
                 log.warning("LinkedIn mirror attempt %d/%d failed for post %s: %s",
