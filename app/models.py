@@ -365,6 +365,9 @@ class ThreadsPost(Base):
     linkedin_post: Mapped["LinkedInPost | None"] = relationship(
         back_populates="threads_post", uselist=False,
     )
+    x_post: Mapped["XPost | None"] = relationship(
+        back_populates="threads_post", uselist=False,
+    )
 
 
 class InstagramPost(Base):
@@ -432,6 +435,35 @@ class LinkedInPost(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     threads_post: Mapped["ThreadsPost"] = relationship(back_populates="linkedin_post")
+
+
+class XPost(Base):
+    """The X mirror of a published ThreadsPost — same shape as LinkedInPost.
+
+    ``skipped`` is a post deliberately not sent: its caption carries a link
+    (X bills those at over ten times the plain rate), it's too long for X, or
+    X refused it as a duplicate. Skips are final and never need attention.
+    """
+
+    __tablename__ = "x_posts"
+    __table_args__ = (UniqueConstraint("threads_post_pk", name="uq_x_threads_post"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    threads_post_pk: Mapped[int] = mapped_column(ForeignKey("threads_posts.id"))
+    caption: Mapped[str] = mapped_column(Text, default="")
+    media_id: Mapped[str] = mapped_column(String(40), default="")
+    tweet_id: Mapped[str] = mapped_column(String(40), default="")
+    permalink: Mapped[str] = mapped_column(String(300), default="")
+    # publishing | published | failed | skipped
+    status: Mapped[str] = mapped_column(String(20), default="publishing")
+    error: Mapped[str] = mapped_column(Text, default="")
+    attention_dismissed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    threads_post: Mapped["ThreadsPost"] = relationship(back_populates="x_post")
 
 
 class SchedulerState(Base):

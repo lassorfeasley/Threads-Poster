@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "38"
+SCHEMA_VERSION = "39"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -162,6 +162,7 @@ _SCHEMA_SENTINELS = (
     "SELECT rerun_slots FROM posting_schedules LIMIT 0",
     "SELECT last_rerun_slot_key FROM scheduler_state LIMIT 0",
     "SELECT id FROM linkedin_posts LIMIT 0",
+    "SELECT id FROM x_posts LIMIT 0",
 )
 
 

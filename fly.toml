@@ -11,7 +11,8 @@
 #   fly secrets set -a threads-poster-scheduler \
 #       DATABASE_URL=... SUPABASE_URL=... \
 #       SUPABASE_SERVICE_KEY=... ANTHROPIC_API_KEY=... \
-#       LINKEDIN_CLIENT_ID=... LINKEDIN_CLIENT_SECRET=...
+#       LINKEDIN_CLIENT_ID=... LINKEDIN_CLIENT_SECRET=... \
+#       X_CLIENT_ID=... X_CLIENT_SECRET=...
 #
 # Run exactly one machine per app. Concurrent schedulers are safe by design
 # (the window claim is atomic), so this is about cost, not correctness.

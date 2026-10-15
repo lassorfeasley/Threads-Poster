@@ -68,6 +68,7 @@ Optional extras:
 | `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_REDIRECT_URI` | Meta app for the Threads API (below). |
 | `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_REDIRECT_URI` | Optional. Same Meta app with the **Instagram API with Instagram Login** product — required only to queue/publish paired Reels. |
 | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REDIRECT_URI` | Optional. LinkedIn app with the **Community Management API** — mirrors every published post to the company page. |
+| `X_CLIENT_ID`, `X_CLIENT_SECRET`, `X_REDIRECT_URI` | Optional. X API app (pay-per-use credits) — mirrors every published post to X, without links. |
 
 ### Threads / Meta app + OAuth
 
@@ -117,6 +118,25 @@ Notifications with a retry button. Pause the mirror with `linkedin.enabled: fals
 Tokens last 60 days; apps approved for refresh tokens renew themselves (which
 needs `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET` wherever the scheduler runs),
 otherwise the Accounts page prompts you to reconnect two weeks out.
+
+### X (optional, automatic mirror)
+
+1. At console.x.com, create an app with OAuth 2.0 user authentication (type
+   "Web App", read and write), buy some credits, and register
+   `http://localhost:8321/x/callback` as its callback URL.
+2. Put the client ID/secret and that URL in `.env`.
+3. Open **Accounts** → "Authorize with X" while signed in to the account to post
+   as. X's authorization code lives 30 seconds, so the redirect must land on the
+   dashboard — there's no paste-the-code fallback.
+
+From then on every Threads post that publishes also goes to X with the same
+caption and clip, at $0.015 a post. The first comment is never sent, and a
+caption containing a link (promos, or any bare domain like `Renewables.org`) is
+skipped, since X bills a post with a URL at $0.20. Captions over 280 characters
+and posts X rejects as duplicates are skipped too. Failures show under
+Notifications with a retry button; pause with `x.enabled: false`. Access tokens
+last two hours and refresh themselves, which needs `X_CLIENT_ID`/`X_CLIENT_SECRET`
+wherever the scheduler runs.
 
 ## Running
 
@@ -169,13 +189,15 @@ fly secrets set \
   SUPABASE_SERVICE_KEY="..." \
   ANTHROPIC_API_KEY="..." \
   LINKEDIN_CLIENT_ID="..." \
-  LINKEDIN_CLIENT_SECRET="..."
+  LINKEDIN_CLIENT_SECRET="..." \
+  X_CLIENT_ID="..." \
+  X_CLIENT_SECRET="..."
 fly deploy
 fly logs                      # confirm "Scheduler database backend: postgresql..."
 ```
 
-The first four are all it needs to publish to Threads; the LinkedIn pair only
-refreshes the LinkedIn token. `THREADS_APP_ID` / `THREADS_APP_SECRET` /
+The first four are all it needs to publish to Threads; the LinkedIn and X pairs
+only refresh those platforms' tokens. `THREADS_APP_ID` / `THREADS_APP_SECRET` /
 `THREADS_REDIRECT_URI` are only for the OAuth connect flow in the dashboard, and
 the worker refreshes the Threads token on its own (`th_refresh_token` takes no
 client secret) writing it back to the shared `app_tokens` table.

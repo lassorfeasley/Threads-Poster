@@ -20,13 +20,13 @@ from sqlalchemy import or_, select, update
 
 import requests
 
-from . import linkedin_api
+from . import linkedin_api, x_api
 from .categories import is_first_party
 from .config import load_first_reply, load_settings, scheduler_timezone
 from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
 from .instagram_api import publish_reel
 from .llm import caption_attributes, suggest_attribution, suggest_first_reply
-from .models import Candidate, Cut, InstagramPost, LinkedInPost, ThreadsPost, utcnow
+from .models import Candidate, Cut, InstagramPost, LinkedInPost, ThreadsPost, XPost, utcnow
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import publish_text_reply, publish_video
 
@@ -64,6 +64,14 @@ _ACTIVE_LINKEDIN: set[int] = set()
 def is_linkedin_publish_active(li_id: int) -> bool:
     with _ACTIVE_LOCK:
         return li_id in _ACTIVE_LINKEDIN
+
+
+_ACTIVE_X: set[int] = set()
+
+
+def is_x_publish_active(x_id: int) -> bool:
+    with _ACTIVE_LOCK:
+        return x_id in _ACTIVE_X
 
 
 def _clip_duration_seconds(path: Path) -> int | None:
@@ -772,7 +780,7 @@ def _claim_linkedin_mirror(post_id: int) -> tuple[int, str, str, str] | None:
 
 
 @contextmanager
-def _linkedin_video(local_path: str, object_path: str):
+def _mirror_clip(local_path: str, object_path: str):
     """The exact file the Threads post shipped: the local copy when this
     machine has it, else the storage copy streamed to a temp file (deleted on
     exit) — never held in memory, which the small Fly worker can't afford."""
@@ -837,7 +845,7 @@ def publish_linkedin_mirror(post_id: int, *, force: bool = False) -> LinkedInPos
         result = None
         for attempt in range(retries + 1):
             try:
-                with _linkedin_video(local_path, object_path) as video:
+                with _mirror_clip(local_path, object_path) as video:
                     result = linkedin_api.publish_video(video, caption)
                 break
             except Exception as exc:
@@ -859,6 +867,142 @@ def publish_linkedin_mirror(post_id: int, *, force: bool = False) -> LinkedInPos
         with _ACTIVE_LOCK:
             _ACTIVE_LINKEDIN.discard(li_id)
     return _linkedin_snapshot(post_id)
+
+
+# --- X mirror ------------------------------------------------------------------
+
+def x_mirror_enabled() -> bool:
+    """Whether published Threads posts should mirror to X right now."""
+    return bool(load_settings().get("x.enabled", True)) and x_api.is_authenticated()
+
+
+def x_skip_reason(caption: str) -> str:
+    """Why a caption won't go to X, or "" when it will."""
+    if x_api.contains_link(caption):
+        return "Not sent to X: the caption contains a link, which X bills at $0.20 a post."
+    if x_api.weighted_length(caption) > x_api.MAX_WEIGHTED_LENGTH:
+        return (f"Not sent to X: the caption is over X's "
+                f"{x_api.MAX_WEIGHTED_LENGTH}-character limit.")
+    return ""
+
+
+def _write_x_row(x_id: int, **values) -> None:
+    """Update an XPost through a fresh connection (see ``_write_ig_row``)."""
+    from sqlalchemy.exc import OperationalError
+
+    from .db import session_scope
+
+    last_exc: Exception | None = None
+    for _ in range(2):
+        try:
+            with session_scope() as s:
+                s.execute(update(XPost).where(XPost.id == x_id).values(**values))
+            return
+        except OperationalError as exc:
+            last_exc = exc
+    raise last_exc
+
+
+def _claim_x_mirror(post_id: int) -> tuple[int, str, str, str] | None:
+    """``_claim_linkedin_mirror`` for X. A caption that can't go to X is
+    recorded as ``skipped`` here and nobody wins the claim."""
+    from sqlalchemy.exc import IntegrityError
+
+    from .db import session_scope
+
+    try:
+        with session_scope() as session:
+            post = session.get(ThreadsPost, post_id)
+            if post is None or post.status != "published" or not post.threads_media_id:
+                return None
+            caption = post.caption or ""
+            skip = x_skip_reason(caption)
+            row = session.execute(
+                select(XPost).where(XPost.threads_post_pk == post_id)
+            ).scalar_one_or_none()
+            if row is None:
+                row = XPost(threads_post_pk=post_id, caption=caption,
+                            status="skipped" if skip else "publishing", error=skip)
+                session.add(row)
+                session.flush()
+                if skip:
+                    return None
+            else:
+                won = session.execute(
+                    update(XPost)
+                    .where(XPost.id == row.id, XPost.status == "failed")
+                    .values(status="skipped" if skip else "publishing",
+                            error=skip, caption=caption)
+                ).rowcount
+                if won != 1 or skip:
+                    return None
+            return (row.id, caption, post.clip_local_path or "", post.clip_object_path or "")
+    except IntegrityError:
+        return None
+
+
+def _x_retryable(exc: Exception) -> bool:
+    if isinstance(exc, FileNotFoundError) or _storage_object_missing(exc):
+        return False
+    status = getattr(exc, "status", None)
+    return status is None or status >= 500 or status == 429
+
+
+def _x_snapshot(post_id: int) -> XPost | None:
+    from .db import session_scope
+
+    with session_scope(read_only=True) as session:
+        row = session.execute(
+            select(XPost).where(XPost.threads_post_pk == post_id)
+        ).scalar_one_or_none()
+        if row is not None:
+            session.expunge(row)
+        return row
+
+
+def publish_x_mirror(post_id: int, *, force: bool = False) -> XPost | None:
+    """Mirror a just-published Threads post to X: the caption and clip only —
+    never the first comment. Same contract as ``publish_linkedin_mirror``."""
+    if not force and not x_mirror_enabled():
+        return None
+    claim = _claim_x_mirror(post_id)
+    if claim is None:
+        return _x_snapshot(post_id)
+    x_id, caption, local_path, object_path = claim
+
+    settings = load_settings()
+    retries = max(0, int(settings.get("scheduler.publish_retries", 1)))
+    retry_delay = max(0, int(settings.get("scheduler.publish_retry_delay_seconds", 30)))
+    with _ACTIVE_LOCK:
+        _ACTIVE_X.add(x_id)
+    try:
+        result = None
+        for attempt in range(retries + 1):
+            try:
+                with _mirror_clip(local_path, object_path) as video:
+                    result = x_api.publish_video(video, caption)
+                break
+            except x_api.XDuplicateError as exc:
+                _write_x_row(x_id, status="skipped",
+                             error=f"Not sent to X: X refused it as a duplicate of an "
+                                   f"earlier post ({str(exc)[:300]})")
+                break
+            except Exception as exc:
+                log.warning("X mirror attempt %d/%d failed for post %s: %s",
+                            attempt + 1, retries + 1, post_id, exc)
+                if attempt >= retries or not _x_retryable(exc):
+                    _write_x_row(x_id, status="failed", error=str(exc)[:1000])
+                    break
+                time.sleep(retry_delay)
+        if result is not None:
+            _write_x_row(x_id, tweet_id=result["tweet_id"], media_id=result["media_id"],
+                         permalink=result["permalink"], status="published",
+                         published_at=utcnow(), error="")
+            log.info("Mirrored post %s to X (%s)", post_id, result["permalink"])
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE_X.discard(x_id)
+    return _x_snapshot(post_id)
 
 
 def _annotate_footage(session, post: ThreadsPost) -> None:

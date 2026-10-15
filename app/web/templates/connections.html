@@ -1,7 +1,7 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel, LinkedIn for the company-page mirror.{% endset %}
+{% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel, LinkedIn and X for automatic mirrors.{% endset %}
 {{ ui.pagebar("Connected accounts", sub=ta_sub) }}
 
 <div class="card">
@@ -75,6 +75,28 @@
       <input type="text" name="code" placeholder="AQT..." required style="max-width: 460px;">
       <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
     </form>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 8px;">X</div>
+  {% if x_authenticated %}
+    <p class="meta"><span class="badge supportive">Connected</span>
+      Every published Threads post is mirrored to
+      {% if x_info.username %}<strong>@{{ x_info.username }}</strong>{% else %}the connected account{% endif %}
+      with the same caption and clip. No first comment, and captions containing a link are skipped.
+      {% if not x_enabled %}<span class="badge hostile">Paused</span> <code>x.enabled</code> is off in settings.yaml.{% endif %}</p>
+  {% elif not x_configured %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not configured</span></p>
+    <p class="meta">Set <code>X_CLIENT_ID</code>, <code>X_CLIENT_SECRET</code> and
+      <code>X_REDIRECT_URI</code> (this dashboard's <code>/x/callback</code>, registered as a
+      callback URL on the X app) in <code>.env</code> and restart.</p>
+  {% else %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
+  {% endif %}
+  {% if x_configured %}
+    <p class="meta"><a href="{{ x_auth_url }}">{{ 'Reconnect' if x_authenticated else 'Authorize' }} with X ↗</a>
+      while signed in to the account you want to post as. X sends you back here to finish.</p>
   {% endif %}
 </div>
 

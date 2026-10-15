@@ -12,7 +12,8 @@ name: Threads scheduler
 # skipped, so a new workspace can be merged before its infrastructure exists.
 #
 # LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET are only used to refresh the
-# LinkedIn token (stored in the database) when it nears expiry.
+# LinkedIn token (stored in the database) when it nears expiry. X_CLIENT_ID /
+# X_CLIENT_SECRET do the same for the X token, which lasts only two hours.
 #
 # Schedule notes:
 # - GitHub cron is UTC only; posting windows are ET (see scheduler.windows in
@@ -47,6 +48,8 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       LINKEDIN_CLIENT_ID: ${{ secrets[format('LINKEDIN_CLIENT_ID{0}', matrix.suffix)] }}
       LINKEDIN_CLIENT_SECRET: ${{ secrets[format('LINKEDIN_CLIENT_SECRET{0}', matrix.suffix)] }}
+      X_CLIENT_ID: ${{ secrets[format('X_CLIENT_ID{0}', matrix.suffix)] }}
+      X_CLIENT_SECRET: ${{ secrets[format('X_CLIENT_SECRET{0}', matrix.suffix)] }}
     steps:
       - uses: actions/checkout@v4
         if: env.DATABASE_URL != ''

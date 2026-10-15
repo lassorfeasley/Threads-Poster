@@ -25,7 +25,8 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import chapters as chapter_index
-from .. import clip_proposals, instagram_api, linkedin_api, spend, threads_api, vision, youtube
+from .. import (clip_proposals, instagram_api, linkedin_api, spend, threads_api, vision,
+               x_api, youtube)
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
 from ..categories import category_by_slug, category_options, is_first_party
@@ -82,6 +83,7 @@ from ..models import (
     Trait,
     TraitWeight,
     TriageDecision,
+    XPost,
     utcnow,
 )
 from ..monitor import failed_channels_note, run_monitor_once
@@ -102,6 +104,7 @@ from ..publishing import (
     publish_paired_reel,
     publish_post,
     publish_reel_now,
+    publish_x_mirror,
     queue_clip,
     record_instagram_post,
     record_post,
@@ -230,7 +233,8 @@ def _load_attention_count() -> int:
     with session_scope(read_only=True) as session:
         count = int(session.execute(
             select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost)
-                   + _unacknowledged(LinkedInPost) + _stranded_reels())
+                   + _unacknowledged(LinkedInPost) + _unacknowledged(XPost)
+                   + _stranded_reels())
         ).scalar_one())
         try:
             # Expired posts collapse into ONE notification line however many
@@ -3329,6 +3333,11 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
         msg += " · LinkedIn live"
     elif li is not None:
         msg += f" · LinkedIn {li.status}: {(li.error or '')[:120]}"
+    xp = publish_x_mirror(post_id)
+    if xp is not None and xp.status == "published":
+        msg += " · X live"
+    elif xp is not None:
+        msg += f" · X {xp.status}: {(xp.error or '')[:120]}"
     return _flash(f"/cut/{cut_id}?step=post", msg)
 
 
@@ -3639,6 +3648,7 @@ def _publish_in_thread(post_id: int) -> None:
             # After the publish transaction commits; see publish_paired_reel.
             publish_paired_reel(post_id)
             publish_linkedin_mirror(post_id)
+            publish_x_mirror(post_id)
     finally:
         clear_publishing(post_id)
 
@@ -3969,6 +3979,11 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
         ).scalar_one_or_none()
         ctx["li"] = ({"status": li.status, "permalink": li.permalink, "error": li.error}
                      if li else None)
+        xp = session.execute(
+            select(XPost).where(XPost.threads_post_pk == p.id)
+        ).scalar_one_or_none()
+        ctx["xp"] = ({"status": xp.status, "permalink": xp.permalink, "error": xp.error}
+                     if xp else None)
         instagram_ok = instagram_api.is_authenticated()
         ctx["instagram_ok"] = instagram_ok
         ctx["include_instagram"] = bool(
@@ -4111,9 +4126,26 @@ def linkedin_callback(code: str = "", state: str = "", error: str = "",
     return linkedin_connect(code=code, next="/connections")
 
 
+@app.get("/x/callback")
+def x_callback(code: str = "", state: str = "", error: str = "",
+               error_description: str = ""):
+    """OAuth redirect target; X_REDIRECT_URI must point at this dashboard."""
+    if error:
+        return _flash("/connections", f"X auth failed: {error_description or error}")
+    verifier = x_api.pop_verifier(state)
+    if verifier is None:
+        return _flash("/connections", "X auth failed: unrecognized state — "
+                      "start again from the Accounts page")
+    try:
+        token = x_api.exchange_code(code, verifier)
+        return _flash("/connections", f"X connected — posting as @{token.get('username', '')}")
+    except Exception as exc:
+        return _flash("/connections", f"X auth failed: {exc}")
+
+
 @app.get("/connections", response_class=HTMLResponse)
 def connections_page(request: Request, msg: str = ""):
-    """Threads, Instagram and LinkedIn connection status (Configure area)."""
+    """Threads, Instagram, LinkedIn and X connection status (Configure area)."""
     authenticated = threads_api.is_authenticated()
     ig_authenticated = instagram_api.is_authenticated()
     try:
@@ -4122,6 +4154,8 @@ def connections_page(request: Request, msg: str = ""):
         ig_auth_url = ""
     li_configured = linkedin_api.is_configured()
     li_authenticated = linkedin_api.is_authenticated()
+    x_configured = x_api.is_configured()
+    x_authenticated = x_api.is_authenticated()
     return templates.TemplateResponse(
         request, "connections.html",
         {"authenticated": authenticated,
@@ -4135,6 +4169,11 @@ def connections_page(request: Request, msg: str = ""):
          "li_auth_url": linkedin_api.authorize_url() if li_configured else "",
          "li_info": linkedin_api.connection_info() if li_authenticated else {},
          "li_enabled": bool(load_settings().get("linkedin.enabled", True)),
+         "x_configured": x_configured,
+         "x_authenticated": x_authenticated,
+         "x_auth_url": x_api.authorize_url() if x_configured else "",
+         "x_info": x_api.connection_info() if x_authenticated else {},
+         "x_enabled": bool(load_settings().get("x.enabled", True)),
          "msg": msg, "active": "connections"},
     )
 
@@ -4683,6 +4722,15 @@ def _notifications_data() -> dict:
                    LinkedInPost.attention_dismissed_at.is_(None))
             .order_by(LinkedInPost.created_at.desc())
         ).scalars().all()
+        x_failed = session.execute(
+            select(XPost)
+            .options(selectinload(XPost.threads_post)
+                     .selectinload(ThreadsPost.cut).selectinload(Cut.candidate),
+                     selectinload(XPost.threads_post)
+                     .selectinload(ThreadsPost.candidate))
+            .where(XPost.status == "failed", XPost.attention_dismissed_at.is_(None))
+            .order_by(XPost.created_at.desc())
+        ).scalars().all()
         # Timely posts that went stale in the queue. The scored scheduler
         # never auto-places an expired post, so without this they'd sink
         # silently; the operator decides — post now, or delete.
@@ -4694,7 +4742,7 @@ def _notifications_data() -> dict:
             log.exception("Expired-post check failed")
             expired = []
     return {"failed": failed, "ig_failed": ig_failed, "ig_stranded": ig_stranded,
-            "li_failed": li_failed, "expired": expired}
+            "li_failed": li_failed, "x_failed": x_failed, "expired": expired}
 
 
 pagecache.register("notifications", _notifications_data)
@@ -5124,6 +5172,36 @@ def dismiss_linkedin_attention(request: Request, li_id: int,
             return (JSONResponse({"error": "LinkedIn post not found"}, status_code=404)
                     if wants_json else _flash("/notifications", "LinkedIn post not found"))
         li.attention_dismissed_at = utcnow()
+    return JSONResponse({"ok": True}) if wants_json else _flash(next, "Dismissed")
+
+
+@app.post("/xpost/{x_id}/retry")
+def retry_x_post(x_id: int, next: str = Form("/notifications")):
+    """Operator-confirmed retry of a failed X mirror. Synchronous."""
+    with session_scope(read_only=True) as session:
+        xp = session.get(XPost, x_id)
+        if xp is None:
+            return _flash(next, "X post not found")
+        if xp.status != "failed":
+            return _flash(next, "This X post is not retryable")
+        post_id = xp.threads_post_pk
+    xp = publish_x_mirror(post_id, force=True)
+    if xp is not None and xp.status == "published":
+        return _flash(next, f"Posted to X: {xp.permalink}")
+    return _flash(next, f"X post {xp.status if xp else 'failed'}: "
+                        f"{(xp.error if xp else '')[:200]}")
+
+
+@app.post("/xpost/{x_id}/dismiss")
+def dismiss_x_attention(request: Request, x_id: int, next: str = Form("/notifications")):
+    """Acknowledge a failed X mirror so it leaves the notifications list."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with session_scope() as session:
+        xp = session.get(XPost, x_id)
+        if xp is None:
+            return (JSONResponse({"error": "X post not found"}, status_code=404)
+                    if wants_json else _flash("/notifications", "X post not found"))
+        xp.attention_dismissed_at = utcnow()
     return JSONResponse({"ok": True}) if wants_json else _flash(next, "Dismissed")
 
 

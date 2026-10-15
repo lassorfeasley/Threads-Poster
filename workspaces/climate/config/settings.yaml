@@ -340,6 +340,16 @@ linkedin:
   publish_poll_timeout_seconds: 600
   publish_poll_interval_seconds: 10
 
+x:
+  # X mirror: once connected on the Accounts page, every published Threads
+  # post goes to X with the same caption and 16:9 clip. Never the first
+  # comment, and a caption containing a link (promos, any bare domain like
+  # Renewables.org) is skipped — X bills a post with a URL at $0.20 against
+  # $0.015 for a plain one. Off switch for the mirror without disconnecting.
+  enabled: true
+  # How long to wait for X to finish processing an uploaded video.
+  publish_poll_timeout_seconds: 600
+
 vertical:
   # 1080x1920 branded composite for Instagram Reels: hook text at the top, the
   # 16:9 clip full-width in the upper-middle, burned-in captions below it, and

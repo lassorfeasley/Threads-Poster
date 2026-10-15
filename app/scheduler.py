@@ -67,11 +67,13 @@ from .publishing import (
     first_reply_needs_metrics,
     is_linkedin_publish_active,
     is_publish_active,
+    is_x_publish_active,
     mark_publishing,
     maybe_post_first_reply,
     publish_linkedin_mirror,
     publish_paired_reel,
     publish_post,
+    publish_x_mirror,
     record_post,
     resolve_first_reply_text,
 )
@@ -161,6 +163,19 @@ def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
                     "didn't, retry from here.")
         recovered += 1
         log.warning("Recovered LinkedIn post %s stuck in 'publishing' -> 'failed'", li.id)
+    from .models import XPost
+
+    x_rows = session.execute(
+        select(XPost).where(XPost.status == STATUS_PUBLISHING)
+    ).scalars().all()
+    for xp in x_rows:
+        if only_inactive and is_x_publish_active(xp.id):
+            continue
+        xp.status = "failed"
+        xp.error = ("Publishing to X was interrupted before it finished. Check the "
+                    "X account to see if this clip went out; if it didn't, retry from here.")
+        recovered += 1
+        log.warning("Recovered X post %s stuck in 'publishing' -> 'failed'", xp.id)
     return recovered
 
 
@@ -2101,6 +2116,7 @@ def _claim_and_publish(post_id: int, window_key: str, state_action: str,
             # so crash recovery can tell an in-flight reel from a stranded one.
             publish_paired_reel(post_id)
             publish_linkedin_mirror(post_id)
+            publish_x_mirror(post_id)
     finally:
         clear_publishing(post_id)
 
