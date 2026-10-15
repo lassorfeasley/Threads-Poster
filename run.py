@@ -288,7 +288,7 @@ def _monitor_pass_with_record(lookback: int | None) -> None:
     "last refreshed" state also reflects headless (cron / GitHub Actions) runs."""
     from app.db import session_scope
     from app.models import MonitorRun, utcnow
-    from app.monitor import run_monitor_once
+    from app.monitor import failed_channels_note, run_monitor_once
 
     scope = f"last {lookback} days" if lookback else "since last check"
     with session_scope() as session:
@@ -318,8 +318,12 @@ def _monitor_pass_with_record(lookback: int | None) -> None:
                 f"{result['channels_checked']} channels checked, "
                 f"{result['candidates_stored']} new candidates, "
                 f"{result.get('vision_scored', 0)} vision-scored"
+                f"{failed_channels_note(result)}"
             )
             run.finished_at = utcnow()
+    failed = result.get("channels_failed") or []
+    if failed and os.environ.get("GITHUB_ACTIONS"):
+        print(f"::warning title=Monitor::{len(failed)} channels failing: {', '.join(failed)}")
 
 
 def cmd_monitor(args) -> None:

@@ -62,27 +62,21 @@ deadline_hours: 12
 deadline_min_views: 500
 deadline_min_likes: 50
 instruction: |
-  Write a two-sentence invitation to support Renewables.org.
+  Write a short, plain note pointing readers to Renewables.org, one or two
+  sentences.
 
-  Sentence one is a short question offering the reader a way to help the specific
-  thing at stake in the clip they just watched. It asks whether they WANT that
-  thing protected or fixed — it never describes their feelings, never asks what
-  they are experiencing, and never addresses them as if the problem is happening
-  to them. Name the concrete subject of the footage.
+  It should read like the poster adding a useful aside under their own clip,
+  not like an ad. No questions, no exclamation marks, no urgency, and never
+  describe the reader's feelings. A light, natural bridge from the clip is fine
+  ("If you want to do something about this, ..." or "One practical thing you
+  can do: ...") but it's equally fine to skip it and just state the ask. Don't
+  use the same bridge twice in a row.
 
-  For a clip about England's hedgehogs losing their habitat: "Want to save the
-  hedgehogs?" For a clip about a Spanish reservoir running dry: "Think Spain's
-  reservoirs are worth saving?" Other good shapes are "Care about ...?",
-  "Want to help protect ...?", and "Ready to do something about ...?".
-
-  Keep it under about eight words. Vary the opening across posts — do not start
-  every reply with "Want to".
-
-  Sentence two makes the ask and must contain the URL Renewables.org written
-  exactly that way, with no https:// and no tracking parameters. Say that
-  Renewables.org is a nonprofit and that the money finances solar projects in the
-  Global South. Vary how you phrase this every time — different verbs, different
-  sentence shape, different emphasis — so the same line never appears twice.
+  It must contain the URL Renewables.org written exactly that way, with no
+  https:// and no tracking parameters. Say that Renewables.org is a nonprofit
+  and that the money finances solar projects in the Global South. Vary how you
+  phrase this every time — different verbs, different sentence shape, different
+  emphasis — so the same line never appears twice.
 
   You may also use any of the following facts, but only word them in ways that
   stay true to them. Rotate which one you include rather than using all of them:

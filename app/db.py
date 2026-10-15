@@ -548,6 +548,10 @@ def session_scope(*, read_only: bool = False):
 def sync_channels_from_config(session: Session) -> int:
     """Upsert channels from config/channels.yaml into the DB (keyed by URL).
 
+    An entry's ``previous_urls`` carries a row forward when a channel changes
+    handle: the old row moves to the new URL (keeping its candidates), or is
+    disabled if a row for the new URL already exists.
+
     Channels added via the dashboard live only in the DB; this never deletes
     rows, so dashboard-added channels survive a re-sync.
 
@@ -569,6 +573,23 @@ def sync_channels_from_config(session: Session) -> int:
         if not url:
             continue
         existing = by_url.get(url)
+        for old_url in entry.get("previous_urls") or []:
+            old = by_url.get(str(old_url).strip())
+            if old is None or old is existing:
+                continue
+            if url not in by_url:
+                # Move the row to the new URL so its candidate history stays
+                # attached. Cached ids came from the old URL (or never resolved),
+                # so clear them and let the next poll re-resolve.
+                old.url = url
+                old.channel_id = None
+                old.uploads_playlist_id = None
+                old.last_error = ""
+                by_url[url] = old
+                existing = old
+            elif existing is not None and old.enabled:
+                old.enabled = False
+                old.last_error = f"replaced by {url} (#{existing.id})"
         if existing is None:
             session.add(
                 Channel(

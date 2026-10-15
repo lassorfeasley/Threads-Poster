@@ -84,7 +84,7 @@ from ..models import (
     TriageDecision,
     utcnow,
 )
-from ..monitor import run_monitor_once
+from ..monitor import failed_channels_note, run_monitor_once
 from ..publishing import (
     clear_publishing,
     draft_first_reply,
@@ -880,6 +880,7 @@ def _monitor_in_thread(run_id: int, days: int | None) -> None:
             f"{result['candidates_stored']} new candidates, "
             f"{result.get('vision_scored', 0)} vision-scored "
             f"(spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today)"
+            f"{failed_channels_note(result)}"
         )
         with session_scope() as session:
             run = session.get(MonitorRun, run_id)

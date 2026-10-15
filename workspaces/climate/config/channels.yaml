@@ -13,6 +13,8 @@
 #   scope:     local | national | international (defaults to local)
 #   url:       YouTube channel URL (handle, /channel/, /c/, or /user/ form)
 #   channel_id: canonical UC... id. Leave blank; the app resolves and caches it.
+#   previous_urls: old URLs for this channel after a handle change. The
+#              existing row (and its candidates) moves to the new url.
 #   enabled:   set false to pause a channel without deleting it.
 #
 # You can edit this file by hand or use the Channels page in the dashboard.
@@ -27,7 +29,7 @@ channels:
   # 2. Los Angeles
   - {call_sign: KABC, network: ABC, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@ABC7"}
   - {call_sign: KNBC, network: NBC, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@nbcla"}
-  - {call_sign: KCAL/KCBS, network: CBS, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@KCALnews"}
+  - {call_sign: KCAL/KCBS, network: CBS, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@CBSLA", previous_urls: ["https://www.youtube.com/@KCALnews"]}
   - {call_sign: KTLA, network: IND/CW, market: "Los Angeles", region: West Coast, url: "https://www.youtube.com/@KTLA"}
 
   # 3. Chicago
@@ -44,7 +46,7 @@ channels:
   - {call_sign: WTXF, network: FOX, market: "Philadelphia", region: Northeast, url: "https://www.youtube.com/@Fox29Philly"}
 
   # 5. Dallas-Fort Worth
-  - {call_sign: WFAA, network: ABC, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@wfaa"}
+  - {call_sign: WFAA, network: ABC, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@WFAA8", previous_urls: ["https://www.youtube.com/@wfaa"]}
   - {call_sign: KXAS, network: NBC, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@nbcdfw"}
   - {call_sign: KTVT, network: CBS, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@CBSTexas"}
   - {call_sign: KDFW, network: FOX, market: "Dallas-Fort Worth", region: Texas, url: "https://www.youtube.com/@fox4news"}
@@ -70,7 +72,7 @@ channels:
   # 9. Washington, DC
   - {call_sign: WJLA, network: ABC, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@7NewsDC"}
   - {call_sign: WRC, network: NBC, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@nbcwashington"}
-  - {call_sign: WUSA, network: CBS, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@wusa9"}
+  - {call_sign: WUSA, network: CBS, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@WUSA9news", previous_urls: ["https://www.youtube.com/@wusa9"]}
   - {call_sign: WTTG, network: FOX, market: "Washington DC", region: Mid-Atlantic, url: "https://www.youtube.com/@fox5dc"}
 
   # 10. Boston
@@ -93,9 +95,9 @@ channels:
 
   # 13. Tampa-St. Petersburg
   - {call_sign: WFLA, network: NBC, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@WFLANewsChannel8"}
-  - {call_sign: WFTS, network: ABC, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@abcactionnews"}
+  - {call_sign: WFTS, network: ABC, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@TampaBay28", previous_urls: ["https://www.youtube.com/@abcactionnews"]}
   - {call_sign: WTSP, network: CBS, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@10TampaBay"}
-  - {call_sign: WTVT, network: FOX, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@FOX13TampaBay"}
+  - {call_sign: WTVT, network: FOX, market: "Tampa", region: Gulf Coast, url: "https://www.youtube.com/@FOX13Tampa", previous_urls: ["https://www.youtube.com/@FOX13TampaBay"]}
 
   # 14. Minneapolis-St. Paul
   - {call_sign: KSTP, network: ABC, market: "Minneapolis", region: Midwest, url: "https://www.youtube.com/@KSTPTV"}
@@ -105,7 +107,7 @@ channels:
 
   # 15. Detroit
   - {call_sign: WXYZ, network: ABC, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@wxyztvdetroit"}
-  - {call_sign: WDIV, network: NBC, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@ClickOnDetroit"}
+  - {call_sign: WDIV, network: NBC, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@ClickOnDetroitLocal4WDIV", previous_urls: ["https://www.youtube.com/@ClickOnDetroit"]}
   - {call_sign: WWJ, network: CBS, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@CBSDetroitWWJTV"}
   - {call_sign: WJBK, network: FOX, market: "Detroit", region: Midwest, url: "https://www.youtube.com/@FOX2Detroit"}
 
@@ -250,7 +252,7 @@ channels:
   - {call_sign: KTNV, network: ABC, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@KTNV"}
   - {call_sign: KSNV, network: NBC, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@News3LasVegas"}
   - {call_sign: KLAS, network: CBS, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@8NewsNOW"}
-  - {call_sign: KVVU, network: FOX, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@kvvutv"}
+  - {call_sign: KVVU, network: FOX, market: "Las Vegas", region: Southwest, url: "https://www.youtube.com/@fox5lasvegas", previous_urls: ["https://www.youtube.com/@kvvutv"]}
 
   # 40. West Palm Beach-Fort Pierce
   - {call_sign: WPBF, network: ABC, market: "West Palm Beach", region: Southeast, url: "https://www.youtube.com/@WPBF"}
@@ -259,7 +261,7 @@ channels:
 
   # 41. Grand Rapids-Kalamazoo
   - {call_sign: WZZM, network: ABC, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@13onyourside"}
-  - {call_sign: WOOD, network: NBC, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@woodtv8"}
+  - {call_sign: WOOD, network: NBC, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@WOODTV", previous_urls: ["https://www.youtube.com/@woodtv8"]}
   - {call_sign: WWMT, network: CBS, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@wwmtnews"}
   - {call_sign: WXMI, network: FOX, market: "Grand Rapids", region: Midwest, url: "https://www.youtube.com/@Fox17onlineWXMI"}
 
@@ -306,7 +308,7 @@ channels:
 
   # 49. Jacksonville (shared newsrooms: one channel covers two stations each)
   - {call_sign: WTLV/WJXX, network: NBC/ABC, market: "Jacksonville", region: Southeast, url: "https://www.youtube.com/@FirstCoastNews"}
-  - {call_sign: WJAX/WFOX, network: CBS/FOX, market: "Jacksonville", region: Southeast, url: "https://www.youtube.com/@ActionNewsJax"}
+  - {call_sign: WJAX/WFOX, network: CBS/FOX, market: "Jacksonville", region: Southeast, url: "https://www.youtube.com/@actionnewsjaxcbs47fox30", previous_urls: ["https://www.youtube.com/@ActionNewsJax"]}
 
   # 50. Memphis
   - {call_sign: WATN, network: ABC, market: "Memphis", region: Southeast, url: "https://www.youtube.com/@ABC24Memphis"}
@@ -320,10 +322,11 @@ channels:
   - {call_sign: "NBC News", network: NBC, country: "United States", scope: national, url: "https://www.youtube.com/@NBCNews"}
   - {call_sign: "CNN", network: CNN, country: "United States", scope: national, url: "https://www.youtube.com/@CNN"}
   - {call_sign: "Fox News", network: FOX, country: "United States", scope: national, url: "https://www.youtube.com/@FoxNews"}
-  - {call_sign: "MSNBC", network: MSNBC, country: "United States", scope: national, url: "https://www.youtube.com/@msnbc"}
+  - {call_sign: "MS NOW", network: "MS NOW", country: "United States", scope: national, url: "https://www.youtube.com/@msnow", previous_urls: ["https://www.youtube.com/@msnbc"]}
   - {call_sign: "PBS NewsHour", network: PBS, country: "United States", scope: national, url: "https://www.youtube.com/@PBSNewsHour"}
-  - {call_sign: "The Weather Channel", network: Weather, country: "United States", scope: national, url: "https://www.youtube.com/@weatherchannel"}
+  - {call_sign: "The Weather Channel", network: Weather, country: "United States", scope: national, url: "https://www.youtube.com/@TheWeatherChannel", previous_urls: ["https://www.youtube.com/@weatherchannel"]}
   - {call_sign: "AccuWeather", network: Weather, country: "United States", scope: national, url: "https://www.youtube.com/@accuweather"}
+  - {call_sign: "Nat Geo Animals", network: "Nat Geo", country: "United States", scope: national, url: "https://www.youtube.com/@NatGeoAnimals", previous_urls: ["https://www.youtube.com/@NatGeoWild"]}
   - {call_sign: "Associated Press", network: Wire, country: "United States", scope: national, url: "https://www.youtube.com/@AssociatedPress"}
 
   # --- International (scope: international) ---

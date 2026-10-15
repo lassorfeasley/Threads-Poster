@@ -11,6 +11,9 @@ monitor:
   default_lookback_days: 2
   # Max uploads fetched per channel per poll (safety cap; local news volume is low).
   max_results_per_channel: 25
+  # Same cap for national/international channels, which can post more than 25
+  # videos between 6-hourly passes. Uploads past the cap are never seen.
+  max_results_per_national_channel: 100
   # Skip portrait/vertical videos (YouTube Shorts) — they don't fit the clip workflow.
   exclude_portrait: true
 

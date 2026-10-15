@@ -2,7 +2,7 @@
 
 Reads the operator's own published captions and, via the LLM, distills concrete
 EDITORIAL / FORMATTING rules — the composition moves that make their strong posts
-work (e.g. "lead with a one-line pull quote", "end with a wry question", "frame
+work (e.g. "lead with a one-line pull quote", "end on a concrete detail", "frame
 denial viewpoints impartially"). The operator can promote the ones that ring true
 into their style guide, or dismiss them.
 

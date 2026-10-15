@@ -17,7 +17,12 @@ name: Channel monitor
 on:
   schedule:
     - cron: "0 4,10,16,22 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Backfill: scan this many days back (blank = normal window)"
+        required: false
+        default: ""
 
 jobs:
   monitor:
@@ -58,4 +63,6 @@ jobs:
         if: env.DATABASE_URL != ''
       - name: Run one monitor pass
         if: env.DATABASE_URL != ''
-        run: python run.py monitor --workspace "$WORKSPACE"
+        env:
+          LOOKBACK_DAYS: ${{ inputs.lookback_days }}
+        run: python run.py monitor --workspace "$WORKSPACE" ${LOOKBACK_DAYS:+--lookback "$LOOKBACK_DAYS"}

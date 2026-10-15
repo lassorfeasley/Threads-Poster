@@ -207,15 +207,17 @@ def list_recent_uploads(uploads_playlist_id: str, since: dt.datetime, max_result
         if hit_older or not page_token:
             break
 
-    # Batch-fetch durations.
-    if uploads:
-        ids = ",".join(u.video_id for u in uploads[:50])
+    uploads = uploads[:max_results]
+    # Batch-fetch durations (videos.list takes at most 50 ids per call).
+    durations: dict[str, int] = {}
+    for start in range(0, len(uploads), 50):
+        ids = ",".join(u.video_id for u in uploads[start:start + 50])
         vdata = _get("videos", part="contentDetails", id=ids)
         # Live streams / premieres / upcoming videos may have no duration.
-        durations = {
+        durations.update({
             item["id"]: parse_iso8601_duration(item.get("contentDetails", {}).get("duration", ""))
             for item in vdata.get("items", [])
-        }
-        for u in uploads:
-            u.duration_seconds = durations.get(u.video_id)
-    return uploads[:max_results]
+        })
+    for u in uploads:
+        u.duration_seconds = durations.get(u.video_id)
+    return uploads

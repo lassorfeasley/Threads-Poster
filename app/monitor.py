@@ -78,10 +78,13 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
         return 0
 
     max_results = settings.get("monitor.max_results_per_channel", 25)
+    if channel.scope in ("national", "international"):
+        max_results = settings.get("monitor.max_results_per_national_channel", 100)
     if lookback_days is not None:
         since = utcnow() - dt.timedelta(days=lookback_days)
-        # Backfills page deeper than a routine poll.
-        max_results = max(max_results, min(50 * lookback_days, 200))
+        # Backfills page deeper than a routine poll, per day of lookback; the
+        # date cutoff stops paging early on low-volume channels.
+        max_results = max(max_results, 50) * max(lookback_days, 1)
     else:
         # Default window: calendar days "today + yesterday" (configurable). Scans
         # the whole window every run rather than only since the last check; video
@@ -198,6 +201,7 @@ def run_monitor_once(lookback_days: int | None = None) -> dict:
     keywords = load_keywords()
     total_stored = 0
     checked = 0
+    failed: list[str] = []
     # Shared across all channels so the per-pass vision cap is a global limit.
     vision_state = {"scored": 0}
     with session_scope() as session:
@@ -209,10 +213,22 @@ def run_monitor_once(lookback_days: int | None = None) -> dict:
             total_stored += poll_channel(session, channel, keywords, settings, lookback_days,
                                          vision_state=vision_state, traits=traits)
             checked += 1
+            if channel.last_error:
+                failed.append(channel.call_sign)
             # Commit per channel: keeps write transactions short (no long lock
             # for other sessions) and preserves progress if a pass is interrupted.
             session.commit()
     log.info("Monitor pass done: %d channels checked, %d new candidates, %d vision-scored",
              checked, total_stored, vision_state["scored"])
+    if failed:
+        log.warning("%d channels failed (see Channels page): %s", len(failed), ", ".join(failed))
     return {"channels_checked": checked, "candidates_stored": total_stored,
-            "vision_scored": vision_state["scored"]}
+            "vision_scored": vision_state["scored"], "channels_failed": failed}
+
+
+def failed_channels_note(result: dict) -> str:
+    """Summary suffix naming channels that couldn't be polled, or ''."""
+    failed = result.get("channels_failed") or []
+    if not failed:
+        return ""
+    return f" — {len(failed)} channels failing: {', '.join(failed)}"
