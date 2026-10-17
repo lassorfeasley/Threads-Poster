@@ -346,6 +346,9 @@ def suggest_rerun_caption(model: str, *, title: str, channel: str,
         "or anything implying the events are happening now. Don't mention that "
         "it's a rerun either.\n"
         "- Only facts found in the transcript, title or original caption.\n"
+        "- No closing question aimed at the reader, even if the original ends "
+        "on one — it reads as engagement bait. End on the strongest fact or "
+        "line. A question someone actually asks in the clip is fine.\n"
         f"- {length} Hard ceiling {max_chars} characters. No lists, no blank "
         "lines.\n"
     )
@@ -1544,7 +1547,9 @@ def distill_style_guide(model: str, captions: list[str]) -> str:
         "no headers) that would let a ghostwriter imitate them: sentence length "
         "and rhythm, how they open and close, punctuation and capitalization "
         "quirks, emoji/hashtag habits, tone and attitude, recurring moves (e.g. "
-        "quotes, stats, questions). Describe only patterns actually present. "
+        "quotes, stats). Describe only patterns actually present. Never "
+        "describe ending on a question, rhetorical or otherwise, as one of "
+        "their habits; the operator has stopped doing it. "
         "JSON shape: {\"style_guide\": \"- bullet\\n- bullet\"}"
     )
     user = json.dumps({"captions": [c[:500] for c in captions[:30]]})

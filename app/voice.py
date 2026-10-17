@@ -33,6 +33,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import statistics
 from difflib import SequenceMatcher
 
@@ -46,6 +47,12 @@ from .models import AppToken, Candidate, Channel, DraftProposal, ThreadsPost, ut
 log = logging.getLogger("voice")
 
 _STYLE_TOKEN_NAME = "voice_style_guide"
+# Bump to rebuild every cached style guide on its next use, e.g. after changing
+# what the distiller is fed or told.
+_STYLE_GUIDE_VERSION = 2
+# Hashtags, links, emoji and other non-word characters that can trail the last
+# sentence of a caption.
+_CAPTION_TAIL = re.compile(r"(?:\s+(?:#\w+|https?://\S+|\S+\.\w{2,}/?\S*)|[^\w?.!]+)+$")
 
 # Weight for app captions of unknown provenance — rows written before the
 # caption ledger existed, when ``suggested_caption`` was mistakenly filled with
@@ -132,6 +139,18 @@ def _recency(published_at, half_life_days: float = 180.0) -> float:
     return 0.5 ** (age_days / half_life_days)
 
 
+def ends_with_question(caption: str) -> bool:
+    """Whether the caption's last sentence is a question, ignoring trailing
+    hashtags, links and emoji.
+
+    Captions that close on a question are kept out of everything that teaches
+    the drafter the operator's voice. Older history is full of them, and as
+    examples or distilled "habits" they outweigh the drafter's instruction not
+    to reach for one.
+    """
+    return _CAPTION_TAIL.sub("", caption.strip()).endswith("?")
+
+
 def select_examples(captions: list[dict], k: int,
                     history_share: float = 0.5) -> list[str]:
     """Pick up to ``k`` voice examples, newest-and-most-operator-ish first.
@@ -151,7 +170,8 @@ def select_examples(captions: list[dict], k: int,
     def score(c: dict) -> float:
         return c["weight"] * 2.0 + _recency(c["published_at"]) * 0.5
 
-    ranked = sorted(captions, key=score, reverse=True)
+    ranked = sorted((c for c in captions if not ends_with_question(c["caption"])),
+                    key=score, reverse=True)
     history = [c for c in ranked if c["imported"]]
     own = [c for c in ranked if not c["imported"]]
 
@@ -232,6 +252,7 @@ def _load_cached_guide(session) -> dict:
 
 def _store_guide(session, text: str, built_from_n: int) -> None:
     payload = json.dumps({"text": text, "built_from_n": built_from_n,
+                          "version": _STYLE_GUIDE_VERSION,
                           "built_at": utcnow().isoformat()})
     row = session.get(AppToken, _STYLE_TOKEN_NAME)
     if row is None:
@@ -248,6 +269,7 @@ def get_style_guide(session, settings: Settings, captions: list[dict]) -> str:
     cached = _load_cached_guide(session)
     refresh_every = int(settings.get("voice.refresh_every", 5))
     stale = (not cached
+             or cached.get("version") != _STYLE_GUIDE_VERSION
              or len(captions) >= int(cached.get("built_from_n", 0)) + refresh_every)
     if not stale:
         return str(cached.get("text", ""))
@@ -255,10 +277,12 @@ def get_style_guide(session, settings: Settings, captions: list[dict]) -> str:
     # Distill from the operator's most voice-heavy captions, recency included
     # so the guide tracks how they write now rather than how they wrote first.
     sample = [c["caption"] for c in sorted(
-        captions,
+        (c for c in captions if not ends_with_question(c["caption"])),
         key=lambda c: c["weight"] * 2.0 + _recency(c["published_at"]) * 0.5,
         reverse=True,
     )[:30]]
+    if not sample:
+        return ""
     try:
         text = llm.distill_style_guide(
             settings.get("voice.model", "claude-sonnet-5"), sample)
