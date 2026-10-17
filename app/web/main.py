@@ -2951,6 +2951,36 @@ def _load_clip_transcript(cut: Cut | None = None,
     return lines, _clip_transcript_plain(lines)
 
 
+def _caption_scene_context(cut: Cut, lead_in_seconds: float = 60.0) -> tuple[str, dict | None]:
+    """Background for the caption drafter: source transcript just before the
+    clip, and the chapter the clip opens in. Returns ("", None) when missing."""
+    c = cut.candidate
+    try:
+        windows = json.loads(cut.trim_segments or "[]")
+        clip_start = float(windows[0]["start"])
+    except (ValueError, TypeError, KeyError, IndexError):
+        return "", None
+    lead_in = ""
+    if c.transcript_path and Path(c.transcript_path).exists():
+        try:
+            segments = json.loads(Path(c.transcript_path).read_text())
+        except Exception:
+            segments = []
+        lines = []
+        for s in segments:
+            try:
+                s_start, s_end = float(s["start"]), float(s["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if s_end <= clip_start and s_start >= clip_start - lead_in_seconds:
+                lines.append(str(s.get("text", "")).strip())
+        lead_in = " ".join(" ".join(lines).split())
+    chapter = next((ch for ch in chapter_index.load(c)
+                    if float(ch.get("start", 0)) <= clip_start < float(ch.get("end", 0))),
+                   None)
+    return lead_in, chapter
+
+
 @app.post("/cut/{cut_id}/suggest-caption")
 def suggest_caption(cut_id: int):
     settings = load_settings()
@@ -2989,6 +3019,15 @@ def suggest_caption(cut_id: int):
         # Promo captions carry the call-to-action URL themselves, because those
         # posts get no first comment to put it in (``first_party_enabled``).
         first_party = is_first_party(c)
+        # What the scene means rarely lives in its few seconds of dialogue —
+        # extra context only, so a failure here drafts without it.
+        try:
+            lead_in, chapter = _caption_scene_context(cut)
+        except Exception as exc:
+            log.warning("Caption scene context failed for cut %s: %s", cut_id, exc)
+            lead_in, chapter = "", None
+        contact_sheet = (vision.clip_contact_sheet(cut.trimmed_clip_path)
+                         if settings.get("vision.enabled", True) else None)
         try:
             caption = suggest_post_caption(
                 model,
@@ -2999,6 +3038,9 @@ def suggest_caption(cut_id: int):
                 target_words=target_words,
                 description=c.description,
                 first_party=first_party,
+                contact_sheet=contact_sheet,
+                lead_in=lead_in,
+                chapter=chapter,
             )
             # The caption field itself is left untouched — this is a proposal
             # until the operator accepts it (/cut/{id}/caption). The DRAFT is
@@ -3011,6 +3053,7 @@ def suggest_caption(cut_id: int):
                     model=model, max_chars=max_chars, target_words=target_words,
                     style_guide=voice["style_guide"], operator_guide=operator_guide,
                     examples=len(voice["examples"]), first_party=first_party,
+                    scene_context=bool(contact_sheet or lead_in or chapter),
                 ),
                 max_chars=max_chars,
                 target_words=target_words,

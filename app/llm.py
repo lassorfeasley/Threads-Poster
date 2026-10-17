@@ -1171,7 +1171,10 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
                          max_chars: int = 220,
                          target_words: int | None = None,
                          description: str = "",
-                         first_party: bool = False) -> str:
+                         first_party: bool = False,
+                         contact_sheet: bytes | None = None,
+                         lead_in: str = "",
+                         chapter: dict | None = None) -> str:
     """Recommend Threads post text for the operator's trimmed clip. The operator
     reviews/edits before posting — this is a DRAFT, never auto-posted.
 
@@ -1190,6 +1193,13 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     ``first_party`` marks the brand's own promo footage, where the clip IS the
     ad and the caption has to name the destination — those posts get no first
     comment to carry it (``first_party_enabled`` in first_reply.yaml).
+
+    A few seconds of dialogue rarely say what a scene is about — a punchline
+    without its setup reads as something else entirely. ``contact_sheet`` (a
+    tiled JPEG of the clip's frames), ``lead_in`` (source transcript just before
+    the clip) and ``chapter`` ({topic, summary} of the stretch the clip sits in)
+    supply that meaning. Only the clip's own transcript and frames may be
+    described as being in the clip.
     """
     b = _brand()
     # The URL is a fixed cost the drafter must not pay for out of the pitch, so
@@ -1242,6 +1252,29 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
         "publisher, or topic — use it for context but the transcript is still "
         "the primary authority on what happened. "
     )
+    system += (
+        "\n\nUNDERSTAND THE SCENE BEFORE WRITING. A short excerpt of dialogue — "
+        "especially from fiction, comedy, satire or an edited segment — is "
+        "often a punchline whose meaning comes from the setup and from what is "
+        "on screen, not from the literal words. Work out what is actually "
+        "happening and what the point is, then caption that. If you are not "
+        "sure what a line means in context, say plainly what happens rather "
+        "than quoting it; a quote that only makes sense with the video playing "
+        "is a misfire, not a hook.\n"
+    )
+    if contact_sheet:
+        system += (
+            "The attached image is a grid of frames from the clip, in order, "
+            "left to right and top to bottom. Use it to see what is on screen — "
+            "signs, settings, who is acting on whom.\n"
+        )
+    if lead_in or chapter:
+        system += (
+            "lead_in_transcript_before_clip and source_chapter come from the "
+            "surrounding video, NOT the clip. Use them only to understand the "
+            "setup and what the moment means; never present anything from them "
+            "as something the viewer will see or hear in the clip.\n"
+        )
     # A mandatory place name can consume most of a very short caption, so it
     # becomes a preference once the target is tight. Only asked for at all
     # when the source actually has a place (news stations do; a fitness
@@ -1298,8 +1331,25 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     }
     if description:
         payload["source_video_description"] = description[:2000]
-    user = json.dumps(payload)
-    data = _json_chat(model, system, user, max_tokens=600)
+    if lead_in:
+        payload["lead_in_transcript_before_clip"] = lead_in[-2000:]
+    if chapter:
+        payload["source_chapter"] = {
+            "topic": str(chapter.get("topic", ""))[:200],
+            "summary": str(chapter.get("summary", ""))[:600],
+        }
+    system += "\nRespond with a single JSON object only — no prose, no code fences."
+    content: str | list = json.dumps(payload)
+    if contact_sheet:
+        content = [
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(contact_sheet).decode("ascii"),
+            }},
+            {"type": "text", "text": content},
+        ]
+    data = _parse_json(_text_from(_create(model, system, content,
+                                          max_tokens=600, temperature=0.2)))
     return _tidy_caption(str(data.get("caption", "")))
 
 
