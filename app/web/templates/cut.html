@@ -2979,7 +2979,8 @@ async function retryExport() {
 
     // Queueing with the reel ticked needs a rendered vertical. Kick off
     // compose when the box is on (including the default-on page load).
-    (function guardIgQueue() {
+    // The toggle sits in the rail, parsed after this script runs.
+    document.addEventListener('DOMContentLoaded', function guardIgQueue() {
       const box = document.getElementById('include-instagram');
       if (!box) return;
       function ensureVertical() {
@@ -2988,7 +2989,7 @@ async function retryExport() {
       }
       box.addEventListener('change', ensureVertical);
       ensureVertical();
-    })();
+    });
 
     // Three-state toggle: plain clip, or captions burned in at bottom/top.
     // Reuses an already-rendered captioned file when the position matches;
@@ -3460,18 +3461,19 @@ async function retryExport() {
         const target = await chooseDialog('Publish right now — pick where this goes.',
                                           { title: 'Post now', choices: targetChoices() });
         if (!target) return null;
-        // The reel needs a rendered vertical: compose it on demand rather than
-        // bouncing the operator back with a server-side error.
-        if (target !== 'threads' && !hasVertical) {
-          if (!verticalBusy) await generateVertical();
-          if (!hasVertical) {
-            await alertDialog(verticalBusy
-              ? 'Still composing the vertical — try again in a moment.'
-              : "The vertical composite isn't ready, so the reel can't be published yet.");
-            return null;
-          }
-        }
+        if (target !== 'threads' && !(await ensureReelReady('published'))) return null;
         return target;
+      }
+      // The reel needs a rendered vertical: compose it on demand rather than
+      // bouncing the operator back with a server-side error.
+      async function ensureReelReady(verb) {
+        if (hasVertical) return true;
+        if (!verticalBusy) await generateVertical();
+        if (hasVertical) return true;
+        await alertDialog(verticalBusy
+          ? 'Still composing the vertical — try again in a moment.'
+          : `The vertical composite isn't ready, so the reel can't be ${verb} yet.`);
+        return false;
       }
       if (postForm) {
         document.getElementById('btn-post-now').addEventListener('click', async (e) => {
@@ -3487,6 +3489,8 @@ async function retryExport() {
           e.preventDefault();
           const btn = e.currentTarget;
           if (!captionOk()) return;
+          const igBox = document.getElementById('include-instagram');
+          if (igBox && igBox.checked && !(await ensureReelReady('queued'))) return;
           {% if pending_post_status == "queued" %}
           if (await confirmDialog('Update the queued post with this caption, clip and attribution?', { okText: 'Update queue' }))
           {% else %}

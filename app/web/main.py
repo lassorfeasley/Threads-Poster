@@ -111,8 +111,8 @@ from ..publishing import (
     resolve_first_reply_text,
 )
 from ..placement import SHELF_LIVES
-from ..ranking import load_trait_weights, order_expr, sort_candidates
-from .. import posting_schedule, rerun_review
+from ..ranking import load_trait_weights, order_clauses, sort_candidates
+from .. import posting_schedule, rerun_review, triage_model
 from ..config import scheduler_timezone
 from ..scheduler import (
     PIN_HORIZON_DAYS,
@@ -434,6 +434,20 @@ def _in_background(fn, *args) -> None:
     threading.Thread(target=_run, daemon=True, name=getattr(fn, "__name__", "worker")).start()
 
 
+def _retrain_triage_model_in_background() -> None:
+    """Let the approve predictor catch up on new decisions. Not ``_in_background``:
+    that drops every cached page when it finishes, and this runs after every
+    triage keypress but only changes anything once per ``retrain_every``."""
+    def _run() -> None:
+        try:
+            if triage_model.maybe_retrain():
+                pagecache.invalidate()
+        except Exception:
+            log.exception("Triage model retrain failed")
+
+    threading.Thread(target=_run, daemon=True, name="triage-retrain").start()
+
+
 def _scrape_in_thread(candidate_id: int) -> None:
     session = SessionLocal()
     try:
@@ -464,6 +478,7 @@ def _resume_stalled_scrapes() -> None:
 
 
 _resume_stalled_scrapes()
+_retrain_triage_model_in_background()
 
 
 # --- Workflow step helpers ----------------------------------------------------
@@ -638,7 +653,7 @@ def _candidate_rows(settings, threshold, q="", channel_id=0, keyword=(),
     query = (
         select(Candidate)
         .options(selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY)
-        .order_by(order_expr(settings).desc(), Candidate.published_at.desc())
+        .order_by(*order_clauses(settings), Candidate.published_at.desc())
     )
     if status != "all":
         query = query.where(Candidate.status == status)
@@ -696,8 +711,9 @@ def _candidate_rows(settings, threshold, q="", channel_id=0, keyword=(),
     # the fetch (rows, then their channels) is the slowest of the three, so
     # together they cost about what it costs alone.
     total_matches, candidates, trait_weights = _in_parallel(_total, _rows, _weights)
-    # Re-rank by relevance, nudged by ACTIVE trait verdicts once unlocked. The
-    # rows are detached by now, and none of the columns this reads are deferred.
+    # Re-rank by approve probability, then relevance nudged by ACTIVE trait
+    # verdicts. The rows are detached by now, and none of the columns this
+    # reads are deferred.
     return {"candidates": sort_candidates(candidates, trait_weights, settings),
             "total_matches": total_matches, "row_cap": row_cap}
 
@@ -862,6 +878,7 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
     return templates.TemplateResponse(
         request, "dashboard.html",
         {**data, "threshold": threshold,
+         "model_on": triage_model.enabled(settings),
          "date_defaulted": date_defaulted,
          "show_hidden": show_hidden, "filtering": filtering,
          "q": q, "channel_id": channel_id, "keyword": keyword, "region": region,
@@ -1001,7 +1018,7 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
         query = (
             select(Candidate)
             .where(Candidate.status == STATUS_NEW)
-            .order_by(order_expr(settings).desc(), Candidate.published_at.desc())
+            .order_by(*order_clauses(settings), Candidate.published_at.desc())
         )
         if q:
             like = f"%{q}%"
@@ -1043,6 +1060,7 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
         total_published = session.execute(
             select(func.count(ThreadsPost.id)).where(ThreadsPost.status == "published")
         ).scalar_one()
+        model_on = triage_model.enabled(settings)
         queue = [
             {
                 "id": c.id,
@@ -1059,6 +1077,7 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
                 "duration_short": (f"{c.duration_seconds // 60}:{c.duration_seconds % 60:02d}"
                                    if c.duration_seconds else ""),
                 "score": c.relevance_score,
+                "approve_prob": c.approve_prob if model_on else None,
                 "visual_traits": [t for t in (c.visual_traits or "").split(",") if t],
                 "visual_rationale": c.visual_rationale,
                 "keywords": [k for k in (c.matched_keywords or "").split(",") if k],
@@ -1073,8 +1092,28 @@ def triage(request: Request, q: str = "", channel_id: int = 0,
          "learning_min_trait": settings.get("learning.min_trait_posts", 20),
          "learning_min_total": settings.get("learning.min_total_posts", 100),
          "total_published": total_published,
+         "model_on": model_on,
          "msg": msg, "active": "dashboard"},
     )
+
+
+@app.get("/triage/model")
+def triage_model_report():
+    """The approve predictor's backtest and live grade, for the triage page."""
+    with session_scope(read_only=True) as session:
+        return JSONResponse(triage_model.scorecard(session))
+
+
+@app.post("/triage/model/retrain")
+def triage_model_retrain():
+    """Retrain now instead of waiting for ``triage_model.retrain_every`` decisions."""
+    if not triage_model.maybe_retrain(force=True):
+        return JSONResponse(
+            {"error": "Not retrained — either a training run is already underway or "
+                      "there aren't enough approvals and rejections to learn from yet."},
+            status_code=409)
+    with session_scope(read_only=True) as session:
+        return JSONResponse(triage_model.scorecard(session))
 
 
 @app.get("/video/{candidate_id}/waveform")
@@ -2053,6 +2092,8 @@ def _log_triage_decision(session, c: Candidate, action: str) -> None:
         relevance_score=c.relevance_score,
         visual_score=c.visual_score,
         visual_traits=c.visual_traits or "",
+        predicted_prob=c.approve_prob,
+        model_pk=c.approve_model_pk,
     ))
 
 
@@ -2072,6 +2113,7 @@ def approve(request: Request, candidate_id: int):
         c.approved_at = utcnow()
         _log_triage_decision(session, c, "approve")
     _in_background(_scrape_in_thread, candidate_id)
+    _retrain_triage_model_in_background()
     # AJAX callers transition the page in place (no full reload); others redirect.
     if wants_json:
         return JSONResponse({"ok": True, "status": "approved"})
@@ -2085,6 +2127,7 @@ def reject(request: Request, candidate_id: int):
         if c:
             c.status = STATUS_REJECTED
             _log_triage_decision(session, c, "reject")
+    _retrain_triage_model_in_background()
     # AJAX callers (dashboard delete buttons) get a light JSON reply so the page
     # can drop the row in place instead of reloading and re-fetching filmstrips.
     if "application/json" in request.headers.get("accept", ""):

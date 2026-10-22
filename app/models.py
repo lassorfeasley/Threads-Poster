@@ -148,6 +148,12 @@ class Candidate(Base):
     # variety gate until the post's own ground-truth ``format_tags`` exist.
     format_tags: Mapped[str] = mapped_column(Text, default="")
 
+    # Learned chance the operator approves this video (0-1), from their own
+    # triage history — see app/triage_model.py. Only kept current while the
+    # video awaits triage; ``approve_model_pk`` is the TriageModel that wrote it.
+    approve_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    approve_model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     channel: Mapped[Channel] = relationship(back_populates="candidates")
@@ -605,8 +611,33 @@ class TriageDecision(Base):
     relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     visual_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     visual_traits: Mapped[str] = mapped_column(Text, default="")  # comma-separated
+    # The model's approve probability as it stood when the call was made, and
+    # which model said it. The live scorecard grades these, so they must never
+    # be backfilled from a model that has since seen the decision.
+    predicted_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
     undone: Mapped[bool] = mapped_column(Boolean, default=False)
     decided_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TriageModel(Base):
+    """One trained triage predictor (app/triage_model.py) and how it backtested.
+
+    ``params`` holds the fitted vocabulary and weights as JSON, and is cleared
+    on all but the newest few rows; the counts and backtest stay as history.
+    """
+
+    __tablename__ = "triage_models"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    feature_version: Mapped[int] = mapped_column(Integer, default=1)
+    n_decisions: Mapped[int] = mapped_column(Integer, default=0)
+    n_approved: Mapped[int] = mapped_column(Integer, default=0)
+    # triage_model.evaluate() on the newest quarter of decisions, scored by a
+    # model fitted only on the older three quarters.
+    backtest: Mapped[str] = mapped_column(Text, default="")
+    params: Mapped[str] = mapped_column(Text, default="")
+    trained_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class DraftProposal(Base):

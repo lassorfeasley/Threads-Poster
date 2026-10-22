@@ -47,6 +47,7 @@
     <div class="grow" style="min-width: 300px;">
       <div id="title" style="font-weight: 650; font-size: 16px; line-height: 1.4;"></div>
       <div class="meta" id="sub" style="margin: 8px 0;"></div>
+      {% if model_on %}<div class="approve-odds" id="odds"></div>{% endif %}
       <div id="badges" class="badges" style="margin: 10px 0;"></div>
       <div class="meta" id="visual-line" style="margin-top: 6px;"></div>
       <div style="margin-top: 8px;">
@@ -60,6 +61,13 @@
         <button class="lg" id="undo-btn" onclick="undo()" disabled>Undo&nbsp;<kbd>U</kbd></button>
       </div>
       <div class="meta" style="margin-top: 8px;" id="counts"></div>
+      {% if model_on %}
+      <div class="meta" style="margin-top: 4px;" id="session-grade"></div>
+      <details class="model-report" id="model-report" style="margin-top: 18px;">
+        <summary>How well does it predict you?</summary>
+        <div id="model-report-body" class="meta">Loading…</div>
+      </details>
+      {% endif %}
     </div>
   </div>
 
@@ -125,12 +133,14 @@ function render() {
   document.getElementById('title').textContent = c.title;
   document.getElementById('sub').textContent =
     `${c.channel} · ${c.published}${c.duration ? ' · ' + c.duration : ''}`;
+  renderOdds(c);
   renderBadges(c);
   renderVisual(c);
   document.getElementById('progress').textContent = `${idx + 1} of ${queue.length}`;
   setProgress(idx, queue.length);
   document.getElementById('counts').textContent =
     `${stats.approved} approved · ${stats.rejected} rejected · ${stats.skipped} skipped`;
+  renderSessionGrade();
   updateUndoButtons();
   loadFilmstrip(c);
   prefetchNext();
@@ -247,6 +257,121 @@ async function pollApproved() {
   if (changed) renderApproved();
 }
 
+// ---- Approve predictor (app/triage_model.py) ----
+// The share it rates "safe to auto-reject" in the session tally — the hand-off
+// question is whether you ever approve what it puts down here.
+const LOW_ODDS = 0.05;
+
+function fmtPct(p) {
+  const n = Math.round(p * 100);
+  return (p > 0 && n < 1) ? '<1%' : `${n}%`;
+}
+
+function renderOdds(c) {
+  const el = document.getElementById('odds');
+  if (!el) return;
+  const p = c.approve_prob;
+  if (p === null || p === undefined) {
+    el.className = 'approve-odds';
+    el.innerHTML = '<span class="meta">No approval prediction for this video yet</span>';
+    return;
+  }
+  el.className = 'approve-odds ' + (p >= 0.4 ? 'is-high' : (p < LOW_ODDS ? 'is-low' : 'is-mid'));
+  el.title = 'Learned from your past approve/reject decisions on similar titles and descriptions';
+  el.innerHTML = `<span class="odds-value">${fmtPct(p)}</span>
+    <span class="odds-label">chance you approve</span>
+    <span class="odds-meter"><i style="width: ${Math.max(2, Math.round(p * 100))}%"></i></span>`;
+}
+
+function renderSessionGrade() {
+  const el = document.getElementById('session-grade');
+  if (!el) return;
+  const low = history.filter(h => (h.action === 'approve' || h.action === 'reject')
+                                  && h.prob !== null && h.prob !== undefined && h.prob < LOW_ODDS);
+  if (!low.length) { el.textContent = ''; return; }
+  const kept = low.filter(h => h.action === 'approve').length;
+  el.textContent = `This session: of ${low.length} video${low.length === 1 ? '' : 's'} it rated ` +
+    `under ${fmtPct(LOW_ODDS)}, you approved ${kept}.`;
+}
+
+function rateCell(approved, n) {
+  return n ? `${fmtPct(approved / n)} <span class="meta">of ${n}</span>` : '<span class="meta">—</span>';
+}
+
+function handoffCell(h, total, approvals) {
+  if (!total) return '<span class="meta">—</span>';
+  return `${h.below} of ${total} videos <span class="meta">(${fmtPct(h.below / total)})</span>` +
+    ` · ${h.approvals_lost} of ${approvals} approvals lost`;
+}
+
+function renderModelReport(d) {
+  const body = document.getElementById('model-report-body');
+  if (!d.model) {
+    body.innerHTML = 'No model yet. It trains once there are enough approvals and rejections ' +
+      'to learn from (<code>triage_model.min_decisions_each</code> of each).';
+    return;
+  }
+  const m = d.model, bt = m.backtest || {}, lv = d.live || { n: 0 };
+  const auc = (x) => (x === null || x === undefined) ? '—' : x.toFixed(2);
+  const trained = m.trained_at ? new Date(m.trained_at).toLocaleString() : '?';
+  const btBuckets = bt.buckets || [], lvBuckets = lv.buckets || [];
+  const bucketRows = btBuckets.map((b, i) => `<tr>
+      <td>${fmtPct(b.lo)}–${fmtPct(b.hi)}</td>
+      <td>${rateCell(b.approved, b.n)}</td>
+      <td>${lvBuckets[i] ? rateCell(lvBuckets[i].approved, lvBuckets[i].n) : '—'}</td></tr>`).join('');
+  const btHand = bt.handoff || [], lvHand = lv.handoff || [];
+  const handRows = btHand.map((h, i) => `<tr>
+      <td>under ${fmtPct(h.threshold)}</td>
+      <td>${handoffCell(h, bt.n, bt.approved)}</td>
+      <td>${lvHand[i] ? handoffCell(lvHand[i], lv.n, lv.approved) : '—'}</td></tr>`).join('');
+  body.innerHTML = `
+    <p>Model #${m.id}, trained ${esc(trained)} on ${m.n_decisions} of your decisions
+      (${m.n_approved} approved). It retrains as you keep deciding.</p>
+    <p><strong>Backtest</strong> is your newest ${bt.n} decisions, predicted by a version that
+      never saw them. <strong>Live</strong> grades the percentage that was on screen when you
+      decided${lv.n ? ` (last ${lv.n})` : ' — nothing graded yet; every approve or reject from now on counts'}.</p>
+    <p>Ranking score (AUC; 0.5 is a coin flip, 1.0 is perfect):
+      backtest ${auc(bt.auc)} · live ${auc(lv.auc)}</p>
+    <table class="model-table">
+      <tr><th>It said</th><th>Backtest: you approved</th><th>Live: you approved</th></tr>
+      ${bucketRows}
+    </table>
+    <table class="model-table">
+      <tr><th>If it had auto-rejected</th><th>Backtest</th><th>Live</th></tr>
+      ${handRows}
+    </table>
+    <button class="btn ghost sm" id="retrain-btn" onclick="retrainModel()">Retrain now</button>`;
+}
+
+async function loadModelReport() {
+  const body = document.getElementById('model-report-body');
+  try {
+    const r = await fetch('/triage/model');
+    renderModelReport(await r.json());
+  } catch (e) {
+    body.textContent = 'Could not load the model report: ' + e;
+  }
+}
+
+async function retrainModel() {
+  const btn = document.getElementById('retrain-btn');
+  btn.disabled = true;
+  btn.textContent = 'Retraining…';
+  try {
+    const r = await fetch('/triage/model/retrain', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || 'Retrain failed'); btn.disabled = false; btn.textContent = 'Retrain now'; return; }
+    renderModelReport(data);
+  } catch (e) {
+    alert('Retrain failed: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'Retrain now';
+  }
+}
+
+const modelReport = document.getElementById('model-report');
+if (modelReport) modelReport.addEventListener('toggle', () => { if (modelReport.open) loadModelReport(); });
+
 function traitBadge(t) {
   const w = TRAIT_STATS[t];
   if (w && w.status === 'active' && w.lift !== null && w.lift !== undefined) {
@@ -308,7 +433,7 @@ function act(action) {
   if (idx >= queue.length) return;
   const c = queue[idx];
   // Optimistic: advance the UI immediately and never block on the network.
-  history.push({ id: c.id, action });
+  history.push({ id: c.id, action, prob: c.approve_prob });
   stats[STAT_KEY[action]]++;
   idx++;
   render();

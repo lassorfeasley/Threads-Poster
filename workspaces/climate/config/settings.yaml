@@ -180,6 +180,17 @@ vision:
   # (runs at queue time so the scheduler can place on the result).
   post_frames: 12
 
+triage_model:
+  # Learns your approve/reject calls from triage history and shows each new
+  # video's chance of approval (app/triage_model.py). While on, it also leads
+  # the queue order, ahead of `ranking:`. Nothing is approved or rejected
+  # automatically.
+  enabled: true
+  # Retrain (and rescore the queue) after this many new decisions.
+  retrain_every: 20
+  # Approvals AND rejections needed before the first model is trained.
+  min_decisions_each: 30
+
 ranking:
   # Queue order: climate relevance, optionally nudged by ACTIVE trait verdicts
   # (see `learning:`). Visual scores are retired.

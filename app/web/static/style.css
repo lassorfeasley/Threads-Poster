@@ -2658,6 +2658,27 @@ kbd {
   width: 140px;
 }
 
+/* Approve predictor on the triage screen: the number is the headline, the
+   meter just makes 3% and 60% read differently at a glance. */
+.approve-odds { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
+.approve-odds .odds-value {
+  font-size: 22px; font-weight: 700; line-height: 1;
+  font-variant-numeric: tabular-nums; color: var(--text);
+}
+.approve-odds .odds-label { color: var(--muted); font-size: 13px; }
+.approve-odds .odds-meter {
+  flex: 0 0 120px; height: 6px; border-radius: 999px;
+  background: var(--panel3); overflow: hidden;
+}
+.approve-odds .odds-meter > i { display: block; height: 100%; background: var(--blue); }
+.approve-odds.is-high .odds-value { color: var(--accent); }
+.approve-odds.is-high .odds-meter > i { background: var(--accent); }
+.approve-odds.is-low .odds-value { color: var(--muted); }
+.approve-odds.is-low .odds-meter > i { background: var(--muted); }
+.model-report p { margin: 0 0 8px; line-height: 1.5; }
+.model-table { margin: 6px 0 14px; }
+.model-table th, .model-table td { padding: 5px 8px; }
+
 /* ---- Optimistic clip-save skeleton (Post step while ffmpeg runs) ---- */
 .export-stage {
   padding: 8px 0 24px;
@@ -5254,6 +5275,20 @@ details.panel > .panel-body { padding: 14px 18px; }
   background: rgba(0, 0, 0, 0.72);
 }
 .media-card .thumb-badge .badge.score-lo { color: var(--warn); }
+/* Approve probability: plated like the relevance score beside it, tinted only
+   at the ends where it says something — likely keep, or likely skip. */
+.media-card .thumb-badge .badge.odds {
+  padding: 1px 6px;
+  gap: 3px;
+  border-radius: 5px;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  background: rgba(0, 0, 0, 0.72);
+}
+/* The plate is black in both themes, and the light theme's accent is too dark
+   to read on it, so this takes the dark theme's green either way. */
+.media-card .thumb-badge .badge.odds.is-high { color: #3ecf8e; }
+.media-card .thumb-badge .badge.odds.is-low { color: rgba(255, 255, 255, 0.55); }
 /* Icon-only chip for the multi-clip marker (bottom-left, opposite the
    duration): a stacked-frames glyph instead of a labelled pill, since the
    marker is ambient state, not something the operator must read every time. */

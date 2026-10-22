@@ -320,8 +320,8 @@
   </div>
 </div>
 {% if total_matches > candidates|length %}
-  <div class="meta" style="margin: -6px 0 12px;">Showing the top {{ row_cap }} by combined ranking
-    (relevance + visual appeal). Narrow with filters above to see the rest.</div>
+  <div class="meta" style="margin: -6px 0 12px;">Showing the top {{ row_cap }} by
+    {{ "chance you approve" if model_on else "relevance" }}. Narrow with filters above to see the rest.</div>
 {% endif %}
 {% if not candidates %}
   <div class="empty">
@@ -351,10 +351,21 @@
          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
       <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>
     {% endif %}
-    {% if c.relevance_score is not none %}
+    {% set show_odds = model_on and c.status == "new" and c.approve_prob is not none %}
+    {% if c.relevance_score is not none or show_odds %}
     <span class="thumb-badge">
+      {% if show_odds %}
+      {% set pct = (c.approve_prob * 100)|round|int %}
+      <span class="badge odds {{ 'is-high' if c.approve_prob >= 0.4 else ('is-low' if c.approve_prob < 0.05 else '') }}"
+            title="Chance you approve, learned from your past triage decisions">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        {{ "<1" if pct < 1 else pct }}%</span>
+      {% endif %}
+      {% if c.relevance_score is not none %}
       <span class="badge {{ 'score-hi' if c.relevance_score >= threshold else 'score-lo' }}"
             title="Climate relevance score">{{ "%.2f"|format(c.relevance_score) }}</span>
+      {% endif %}
     </span>
     {% endif %}
     {% if c.duration_seconds %}

@@ -11,7 +11,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import object_session
 
-from . import youtube
+from . import triage_model, youtube
 from .categories import auto_tag_candidate
 from .config import env, load_keywords, load_settings
 from .db import (
@@ -218,6 +218,13 @@ def run_monitor_once(lookback_days: int | None = None) -> dict:
             # Commit per channel: keeps write transactions short (no long lock
             # for other sessions) and preserves progress if a pass is interrupted.
             session.commit()
+        if total_stored and triage_model.enabled(settings):
+            try:
+                scored = triage_model.score_new_candidates(session, only_missing=True)
+                log.info("Approve probability written for %d candidates", scored)
+            except Exception as exc:  # a scoring failure must not fail the pass
+                session.rollback()
+                log.warning("Approve-probability scoring failed: %s", exc)
     log.info("Monitor pass done: %d channels checked, %d new candidates, %d vision-scored",
              checked, total_stored, vision_state["scored"])
     if failed:

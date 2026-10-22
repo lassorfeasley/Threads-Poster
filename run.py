@@ -18,6 +18,7 @@ Usage:
   python run.py backfill-post-times # restate post weekday/hour in the scheduler timezone
   python run.py backfill-calendar-names  # short calendar labels for old titled cuts
   python run.py backfill-categories # auto-tag programming categories for untagged videos
+  python run.py triage-train       # retrain the approve predictor, print its backtest
   python run.py metrics            # snapshot Threads metrics for published posts
   python run.py comments           # sync comments on own posts
   python run.py digest             # write a fresh analytics digest (one LLM call)
@@ -637,6 +638,31 @@ def cmd_backfill_categories(args) -> None:
           f"Spent ${spend.today_spend():.2f} of ${spend.daily_budget():.2f} today.")
 
 
+def cmd_triage_train(_args) -> None:
+    """Retrain the approve predictor now, rescore the triage queue, and print
+    how the new model backtested against your most recent decisions."""
+    from app import triage_model
+    from app.db import init_db, session_scope
+
+    init_db()
+    if not triage_model.maybe_retrain(force=True):
+        print("Not trained: too few approvals/rejections yet (see triage_model.min_decisions_each).")
+        return
+    with session_scope(read_only=True) as session:
+        card = triage_model.scorecard(session)
+    m, bt = card["model"], card["model"]["backtest"]
+    print(f"Model #{m['id']}: {m['n_decisions']} decisions ({m['n_approved']} approved)")
+    print(f"Backtest on the newest {bt['n']} ({bt['approved']} approved): AUC {bt['auc']:.3f}")
+    print("Predicted range -> share you actually approved:")
+    for b in bt["buckets"]:
+        rate = f"{b['approved'] / b['n']:.0%}" if b["n"] else "-"
+        print(f"  {b['lo']:>4.0%}-{b['hi']:<4.0%}  {rate:>4} of {b['n']}")
+    print("Had it auto-rejected everything under:")
+    for h in bt["handoff"]:
+        print(f"  {h['threshold']:.0%}: {h['below']} of {bt['n']} videos, "
+              f"{h['approvals_lost']} of {bt['approved']} approvals lost")
+
+
 def cmd_metrics(_args) -> None:
     from app.analytics import snapshot_metrics
     from app.db import init_db, session_scope
@@ -838,6 +864,9 @@ def main() -> None:
                    help="include rejected candidates")
     p.set_defaults(func=cmd_backfill_categories)
 
+    sub.add_parser("triage-train", parents=[common],
+                   help="retrain the approve predictor and print its backtest"
+                   ).set_defaults(func=cmd_triage_train)
     sub.add_parser("metrics", parents=[common],
                    help="snapshot Threads post metrics").set_defaults(func=cmd_metrics)
     sub.add_parser("comments", parents=[common],
