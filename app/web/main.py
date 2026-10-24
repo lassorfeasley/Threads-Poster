@@ -1829,6 +1829,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          # nothing in it will auto-post, so the box has to say so.
          "first_reply_suppressed": first_comment_suppressed(c),
          "first_reply_mode": load_first_reply().get("mode", "citation"),
+         "first_reply_static_text": load_first_reply().get("text", ""),
          # Whether the comment rides along with the publish or is held back
          # until the post has replies of its own — the box says which.
          "first_reply_deferred": first_reply_is_deferred(),
@@ -4022,10 +4023,13 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "attribution_enabled": load_first_reply().get("attribution_enabled", True),
             "first_reply_suppressed": first_comment_suppressed(cand),
             "first_reply_mode": load_first_reply().get("mode", "citation"),
+            "first_reply_static_text": load_first_reply().get("text", ""),
             "first_reply_deferred": first_reply_is_deferred(),
             # A call to action is written from the brief, not from the source
             # video, so it can be drafted even for a post with no candidate.
-            "can_suggest_attribution": bool(cand) or _first_reply_is_invitation(),
+            # Static mode drafts nothing.
+            "can_suggest_attribution": (load_first_reply().get("mode") != "static"
+                                        and (bool(cand) or _first_reply_is_invitation())),
             "first_reply_id": p.first_reply_id or "",
             "first_reply_text": p.first_reply_text or "",
             "first_reply_error": p.first_reply_error or "",
@@ -5757,6 +5761,9 @@ def first_reply_save(enabled: str = Form(""), text: str = Form(""),
     if mode == "invitation" and not instruction:
         return _flash("/engagement/first-reply",
                       "Write the brief before switching to call-to-action replies")
+    if mode == "static" and not (on and text):
+        return _flash("/engagement/first-reply",
+                      "Fixed-text replies need the static reply text set and enabled")
     # A deadline shorter than the delay would fire first and make the delay
     # meaningless — the reply would go out on every post at the deadline.
     if deadline_hours and delay_minutes > deadline_hours * 60:
@@ -5776,14 +5783,15 @@ def first_reply_save(enabled: str = Form(""), text: str = Form(""),
                      deadline_hours=deadline_hours,
                      deadline_min_views=deadline_min_views,
                      deadline_min_likes=deadline_min_likes)
-    drafts = "a call to action" if mode == "invitation" else "a source citation"
+    drafts = {"invitation": "draft a call to action",
+              "static": "use the fixed text"}.get(mode, "draft a source citation")
     state = "enabled" if on else "disabled"
     attr_state = "on" if attribution_on else "off"
     timing = _timing_summary(delay_minutes, min_replies, min_likes, deadline_hours,
                              deadline_min_views, deadline_min_likes)
     promos = "" if first_party_on else ", promos excluded"
     return _flash("/engagement/first-reply",
-                  f"Saved — first replies draft {drafts}, posting {attr_state}"
+                  f"Saved — first replies {drafts}, posting {attr_state}"
                   f"{promos}, static fallback {state}; {timing}")
 
 

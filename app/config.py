@@ -128,8 +128,11 @@ FIRST_REPLY_HEADER = """\
 #                when you click Suggest; nothing is written automatically).
 #   invitation - a call to action written from `instruction` below, drafted
 #                automatically for every post so none goes out without one.
-# Either way the drafted text lands in an editable box you review before the
-# post publishes; the first comment is only ever the text sitting in that box.
+#   static     - nothing is drafted: every post's first comment is `text`
+#                below, unless you type something else into its box.
+# Drafted text lands in an editable box you review before the post publishes;
+# the first comment is only ever the text sitting in that box, or `text` when
+# the box is empty.
 #
 # instruction is your own plain-language brief for invitation mode, passed to
 # the model as the authoritative spec. It is also the ONLY source of factual
@@ -174,7 +177,7 @@ FIRST_REPLY_HEADER = """\
 
 """
 
-FIRST_REPLY_MODES = ("citation", "invitation")
+FIRST_REPLY_MODES = ("citation", "invitation", "static")
 
 
 def _positive_int(value: Any, default: int = 0) -> int:

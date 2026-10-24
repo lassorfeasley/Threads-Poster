@@ -2699,9 +2699,13 @@ async function retryExport() {
        mode on the Replies page. Configured here, saved onto the post when it's
        queued/drafted/published. ---- #}
   {% set fr_invitation = first_reply_mode == "invitation" %}
+  {% set fr_static = first_reply_mode == "static" %}
   {% set fr_when = ("held back until the post has replies of its own (see Reply settings)"
                     if first_reply_deferred else
                     "posts as the first comment right after this publishes") %}
+  {% set fr_placeholder = (("Leave empty to post: " ~ first_reply_static_text) if fr_static else
+                           ("Invite viewers to act — " ~ fr_when ~ ". Leave empty and no reply is posted.") if fr_invitation else
+                           ("Credit the source — " ~ fr_when ~ ". Leave empty and no attribution is posted.")) %}
   <article class="thread-item is-reply">
     <div class="ti-gutter" aria-hidden="true">
       <span class="ti-avatar">{{ handle[0]|upper }}</span>
@@ -2709,7 +2713,7 @@ async function retryExport() {
     <div class="ti-main">
       <div class="ti-head">
         <span class="ti-name">{{ handle }}</span>
-        <span class="ti-type">first reply · {{ "call to action" if fr_invitation else "attribution" }}</span>
+        <span class="ti-type">first reply · {{ "attribution" if first_reply_mode == "citation" else "call to action" }}</span>
         <span class="ti-tools">
           <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
           <details class="ti-menu">
@@ -2717,8 +2721,10 @@ async function retryExport() {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
             </summary>
             <div class="ti-menu-pop">
+              {% if not fr_static %}
               <button type="button" id="attribution-regen"
                       onclick="suggestAttribution(this)">{{ "Regenerate draft" if attribution_text else "Suggest draft" }}</button>
+              {% endif %}
               <a href="/engagement/first-reply">Reply settings</a>
             </div>
           </details>
@@ -2726,12 +2732,14 @@ async function retryExport() {
       </div>
       <div class="ti-text-wrap">
         <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                  placeholder="{{ ("Invite viewers to act — " ~ fr_when ~ ". Leave empty and no reply is posted.") if fr_invitation else ("Credit the source — " ~ fr_when ~ ". Leave empty and no attribution is posted.") }}">{{ attribution_text }}</textarea>
+                  placeholder="{{ fr_placeholder }}">{{ attribution_text }}</textarea>
+        {% if not fr_static %}
         <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
                 title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
                 aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
         </button>
+        {% endif %}
       </div>
       {% if first_reply_suppressed %}
       <p class="field-hint">This is your own promo, and first comments are off for

@@ -172,7 +172,9 @@
   {% set fr_when = ("held back until this post has replies of its own (see Reply settings)"
                     if first_reply_deferred else
                     "posts as the first comment right after this publishes") %}
-  {% set fr_placeholder = (("Invite viewers to act — " ~ fr_when ~ ". Leave empty and no reply is posted.")
+  {% set fr_placeholder = (("Leave empty to post: " ~ first_reply_static_text)
+                           if first_reply_mode == "static" else
+                           ("Invite viewers to act — " ~ fr_when ~ ". Leave empty and no reply is posted.")
                            if fr_invitation else
                            ("Credit the source — " ~ fr_when ~ ". Leave empty and no attribution is posted.")) %}
   <article class="thread-item is-reply">
@@ -183,7 +185,7 @@
       <div class="ti-head">
         <span class="ti-name">{{ handle }}</span>
         {% if editable %}
-        <span class="ti-type">first reply · {{ "call to action" if fr_invitation else "attribution" }}</span>
+        <span class="ti-type">first reply · {{ "attribution" if first_reply_mode == "citation" else "call to action" }}</span>
         <span class="ti-tools">
           <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
           <details class="ti-menu">

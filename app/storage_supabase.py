@@ -13,6 +13,7 @@ from pathlib import Path
 from supabase import create_client
 
 from .config import env, load_settings
+from .outro import with_outro
 
 log = logging.getLogger("storage")
 
@@ -50,6 +51,9 @@ def _ensure_bucket(client, bucket: str) -> None:
 def upload_trimmed_clip(local_path: str | Path, object_key: str) -> str:
     """Upload the clip and return a signed URL. Idempotent via upsert.
 
+    What goes up is what publishes, so the workspace's post-roll outro (see
+    app/outro.py) is appended here, on every path that ships a clip.
+
     Clips larger than ``storage.max_upload_mb`` are transparently recompressed to
     fit first: Supabase rejects oversized uploads with a 413 that otherwise fails
     the whole publish (and the post silently drops out of the queue)."""
@@ -57,7 +61,7 @@ def upload_trimmed_clip(local_path: str | Path, object_key: str) -> str:
     bucket = settings.get("storage.trimmed_clip_bucket", "trimmed-clips")
     ttl = settings.get("storage.signed_url_ttl_seconds", 3600)
     max_mb = settings.get("storage.max_upload_mb", 45)
-    local_path = Path(local_path)
+    local_path = with_outro(local_path)
 
     upload_path = local_path
     compressed: Path | None = None

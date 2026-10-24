@@ -8,7 +8,16 @@
   <form method="post" action="/engagement/first-reply">
     <label class="card-title" style="display:block; margin-bottom: 8px;">What the first reply says</label>
     <label class="inline-label" style="display:flex; align-items:flex-start; gap:10px; margin-bottom: 4px;">
-      <input type="radio" name="mode" value="citation" {% if mode != 'invitation' %}checked{% endif %}>
+      <input type="radio" name="mode" value="static" {% if mode == 'static' %}checked{% endif %}>
+      <span>Fixed text — the same static reply under every post</span>
+    </label>
+    <p class="meta" style="margin: 0 0 12px 26px;">
+      Nothing is drafted. Every post gets the static reply text below unless you
+      type something else into its first-reply box.
+    </p>
+
+    <label class="inline-label" style="display:flex; align-items:flex-start; gap:10px; margin-bottom: 4px;">
+      <input type="radio" name="mode" value="citation" {% if mode == 'citation' %}checked{% endif %}>
       <span>Source citation — credit the publisher of the clip</span>
     </label>
     <p class="meta" style="margin: 0 0 12px 26px;">

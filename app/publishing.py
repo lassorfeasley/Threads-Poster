@@ -27,6 +27,7 @@ from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
 from .instagram_api import publish_reel
 from .llm import caption_attributes, suggest_attribution, suggest_first_reply
 from .models import Candidate, Cut, InstagramPost, LinkedInPost, ThreadsPost, XPost, utcnow
+from .outro import with_outro
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import publish_text_reply, publish_video
 
@@ -143,8 +144,9 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         # Measure now, while the file is certainly on this machine. Doing it at
         # publish time meant any headless publisher (CI, always-on container)
         # ffprobed a path that only exists on the operator's disk and silently
-        # recorded no duration at all.
-        clip_length_seconds=_clip_duration_seconds(clip),
+        # recorded no duration at all. Measured with the outro, which the
+        # upload below appends (rendered once here, cached for the upload).
+        clip_length_seconds=_clip_duration_seconds(with_outro(clip)),
     )
     # Tags set on the clip (vision on export, optionally corrected by hand)
     # describe this exact file, so they carry over now and spare the post the
@@ -781,12 +783,13 @@ def _claim_linkedin_mirror(post_id: int) -> tuple[int, str, str, str] | None:
 
 @contextmanager
 def _mirror_clip(local_path: str, object_path: str):
-    """The exact file the Threads post shipped: the local copy when this
-    machine has it, else the storage copy streamed to a temp file (deleted on
-    exit) — never held in memory, which the small Fly worker can't afford."""
+    """The exact file the Threads post shipped: the local copy (with the outro
+    the upload added) when this machine has it, else the storage copy streamed
+    to a temp file (deleted on exit) — never held in memory, which the small
+    Fly worker can't afford."""
     clip = Path(local_path).expanduser() if local_path else None
     if clip is not None and clip.exists():
-        yield clip
+        yield with_outro(clip)
         return
     if not object_path:
         raise FileNotFoundError(f"Clip not found: {local_path} (and no uploaded copy)")
@@ -1026,7 +1029,7 @@ def _annotate_footage(session, post: ThreadsPost) -> None:
 def _no_first_comment_reason(post: ThreadsPost, cfg: dict) -> str:
     """Plain-language reason a published post carries no first comment, stored on
     the post so it shows up on the post page instead of looking untouched."""
-    kind = "call to action" if cfg.get("mode") == "invitation" else "attribution"
+    kind = "attribution" if cfg.get("mode") == "citation" else "call to action"
     if (post.attribution_text or "").strip() and not cfg.get("attribution_enabled"):
         return (f"No first comment: this post has {kind} text, but first comments "
                 "are switched off under Replies settings.")

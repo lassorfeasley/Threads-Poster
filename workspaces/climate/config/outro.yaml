@@ -1,0 +1,128 @@
+# Post-roll outro appended to every clip this workspace publishes (Threads,
+# Instagram Reels, and the LinkedIn/X mirrors): the footage dissolves into a
+# branded card, and a label tab rides on the footage until then. Applied when
+# a clip is uploaded for publishing; the dashboard previews show the plain clip.
+#
+# Design it live:  python lab/outro/render.py --serve  (re-renders on save)
+#
+# Timeline (t = 0 is where the dissolve starts):
+#   clip ──────────────┐
+#                      ╲  dissolve
+#                       └── blue card ──────── end
+#                      |<──────── duration ────────>|
+# The card is on screen for `duration` seconds, dissolve included, so the clip
+# grows by (duration - dissolve). Element delays are measured from t = 0.
+
+enabled: true
+
+duration: 3.5        # hard cap 4.0
+dissolve: 0.7
+# Any ffmpeg xfade transition: fade, dissolve, fadeblack, fadewhite, smoothup,
+# smoothdown, circleopen, radial, hblur, zoomin, pixelize, ...
+transition: fade
+# Seconds of clip shown before the dissolve in the lab's previews.
+lead_in: 2.5
+# Fade the clip's audio out across the dissolve.
+audio_fade: true
+# Synthesized key clicks, one per typed character, on the frame it appears.
+# volume is the track's peak level (1.0 = full scale).
+typing_sound:
+  enabled: true
+  volume: 0.6
+
+# Label tab on the clip itself (not the card), hanging from the top edge with
+# rounded bottom corners. It rides along with the footage and dissolves away
+# with it.
+tab:
+  enabled: true
+  text: Renewables.org
+  font: FunnelDisplay-Bold.ttf
+  size: 0.034          # short-side fraction
+  color: "#FFFFFF"
+  box_color: "#1A4A7D"
+  opacity: 1.0
+  x: 0.07              # left edge, as a fraction of frame width
+  y: 0.0               # top edge, as a fraction of frame height
+  radius: 0.3          # bottom-corner rounding, fraction of tab height
+
+background:
+  style: radial       # flat | radial | vertical
+  color: "#1A4A7D"    # center (radial) or top (vertical)
+  edge_color: "#0E2F55"
+
+layout:
+  anchor_y: 0.5       # vertical center of the text stack, as a fraction of height
+  align: left         # center | left | right
+  safe_frac: 0.80     # text width as a fraction of frame width...
+  max_width: 1.45     # ...capped at this many short-sides
+
+# Sizes, gaps, and rise are fractions of the frame's short side (1080 px for
+# both 1080x1920 and 1920x1080), so one design works in both orientations.
+#
+# Elements are static unless given a `delay`: then they fade in over `fade`
+# seconds starting there, rising by `rise`. A `typed` element types its text
+# out from `delay` at `cps` characters per second, with a blinking cursor.
+#
+# FunnelSans-Variable.ttf takes any `weight` from 300 to 800.
+elements:
+  - type: text
+    text: Fund Global South solar
+    font: FunnelSans-Variable.ttf
+    weight: 300
+    size: 0.10
+    max_lines: 1
+    gap: 0.0
+
+  - type: text
+    text: Create 550% more impact
+    font: FunnelSans-Variable.ttf
+    weight: 300
+    size: 0.10
+    max_lines: 1
+    gap: 0.0
+
+  - type: text
+    text: Get repaid
+    font: FunnelSans-Variable.ttf
+    weight: 300
+    size: 0.10
+    max_lines: 1
+    gap: 0.07
+
+  - type: typed
+    text: Renewables.org
+    font: FunnelDisplay-ExtraBold.ttf
+    size: 0.15
+    delay: 0.9          # cursor blinks in place until typing starts
+    cps: 12
+    jitter: 0.35        # keystroke timing wobble, 0 = metronome
+    blink: 1.0          # cursor blink period once typing is done
+    # cursor_color: "#3ECF8E"
+
+  # Other element types:
+  # - type: pill          # text on a rounded box
+  #   text: Renewables.org
+  #   color: "#1A4A7D"
+  #   box_color: "#FFFFFF"
+  # - type: rule          # accent bar that grows out from its aligned edge
+  #   width: 0.12
+  #   thickness: 0.008
+  #   color: "#3ECF8E"
+  #   delay: 0.9
+  # - type: logo          # image path relative to this file; `mask: circle`
+  #   file: logo.jpg      # cuts a round logo out of a square backdrop
+  #   mask: circle
+  #   height: 0.13
+
+# Per-orientation tweaks, deep-merged over everything above. `elements` here
+# is a map from element index to overrides, e.g. `1: {size: 0.09}`.
+overrides:
+  vertical:
+    layout:
+      safe_frac: 0.86
+    elements:
+      0: {size: 0.072}
+      1: {size: 0.072}
+      2: {size: 0.072, gap: 0.06}
+      3: {size: 0.105}
+  landscape: {}

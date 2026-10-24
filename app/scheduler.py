@@ -1073,6 +1073,7 @@ def _stage_promo(session, cut: Cut, window_key: str) -> ThreadsPost | None:
 
     if (prior is not None and (prior.caption or "").strip()
             and (prior.clip_object_path or prior.clip_local_path)):
+        static = load_first_reply().get("mode") == "static"
         post = ThreadsPost(
             candidate_pk=cut.candidate_pk,
             cut_pk=cut.id,
@@ -1080,8 +1081,8 @@ def _stage_promo(session, cut: Cut, window_key: str) -> ThreadsPost | None:
             clip_local_path=prior.clip_local_path,
             clip_object_path=prior.clip_object_path,
             clip_length_seconds=prior.clip_length_seconds,
-            attribution_text=prior.attribution_text,
-            attribution_skipped=prior.attribution_skipped,
+            attribution_text="" if static else prior.attribution_text,
+            attribution_skipped=False if static else prior.attribution_skipped,
             status=STATUS_QUEUED,
             pinned_window_key=window_key,
         )
@@ -1405,10 +1406,13 @@ def _rerun_first_reply(session, cut: Cut, prior: ThreadsPost,
     re-air's caption: the prior airing may predate invitation mode and carry
     a source citation, which must not ride along onto the rerun. An empty
     draft leaves the static fallback text to cover it at publish time.
-    Citation mode keeps the original credit."""
+    Static mode clears the box so the current static text covers it, whatever
+    the prior airing carried. Citation mode keeps the original credit."""
     from . import spend
 
     cfg = load_first_reply()
+    if cfg.get("mode") == "static":
+        return "", False
     if cfg.get("mode") != "invitation":
         return prior.attribution_text or "", bool(prior.attribution_skipped)
     if first_comment_suppressed(cut.candidate, cfg) or not spend.within_budget():
