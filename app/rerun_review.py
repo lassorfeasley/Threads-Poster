@@ -159,7 +159,7 @@ def _judge_inputs(fact: dict) -> dict:
 
     post, cut, cand = fact["post"], fact["cut"], fact["candidate"]
     channel = cand.channel if cand is not None else None
-    transcript = _clip_transcript_text(cut) or ((cand.transcript_text or "") if cand else "")
+    transcript = _clip_transcript_text(cut)
     published = cand.published_at if cand is not None else None
     return {
         "title": ((cut.clip_title if cut else "") or (cand.title if cand else "") or ""),

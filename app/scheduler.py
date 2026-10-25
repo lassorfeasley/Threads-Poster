@@ -1367,8 +1367,7 @@ def _draft_rerun_caption(session, cut: Cut, prior: ThreadsPost, model: str) -> s
             title=cand.title if cand is not None else "",
             channel=(channel.channel_title or channel.call_sign) if channel else "",
             original_caption=prior.caption or "",
-            clip_transcript=_clip_transcript_text(cut)
-            or ((cand.transcript_text or "") if cand is not None else ""),
+            clip_transcript=_clip_transcript_text(cut),
             first_aired=first.date().isoformat() if first else "",
             today=utcnow().date().isoformat(),
             examples=voice.get("examples"),

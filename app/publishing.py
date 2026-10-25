@@ -7,7 +7,9 @@ add to queue). ``queue_clip`` records a post for the adaptive window scheduler;
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+import re
 import subprocess
 import tempfile
 import threading
@@ -217,18 +219,57 @@ def generate_attribution(candidate: Candidate) -> str:
 
 
 def _clip_transcript_text(cut: Cut | None) -> str:
-    """Plain text of the trimmed clip's Whisper word stream, when one was already
-    saved. Never transcribes: this runs on the record path, where a Whisper pass
-    would be far too slow, so a missing sidecar just falls back to the source
-    video's transcript."""
-    if cut is None or not cut.clip_transcript_path:
+    """What is said in the clip itself, or "" when that can't be pinned down.
+
+    Prefers the trimmed clip's saved Whisper word stream; otherwise slices the
+    source transcript to the cut's trim windows. Never transcribes: this runs
+    on the record path and on the headless scheduler. Never returns the whole
+    source transcript either: a news segment often covers several stories, and
+    a drafter handed all of them will happily caption the wrong one."""
+    if cut is None:
         return ""
-    from .subtitles import load_clip_words, words_to_plain
+    if cut.clip_transcript_path:
+        from .subtitles import load_clip_words, words_to_plain
+        try:
+            words = load_clip_words(cut.clip_transcript_path)
+        except Exception:
+            words = None
+        if words:
+            text = words_to_plain(words).strip()
+            if text:
+                return text
+    cand = cut.candidate
+    if cand is None:
+        return ""
+    return _slice_transcript(cand.transcript_text or "", cut.trim_segments or "")
+
+
+_TRANSCRIPT_LINE = re.compile(r"^\[(?:(\d+):)?(\d+):(\d{2})\]\s*(.*)$")
+
+
+def _slice_transcript(transcript: str, trim_segments: str) -> str:
+    """Lines of a ``[mm:ss] text`` transcript that overlap the trim windows, in
+    window order. A line runs until the next line's timestamp."""
     try:
-        words = load_clip_words(cut.clip_transcript_path)
-    except Exception:
+        windows = [(float(w["start"]), float(w["end"]))
+                   for w in json.loads(trim_segments or "[]")]
+    except (ValueError, TypeError, KeyError):
         return ""
-    return words_to_plain(words).strip() if words else ""
+    lines: list[tuple[float, str]] = []
+    for raw in transcript.splitlines():
+        m = _TRANSCRIPT_LINE.match(raw.strip())
+        if m:
+            h, mnt, sec, text = m.groups()
+            lines.append((int(h or 0) * 3600 + int(mnt) * 60 + int(sec), text.strip()))
+    if not windows or not lines:
+        return ""
+    out: list[str] = []
+    for ws, we in windows:
+        for i, (start, text) in enumerate(lines):
+            end = lines[i + 1][0] if i + 1 < len(lines) else start + 5
+            if end > ws and start < we and text:
+                out.append(text)
+    return " ".join(out).strip()
 
 
 def _recent_first_replies(session, limit: int = 12) -> list[str]:
@@ -280,8 +321,6 @@ def first_reply_context(session, candidate: Candidate | None, cut: Cut | None,
     if cfg.get("mode") != "invitation" or not instruction:
         return None
     transcript = _clip_transcript_text(cut)
-    if not transcript and candidate is not None:
-        transcript = (candidate.transcript_text or "").strip()
     return {
         "instruction": instruction,
         "fallback": (cfg.get("text") or "").strip(),

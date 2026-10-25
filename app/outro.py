@@ -465,24 +465,29 @@ def render(clip: Path, dest: Path, *, lead_in: float | None = None,
         ])
 
         tmp_out = tmpdir / "out.mp4"
-        proc = subprocess.Popen(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             *seek, "-i", str(clip),
-             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", fps_s, "-i", "-",
-             *extra_inputs,
-             "-filter_complex", graph, "-map", "[v]", "-map", "[a]", *ENCODE_ARGS, str(tmp_out)],
-            stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        last = None
-        try:
-            for i in range(n_frames):
-                last = card.frame(i / float(fps))
-                proc.stdin.write(last.tobytes())
-            proc.stdin.close()
-        except BrokenPipeError:
-            pass
-        err = proc.stderr.read().decode()
-        proc.stderr.close()
-        if proc.wait(timeout=900) != 0:
+        # stderr goes to a file, not a pipe: a damaged clip can log decode
+        # errors faster than anyone reads them, and a full stderr pipe stalls
+        # ffmpeg while we block feeding it frames — a deadlock, not a failure.
+        err_path = tmpdir / "ffmpeg.err"
+        with open(err_path, "wb") as err_file:
+            proc = subprocess.Popen(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                 *seek, "-i", str(clip),
+                 "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", fps_s, "-i", "-",
+                 *extra_inputs,
+                 "-filter_complex", graph, "-map", "[v]", "-map", "[a]", *ENCODE_ARGS, str(tmp_out)],
+                stdin=subprocess.PIPE, stderr=err_file)
+            last = None
+            try:
+                for i in range(n_frames):
+                    last = card.frame(i / float(fps))
+                    proc.stdin.write(last.tobytes())
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            code = proc.wait(timeout=900)
+        if code != 0:
+            err = err_path.read_text(errors="replace")
             raise RuntimeError(f"ffmpeg failed adding the outro to {clip.name}: {err[-800:]}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Moved into place whole, so a concurrent reader never sees a partial file.
