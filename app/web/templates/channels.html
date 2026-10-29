@@ -3,6 +3,11 @@
 {% import "components/toolbar.html" as ui %}
 
 {% set ch_actions %}
+  <form class="inline" method="post" action="/channels/heal">
+    <button class="btn" {{ "disabled" if healing }}
+            title="Retire broken, unproductive and silent channels and look for replacements. Also runs after every monitor pass.">
+      {{ "Healing…" if healing else "Heal now" }}</button>
+  </form>
   <button type="button" class="btn primary"
           onclick="document.getElementById('add-channel-dialog').showModal()">＋ Add channel</button>
 {% endset %}
@@ -12,7 +17,7 @@
   {{ ui.combo("country", channels|map(attribute='country')|select|unique|list|sort, all_label="All countries", filter_target=CH, filter_key="country") }}
   {{ ui.combo("region", channels|map(attribute='region')|select|unique|list|sort, all_label="All regions", filter_target=CH, filter_key="region") }}
   {{ ui.combo("scope", ["local", "national", "international"], all_label="All scopes", filter_target=CH, filter_key="scope") }}
-  {{ ui.select("state", [("ok", "OK"), ("pending", "Pending resolve"), ("error", "Error"), ("disabled", "Disabled")],
+  {{ ui.select("state", [("ok", "OK"), ("at_risk", "At risk"), ("pending", "Pending resolve"), ("error", "Error"), ("disabled", "Disabled")],
                submit=false, filter_target=CH, filter_key="state", all_label="Any status") }}
   {{ ui.sort(CH, [("callsign-asc", "Call sign A–Z"), ("callsign-desc", "Call sign Z–A"),
                   ("checked-desc", "Recently checked"), ("checked-asc", "Least recently checked")]) }}
@@ -129,9 +134,11 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
 <table>
   <tr><th>Call sign</th><th>Network</th><th>Market</th><th>Region</th><th>Country</th><th>Scope</th>
       <th title="Your own content: joins the promo rotation, excluded from caption-voice learning">First-party</th>
+      <th title="Approved clips, and candidates rejected since the last approval (vs. the limit before it's retired)">Yield</th>
       <th>Status</th><th>Last checked</th><th></th></tr>
   {% for ch in channels %}
-  {% set state = "error" if ch.last_error else ("disabled" if not ch.enabled else ("ok" if ch.channel_id else "pending")) %}
+  {% set h = health.get(ch.id) %}
+  {% set state = "error" if ch.last_error else ("disabled" if not ch.enabled else ("at_risk" if h and h.verdict != "ok" else ("ok" if ch.channel_id else "pending"))) %}
   <tr class="ch-row" style="{{ 'opacity:.45' if not ch.enabled }}"
       data-filter-row
       data-search="{{ (ch.call_sign ~ ' ' ~ ch.network ~ ' ' ~ ch.market ~ ' ' ~ ch.region ~ ' ' ~ (ch.country or '')) | lower }}"
@@ -139,7 +146,8 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
       data-scope="{{ ch.scope or 'local' }}" data-state="{{ state }}"
       data-sort-callsign="{{ ch.call_sign }}"
       data-sort-checked="{{ ch.last_checked_at.isoformat() if ch.last_checked_at else '' }}">
-    <td><a href="{{ ch.url }}" target="_blank">{{ ch.call_sign }}</a></td>
+    <td><a href="{{ ch.url }}" target="_blank">{{ ch.call_sign }}</a>
+      {% if ch.added_note %}<span class="badge info" title="{{ ch.added_note }}">auto-added</span>{% endif %}</td>
     <td>{{ ch.network }}</td>
     <td>{{ ch.market }}</td>
     <td>{{ ch.region }}</td>
@@ -152,9 +160,18 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
           {{ "Yes" if ch.first_party else "No" }}</button>
       </form>
     </td>
+    <td class="meta" style="white-space: nowrap;">
+      {% if h %}{{ h.approved }} approved{% if h.misses %} ·
+        <span class="{{ 'ch-yield-warn' if h.misses >= h.miss_limit * 0.75 }}"
+              title="Rejected since the last approved clip; retired at {{ h.miss_limit }}">{{ h.misses }}/{{ h.miss_limit }} missed</span>{% endif %}
+      {% else %}—{% endif %}
+    </td>
     <td>
       {% if ch.last_error %}<span class="badge hostile" title="{{ ch.last_error }}">error</span>
       {% elif not ch.enabled %}<span class="badge">disabled</span>
+      {% elif h and h.verdict != "ok" %}<span class="badge score-lo"
+          title="{% if h.reason %}Retires next pass — {{ h.reason }}{% elif ch.consecutive_failures %}YouTube couldn't find it on the last {{ ch.consecutive_failures }} pass(es){% elif h.days_silent and h.misses < h.miss_limit * 0.75 %}No keyword-matching uploads in {{ h.days_silent }} days{% else %}{{ h.misses }} rejected since its last approval{% endif %}">
+          {{ "retiring" if h.verdict == "retire" else "at risk" }}</span>
       {% elif ch.channel_id %}<span class="badge supportive">ok</span>
       {% else %}<span class="badge score-lo">pending resolve</span>{% endif %}
     </td>
@@ -173,6 +190,43 @@ Al Jazeera, , , , Qatar, international, https://www.youtube.com/@aljazeeraenglis
 {{ ui.no_matches("channels") }}
 </div>
 <div class="meta" style="margin-top: 10px;"><span data-filter-count="channels">{{ channels|length }}</span> of {{ channels|length }} shown</div>
+
+{% if retired %}
+<section>
+  <h2>Retired by self-healing · {{ retired|length }}</h2>
+  <p class="meta" style="margin: 4px 0 12px;">Broken, unproductive, or silent channels are retired after each
+    monitor pass, and the system searches for a stand-in. Restoring gives a channel a fresh start —
+    only evidence from then on counts.</p>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Call sign</th><th>Why</th><th>Replacement</th><th>Retired</th><th></th></tr>
+    {% for ch in retired %}
+    {% set rep = replaced_by.get(ch.id) %}
+    <tr>
+      <td><a href="{{ ch.url }}" target="_blank">{{ ch.call_sign }}</a>
+        <div class="meta">{{ [ch.market, ch.scope]|select|join(" · ") }}</div></td>
+      <td style="max-width: 420px;">{{ ch.retired_reason }}</td>
+      <td class="meta">
+        {% if rep %}<a href="{{ rep.url }}" target="_blank" title="{{ rep.added_note }}">{{ rep.call_sign }}</a>
+          {% if rep.retired_at %}<span class="badge">retired too</span>{% endif %}
+        {% elif ch.replacement_searched_at and ch.retired_reason.startswith("duplicate:") %}not needed
+        {% elif ch.replacement_searched_at %}none found
+        {% else %}searching next pass{% endif %}
+      </td>
+      <td class="meta" style="white-space: nowrap;">{{ ch.retired_at.strftime("%b %-d") }}</td>
+      <td style="white-space: nowrap;">
+        <form class="inline" method="post" action="/channels/{{ ch.id }}/restore">
+          <button class="sm">Restore</button></form>
+        <form class="inline" method="post" action="/channels/{{ ch.id }}/delete"
+              data-confirm="Delete {{ ch.call_sign }}?" data-confirm-ok="Delete" data-confirm-variant="danger">
+          <button class="reject sm">Delete</button></form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+</section>
+{% endif %}
 
 <p class="meta" style="margin-top: 12px;">Channels from <code>config/channels.yaml</code> are synced in
 on startup; removing one here only disables it if it has stored candidates.</p>

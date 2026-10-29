@@ -60,6 +60,22 @@
 {% endmacro %}
 
 
+{# ---- Page header: headline + one-line subtitle above a tabs-only pagebar ----
+
+   For top-level pages whose sticky band carries only view tabs. The header
+   scrolls away; the band below it sticks and only takes on its frosted chrome
+   once it's actually pinned (toolbar.js toggles .is-stuck). #}
+{% macro page_header(title, sub=none, actions='') %}
+<header class="page-hero">
+  <div class="page-hero-text">
+    <h1>{{ title }}</h1>
+    {% if sub %}<p class="sub">{{ sub }}</p>{% endif %}
+  </div>
+  {% if actions %}<div class="page-hero-actions">{{ actions|safe }}</div>{% endif %}
+</header>
+{% endmacro %}
+
+
 {# ---- Workflow breadcrumb: Video › Edit › Clip › Post ----
 
    One fixed trail shared by every per-item page (video, cut, post). The shape
@@ -111,8 +127,8 @@
 
 {# ---- View tabs: swap which list the page shows, in place ----
 
-   Peer views of one page, not steps of a journey — nobody works Candidates ->
-   Selected to trim -> Trimmed in order, they pick the bucket they need. So
+   Peer views of one page, not steps of a journey — nobody works New ->
+   To trim -> Ready to post in order, they pick the bucket they need. So
    these render as a tab strip; the crumb trail above stays reserved for
    navigation that actually leaves the page.
 
@@ -123,9 +139,13 @@
    `store` is the localStorage key remembering the last choice and `param` the
    query param that addresses the view, so a view can be linked to and survives
    a reload. toolbar.js drives the rest — panel swapping, arrow keys, history.
-   Render `active` from that same param server-side to avoid a flash. #}
-{% macro view_tabs(items, store, param, active=none, label='Switch view', live_counts=false) %}
-<div class="segmented sm view-tabs" role="tablist" aria-label="{{ label }}"
+   Render `active` from that same param server-side to avoid a flash.
+
+   `attention` is for buckets of work waiting on you (the dashboard): their
+   counts render as solid ink badges. Plain inventory totals stay quiet. #}
+{% macro view_tabs(items, store, param, active=none, label='Switch view', live_counts=false,
+                   attention=false) %}
+<div class="segmented sm view-tabs{{ ' is-attention' if attention }}" role="tablist" aria-label="{{ label }}"
      data-view-tabs="{{ store }}" data-view-param="{{ param }}">
   {% for key, text, count in items %}
   {% set on = (key == active) if active else loop.first %}
@@ -134,7 +154,7 @@
           aria-selected="{{ 'true' if on else 'false' }}"
           tabindex="{{ 0 if on else -1 }}" data-tab="{{ key }}">
     {{ text }}
-    <span class="seg-count"{% if live_counts %} data-filter-count="{{ key }}"{% endif %}>{{ count }}</span>
+    <span class="seg-count{{ ' is-zero' if not count }}"{% if live_counts %} data-filter-count="{{ key }}"{% endif %}>{{ count }}</span>
   </button>
   {% endfor %}
 </div>

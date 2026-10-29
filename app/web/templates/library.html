@@ -63,6 +63,8 @@
                   store="libTab", param="section", active=section,
                   label="Switch library view", live_counts=true) }}
 {% endset %}
+{{ ui.page_header("Content library",
+                  sub="Every video, clip, and post you've made, in one place.") }}
 {{ ui.pagebar("", views=lib_views) }}
 
 <div class="pagebar-tools below-bar" data-toolbar>

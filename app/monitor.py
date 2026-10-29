@@ -11,7 +11,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import object_session
 
-from . import triage_model, youtube
+from . import channel_health, triage_model, youtube
 from .categories import auto_tag_candidate
 from .config import env, load_keywords, load_settings
 from .db import (
@@ -36,6 +36,8 @@ def ensure_channel_resolved(channel: Channel) -> bool:
         info = youtube.resolve_channel(channel.url)
     except youtube.YouTubeAPIError as exc:
         channel.last_error = f"resolve failed: {exc}"
+        if exc.not_found:
+            channel.consecutive_failures = (channel.consecutive_failures or 0) + 1
         log.warning("Could not resolve %s (%s): %s", channel.call_sign, channel.url, exc)
         return False
     # Two rows can point at the same YouTube channel (e.g. the same handle
@@ -103,11 +105,18 @@ def poll_channel(session, channel: Channel, keywords: list[str], settings,
         )
     except youtube.YouTubeAPIError as exc:
         channel.last_error = f"poll failed: {exc}"
+        if exc.not_found:
+            # The cached uploads playlist is gone (channel deleted or moved).
+            # Drop the cached ids so the next pass re-resolves from the URL.
+            channel.consecutive_failures = (channel.consecutive_failures or 0) + 1
+            channel.channel_id = None
+            channel.uploads_playlist_id = None
         log.warning("Poll failed for %s: %s", channel.call_sign, exc)
         return 0
 
     channel.last_checked_at = utcnow()
     channel.last_error = ""
+    channel.consecutive_failures = 0
     stored = 0
 
     for up in uploads:
@@ -218,6 +227,13 @@ def run_monitor_once(lookback_days: int | None = None) -> dict:
             # Commit per channel: keeps write transactions short (no long lock
             # for other sessions) and preserves progress if a pass is interrupted.
             session.commit()
+        healing: dict = {"retired": [], "added": []}
+        try:
+            healing = channel_health.heal(session, settings, keywords)
+            session.commit()
+        except Exception as exc:  # a health-check failure must not fail the pass
+            session.rollback()
+            log.warning("Channel health check failed: %s", exc)
         if total_stored and triage_model.enabled(settings):
             try:
                 scored = triage_model.score_new_candidates(session, only_missing=True)
@@ -230,12 +246,21 @@ def run_monitor_once(lookback_days: int | None = None) -> dict:
     if failed:
         log.warning("%d channels failed (see Channels page): %s", len(failed), ", ".join(failed))
     return {"channels_checked": checked, "candidates_stored": total_stored,
-            "vision_scored": vision_state["scored"], "channels_failed": failed}
+            "vision_scored": vision_state["scored"], "channels_failed": failed,
+            "channels_retired": [r["call_sign"] for r in healing["retired"]],
+            "channels_added": [a["call_sign"] for a in healing["added"]]}
 
 
 def failed_channels_note(result: dict) -> str:
-    """Summary suffix naming channels that couldn't be polled, or ''."""
+    """Summary suffix naming failing, retired, and auto-added channels, or ''."""
+    note = ""
     failed = result.get("channels_failed") or []
-    if not failed:
-        return ""
-    return f" — {len(failed)} channels failing: {', '.join(failed)}"
+    if failed:
+        note += f" — {len(failed)} channels failing: {', '.join(failed)}"
+    retired = result.get("channels_retired") or []
+    if retired:
+        note += f" — retired {len(retired)}: {', '.join(retired)}"
+    added = result.get("channels_added") or []
+    if added:
+        note += f" — auto-added {len(added)}: {', '.join(added)}"
+    return note

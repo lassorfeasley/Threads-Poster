@@ -19,7 +19,13 @@ API_BASE = "https://www.googleapis.com/youtube/v3"
 
 
 class YouTubeAPIError(RuntimeError):
-    pass
+    """``not_found`` marks errors that implicate the channel itself (deleted,
+    renamed, bad URL) as opposed to quota, auth, or network trouble that would
+    hit every channel alike. Channel health only counts the former."""
+
+    def __init__(self, message: str, not_found: bool = False):
+        super().__init__(message)
+        self.not_found = not_found
 
 
 def _get(endpoint: str, **params) -> dict:
@@ -27,9 +33,13 @@ def _get(endpoint: str, **params) -> dict:
     if not key:
         raise YouTubeAPIError("YOUTUBE_API_KEY is not set (see .env.example)")
     params["key"] = key
-    resp = requests.get(f"{API_BASE}/{endpoint}", params=params, timeout=30)
+    try:
+        resp = requests.get(f"{API_BASE}/{endpoint}", params=params, timeout=30)
+    except requests.RequestException as exc:
+        raise YouTubeAPIError(f"{endpoint} request failed: {exc}") from exc
     if resp.status_code != 200:
-        raise YouTubeAPIError(f"{endpoint} HTTP {resp.status_code}: {resp.text[:300]}")
+        raise YouTubeAPIError(f"{endpoint} HTTP {resp.status_code}: {resp.text[:300]}",
+                              not_found=resp.status_code == 404)
     return resp.json()
 
 
@@ -71,7 +81,7 @@ def parse_channel_url(url: str) -> tuple[str, str]:
     m = re.search(r"youtube\.com/([\w.\-]+)$", url)
     if m:
         return "custom", m.group(1)
-    raise YouTubeAPIError(f"Unrecognized channel URL: {url}")
+    raise YouTubeAPIError(f"Unrecognized channel URL: {url}", not_found=True)
 
 
 def parse_video_url(url: str) -> str:
@@ -129,7 +139,7 @@ def resolve_channel(url: str) -> dict:
             data = _get("channels", part="id,snippet,contentDetails", id=cid)
             items = data.get("items") or []
     if not items:
-        raise YouTubeAPIError(f"Could not resolve channel for URL: {url}")
+        raise YouTubeAPIError(f"Could not resolve channel for URL: {url}", not_found=True)
 
     item = items[0]
     snippet = item.get("snippet") or {}

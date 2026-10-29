@@ -192,6 +192,65 @@ def suggest_channel_fields(model: str, url: str, title: str = "", description: s
     }
 
 
+def suggest_replacement_channels(model: str, retired: dict, exemplars: list[dict],
+                                 existing: list[str], limit: int = 5) -> list[dict]:
+    """Propose YouTube channels to stand in for one the health check retired.
+
+    ``retired`` describes the slot to fill ({call_sign, network, market,
+    region, country, scope, reason}); ``exemplars`` are channels that actually
+    produce approved clips ({call_sign, network, market, scope, approved});
+    ``existing`` lists URLs/names already monitored, to steer away from
+    repeats. Proposals are unverified — the caller resolves each URL and
+    trial-runs its recent uploads before adding anything.
+
+    Returns [{url, call_sign, network, market, region, country, scope, why}].
+    """
+    b = _brand()
+    system = (
+        f"You help curate the YouTube channels a media monitor watches for "
+        f"{b['source_kind']} about {b['topic']}. Raw footage of real events "
+        "(weather, disasters, field reporting, wildlife, science) is what the "
+        "operator clips; talk shows, punditry, and studio-only channels rarely "
+        "yield anything.\n"
+        "A monitored channel was retired. Propose real YouTube channels that "
+        "fill the same slot: for a local station, other outlets covering that "
+        "same market or region; for a national or international outlet, peers "
+        "with similar reach. Favor channels like the proven producers listed. "
+        "Never propose a channel already monitored. Only propose channels you "
+        "are confident exist, using their canonical https://www.youtube.com/@handle "
+        f"URL. Return at most {limit}.\n"
+        "JSON shape: {\"channels\": [{\"url\": \"https://www.youtube.com/@...\", "
+        "\"call_sign\": \"...\", \"network\": \"...\", \"market\": \"...\", "
+        "\"region\": \"...\", \"country\": \"...\", "
+        "\"scope\": \"local|national|international\", \"why\": \"one short sentence\"}]}"
+    )
+    user = json.dumps({
+        "retired_channel": retired,
+        "proven_producers": exemplars[:12],
+        "already_monitored": existing[:400],
+    })
+    data = _json_chat(model, system, user, max_tokens=1500, temperature=0.4)
+    out: list[dict] = []
+    for item in (data.get("channels") or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url", "")).strip()
+        if "youtube.com/" not in url:
+            continue
+        scope = str(item.get("scope", "")).strip().lower()
+        out.append({
+            "url": url[:300],
+            "call_sign": str(item.get("call_sign", "")).strip()[:40],
+            "network": str(item.get("network", "")).strip()[:40],
+            "market": str(item.get("market", "")).strip()[:80],
+            "region": str(item.get("region", "")).strip()[:80],
+            "country": str(item.get("country", "")).strip()[:60],
+            "scope": scope if scope in ("local", "national", "international") else retired.get("scope", "local"),
+            "why": str(item.get("why", "")).strip()[:200],
+        })
+    return out
+
+
 def suggest_category(model: str, categories: list[dict], title: str, description: str,
                      channel: str = "", matched_keywords: list[str] | None = None,
                      transcript_excerpt: str = "") -> dict:

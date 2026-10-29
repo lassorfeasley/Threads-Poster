@@ -4,13 +4,16 @@
 
 {# Three buckets of the same pipeline. They keep pipeline order left to right,
    but they are peer views rather than a trail you walk: each one swaps the
-   list below instead of navigating away. #}
+   list below instead of navigating away. "Ready to post" is rarely occupied,
+   so its tab only appears while it holds something (or is linked to). #}
+{% set dash_tabs = [("candidates", "New", total_matches),
+                    ("inprogress", "To trim", in_progress|length)] %}
+{% if trimmed or view == "trimmed" %}
+  {% set dash_tabs = dash_tabs + [("trimmed", "Ready to post", trimmed|length)] %}
+{% endif %}
 {% set dash_views %}
-  {{ ui.view_tabs([("candidates", "Candidates", total_matches),
-                   ("inprogress", "Selected to trim", in_progress|length),
-                   ("trimmed", "Trimmed, not posted", trimmed|length)],
-                  store="dashTab", param="view", active=view,
-                  label="Switch list view") }}
+  {{ ui.view_tabs(dash_tabs, store="dashTab", param="view", active=view,
+                  label="Switch list view", attention=true) }}
 {% endset %}
 
 {% set dash_filters %}
@@ -20,6 +23,8 @@
   {% if filtering %}{{ ui.clear("/") }}{% endif %}
 {% endset %}
 
+{{ ui.page_header("Create content",
+                  sub="New videos the monitor found, and the ones you've picked to trim.") }}
 {{ ui.pagebar("", views=dash_views) }}
 
 {# Filters live under the bar, scoping whichever view is active. #}

@@ -52,6 +52,22 @@ class Channel(Base):
     last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+    # Self-healing (see channel_health.py). Only YouTube "not found" failures
+    # count toward consecutive_failures; quota/network errors say nothing about
+    # the channel itself.
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    # Set when the health check retires the channel (it is also disabled).
+    retired_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_reason: Mapped[str] = mapped_column(Text, default="")
+    # Health evidence only counts from here (None = created_at). Re-enabling a
+    # channel moves it forward so old rejections can't re-retire it at once.
+    health_since: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set once a replacement search ran for this retired channel (hit or miss).
+    replacement_searched_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Auto-added replacements: which retired channel they stand in for, and why.
+    replaces_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    added_note: Mapped[str] = mapped_column(Text, default="")
+
     candidates: Mapped[list["Candidate"]] = relationship(back_populates="channel")
 
 
@@ -94,7 +110,7 @@ class Candidate(Base):
     shelf_life: Mapped[str] = mapped_column(String(20), default="")
 
     # Operator marker: this video has material for more than one clip. Keeps
-    # the video pinned in the dashboard's "Selected to trim" bucket (even after
+    # the video pinned in the dashboard's "To trim" bucket (even after
     # exports/posts) until the operator toggles it off.
     multi_clip_potential: Mapped[bool] = mapped_column(Boolean, default=False)
     # Set by the clip suggester rather than the operator, so the marker can be

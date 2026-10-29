@@ -676,6 +676,57 @@ main.main-settings {
   padding-top: 11px;
   padding-bottom: 11px;
 }
+/* Page header: the headline a top-level page opens on, with a tabs-only
+   pagebar right under it (components/toolbar.html page_header). */
+.page-hero {
+  display: flex;
+  align-items: flex-end;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin: 10px 0 18px;
+}
+.page-hero-text { flex: 1; min-width: 260px; }
+.page-hero h1 {
+  margin: 0;
+  font-size: 38px;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+}
+.page-hero .sub {
+  margin: 10px 0 0;
+  max-width: 60ch;
+  color: var(--text-dim);
+  font-size: 17px;
+  font-weight: 300;
+  line-height: 1.5;
+}
+.page-hero-actions { display: flex; align-items: center; gap: 8px; }
+/* Resting under the headline the tabs band is just part of the page; it only
+   takes on the frosted chrome once pinned (.is-stuck, set by toolbar.js). */
+.page-hero + .pagebar.is-sticky {
+  margin-top: 0;
+  margin-bottom: 8px;
+  background: transparent;
+  border-bottom-color: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
+}
+.page-hero + .pagebar.is-sticky.is-stuck {
+  background: var(--frost);
+  border-bottom-color: var(--border);
+  -webkit-backdrop-filter: saturate(1.4) blur(22px);
+  backdrop-filter: saturate(1.4) blur(22px);
+}
+.page-hero + .pagebar.is-sticky .pagebar-inner {
+  max-width: var(--canvas-wide);
+  margin: 0 auto;
+}
+@media (max-width: 860px) {
+  .page-hero h1 { font-size: 30px; }
+  .page-hero .sub { font-size: 15.5px; }
+  .page-hero + .pagebar.is-sticky { margin-top: 0; }
+}
 .pagebar-actions {
   display: flex;
   align-items: center;
@@ -848,6 +899,7 @@ h2::after {
   min-width: 40px;
 }
 h2:first-child { margin-top: 0; }
+.ch-yield-warn { color: var(--warn); font-weight: 600; }
 h2 .meta { text-transform: none; letter-spacing: 0; font-weight: 500; white-space: normal; }
 
 /* Section header row: heading on the left, controls (e.g. view toggle) right.
@@ -3335,10 +3387,15 @@ a.cal-event:hover { background: var(--panel3); }
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.segmented .seg-btn.is-active .seg-count {
+.segmented .seg-btn.is-active .seg-count { background: var(--panel2); color: var(--text-dim); }
+/* Work waiting on you: a badge showing at all means something is in there. */
+.segmented.is-attention .seg-count,
+.segmented.is-attention .seg-btn.is-active .seg-count {
   background: var(--ink);
   color: var(--ink-contrast);
 }
+/* An empty bucket says so in its own panel; a "0" badge on the tab is noise. */
+.segmented .seg-count.is-zero { display: none; }
 /* Compact variant, sized to ride inside the sticky pagebar band without
    thickening it. Long label sets scroll rather than bursting the pill. */
 .segmented.sm {

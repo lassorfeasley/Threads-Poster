@@ -15,6 +15,7 @@
       {% if queue_count %}<span class="seg-count">{{ queue_count }}</span>{% endif %}</button>
   </div>
 {% endset %}
+{{ ui.page_header("Calendar", sub="What's going out, and when. Drag a post to move it.") }}
 {{ ui.pagebar("", views=cal_views) }}
 
 {% macro wk_media(e, label) %}

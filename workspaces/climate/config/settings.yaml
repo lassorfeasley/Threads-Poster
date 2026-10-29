@@ -17,6 +17,32 @@ monitor:
   # Skip portrait/vertical videos (YouTube Shorts) — they don't fit the clip workflow.
   exclude_portrait: true
 
+channel_health:
+  # Self-healing for monitored channels, run at the end of every monitor pass.
+  # Unhealthy channels are retired (disabled, never deleted — restore any of
+  # them from the Channels page), then the system looks for a stand-in.
+  enabled: true
+  # Broken: YouTube answered "not found" (deleted channel, dead handle) on this
+  # many passes in a row. Quota and network errors never count.
+  max_consecutive_failures: 4
+  # Unproductive: this many candidates rejected since the channel's last
+  # approved clip. Channels that have produced approvals get twice this.
+  max_rejections_without_approval: 12
+  # Silent: no keyword-matching uploads at all for this many days.
+  max_days_without_match: 45
+  # Safety cap so one bad signal can't empty the list in a single pass.
+  max_retirements_per_pass: 10
+  # Replacement search: an LLM proposes channels for the same slot (market /
+  # scope); each is checked against YouTube and trial-run over its recent
+  # uploads (up to 150) with your keyword list. The best one is added if it
+  # clears the bar. For scale: proven producers match 0–6 of every 50 uploads.
+  find_replacements: true
+  max_replacements_per_pass: 3
+  trial_days: 30
+  min_trial_matches: 2
+  # Model for proposing replacements (defaults to engagement.draft_model).
+  # discovery_model: claude-sonnet-5
+
 matching:
   # LLM relevance score is 0.0-1.0. Candidates below this are hidden by default
   # in the review dashboard (still stored, still viewable with "show hidden").

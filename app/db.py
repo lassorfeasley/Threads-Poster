@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "41"
+SCHEMA_VERSION = "42"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -167,6 +167,8 @@ _SCHEMA_SENTINELS = (
     "SELECT predicted_prob FROM triage_decisions LIMIT 0",
     "SELECT id FROM triage_models LIMIT 0",
     "SELECT id FROM caption_checks LIMIT 0",
+    "SELECT retired_at FROM channels LIMIT 0",
+    "SELECT added_note FROM channels LIMIT 0",
 )
 
 
@@ -302,6 +304,13 @@ def _ensure_new_columns() -> None:
             "country": "VARCHAR(60) DEFAULT ''",
             "scope": "VARCHAR(20) DEFAULT 'local'",
             "first_party": "BOOLEAN DEFAULT FALSE",
+            "consecutive_failures": "INTEGER DEFAULT 0",
+            "retired_at": "TIMESTAMP WITH TIME ZONE",
+            "retired_reason": "TEXT DEFAULT ''",
+            "health_since": "TIMESTAMP WITH TIME ZONE",
+            "replacement_searched_at": "TIMESTAMP WITH TIME ZONE",
+            "replaces_pk": "INTEGER",
+            "added_note": "TEXT DEFAULT ''",
         },
         "draft_proposals": {
             "kind": "VARCHAR(20) DEFAULT 'caption'",

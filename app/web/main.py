@@ -25,8 +25,8 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import chapters as chapter_index
-from .. import (clip_proposals, instagram_api, linkedin_api, spend, threads_api, vision,
-               x_api, youtube)
+from .. import (channel_health, clip_proposals, instagram_api, linkedin_api, spend, threads_api,
+               vision, x_api, youtube)
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
 from ..categories import category_by_slug, category_options, is_first_party
@@ -759,7 +759,7 @@ def _workflow_buckets() -> dict:
                 state["post_failed"] = True
                 trimmed_rows.append((c, state))
                 continue
-            # The multi-clip marker pins the video to "Selected to trim":
+            # The multi-clip marker pins the video to "To trim":
             # more clips are expected, so exports/handled posts don't move
             # it along until the operator toggles the marker off.
             if c.multi_clip_potential:
@@ -1317,7 +1317,7 @@ def create_cut(candidate_id: int):
 @app.post("/video/{candidate_id}/multi-clip")
 def toggle_multi_clip(candidate_id: int):
     """Flip the video's "multiple clips potential" marker (AJAX). While on, the
-    video stays in the dashboard's "Selected to trim" bucket regardless of
+    video stays in the dashboard's "To trim" bucket regardless of
     exports or queued/published posts."""
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
@@ -6111,12 +6111,56 @@ def trait_delete(trait_id: int):
 @app.get("/channels", response_class=HTMLResponse)
 def channels_page(request: Request, msg: str = ""):
     with session_scope() as session:
-        channels = session.execute(
+        all_channels = session.execute(
             select(Channel).order_by(Channel.market, Channel.call_sign)
         ).scalars().all()
+        health = channel_health.assess(session, load_settings(), channels=all_channels)
+    channels = [c for c in all_channels if c.retired_at is None]
+    retired = sorted((c for c in all_channels if c.retired_at is not None),
+                     key=lambda c: c.retired_at, reverse=True)
+    by_id = {c.id: c for c in all_channels}
+    replaced_by = {c.replaces_pk: c for c in all_channels if c.replaces_pk}
     return templates.TemplateResponse(
-        request, "channels.html", {"channels": channels, "msg": msg, "active": "channels"}
+        request, "channels.html",
+        {"channels": channels, "retired": retired, "health": health, "by_id": by_id,
+         "replaced_by": replaced_by, "healing": _healing_running.is_set(),
+         "msg": msg, "active": "channels"},
     )
+
+
+_healing_running = threading.Event()
+
+
+def _heal_in_thread() -> None:
+    try:
+        with session_scope() as session:
+            channel_health.heal(session, load_settings(), load_keywords())
+    except Exception as exc:  # noqa: BLE001 — background worker; log and move on
+        log.warning("Channel healing failed: %s", exc)
+    finally:
+        _healing_running.clear()
+
+
+@app.post("/channels/heal")
+def channels_heal():
+    """Run the self-healing step now instead of waiting for the next monitor pass."""
+    if _healing_running.is_set():
+        return _flash("/channels", "A health check is already running")
+    _healing_running.set()
+    _in_background(_heal_in_thread)
+    return _flash("/channels", "Health check started — retiring unhealthy channels and "
+                               "searching for replacements. Refresh in a minute.")
+
+
+@app.post("/channels/{channel_id}/restore")
+def channel_restore(channel_id: int):
+    with session_scope() as session:
+        channel = session.get(Channel, channel_id)
+        if channel is None:
+            return _flash("/channels", "Not found")
+        channel_health.restore(channel)
+        name = channel.call_sign
+    return _flash("/channels", f"Restored {name} with a fresh start")
 
 
 @app.post("/channels/add")
@@ -6237,8 +6281,10 @@ def channels_import_csv(csv_text: str = Form(...)):
 def channel_toggle(channel_id: int):
     with session_scope() as session:
         channel = session.get(Channel, channel_id)
-        if channel:
-            channel.enabled = not channel.enabled
+        if channel and channel.enabled:
+            channel.enabled = False
+        elif channel:
+            channel_health.restore(channel)
     return _flash("/channels", "Updated")
 
 

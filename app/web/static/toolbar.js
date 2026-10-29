@@ -48,6 +48,21 @@
     document.documentElement.style.setProperty('--sbw', sbw + 'px');
   }
 
+  // ---- Tabs band under a page header: chrome only once it's pinned ----
+  // Resting under the headline it reads as part of the page; pinned to the top
+  // it needs the frosted band so content scrolling beneath stays legible.
+  function initStuckBars() {
+    var bars = [].slice.call(document.querySelectorAll('.page-hero + .pagebar.is-sticky'));
+    if (!bars.length) return;
+    var update = function () {
+      bars.forEach(function (bar) {
+        bar.classList.toggle('is-stuck', bar.getBoundingClientRect().top <= 0);
+      });
+    };
+    window.addEventListener('scroll', update, { passive: true });
+    update();
+  }
+
   // ---- Server model: debounced search + submit-on-change + combo ----
   function initServerForms() {
     document.querySelectorAll('form[data-toolbar-form]').forEach(function (form) {
@@ -289,6 +304,7 @@
       var name = section.getAttribute('data-filter-section');
       document.querySelectorAll('[data-filter-count="' + name + '"]').forEach(function (el) {
         el.textContent = shown;
+        el.classList.toggle('is-zero', shown === 0);
       });
       var empty = section.querySelector('[data-filter-empty]');
       if (empty) empty.classList.toggle(HIDE, !(rows.length && !shown));
@@ -609,6 +625,7 @@
 
   ready(function () {
     updateScrollbarWidth();
+    initStuckBars();
     initCombos();
     initServerForms();
     // Before the filters: opening a view hides the slots belonging to the
