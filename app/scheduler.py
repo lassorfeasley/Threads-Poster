@@ -1382,19 +1382,40 @@ def _draft_rerun_caption(session, cut: Cut, prior: ThreadsPost, model: str) -> s
     return "" if caption == (prior.caption or "").strip() else caption
 
 
+# Drafts tried per re-air before falling back to the vetted caption. Each one
+# costs a draft plus a gut check.
+_RERUN_CHECKED_DRAFTS = 2
+
+
 def _rerun_caption(session, cut: Cut, prior: ThreadsPost) -> str | None:
     """Caption to re-air ``prior`` under: freshly drafted when
-    ``scheduler.placement.reruns.fresh_captions`` is on (falling back to the
-    original if drafting fails), or always drafted for a clip Rerun Review
-    cleared only with a new caption. None when such a clip couldn't get
+    ``scheduler.placement.reruns.fresh_captions`` is on, or always drafted for
+    a clip Rerun Review cleared only with a new caption.
+
+    Drafts are written from, and gut-checked against, the FIRST airing's
+    caption — the one the operator vetted — never a previous re-air's
+    machine-written one. A draft that's flagged, or that can't be checked,
+    never ships: after ``_RERUN_CHECKED_DRAFTS`` the clip re-airs under that
+    vetted caption. None when the clip needs a new caption and didn't get
     one — it must not air under its dated caption."""
+    from .caption_check import first_airing, run as check_caption
+    from .models import CaptionCheck
+
     needs_new = resolve_shelf_life(prior, prior.candidate) != SHELF_EVERGREEN
     cfg = _rerun_settings()
+    first = first_airing(session, prior)
     if cfg["fresh_captions"] or needs_new:
-        drafted = _draft_rerun_caption(session, cut, prior, cfg["model"])
-        if drafted:
-            return drafted
-    return None if needs_new else prior.caption
+        for _ in range(_RERUN_CHECKED_DRAFTS):
+            drafted = _draft_rerun_caption(session, cut, first, cfg["model"])
+            if not drafted:
+                break
+            verdict = check_caption(session, cut, drafted, source=CaptionCheck.SOURCE_RERUN,
+                                    reference=first, rerun=True)
+            if verdict.ok:
+                return drafted
+            if verdict.ok is None:
+                break
+    return None if needs_new else (first.caption or prior.caption)
 
 
 def _rerun_first_reply(session, cut: Cut, prior: ThreadsPost,
@@ -1440,14 +1461,17 @@ def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str,
     answer). The first comment comes from ``_rerun_first_reply`` (drafted
     here unless the caller already has it in hand).
     """
+    from .caption_check import first_airing
+
     caption = caption if caption is not None else prior.caption
     attribution, skipped = (first_reply if first_reply is not None
                             else _rerun_first_reply(session, cut, prior, caption))
+    drafted = caption not in (prior.caption, first_airing(session, prior).caption)
     post = ThreadsPost(
         candidate_pk=cut.candidate_pk,
         cut_pk=cut.id,
         caption=caption,
-        suggested_caption=caption if caption != prior.caption else "",
+        suggested_caption=caption if drafted else "",
         clip_local_path=prior.clip_local_path,
         clip_object_path=prior.clip_object_path,
         clip_length_seconds=prior.clip_length_seconds,

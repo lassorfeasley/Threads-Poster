@@ -377,6 +377,73 @@ def suggest_rerun_caption(model: str, *, title: str, channel: str,
     return _tidy_caption(str(data.get("caption", "")))
 
 
+def check_caption(model: str, *, caption: str, clip_transcript: str, title: str,
+                  reference_caption: str = "", rerun: bool = False) -> dict:
+    """Gut check a caption against its clip before it's queued.
+
+    Returns {ok, reason}. Narrow on purpose: it catches captions that are
+    wrong about the clip, not ones that are merely weaker than they could be.
+    ``reference_caption`` is the caption the operator vetted when the clip
+    first aired — the authority on what the clip shows.
+    """
+    b = _brand()
+    system = (
+        f"You gut-check a caption for a short {b['source_kind']} clip about "
+        f"{b['topic']} before it's posted to Threads. Flag it only if a "
+        "reader who watched the clip would find it wrong or confusing:\n"
+        "- It describes something the clip isn't about — for example a "
+        "different story from the same broadcast (the title can cover a "
+        "longer video than the clip).\n"
+        "- It's garbled, self-contradictory, or doesn't make sense.\n"
+    )
+    if rerun:
+        system += (
+            "- It states a fact, number, name or place found in none of "
+            "clip_transcript, title or reference_caption, or gets one wrong. "
+            "This caption was machine-written and may only use those sources.\n"
+        )
+    else:
+        system += (
+            "- It gets a fact, number, name or place wrong — the clip says "
+            "otherwise. The operator wrote or approved this caption and often "
+            "adds true context the clip doesn't state (an event, a name for an "
+            "unnamed narrator or reporter, background): that's fine. Flag only "
+            "a contradiction, not mere absence from the transcript.\n"
+        )
+    if reference_caption:
+        system += (
+            "- reference_caption was written and checked by the account's "
+            "operator when this clip first aired; treat it as the truth about "
+            "what the clip shows. The caption must be about the same story and "
+            "must not contradict it. A different angle or detail is fine.\n"
+        )
+    if rerun:
+        system += (
+            "- This is a re-air: flag wording that pins the clip to a moment "
+            "('today', 'this week', 'just announced', a date) or presents a "
+            "past event as happening now.\n"
+        )
+    system += (
+        "Do NOT flag style, tone, length, or a caption you'd merely have "
+        "written differently. clip_transcript is what is said in the clip "
+        "itself; it may be empty (no speech), in which case judge from the "
+        "title and reference_caption and flag only clear contradictions.\n"
+        "JSON shape: {\"ok\": true|false, \"reason\": \"one short sentence, "
+        "empty when ok\"}"
+    )
+    user = json.dumps({
+        "caption": caption,
+        "reference_caption": reference_caption,
+        "title": title,
+        "clip_transcript": (clip_transcript or "")[:4000],
+    })
+    data = _json_chat(model, system, user, max_tokens=300, temperature=0.0)
+    ok = data.get("ok")
+    if not isinstance(ok, bool):
+        raise ValueError(f"caption check returned no verdict: {data!r}")
+    return {"ok": ok, "reason": "" if ok else str(data.get("reason", "")).strip()[:500]}
+
+
 def _clean_clip_segments(raw, horizon: float, cap: int,
                          opening_hold: float = 0.0,
                          floor: float = 0.0) -> list[dict]:

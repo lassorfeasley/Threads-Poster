@@ -418,6 +418,9 @@ engagement:
   max_replies_per_day: 250
   # Shared default LLM model id (captions, attribution drafts, etc.).
   draft_model: claude-sonnet-5
+  # Model for the caption gut check (app/caption_check.py) run on re-air
+  # drafts and on Queue / Post now. Blank = draft_model.
+  caption_check_model: ""
   # Hard ceiling given to the caption drafter — a backstop, not the goal. The
   # real instruction is the learned word target under `voice.learn_length`,
   # which follows the operator's recent captions. A ceiling alone doesn't work:

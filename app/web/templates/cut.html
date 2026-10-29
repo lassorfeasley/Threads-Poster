@@ -3435,6 +3435,38 @@ async function retryExport() {
         if (!cap.value.trim()) { alertDialog('Add a caption first.'); return false; }
         return true;
       }
+      // Gut check: does the caption actually match the clip? Only a warning —
+      // resolves true to go ahead, false to stop and edit. A check that errors
+      // or times out never blocks shipping.
+      async function captionGutCheck(btn, verb) {
+        const cap = document.getElementById('caption');
+        const old = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Checking caption…';
+        let d = null;
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 25000);
+          const r = await fetch('/cut/{{ cut.id }}/caption-check', {
+            method: 'POST', body: new URLSearchParams({ caption: cap.value }),
+            signal: ctrl.signal,
+          });
+          clearTimeout(timer);
+          if (r.ok) d = await r.json();
+        } catch (e) {
+          d = null;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = old;
+        }
+        if (!d || d.ok !== false) return true;
+        const go = await confirmDialog(
+          (d.reason || 'This caption may not match the clip.') +
+          '\n\nGo ahead anyway, or fix the caption first?',
+          { title: 'Caption check', okText: verb + ' anyway', cancelText: 'Edit caption' });
+        if (!go) cap.focus();
+        return go;
+      }
       // NOTE: capture the button BEFORE any await — event.currentTarget is reset
       // to null once the event finishes dispatching, and submitting with a null
       // submitter would fall back to the form's default action (/post = post now),
@@ -3488,6 +3520,7 @@ async function retryExport() {
           e.preventDefault();
           const btn = e.currentTarget;
           if (!captionOk()) return;
+          if (!(await captionGutCheck(btn, 'Post'))) return;
           const target = await askPublishTarget();
           if (!target) return;
           document.getElementById('publish-target-field').value = target;
@@ -3497,6 +3530,7 @@ async function retryExport() {
           e.preventDefault();
           const btn = e.currentTarget;
           if (!captionOk()) return;
+          if (!(await captionGutCheck(btn, 'Queue'))) return;
           const igBox = document.getElementById('include-instagram');
           if (igBox && igBox.checked && !(await ensureReelReady('queued'))) return;
           {% if pending_post_status == "queued" %}

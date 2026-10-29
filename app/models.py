@@ -707,6 +707,37 @@ class DraftProposal(Base):
     decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class CaptionCheck(Base):
+    """One gut check of a caption against its clip, before it was queued.
+
+    Re-airs are checked by the scheduler, which drafts their captions with no
+    one watching; the cut page checks on Queue / Post now and only warns.
+    ``reference`` is the caption the operator vetted on the clip's first
+    airing, when there is one. Kept so a flag rate, or a miss that aired
+    anyway, can be traced to exactly what the checker saw.
+    """
+
+    __tablename__ = "caption_checks"
+
+    SOURCE_RERUN = "rerun"
+    SOURCE_CUT_PAGE = "cut_page"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(20), default=SOURCE_RERUN)
+    cut_pk: Mapped[int | None] = mapped_column(ForeignKey("cuts.id"), nullable=True)
+    reference_post_pk: Mapped[int | None] = mapped_column(
+        ForeignKey("threads_posts.id"), nullable=True)
+    caption: Mapped[str] = mapped_column(Text, default="")
+    reference: Mapped[str] = mapped_column(Text, default="")
+    passed: Mapped[bool] = mapped_column(Boolean, default=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    # Set when the check itself failed (model error, budget) rather than
+    # judging the caption.
+    error: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(60), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ClipProposal(Base):
     """Every clip the model proposed and what the operator actually cut.
 

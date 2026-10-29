@@ -16,7 +16,8 @@ from unittest import mock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app import scheduler
+from app import caption_check, scheduler
+from app.caption_check import Verdict
 from app.models import Base, Candidate, Channel, Cut, RerunReview, ThreadsPost, utcnow
 
 DAY = dt.date(2026, 10, 1)
@@ -112,7 +113,8 @@ class CaptionTest(DbTest):
         settings = {"fresh_captions": fresh, "model": "m", "stage_ahead_hours": 24}
         with mock.patch.object(scheduler, "_rerun_settings", return_value=settings), \
                 mock.patch.object(scheduler, "_draft_rerun_caption",
-                                  return_value=drafted) as draft:
+                                  return_value=drafted) as draft, \
+                mock.patch.object(caption_check, "run", return_value=Verdict(ok=True)):
             return scheduler._rerun_caption(self.session, prior.cut, prior), draft
 
     def test_fresh_caption_when_drafting_works(self):

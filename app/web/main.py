@@ -3566,6 +3566,28 @@ def _no_suggestion_message(invitation: bool) -> str:
             "reliable attribution.")
 
 
+@app.post("/cut/{cut_id}/caption-check")
+def cut_caption_check(cut_id: int, caption: str = Form("")):
+    """Gut check the caption on the cut page before Queue / Post now. Only a
+    warning: the page lets the operator go ahead anyway. ``ok`` is null when
+    the check couldn't run, which the page treats as a pass."""
+    from ..caption_check import run as check_caption, vetted_airing
+    from ..models import CaptionCheck
+
+    caption = (caption or "").strip()
+    if not caption:
+        return {"ok": None, "reason": ""}
+    with session_scope() as session:
+        cut = session.execute(
+            select(Cut).options(selectinload(Cut.candidate)).where(Cut.id == cut_id)
+        ).scalar_one_or_none()
+        if cut is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        verdict = check_caption(session, cut, caption, source=CaptionCheck.SOURCE_CUT_PAGE,
+                                reference=vetted_airing(session, cut))
+    return {"ok": verdict.ok, "reason": verdict.reason}
+
+
 @app.post("/cut/{cut_id}/suggest-attribution")
 def suggest_cut_attribution(cut_id: int):
     """(Re)draft the first-comment while still on the cut page — a source

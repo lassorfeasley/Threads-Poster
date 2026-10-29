@@ -161,7 +161,7 @@ if (window.Chart && TS.days && TS.days.length) {
   const text = cssVar('--text-dim', '#b7c2cd');
   const grid = cssVar('--border', '#27313d');
   const accent = cssVar('--accent', '#3ecf8e');
-  const blue = '#5aa9f0';
+  const ink = cssVar('--text', '#f3f2ef');
   const accentFill = /^#[0-9a-fA-F]{6}$/.test(accent) ? accent + '22' : 'rgba(62,207,142,0.13)';
   Chart.defaults.color = text;
   Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
@@ -222,7 +222,7 @@ if (window.Chart && TS.days && TS.days.length) {
       datasets: (m) => [{
         type: 'bar', label: `Daily avg ${METRIC_LABELS[m].toLowerCase()} / post`,
         data: TS.metrics[m].daily_avg,
-        backgroundColor: blue + '99', hoverBackgroundColor: blue, borderRadius: 3,
+        backgroundColor: ink + 'cc', hoverBackgroundColor: ink, borderRadius: 4,
       }],
     },
     posts: {
@@ -231,7 +231,7 @@ if (window.Chart && TS.days && TS.days.length) {
       datasets: (m) => [{
         type: 'scatter', label: METRIC_LABELS[m],
         data: pointsFor(m),
-        backgroundColor: blue + 'cc', borderColor: blue,
+        backgroundColor: ink + 'b3', borderColor: ink,
         pointRadius: 4, pointHoverRadius: 6,
       }],
     },
@@ -252,7 +252,7 @@ if (window.Chart && TS.days && TS.days.length) {
       datasets: () => [
         { type: 'bar', label: 'LLM spend', isSpend: true,
           data: SPEND.map((d) => d.spend_usd),
-          backgroundColor: amber + 'b3', hoverBackgroundColor: amber, borderRadius: 3 },
+          backgroundColor: amber + 'b3', hoverBackgroundColor: amber, borderRadius: 4 },
         { type: 'line', label: 'Daily budget',
           data: SPEND.map(() => SPEND_BUDGET),
           borderColor: '#e05252', borderWidth: 1.5, borderDash: [6, 4],
