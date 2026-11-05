@@ -122,6 +122,11 @@ FIRST_REPLY_HEADER = """\
 # Auto first-reply posted under every Threads post this app publishes.
 # Editable via the cog on the Replies page; no code changes needed.
 #
+# The Replies page saves these settings to the shared database AND to this file.
+# Every runner reads the database copy whenever one exists, so editing this
+# file by hand changes nothing until it's saved again from the Replies page.
+# The file only matters for a workspace that has never been saved from there.
+#
 # mode decides what the "Suggest a draft" button writes into the first-reply box
 # on the cut and post pages:
 #   citation   - a formal credit line for the source publisher (drafted only
@@ -151,18 +156,22 @@ FIRST_REPLY_HEADER = """\
 # it false and promo captions have to carry the URL themselves; found footage is
 # unaffected either way.
 #
-# WHEN the first comment posts. By default it goes out seconds after the post,
-# which makes it the first thing under every clip — and a promotional comment
-# sitting in that slot can smother the audience replies that would otherwise
-# start the conversation. These four hold it back until the post has a
-# conversation of its own:
+# WHEN the first comment posts. With all four gates at 0 it goes out seconds
+# after the post, which is the recommended setting: a post gets ~70% of its
+# lifetime views in its first 2 hours and ~99% within 6 (measured across 400+
+# of this account's posts, Nov 2026), so every hour of holding back hides the
+# comment from most of the people who will ever see the post. Holding until
+# other people reply also showed no benefit: posts commented under immediately
+# drew as many audience replies as posts that waited. The gates remain for
+# anyone who wants the comment held back until the post has a conversation of
+# its own:
 #   delay_minutes  - don't comment until the post is at least this old
 #   min_replies    - ...and until this many OTHER people have replied
 #   min_likes      - ...and until it has at least this many likes
 #   deadline_hours - comment anyway once the post is this old, so a post that
 #                    never got replies still gets its call to action
 #                    (0 = wait indefinitely)
-# All four at 0 restores the original behavior: comment immediately on publish.
+# All four at 0: comment immediately on publish.
 #
 # The deadline fires only on posts that FLOPPED — a post that got its replies
 # was commented under long before. Left unqualified it therefore attaches the
@@ -188,11 +197,63 @@ def _positive_int(value: Any, default: int = 0) -> int:
         return default
 
 
+# The first-reply settings live in the shared database as well as in
+# first_reply.yaml, for the same reason the posting windows do (see
+# models.PostingSchedule): the Fly worker that actually posts the comments runs
+# from a baked image, so a YAML-only edit made on the dashboard never reached it
+# until the next deploy — which is how a replaced first-reply text kept going
+# out for weeks. The DB copy wins whenever it exists; the YAML is the seed for a
+# workspace that has never saved from the dashboard, and the mirror a save
+# writes for the repo.
+FIRST_REPLY_TOKEN = f"first_reply_config:{WORKSPACE}"
+# load_first_reply() runs per post in the reply sweep and on every cut/post
+# page; a short cache keeps that from being a DB round trip each time while a
+# dashboard save still reaches the worker within a minute.
+_FIRST_REPLY_CACHE_TTL = 60.0
+_first_reply_cache: tuple[float, dict[str, Any] | None] | None = None
+
+
+def _first_reply_from_db() -> dict[str, Any] | None:
+    """The DB copy of the first-reply settings, or None when there is none (or
+    the DB can't be reached — the YAML then stands in rather than failing the
+    caller)."""
+    global _first_reply_cache
+    import json
+    import logging
+    import time
+
+    now = time.monotonic()
+    if _first_reply_cache and now - _first_reply_cache[0] < _FIRST_REPLY_CACHE_TTL:
+        return _first_reply_cache[1]
+    data: dict[str, Any] | None = None
+    try:
+        from .db import session_scope
+        from .models import AppToken
+
+        with session_scope(read_only=True) as session:
+            row = session.get(AppToken, FIRST_REPLY_TOKEN)
+            if row is not None and row.value:
+                parsed = json.loads(row.value)
+                data = parsed if isinstance(parsed, dict) else None
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Could not read first-reply settings from the DB (using %s): %s",
+            CONFIG_DIR / "first_reply.yaml", exc)
+        return None  # not cached: retry on the next call
+    _first_reply_cache = (now, data)
+    return data
+
+
 def load_first_reply() -> dict[str, Any]:
     """Return the auto first-reply config: ``{enabled, text, attribution_enabled,
     first_party_enabled, mode, instruction, delay_minutes, min_replies,
-    min_likes, deadline_hours, deadline_min_views, deadline_min_likes}``."""
-    data = _load_yaml(CONFIG_DIR / "first_reply.yaml")
+    min_likes, deadline_hours, deadline_min_views, deadline_min_likes}``.
+
+    Read from the shared DB when a copy has been saved there, else from
+    first_reply.yaml."""
+    data = _first_reply_from_db()
+    if data is None:
+        data = _load_yaml(CONFIG_DIR / "first_reply.yaml")
 
     def _text(key: str) -> str:
         val = data.get(key) or ""
@@ -248,9 +309,30 @@ def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = Tr
         "instruction": (instruction or "").strip(),
         "text": (text or "").strip(),
     }
+    _save_first_reply_to_db(payload)
     body = yaml.safe_dump(payload, default_flow_style=False, allow_unicode=True, width=88,
                           sort_keys=False)
     (CONFIG_DIR / "first_reply.yaml").write_text(FIRST_REPLY_HEADER + body)
+
+
+def _save_first_reply_to_db(payload: dict[str, Any]) -> None:
+    """Write the settings to the shared DB so every runner sees them. Raises on
+    failure: a save that only reached the local YAML would look successful on
+    the dashboard while the worker kept posting the old settings."""
+    global _first_reply_cache
+    import json
+
+    from .db import session_scope
+    from .models import AppToken, utcnow
+
+    with session_scope() as session:
+        row = session.get(AppToken, FIRST_REPLY_TOKEN)
+        if row is None:
+            row = AppToken(name=FIRST_REPLY_TOKEN)
+            session.add(row)
+        row.value = json.dumps(payload)
+        row.updated_at = utcnow()
+    _first_reply_cache = None
 
 
 BRAND_HEADER = """\

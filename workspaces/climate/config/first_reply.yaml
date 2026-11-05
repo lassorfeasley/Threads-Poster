@@ -1,6 +1,11 @@
 # Auto first-reply posted under every Threads post this app publishes.
 # Editable via the cog on the Replies page; no code changes needed.
 #
+# The Replies page saves these settings to the shared database AND to this file.
+# Every runner reads the database copy whenever one exists, so editing this
+# file by hand changes nothing until it's saved again from the Replies page.
+# The file only matters for a workspace that has never been saved from there.
+#
 # mode decides what the "Suggest a draft" button writes into the first-reply box
 # on the cut and post pages:
 #   citation   - a formal credit line for the source publisher (drafted only
@@ -30,18 +35,22 @@
 # it false and promo captions have to carry the URL themselves; found footage is
 # unaffected either way.
 #
-# WHEN the first comment posts. By default it goes out seconds after the post,
-# which makes it the first thing under every clip — and a promotional comment
-# sitting in that slot can smother the audience replies that would otherwise
-# start the conversation. These four hold it back until the post has a
-# conversation of its own:
+# WHEN the first comment posts. With all four gates at 0 it goes out seconds
+# after the post, which is the recommended setting: a post gets ~70% of its
+# lifetime views in its first 2 hours and ~99% within 6 (measured across 400+
+# of this account's posts, Nov 2026), so every hour of holding back hides the
+# comment from most of the people who will ever see the post. Holding until
+# other people reply also showed no benefit: posts commented under immediately
+# drew as many audience replies as posts that waited. The gates remain for
+# anyone who wants the comment held back until the post has a conversation of
+# its own:
 #   delay_minutes  - don't comment until the post is at least this old
 #   min_replies    - ...and until this many OTHER people have replied
 #   min_likes      - ...and until it has at least this many likes
 #   deadline_hours - comment anyway once the post is this old, so a post that
 #                    never got replies still gets its call to action
 #                    (0 = wait indefinitely)
-# All four at 0 restores the original behavior: comment immediately on publish.
+# All four at 0: comment immediately on publish.
 #
 # The deadline fires only on posts that FLOPPED — a post that got its replies
 # was commented under long before. Left unqualified it therefore attaches the
@@ -58,39 +67,29 @@ mode: static
 enabled: true
 attribution_enabled: true
 first_party_enabled: false
-delay_minutes: 120
-min_replies: 1
+delay_minutes: 0
+min_replies: 0
 min_likes: 0
-deadline_hours: 12
-deadline_min_views: 500
-deadline_min_likes: 50
-instruction: |
-  Write a short, plain note pointing readers to Renewables.org, one or two
-  sentences.
-
-  It should read like the poster adding a useful aside under their own clip,
-  not like an ad. No questions, no exclamation marks, no urgency, and never
-  describe the reader's feelings. A light, natural bridge from the clip is fine
-  ("If you want to do something about this, ..." or "One practical thing you
-  can do: ...") but it's equally fine to skip it and just state the ask. Don't
-  use the same bridge twice in a row.
-
-  It must contain the URL Renewables.org written exactly that way, with no
-  https:// and no tracking parameters. Say that Renewables.org is a nonprofit
-  and that the money finances solar projects in the Global South. Vary how you
-  phrase this every time — different verbs, different sentence shape, different
-  emphasis — so the same line never appears twice.
-
-  You may also use any of the following facts, but only word them in ways that
-  stay true to them. Rotate which one you include rather than using all of them:
-    - Anyone can invest as little as $25.
-    - Investors are paid back as the panels generate and sell clean electricity
-      to the grid.
-    - You don't earn an interest rate, but dollar-for-dollar you create 550% more
-      carbon avoidance than investing in the Global North would.
-
-  Never promise a financial return. Always call it an investment: never a
-  donation, contribution, gift, or pledge, and never use the verb "donate" or
-  "give". Never state any number that does not appear above.
-text: Take climate action 👉 Renewables.org — fund solar, create 5.5x the carbon impact,
-  get repaid
+deadline_hours: 0
+deadline_min_views: 0
+deadline_min_likes: 0
+instruction: "Write a short, plain note pointing readers to Renewables.org, one or two\nsentences.\n\
+  \nIt should read like the poster adding a useful aside under their own clip,\nnot like an\
+  \ ad. No questions, no exclamation marks, no urgency, and never\ndescribe the reader's feelings.\
+  \ A light, natural bridge from the clip is fine\n(\"If you want to do something about this,\
+  \ ...\" or \"One practical thing you\ncan do: ...\") but it's equally fine to skip it and\
+  \ just state the ask. Don't\nuse the same bridge twice in a row.\n\nIt must contain the\
+  \ URL Renewables.org written exactly that way, with no\nhttps:// and no tracking parameters.\
+  \ Say that Renewables.org is a nonprofit\nand that the money finances solar projects in\
+  \ the Global South. Vary how you\nphrase this every time — different verbs, different sentence\
+  \ shape, different\nemphasis — so the same line never appears twice.\n\nYou may also use\
+  \ any of the following facts, but only word them in ways that\nstay true to them. Rotate\
+  \ which one you include rather than using all of them:\n  - Anyone can invest as little\
+  \ as $25.\n  - Investors are paid back as the panels generate and sell clean electricity\n\
+  \    to the grid.\n  - You don't earn an interest rate, but dollar-for-dollar you create\
+  \ 550% more\n    carbon avoidance than investing in the Global North would.\n\nNever promise\
+  \ a financial return. Always call it an investment: never a\ndonation, contribution, gift,\
+  \ or pledge, and never use the verb \"donate\" or\n\"give\". Never state any number that\
+  \ does not appear above."
+text: Take climate action 👉 Renewables.org — fund solar, create 5.5x the carbon impact, get
+  repaid
