@@ -1,4 +1,13 @@
-# Local Climate News Clip Monitor
+# Threads Poster
+
+An AI agent that creates and posts social media content for [@climate_archives](https://www.threads.com/@climate_archives), with human review until it earns more autonomy.
+
+**Live:** [threads.com/@climate_archives](https://www.threads.com/@climate_archives)  
+**Stack:** Python, FastAPI, SQLAlchemy, yt-dlp, faster-whisper, Threads API, Fly.io
+
+---
+
+## What it does
 
 A personal, locally-run tool that watches ~190 local TV news YouTube channels for
 climate-related segments, presents matches in a review dashboard, and — only after
