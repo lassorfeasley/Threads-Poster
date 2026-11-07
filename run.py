@@ -23,6 +23,8 @@ Usage:
   python run.py comments           # sync comments on own posts
   python run.py digest             # write a fresh analytics digest (one LLM call)
   python run.py cleanup            # apply the retention setting (never automatic)
+  python run.py offload --dry-run  # source videos that would move to Supabase / be deleted
+  python run.py offload            # upload out-of-workflow source videos, free the disk
   python run.py scheduler          # one adaptive-scheduler tick (windows + metrics)
   python run.py scheduler --loop   # keep the adaptive scheduler running
   python run.py migrate-db         # copy local SQLite data into DATABASE_URL (Supabase)
@@ -773,6 +775,35 @@ def cmd_cleanup(_args) -> None:
     print(f"Removed {removed} files older than {retention} days.")
 
 
+def cmd_offload(args) -> None:
+    """Upload source videos that are out of the workflow to Supabase and delete
+    the local copies; delete local downloads of rejected videos. The dashboard
+    does the same hourly when storage.offload_sources is on."""
+    from app.db import init_db
+    from app.offload import free_bytes, run_sweep_once
+
+    init_db()
+    res = run_sweep_once(dry_run=args.dry_run, limit=args.limit)
+    if res is None:
+        print("A sweep is already running in this process.")
+        return
+    labels = {"offload": "upload + delete", "delete": "delete (rejected)"}
+    for verb, size, path in res.planned:
+        print(f"{'would ' if args.dry_run else ''}{labels[verb]:18s} {size / 1e6:9.1f} MB  {path}")
+    offload_bytes = sum(s for v, s, _ in res.planned if v == "offload")
+    delete_bytes = sum(s for v, s, _ in res.planned if v == "delete")
+    if args.dry_run:
+        print(f"\nWould upload {sum(v == 'offload' for v, _, _ in res.planned)} videos "
+              f"({offload_bytes / 1e9:.1f} GB) and delete "
+              f"{sum(v == 'delete' for v, _, _ in res.planned)} rejected "
+              f"({delete_bytes / 1e9:.1f} GB). Keeping {res.kept} on disk.")
+    else:
+        print(f"\nOffloaded {res.offloaded} ({res.offloaded_bytes / 1e9:.1f} GB), deleted "
+              f"{res.deleted} rejected ({res.deleted_bytes / 1e9:.1f} GB), "
+              f"{res.failed} failed (see log). Kept {res.kept} on disk.")
+    print(f"Free disk space: {free_bytes() / 1e9:.1f} GB")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -875,6 +906,11 @@ def main() -> None:
                    help="write a fresh analytics digest").set_defaults(func=cmd_digest)
     sub.add_parser("cleanup", parents=[common],
                    help="apply retention setting to downloaded segments").set_defaults(func=cmd_cleanup)
+    p = sub.add_parser("offload", parents=[common],
+                       help="move out-of-workflow source videos to Supabase storage")
+    p.add_argument("--dry-run", action="store_true", help="list what would happen, change nothing")
+    p.add_argument("--limit", type=int, default=None, help="act on at most this many files")
+    p.set_defaults(func=cmd_offload)
 
     args = parser.parse_args()
 

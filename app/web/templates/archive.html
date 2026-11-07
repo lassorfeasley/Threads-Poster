@@ -53,6 +53,7 @@
   <details style="margin-top: 10px;"><summary>Files &amp; transcript</summary>
     <table style="margin-top: 4px;">
       <tr><th style="width: 140px;">Video file</th><td><code>{{ c.local_video_path }}</code></td></tr>
+      {% if c.source_object_key %}<tr><th>Cloud copy</th><td><code>{{ c.source_object_key }}</code></td></tr>{% endif %}
       <tr><th>Transcript</th><td><code>{{ c.transcript_path }}</code></td></tr>
       {% if c.trimmed_clip_path %}<tr><th>Exported clip</th><td><code>{{ c.trimmed_clip_path }}</code></td></tr>{% endif %}
       <tr><th>Source</th><td><a href="{{ c.url }}" target="_blank">{{ c.url }}</a></td></tr>

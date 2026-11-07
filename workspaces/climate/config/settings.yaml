@@ -310,9 +310,24 @@ storage:
   # Retention for full segments: "keep" (default, never delete) or an integer
   # number of days after which the CLEANUP COMMAND (never automatic) may prune.
   retention: keep
-  # Optional redundancy: also copy full segments to a PRIVATE Supabase bucket.
-  # Off by default by design (keep raw segments local).
-  backup_full_segments_to_cloud: false
+  # Move source videos off this disk once they're no longer waiting to be
+  # clipped (out of the dashboard's "To trim" bucket): each is uploaded to the
+  # PRIVATE bucket below, checked, and only then deleted locally. Offloaded
+  # videos still play (streamed from storage) and are downloaded back
+  # automatically when something needs the file, e.g. exporting another clip.
+  # Downloads of REJECTED videos are deleted with no cloud copy. Runs in the
+  # dashboard every offload_interval_minutes; `python run.py offload --dry-run`
+  # shows what it would do. Needs the Supabase global file size limit above the
+  # largest source video (Storage -> Settings).
+  offload_sources: true
+  source_video_bucket: source-videos
+  # Days since a video was last touched (downloaded, restored, a clip edited or
+  # posted) before it leaves the disk, so going back for one more clip right
+  # after posting doesn't mean a re-download.
+  offload_after_days: 3
+  offload_interval_minutes: 60
+  # How long a streamed playback link to an offloaded video stays valid.
+  source_signed_url_ttl_seconds: 21600
   # Supabase Storage bucket for trimmed clips (public URL needed by Threads).
   trimmed_clip_bucket: trimmed-clips
   # Seconds a signed clip URL stays valid; must outlive Meta's fetch+processing
