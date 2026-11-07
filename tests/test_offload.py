@@ -236,6 +236,152 @@ class SweepTest(_DB, unittest.TestCase):
         self.assertEqual(len(uploaded), 1)
 
 
+class ClipSweepTest(_DB, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.clips = self.dir / "clips"
+        self.outro = self.dir / "outro"
+        self.clips.mkdir()
+        self.outro.mkdir()
+        with self.Session() as s:
+            s.add(Candidate(id=1, channel_pk=1, video_id="v", title="t", url="u",
+                            status="archived"))
+            s.commit()
+
+    def file(self, directory, name, age_days=10, size=100):
+        path = directory / name
+        path.write_bytes(b"x" * size)
+        t = (NOW - dt.timedelta(days=age_days)).timestamp()
+        os.utime(path, (t, t))
+        return path
+
+    def add_cut(self, cid, posts=(), age_days=10, **paths):
+        with self.Session() as s:
+            s.add(Cut(id=cid, candidate_pk=1, updated_at=NOW - dt.timedelta(days=age_days),
+                      **{k: str(v) for k, v in paths.items()}))
+            for st, clip in posts:
+                s.add(ThreadsPost(candidate_pk=1, cut_pk=cid, status=st,
+                                  clip_local_path=str(clip),
+                                  created_at=NOW - dt.timedelta(days=age_days)))
+            s.commit()
+
+    def run_sweep(self, **kw):
+        uploaded = {}
+
+        def fake_upload(path, bucket, key):
+            uploaded[key] = Path(path).stat().st_size
+
+        with mock.patch.object(offload, "utcnow", return_value=NOW), \
+                mock.patch.object(offload, "_clips_dir", return_value=self.clips), \
+                mock.patch("app.outro.OUTRO_DIR", self.outro), \
+                mock.patch.object(offload, "remote_size", side_effect=lambda k: uploaded.get(k)), \
+                mock.patch.object(offload, "_precache_clip"), \
+                mock.patch("app.storage_supabase.ensure_bucket"), \
+                mock.patch("app.storage_supabase.upload_file_resumable", side_effect=fake_upload):
+            return offload.sweep_clips(**kw), uploaded
+
+    def test_published_cut_is_archived_pending_cut_stays(self):
+        done = self.file(self.clips, "a_cut1.mp4")
+        done_subs = self.file(self.clips, "a_cut1_subs.mp4")
+        queued = self.file(self.clips, "b_cut2.mp4")
+        unposted = self.file(self.clips, "c_cut3.mp4")
+        self.add_cut(1, posts=[("published", done_subs)], trimmed_clip_path=done,
+                     subtitled_clip_path=done_subs)
+        self.add_cut(2, posts=[("queued", queued)], trimmed_clip_path=queued)
+        self.add_cut(3, trimmed_clip_path=unposted)
+        res, uploaded = self.run_sweep()
+
+        self.assertEqual(set(uploaded), {offload.clip_object_key(done),
+                                         offload.clip_object_key(done_subs)})
+        self.assertFalse(done.exists() or done_subs.exists())
+        self.assertTrue(queued.exists() and unposted.exists())
+        self.assertEqual(res.offloaded, 2)
+
+    def test_cut_with_published_and_failed_posts_stays(self):
+        clip = self.file(self.clips, "a_cut1.mp4")
+        self.add_cut(1, posts=[("published", clip), ("failed", clip)], trimmed_clip_path=clip)
+        res, uploaded = self.run_sweep()
+        self.assertTrue(clip.exists())
+        self.assertEqual(uploaded, {})
+
+    def test_recently_touched_cut_stays(self):
+        clip = self.file(self.clips, "a_cut1.mp4")
+        self.add_cut(1, posts=[("published", clip)], age_days=1, trimmed_clip_path=clip)
+        self.run_sweep()
+        self.assertTrue(clip.exists())
+
+    def test_orphans_and_stale_outros_deleted_pending_outro_kept(self):
+        queued = self.file(self.clips, "b_cut2.mp4")
+        self.add_cut(2, posts=[("queued", queued)], trimmed_clip_path=queued)
+        orphan = self.file(self.clips, "old_vertical.mp4")
+        fresh_orphan = self.file(self.clips, "being_exported.mp4", age_days=0)
+        keep_outro = self.file(self.outro, "b_cut2_outro_abc123.mp4")
+        stale_outro = self.file(self.outro, "z_cut9_outro_def456.mp4")
+        res, uploaded = self.run_sweep()
+
+        self.assertFalse(orphan.exists() or stale_outro.exists())
+        self.assertTrue(fresh_orphan.exists() and keep_outro.exists())
+        self.assertEqual(uploaded, {})  # deleted, never uploaded
+        self.assertEqual(res.deleted, 2)
+
+    def test_transcript_sidecar_of_finished_cut_stays(self):
+        clip = self.file(self.clips, "a_cut1.mp4")
+        sidecar = self.file(self.clips, "a_cut1_transcript.json")
+        self.add_cut(1, posts=[("published", clip)], trimmed_clip_path=clip,
+                     clip_transcript_path=sidecar)
+        with self.Session() as s:
+            s.get(Cut, 1).clip_transcript_path = str(sidecar)
+            s.commit()
+        self.run_sweep()
+        self.assertFalse(clip.exists())
+        self.assertTrue(sidecar.exists())
+
+    def test_dry_run_changes_nothing(self):
+        clip = self.file(self.clips, "a_cut1.mp4")
+        self.add_cut(1, posts=[("published", clip)], trimmed_clip_path=clip)
+        orphan = self.file(self.clips, "orphan.mp4")
+        res, uploaded = self.run_sweep(dry_run=True)
+        self.assertTrue(clip.exists() and orphan.exists())
+        self.assertEqual(sorted(v for v, _, _ in res.planned), ["archive", "delete-orphan"])
+
+
+class EnsureClipFileTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clips = Path(self.tmp.name)
+        offload._clip_misses.clear()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_restores_archived_clip_by_path(self):
+        path = self.clips / "a_cut1.mp4"
+
+        def fake_download(bucket, key, dest, expected_size=None):
+            self.assertEqual(key, offload.clip_object_key(path))
+            Path(dest).write_bytes(b"clip")
+
+        with mock.patch.object(offload, "_clips_dir", return_value=self.clips), \
+                mock.patch.object(offload, "remote_size", return_value=4), \
+                mock.patch("app.storage_supabase.download_to_file", side_effect=fake_download):
+            self.assertTrue(offload.ensure_clip_file(str(path)))
+        self.assertEqual(path.read_bytes(), b"clip")
+
+    def test_not_archived_is_remembered(self):
+        path = self.clips / "gone.mp4"
+        with mock.patch.object(offload, "_clips_dir", return_value=self.clips), \
+                mock.patch.object(offload, "remote_size", return_value=None) as rs:
+            self.assertFalse(offload.ensure_clip_file(str(path)))
+            self.assertFalse(offload.ensure_clip_file(str(path)))
+        self.assertEqual(rs.call_count, 1)
+
+    def test_outside_clips_dir_is_never_fetched(self):
+        with mock.patch.object(offload, "_clips_dir", return_value=self.clips), \
+                mock.patch.object(offload, "remote_size") as rs:
+            self.assertFalse(offload.ensure_clip_file("/elsewhere/x.mp4"))
+        rs.assert_not_called()
+
+
 class EnsureLocalTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -1,4 +1,5 @@
-"""Keep source videos off the local disk once they're out of the workflow.
+"""Keep source videos (and finished clips) off the local disk once they're out
+of the workflow. Clips and outro renders: see the section further down.
 
 A downloaded source video is only needed locally while it is waiting to be
 clipped (the dashboard's "To trim" bucket). After that it is uploaded to a
@@ -388,16 +389,258 @@ def sweep(*, dry_run: bool = False, limit: int | None = None) -> SweepResult:
     return result
 
 
+# --- Exported clips and outro renders ------------------------------------------------
+#
+# A cut's exported files (plain, captioned, vertical) are needed locally while
+# the cut is still headed for a post. Once every post made from it has
+# published, the published copies live in the trimmed-clips bucket and the local
+# files only serve the dashboard (playing the clip, redoing captions or the
+# vertical version). They are then archived to the source-video bucket under
+# ``<workspace>/clips/<filename>`` (filenames are timestamped, so unique) and
+# deleted; ``ensure_clip_file`` brings one back by its path alone, so nothing in
+# the database has to change. Outro renders are a pure cache of what was
+# uploaded, so they are deleted once nothing waiting to publish uses them, as
+# are clip files no row refers to any more.
+
+# Post statuses after which a post never reads its local clip again.
+FINISHED_POST_STATUSES = frozenset({"published"})
+ARCHIVE, DELETE_ORPHAN, DELETE_OUTRO = "archive", "delete-orphan", "delete-outro"
+
+
+def clip_object_key(path: str | Path) -> str:
+    return f"{WORKSPACE}/clips/{Path(path).name}"
+
+
+def _clips_dir() -> Path:
+    from .clipper import CLIPS_DIR
+
+    return CLIPS_DIR
+
+
+def _as_utc(t: dt.datetime | None) -> dt.datetime | None:
+    if t is not None and t.tzinfo is None:
+        return t.replace(tzinfo=dt.timezone.utc)  # SQLite hands back naive UTC
+    return t
+
+
+@dataclass
+class ClipPlan:
+    """What the clip sweep found: per resolved file path, whether every row
+    that refers to it is finished; plus the cut each file belongs to."""
+    finished: dict[str, bool] = field(default_factory=dict)
+    cut_of: dict[str, int] = field(default_factory=dict)
+    # Stems of files something still waiting to publish uses (their outro
+    # renders stay).
+    pending_stems: set[str] = field(default_factory=set)
+
+
+def plan_clips(session, *, now: dt.datetime, grace: dt.timedelta) -> ClipPlan:
+    from .models import InstagramPost
+
+    cut_posts: dict[int, list[tuple[str, dt.datetime | None]]] = {}
+    post_refs: list[tuple[int | None, str, str]] = []  # (cut_pk, status, path)
+    for M in (ThreadsPost, InstagramPost):
+        for cut_pk, status, path, created in session.execute(
+            select(M.cut_pk, M.status, M.clip_local_path, M.created_at)
+        ).all():
+            if cut_pk is not None:
+                cut_posts.setdefault(cut_pk, []).append((status, _as_utc(created)))
+            if path:
+                post_refs.append((cut_pk, status, path))
+
+    plan = ClipPlan()
+    cut_done: dict[int, bool] = {}
+    for cid, trimmed, subbed, vertical, sidecar, exp_status, updated in session.execute(
+        select(Cut.id, Cut.trimmed_clip_path, Cut.subtitled_clip_path,
+               Cut.vertical_clip_path, Cut.clip_transcript_path, Cut.export_status,
+               Cut.updated_at)
+    ).all():
+        posts = cut_posts.get(cid, [])
+        latest = max([t for t in [_as_utc(updated), *(c for _, c in posts)] if t],
+                     default=None)
+        done = (any(s in FINISHED_POST_STATUSES for s, _ in posts)
+                and all(s in FINISHED_POST_STATUSES for s, _ in posts)
+                and exp_status != "exporting"
+                and (latest is None or now - latest >= grace))
+        cut_done[cid] = done
+        # The sidecar is referenced (so never an orphan) but, not being a
+        # video, never archived: ``sweep_clips`` only archives .mp4 files.
+        for p in (trimmed, subbed, vertical, sidecar):
+            if p:
+                _ref(plan, p, done, cid)
+    # Belt and braces: any file a candidate names is never an orphan here.
+    for row in session.execute(
+        select(Candidate.local_video_path, Candidate.transcript_path,
+               Candidate.word_transcript_path)
+    ).all():
+        for p in row:
+            if p:
+                _ref(plan, p, False, None)
+    for cut_pk, status, path in post_refs:
+        done = status in FINISHED_POST_STATUSES and (cut_pk is None
+                                                    or cut_done.get(cut_pk, True))
+        _ref(plan, path, done, cut_pk)
+    return plan
+
+
+def _ref(plan: ClipPlan, path: str, done: bool, cut_pk: int | None) -> None:
+    key = str(Path(path).expanduser().resolve())
+    plan.finished[key] = plan.finished.get(key, True) and done
+    if cut_pk is not None:
+        plan.cut_of.setdefault(key, cut_pk)
+    if not done:
+        plan.pending_stems.add(Path(key).stem)
+
+
+def _precache_clip(path: Path, cut_pk: int | None) -> None:
+    """Cache the clip card's still (served by /media/cut-thumb) before the
+    clip leaves the disk."""
+    if cut_pk is None:
+        return
+    from .clipper import cached_still
+
+    try:
+        cached_still(path, f"cut-{cut_pk}")
+    except Exception as exc:
+        log.info("No still cached for cut %s before archiving: %s", cut_pk, exc)
+
+
+def _archive_clip(path: Path, size: int) -> None:
+    from .storage_supabase import ensure_bucket, upload_file_resumable
+
+    key = clip_object_key(path)
+    if remote_size(key) != size:
+        ensure_bucket(_bucket())
+        upload_file_resumable(path, _bucket(), key)
+    stored = remote_size(key)
+    if stored != size:
+        raise RuntimeError(f"stored copy of {path.name} is {stored} bytes, expected {size}")
+    path.unlink()
+
+
+def sweep_clips(*, dry_run: bool = False, limit: int | None = None) -> SweepResult:
+    """Archive finished cuts' clips, delete unreferenced clip files and outro
+    renders nothing pending needs. Same per-file failure handling as ``sweep``.
+    Only video files are archived; the small transcript sidecars stay put."""
+    from .db import session_scope
+    from .outro import OUTRO_DIR
+
+    settings = load_settings()
+    grace = dt.timedelta(days=float(settings.get("storage.offload_after_days", 3)))
+    now = utcnow()
+    with session_scope(read_only=True) as session:
+        plan = plan_clips(session, now=now, grace=grace)
+
+    work: list[tuple[str, Path, int, int | None]] = []
+    result = SweepResult()
+    for directory, is_outro in ((_clips_dir(), False), (OUTRO_DIR, True)):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.iterdir()):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            settled = now - dt.datetime.fromtimestamp(st.st_mtime, tz=dt.timezone.utc) >= grace
+            if not settled:
+                result.kept += 1
+                continue
+            if is_outro:
+                stem = path.name.split("_outro_", 1)[0]
+                if stem in plan.pending_stems:
+                    result.kept += 1
+                else:
+                    work.append((DELETE_OUTRO, path, st.st_size, None))
+                continue
+            key = str(path.resolve())
+            if key not in plan.finished:
+                work.append((DELETE_ORPHAN, path, st.st_size, None))
+            elif plan.finished[key] and path.suffix.lower() == ".mp4":
+                work.append((ARCHIVE, path, st.st_size, plan.cut_of.get(key)))
+            else:
+                result.kept += 1
+
+    for i, (verb, path, size, cut_pk) in enumerate(work):
+        if limit is not None and i >= limit:
+            break
+        result.planned.append((verb, size, str(path)))
+        if dry_run:
+            continue
+        try:
+            if verb == ARCHIVE:
+                _precache_clip(path, cut_pk)
+                _archive_clip(path, size)
+                result.offloaded += 1
+                result.offloaded_bytes += size
+            else:
+                path.unlink()
+                result.deleted += 1
+                result.deleted_bytes += size
+        except Exception as exc:
+            result.failed += 1
+            log.warning("Could not %s %s: %s", verb, path.name, exc)
+    return result
+
+
+_clip_misses: dict[str, float] = {}
+_CLIP_MISS_TTL = 300.0
+
+
+def ensure_clip_file(path: str | Path) -> bool:
+    """Bring an archived clip back to ``path`` if it's missing. True when the
+    file is (now) on disk. Never raises: a clip that can't be restored leaves
+    the caller's own missing-file handling in charge."""
+    p = Path(path or "").expanduser()
+    if not str(path or "") or p.is_file():
+        return bool(str(path or ""))
+    if p.parent.resolve() != _clips_dir().resolve():
+        return False
+    now = time.monotonic()
+    if now - _clip_misses.get(str(p), -1e9) < _CLIP_MISS_TTL:
+        return False  # checked recently: not in the archive either
+    key = clip_object_key(p)
+    try:
+        with _lock_for(str(p)):
+            if p.is_file():
+                return True
+            size = remote_size(key)
+            if size is None:
+                _clip_misses[str(p)] = now
+                return False
+            from .storage_supabase import download_to_file
+
+            download_to_file(_bucket(), key, p, expected_size=size)
+            log.info("Restored clip %s from storage", p.name)
+            return True
+    except Exception as exc:
+        log.warning("Could not restore clip %s: %s", p.name, exc)
+        _clip_misses[str(p)] = now
+        return False
+
+
 _sweep_lock = threading.Lock()
 _thread: threading.Thread | None = None
 
 
-def run_sweep_once(**kwargs) -> SweepResult | None:
-    """``sweep`` unless one is already running in this process."""
+def run_sweep_once(*, clips: bool = True, **kwargs) -> SweepResult | None:
+    """Source sweep then clip sweep, unless one is already running in this
+    process. The result merges both."""
     if not _sweep_lock.acquire(blocking=False):
         return None
     try:
-        return sweep(**kwargs)
+        res = sweep(**kwargs)
+        if clips:
+            more = sweep_clips(**kwargs)
+            res.offloaded += more.offloaded
+            res.offloaded_bytes += more.offloaded_bytes
+            res.deleted += more.deleted
+            res.deleted_bytes += more.deleted_bytes
+            res.kept += more.kept
+            res.failed += more.failed
+            res.planned += more.planned
+        return res
     finally:
         _sweep_lock.release()
 
@@ -419,8 +662,8 @@ def start_offload_thread() -> None:
                 try:
                     res = run_sweep_once()
                     if res and (res.offloaded or res.deleted or res.failed):
-                        log.info("Offload sweep: %d offloaded (%.1f GB), %d rejected "
-                                 "deleted (%.1f GB), %d failed",
+                        log.info("Offload sweep: %d uploaded (%.1f GB), %d deleted "
+                                 "(%.1f GB), %d failed",
                                  res.offloaded, res.offloaded_bytes / 1e9,
                                  res.deleted, res.deleted_bytes / 1e9, res.failed)
                 except Exception:
@@ -442,4 +685,5 @@ __all__ = [
     "SourceUnavailable", "ensure_local", "restore_in_background", "is_restoring",
     "signed_source_url", "sweep", "run_sweep_once", "start_offload_thread",
     "in_to_trim", "decide", "object_key_for", "free_bytes",
+    "sweep_clips", "plan_clips", "ensure_clip_file", "clip_object_key",
 ]

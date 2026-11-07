@@ -21,6 +21,7 @@ from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
@@ -68,8 +69,8 @@ from ..llm import (
 )
 from ..logging_setup import setup_logging
 from ..offload import (
-    SourceUnavailable, ensure_local, restore_in_background, signed_source_url,
-    start_offload_thread,
+    SourceUnavailable, ensure_clip_file, ensure_local, restore_in_background,
+    signed_source_url, start_offload_thread,
 )
 from ..models import (
     STATUS_APPROVED,
@@ -453,6 +454,61 @@ async def _drop_cached_reads_after_writes(request: Request, call_next):
             for name in scope:
                 pagecache.drop(name)
     return response
+
+
+# Routes that read a cut's exported files (directly or via its post). A finished
+# cut's files may have been archived to storage (app/offload.py), so these bring
+# them back before the handler runs; everything downstream keeps its plain
+# "is the file on disk" checks. Clip CARDS (/media/cut-thumb) are deliberately
+# absent: they serve the still cached at archive time, so browsing the library
+# never pulls clips back.
+_CLIP_ROUTE = re.compile(
+    r"^/(cut|post|media/(?:clip|subtitled|vertical)|media/post)/(\d+)(?:/([\w-]+))?$")
+_CLIP_ROUTE_SKIP = {"export-status", "transcript"}
+_clips_checked: dict[tuple[str, int], float] = {}
+_CLIPS_CHECK_TTL = 300.0
+
+
+def _restore_clips_for(kind: str, pk: int) -> None:
+    """Restore any archived file of this cut (or this post and its cut).
+    Cached for a few minutes per row: video players fire many range requests."""
+    import time as _time
+
+    now = _time.monotonic()
+    if now - _clips_checked.get((kind, pk), -1e9) < _CLIPS_CHECK_TTL:
+        return
+    paths: list[str] = []
+    with session_scope(read_only=True) as session:
+        cut = None
+        if kind == "post":
+            post = session.get(ThreadsPost, pk)
+            if post is not None:
+                paths.append(post.clip_local_path or "")
+                cut = post.cut
+        else:
+            cut = session.get(Cut, pk)
+        if cut is not None:
+            paths += [cut.trimmed_clip_path, cut.subtitled_clip_path, cut.vertical_clip_path]
+            ig = session.execute(
+                select(InstagramPost.clip_local_path).where(InstagramPost.cut_pk == cut.id)
+            ).scalars().all()
+            paths += list(ig)
+    for path in {p for p in paths if p}:
+        if not Path(path).expanduser().exists():
+            ensure_clip_file(path)
+    _clips_checked[(kind, pk)] = now
+
+
+@app.middleware("http")
+async def _restore_archived_clips(request: Request, call_next):
+    m = _CLIP_ROUTE.match(request.url.path)
+    if m and m.group(3) not in _CLIP_ROUTE_SKIP:
+        kind = "post" if m.group(1) in ("post", "media/post") else "cut"
+        try:
+            await run_in_threadpool(_restore_clips_for, kind, int(m.group(2)))
+        except Exception:
+            log.exception("Restoring archived clips for %s %s failed", kind, m.group(2))
+    return await call_next(request)
 
 
 def _flash(url: str, msg: str) -> RedirectResponse:
@@ -2320,6 +2376,11 @@ def media_cut_thumb(cut_id: int):
         if cut is None or not cut.trimmed_clip_path:
             return JSONResponse({"error": "no clip"}, status_code=404)
         source = cut.trimmed_clip_path
+    cached = THUMBS_DIR / f"cut-{cut_id}.jpg"
+    if not Path(source).exists() and cached.exists():
+        # Archived clip: the still was cached before the file left the disk.
+        return FileResponse(str(cached), media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=86400"})
     try:
         path = cached_still(source, f"cut-{cut_id}")
     except Exception as exc:
