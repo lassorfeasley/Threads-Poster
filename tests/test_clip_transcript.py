@@ -46,3 +46,23 @@ class SliceTranscriptTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClipTranscriptWithoutPillowTest(unittest.TestCase):
+    """The headless scheduler image has no Pillow, so the subtitles module
+    can't import there; the clip text must still come from the transcript."""
+
+    def test_falls_back_to_slicing_when_subtitles_cannot_import(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from app.publishing import _clip_transcript_text
+
+        cut = SimpleNamespace(
+            clip_transcript_path="/nowhere/clip.words.json",
+            candidate=SimpleNamespace(transcript_text=TRANSCRIPT),
+            trim_segments=windows((50, 70)),
+        )
+        with mock.patch.dict(sys.modules, {"app.subtitles": None}):
+            self.assertEqual(_clip_transcript_text(cut), "STORY TWO STARTS STORY TWO ENDS")

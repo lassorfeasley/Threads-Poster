@@ -21,6 +21,7 @@ from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
@@ -30,7 +31,10 @@ from .. import (channel_health, clip_proposals, instagram_api, linkedin_api, spe
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
 from ..categories import category_by_slug, category_options, is_first_party
-from ..clipper import ClipExportError, cached_still, clip_duration, export_supercut, get_waveform
+from ..clipper import (
+    THUMBS_DIR, WAVEFORM_DIR, ClipExportError, cached_still, clip_duration,
+    export_supercut, get_waveform,
+)
 from ..config import (
     DATA_DIR, DEFAULT_APP_NAME, WORKSPACE, current_workspace, env, load_brand,
     load_caption_rules, load_first_reply, load_keywords, load_settings,
@@ -64,6 +68,10 @@ from ..llm import (
     suggest_title,
 )
 from ..logging_setup import setup_logging
+from ..offload import (
+    SourceUnavailable, ensure_clip_file, ensure_local, restore_in_background,
+    signed_source_url, start_offload_thread,
+)
 from ..models import (
     STATUS_APPROVED,
     STATUS_ARCHIVED,
@@ -190,6 +198,35 @@ def _thumb_for(candidate) -> str:
 
 
 templates.env.globals["thumb_for"] = _thumb_for
+
+
+def _has_source(c: Candidate) -> bool:
+    """Whether the source video can be played: on disk, or offloaded to storage
+    (streamed from there by /media/source)."""
+    return bool(c.source_object_key
+                or (c.local_video_path and Path(c.local_video_path).exists()))
+
+
+def _source_ready(candidate_id: int) -> JSONResponse | None:
+    """Bring an offloaded source video back to disk before an operation that
+    reads the file itself. Blocks for the download (seconds to a few minutes).
+    None when the file is (now) on disk or there's nothing to restore — the
+    caller's own checks then decide; an error response when the restore failed.
+    Runs outside any DB session so a long download holds no transaction open."""
+    with session_scope(read_only=True) as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return None
+        path, key = c.local_video_path, c.source_object_key
+    if not key or (path and Path(path).is_file()):
+        return None
+    try:
+        ensure_local(path, key)
+    except Exception as exc:
+        log.warning("Could not restore source video for candidate %s: %s", candidate_id, exc)
+        return JSONResponse({"error": f"Couldn't bring the source video back from "
+                                      f"storage: {exc}"}, status_code=409)
+    return None
 
 
 def _unacknowledged(model):
@@ -366,6 +403,9 @@ if env("SCHEDULER_EMBEDDED", "true").strip().lower() not in ("false", "0", "no")
 # Keeps the list pages' datasets warm, so a page render doesn't wait on the
 # database (see pagecache: only pages in active use are refreshed).
 pagecache.start_refresher()
+# Uploads source videos that are out of the workflow to storage and frees the
+# disk (no-op unless storage.offload_sources is on; see app/offload.py).
+start_offload_thread()
 
 
 # Datasets a given write can actually change, keyed by the route's path
@@ -414,6 +454,61 @@ async def _drop_cached_reads_after_writes(request: Request, call_next):
             for name in scope:
                 pagecache.drop(name)
     return response
+
+
+# Routes that read a cut's exported files (directly or via its post). A finished
+# cut's files may have been archived to storage (app/offload.py), so these bring
+# them back before the handler runs; everything downstream keeps its plain
+# "is the file on disk" checks. Clip CARDS (/media/cut-thumb) are deliberately
+# absent: they serve the still cached at archive time, so browsing the library
+# never pulls clips back.
+_CLIP_ROUTE = re.compile(
+    r"^/(cut|post|media/(?:clip|subtitled|vertical)|media/post)/(\d+)(?:/([\w-]+))?$")
+_CLIP_ROUTE_SKIP = {"export-status", "transcript"}
+_clips_checked: dict[tuple[str, int], float] = {}
+_CLIPS_CHECK_TTL = 300.0
+
+
+def _restore_clips_for(kind: str, pk: int) -> None:
+    """Restore any archived file of this cut (or this post and its cut).
+    Cached for a few minutes per row: video players fire many range requests."""
+    import time as _time
+
+    now = _time.monotonic()
+    if now - _clips_checked.get((kind, pk), -1e9) < _CLIPS_CHECK_TTL:
+        return
+    paths: list[str] = []
+    with session_scope(read_only=True) as session:
+        cut = None
+        if kind == "post":
+            post = session.get(ThreadsPost, pk)
+            if post is not None:
+                paths.append(post.clip_local_path or "")
+                cut = post.cut
+        else:
+            cut = session.get(Cut, pk)
+        if cut is not None:
+            paths += [cut.trimmed_clip_path, cut.subtitled_clip_path, cut.vertical_clip_path]
+            ig = session.execute(
+                select(InstagramPost.clip_local_path).where(InstagramPost.cut_pk == cut.id)
+            ).scalars().all()
+            paths += list(ig)
+    for path in {p for p in paths if p}:
+        if not Path(path).expanduser().exists():
+            ensure_clip_file(path)
+    _clips_checked[(kind, pk)] = now
+
+
+@app.middleware("http")
+async def _restore_archived_clips(request: Request, call_next):
+    m = _CLIP_ROUTE.match(request.url.path)
+    if m and m.group(3) not in _CLIP_ROUTE_SKIP:
+        kind = "post" if m.group(1) in ("post", "media/post") else "cut"
+        try:
+            await run_in_threadpool(_restore_clips_for, kind, int(m.group(2)))
+        except Exception:
+            log.exception("Restoring archived clips for %s %s failed", kind, m.group(2))
+    return await call_next(request)
 
 
 def _flash(url: str, msg: str) -> RedirectResponse:
@@ -1121,9 +1216,18 @@ def video_waveform(candidate_id: int):
     """Audio peak envelope of the downloaded file, for the trim editor."""
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
-        if c is None or not c.local_video_path or not Path(c.local_video_path).exists():
+        if c is None or not c.local_video_path:
             return JSONResponse({"error": "no local video"}, status_code=404)
-        path, vid = c.local_video_path, c.video_id
+        path, vid, key = c.local_video_path, c.video_id, c.source_object_key
+    # The waveform is cached before a source is offloaded; only a cache miss
+    # needs the file itself.
+    if not Path(path).exists() and not (WAVEFORM_DIR / f"{vid}.json").exists():
+        if not key:
+            return JSONResponse({"error": "no local video"}, status_code=404)
+        try:
+            ensure_local(path, key)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
     try:
         return get_waveform(path, vid)
     except Exception as exc:
@@ -1275,7 +1379,7 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
             except Exception:
                 transcript_segments = []
 
-        has_local = bool(c.local_video_path and Path(c.local_video_path).exists())
+        has_local = _has_source(c)
         trait_vocab = active_traits_by_facet(session)
 
     return templates.TemplateResponse(
@@ -1375,6 +1479,9 @@ def video_suggest_clips(candidate_id: int, start: float | None = None,
     everything still pending on the video, so on a section pass it can be
     non-empty even when the section itself turned up nothing.
     """
+    # Opening-shot refinement samples frames from the file.
+    if (err := _source_ready(candidate_id)) is not None:
+        return err
     settings = load_settings()
     window, topic = None, ""
     if start is not None and end is not None and end > start:
@@ -1429,6 +1536,8 @@ def video_striking_frames(candidate_id: int, start: float | None = None,
     the window (the scan replaces what that stretch held before) plus ``new``,
     how many this run found.
     """
+    if (err := _source_ready(candidate_id)) is not None:
+        return err
     settings = load_settings()
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
@@ -1498,6 +1607,8 @@ def video_chapters(candidate_id: int):
 @app.post("/video/{candidate_id}/transcribe")
 def video_transcribe(candidate_id: int):
     """Re-run captions + Whisper on a downloaded video (operator-initiated)."""
+    if (err := _source_ready(candidate_id)) is not None:
+        return err
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c is None:
@@ -1622,6 +1733,11 @@ def refine_cut_opening(cut_id: int, segments_json: str = Form(...)):
         return JSONResponse({"error": "Mark at least one segment first"},
                             status_code=409)
 
+    with session_scope(read_only=True) as session:
+        cut = session.get(Cut, cut_id)
+        candidate_pk = cut.candidate_pk if cut is not None else None
+    if candidate_pk is not None and (err := _source_ready(candidate_pk)) is not None:
+        return err
     settings = load_settings()
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
@@ -1716,6 +1832,12 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
 
         active_step = step if step in ("trim", "post") else (
             "post" if (exported or exporting or export_failed) else "trim")
+        # Opening the trim editor on an offloaded video means a clip is about to
+        # be cut from it: start bringing the file back now, so frame sampling and
+        # the export don't wait on the download. Playback streams meanwhile.
+        if (active_step == "trim" and c.source_object_key
+                and not Path(c.local_video_path or "").exists()):
+            restore_in_background(c.local_video_path, c.source_object_key)
 
         segments = []
         if cut.trim_segments:
@@ -2166,7 +2288,7 @@ def unreject(candidate_id: int):
         c = session.get(Candidate, candidate_id)
         if c is None:
             return _flash("/", "Video not found")
-        downloaded = bool(c.local_video_path and Path(c.local_video_path).exists())
+        downloaded = _has_source(c)
         c.status = STATUS_ARCHIVED if downloaded else STATUS_NEW
         dest = STATUS_ARCHIVED if downloaded else STATUS_NEW
     return _flash(f"/video/{candidate_id}", f"Restored — status is now {dest}")
@@ -2199,9 +2321,19 @@ def video_status(candidate_id: int):
 def media_source(candidate_id: int):
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
-        if c is None or not c.local_video_path or not Path(c.local_video_path).exists():
+        if c is None or not c.local_video_path:
             return JSONResponse({"error": "no local video"}, status_code=404)
-        return FileResponse(c.local_video_path, media_type="video/mp4")
+        path, key = c.local_video_path, c.source_object_key
+    if Path(path).exists():
+        return FileResponse(path, media_type="video/mp4")
+    if not key:
+        return JSONResponse({"error": "no local video"}, status_code=404)
+    # Offloaded: stream it straight from storage rather than waiting on a restore.
+    try:
+        return RedirectResponse(signed_source_url(key), status_code=302)
+    except Exception as exc:
+        log.warning("Could not sign source video for candidate %s: %s", candidate_id, exc)
+        return JSONResponse({"error": "source video unavailable"}, status_code=502)
 
 
 @app.get("/media/thumb/{candidate_id}")
@@ -2219,6 +2351,11 @@ def media_thumb(candidate_id: int):
         if c is None or not c.local_video_path:
             return JSONResponse({"error": "no local video"}, status_code=404)
         source = c.local_video_path
+    cached = THUMBS_DIR / f"{candidate_id}.jpg"
+    if not Path(source).exists() and cached.exists():
+        # Offloaded source: the still was cached before the file left the disk.
+        return FileResponse(str(cached), media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=86400"})
     try:
         path = cached_still(source, str(candidate_id))
     except Exception as exc:
@@ -2239,6 +2376,11 @@ def media_cut_thumb(cut_id: int):
         if cut is None or not cut.trimmed_clip_path:
             return JSONResponse({"error": "no clip"}, status_code=404)
         source = cut.trimmed_clip_path
+    cached = THUMBS_DIR / f"cut-{cut_id}.jpg"
+    if not Path(source).exists() and cached.exists():
+        # Archived clip: the still was cached before the file left the disk.
+        return FileResponse(str(cached), media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=86400"})
     try:
         path = cached_still(source, f"cut-{cut_id}")
     except Exception as exc:
@@ -2524,6 +2666,7 @@ def _export_cut_in_thread(cut_id: int) -> None:
                 cut.updated_at = utcnow()
                 return
             source = c.local_video_path
+            source_key = c.source_object_key or ""
             video_id = c.video_id
             word_transcript_path = c.word_transcript_path or ""
             previous = [cut.trimmed_clip_path, cut.subtitled_clip_path,
@@ -2532,6 +2675,13 @@ def _export_cut_in_thread(cut_id: int) -> None:
             draft_caption = cut.draft_caption or ""
             video_title = c.title or ""
             candidate_pk = c.id
+
+        # An offloaded source comes back from storage first (the trim editor
+        # usually started that already; this waits for it or does it).
+        try:
+            source = str(ensure_local(source, source_key))
+        except SourceUnavailable as exc:
+            raise ClipExportError(str(exc)) from exc
 
         stamp = utcnow().strftime("%Y%m%dT%H%M%S")
         out = export_supercut(source, segments, f"{video_id}_cut{cut_id}_{stamp}")

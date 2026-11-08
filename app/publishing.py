@@ -229,8 +229,11 @@ def _clip_transcript_text(cut: Cut | None) -> str:
     if cut is None:
         return ""
     if cut.clip_transcript_path:
-        from .subtitles import load_clip_words, words_to_plain
         try:
+            # subtitles pulls in Pillow, which the headless scheduler image
+            # doesn't install; there the sidecar isn't on disk anyway, so fall
+            # through to slicing the stored transcript.
+            from .subtitles import load_clip_words, words_to_plain
             words = load_clip_words(cut.clip_transcript_path)
         except Exception:
             words = None

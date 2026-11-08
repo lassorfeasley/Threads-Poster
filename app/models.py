@@ -124,6 +124,12 @@ class Candidate(Base):
     scrape_error: Mapped[str] = mapped_column(Text, default="")
 
     local_video_path: Mapped[str] = mapped_column(Text, default="")
+    # Key of the source video's copy in the private source-video bucket, once
+    # it has one (see app/offload.py). Set before the local file is deleted,
+    # and kept when the file is restored, so the local file may or may not
+    # exist alongside it; ``local_video_path`` stays the restore destination.
+    source_object_key: Mapped[str] = mapped_column(Text, default="")
+    source_uploaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     transcript_path: Mapped[str] = mapped_column(Text, default="")
     transcript_text: Mapped[str] = mapped_column(Text, default="")
     transcription_method: Mapped[str] = mapped_column(String(20), default="")  # captions | whisper | captions+whisper | "" (none)

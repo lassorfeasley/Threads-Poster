@@ -73,7 +73,7 @@ Optional extras:
 | `ANTHROPIC_API_KEY` | Claude API key ([console.anthropic.com](https://console.anthropic.com)) for relevance scoring, caption drafts, digest. |
 | `GIPHY_API_KEY` | Optional. Free Giphy key ([developers.giphy.com](https://developers.giphy.com/)) so you can attach GIFs when replying on a post page. |
 | `DATABASE_URL` | Optional. Empty = local SQLite at `data/app.db` (fast for local UI work). For Supabase Postgres use the connection string from Project Settings → Database. Keep Storage (`SUPABASE_*`) even when using SQLite. |
-| `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Supabase project (Settings → API). Used for the trimmed-clip bucket only. Create a **private** Storage bucket named `trimmed-clips` (or change `storage.trimmed_clip_bucket` in settings). |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Supabase project (Settings → API). Used for the trimmed-clip bucket and the source-video bucket (`source-videos`); both are created private on first use. Raise the project's global file size limit (Storage → Settings) above your largest source video, ~3 GB. |
 | `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_REDIRECT_URI` | Meta app for the Threads API (below). |
 | `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_REDIRECT_URI` | Optional. Same Meta app with the **Instagram API with Instagram Login** product — required only to queue/publish paired Reels. |
 | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REDIRECT_URI` | Optional. LinkedIn app with the **Community Management API** — mirrors every published post to the company page. |
@@ -161,6 +161,7 @@ python run.py comments         # pull comments on your own posts
 python run.py metrics          # snapshot Threads metrics (time series)
 python run.py digest           # print the analytics digest
 python run.py cleanup          # apply retention (only if you set it; default keeps everything)
+python run.py offload --dry-run  # which source videos would move to Supabase (drop --dry-run to do it)
 ```
 
 Typical always-on setup on a Mac mini / Pi: run `python run.py monitor --loop` and
@@ -318,7 +319,7 @@ for other users' posts, so enabling it only logs a warning.
 
 | Artifact | Where | Retention |
 |---|---|---|
-| Full segment (raw yt-dlp download) | Local disk, `data/videos/<channel>/<date>/` | Keep forever by default; optional `cleanup` command |
+| Full segment (raw yt-dlp download) | Local disk, `data/videos/<channel>/<date>/`, while waiting to be clipped; then Supabase Storage (private `source-videos` bucket) | Offloaded `storage.offload_after_days` after it leaves "To trim" (hourly sweep in the dashboard, or `offload`); streamed for playback and downloaded back on demand. Rejected videos' downloads are deleted |
 | Trimmed clip (your edit) | Supabase Storage (private bucket, signed URLs) | Kept after posting as the record of what was published |
 | Transcripts + all metadata | SQLite/Postgres (`data/app.db` by default) | Permanent, queryable |
 
