@@ -100,7 +100,14 @@ clips:
   # holds. A proposal is a PARTITION — several clips when the video covers
   # several stories, each clip several segments of the same story with the
   # filler cut out. Drafts only; nothing is applied until you accept it.
-  model: claude-haiku-4-5
+  # Selection is editorial judgment (hook, pacing, throughline), runs once per
+  # video, and is the weakest link — so it gets the stronger model.
+  model: claude-sonnet-5
+  # Teach each pass from this account's history (app/clip_context.py): the
+  # best-performing shipped clips as examples, dismissals and their reasons,
+  # measured boundary bias, and what was posted lately.
+  learn_from_history: true
+  context_examples: 6
   max_clips: 3
   # Budget for a pass scoped to one chapter (the "Suggest a clip here" button
   # over the waveform). Lower than max_clips on purpose: one section of a video

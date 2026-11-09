@@ -199,9 +199,15 @@ def span_deltas(proposed: list[dict], final: list[dict]) -> tuple[float | None, 
 
 # ---- writing ----------------------------------------------------------------
 
+# Bumped whenever the suggester's prompt or inputs change in a way that should
+# be scored separately. Blank was the original transcript-only prompt;
+# "v2" added the editorial rubric, account context and visual moments.
+PROMPT_VERSION = "v2"
+
+
 def policy_version(*, model: str, max_clips: int, max_segments_per_clip: int,
                    min_seconds: int, max_seconds: int,
-                   scope: str = "video") -> str:
+                   scope: str = "video", prompt: str = "") -> str:
     """Short fingerprint of the regime that produced a partition, so a year of
     proposals can be split by prompt version instead of blended into one
     unanalyzable pile.
@@ -215,6 +221,9 @@ def policy_version(*, model: str, max_clips: int, max_segments_per_clip: int,
              str(min_seconds), str(max_seconds)]
     if scope != "video":
         parts.append(scope)
+    # Same rule for the prompt version: only joins when set.
+    if prompt:
+        parts.append(f"prompt={prompt}")
     return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
@@ -408,6 +417,91 @@ def load_words(candidate) -> list[dict]:
     return load_word_transcript(candidate)
 
 
+def _spoken_in(segment: dict, words: list[dict], transcript: list[dict]) -> list[str]:
+    """The words heard inside one window, in order: Whisper words when the
+    video has them (exact), else every transcript line overlapping it."""
+    a, b = float(segment["start"]), float(segment["end"])
+    out: list[str] = []
+    if words:
+        for w in words:
+            try:
+                mid = (float(w["start"]) + float(w["end"])) / 2
+            except (KeyError, TypeError, ValueError):
+                continue
+            if a <= mid < b and str(w.get("word", "")).strip():
+                out.append(str(w["word"]).strip())
+        return out
+    for line in transcript:
+        try:
+            if float(line["end"]) > a and float(line["start"]) < b:
+                out.extend(str(line.get("text", "")).split())
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def excerpts(segments: list[dict], words: list[dict], transcript: list[dict],
+             *, head: int = 22, tail: int = 16) -> dict:
+    """What a proposal opens and closes on, as the words actually heard.
+
+    The model's own ``story`` line says what it THINKS the clip is; these say
+    what you'll hear in the first and last seconds — the two places a clip is
+    won or lost — so it can be judged from the card without pressing play.
+    """
+    if not segments:
+        return {"opening": "", "closing": ""}
+    first = _spoken_in(segments[0], words, transcript)
+    last = _spoken_in(segments[-1], words, transcript)
+    opening = " ".join(first[:head]) + ("…" if len(first) > head else "")
+    if len(segments) == 1 and len(first) <= head + tail:
+        closing = ""   # the opening already shows all of it
+    else:
+        closing = ("…" if len(last) > tail else "") + " ".join(last[-tail:])
+    return {"opening": opening.strip(), "closing": closing.strip()}
+
+
+def pending_summary(session, candidate_pks: list[int]) -> dict[int, dict]:
+    """``candidate_pk -> {count, story}`` for still-usable pending proposals.
+
+    "Usable" means the same filter the editor applies: proposals with too
+    little left once existing clips' material is removed aren't counted, so a
+    dashboard badge never promises a suggestion the editor won't show.
+    """
+    if not candidate_pks:
+        return {}
+    rows = session.execute(
+        select(ClipProposal.candidate_pk, ClipProposal.proposed_segments,
+               ClipProposal.story)
+        .where(ClipProposal.candidate_pk.in_(candidate_pks),
+               ClipProposal.verdict == ClipProposal.VERDICT_PENDING)
+        .order_by(ClipProposal.clip_index.asc(), ClipProposal.id.asc())
+    ).all()
+    if not rows:
+        return {}
+    claimed: dict[int, list[dict]] = {}
+    for pk, raw in session.execute(
+        select(Cut.candidate_pk, Cut.trim_segments)
+        .where(Cut.candidate_pk.in_({r.candidate_pk for r in rows}),
+               Cut.trim_segments != "")
+    ).all():
+        try:
+            claimed.setdefault(pk, []).extend(json.loads(raw) or [])
+        except (ValueError, TypeError):
+            continue
+    out: dict[int, dict] = {}
+    for r in rows:
+        try:
+            proposed = json.loads(r.proposed_segments or "[]")
+        except (ValueError, TypeError):
+            continue
+        kept, _ = visible_segments(proposed, claimed.get(r.candidate_pk, []))
+        if not kept:
+            continue
+        entry = out.setdefault(r.candidate_pk, {"count": 0, "story": r.story or ""})
+        entry["count"] += 1
+    return out
+
+
 def propose(session, candidate, settings, transcript_segments: list[dict], *,
             window: dict | None = None, topic: str = "") -> list[int]:
     """Run one suggestion pass for a video and record it. Returns new row ids.
@@ -435,6 +529,10 @@ def propose(session, candidate, settings, transcript_segments: list[dict], *,
     max_seconds = settings.get("clips.max_seconds", 40)
     opening_hold = settings.get("clips.opening_hold_seconds", 3.0)
     claimed = used_ranges(session, candidate.id)
+    # What this account has shipped, thrown back and posted lately — see
+    # clip_context. Best-effort by construction; an empty dict is fine.
+    from . import clip_context
+    context = clip_context.build(session, candidate, settings)
 
     clips = suggest_clips(
         model, candidate.title, transcript_segments,
@@ -447,6 +545,9 @@ def propose(session, candidate, settings, transcript_segments: list[dict], *,
         words=load_words(candidate),
         description=candidate.description,
         window=window, topic=topic,
+        context=context,
+        # Frames an earlier "Striking frames" scan judged worth opening on.
+        visual_moments=vision.load_striking(candidate),
     )
 
     # Put each opening on a frame worth looking at. Sibling clips from this same
@@ -464,6 +565,7 @@ def propose(session, candidate, settings, transcript_segments: list[dict], *,
                       max_segments_per_clip=max_segments,
                       min_seconds=min_seconds, max_seconds=max_seconds,
                       scope="section" if window else "video",
+                      prompt=PROMPT_VERSION,
                   ))
     if window:
         return ids

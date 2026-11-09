@@ -187,6 +187,7 @@
       {% elif state.current == "scrape" %}<span class="badge info"><span class="dot"></span> downloading</span>
       {% elif c.status == "failed" %}<span class="badge hostile">scrape failed</span>
       {% elif state.current == "post" %}<span class="badge supportive">ready to post</span>{% endif %}
+      {% if state.suggested %}<span class="badge is-suggested" title="The model proposed {{ state.suggested.count }} clip{{ 's' if state.suggested.count != 1 }} from this video — open it to preview them">✦ {{ state.suggested.count }} suggested</span>{% endif %}
     </span>
     {% if c.duration_seconds %}
     <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>
@@ -207,6 +208,7 @@
   <div class="mc-body">
     <div class="item-title">{{ c.title }}</div>
     {% if c.clip_title %}<div class="meta clip-title" title="Generated clip title">{{ c.clip_title }}</div>{% endif %}
+    {% if state.suggested and state.suggested.story %}<div class="meta suggest-teaser" title="Top suggestion">✦ {{ state.suggested.story }}</div>{% endif %}
   </div>
 </div>
 {% endfor %}

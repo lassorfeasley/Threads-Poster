@@ -79,6 +79,7 @@ from ..models import (
     STATUS_REJECTED,
     Candidate,
     Channel,
+    ClipProposal,
     Cut,
     DraftProposal,
     FacebookPost,
@@ -876,6 +877,16 @@ def _workflow_buckets() -> dict:
                 trimmed_rows.append((c, state))
             else:
                 in_progress_rows.append((c, state))
+        # Which "To trim" videos have suggestions waiting, so the card can say
+        # so instead of every one looking like an empty editor.
+        try:
+            suggested = clip_proposals.pending_summary(
+                session, [c.id for c, _ in in_progress_rows])
+        except Exception as exc:
+            log.info("Suggestion summary failed: %s", exc)
+            suggested = {}
+        for c, state in in_progress_rows:
+            state["suggested"] = suggested.get(c.id)
     return {"in_progress": in_progress_rows, "trimmed": trimmed_rows}
 
 
@@ -1387,11 +1398,16 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
 
         has_local = _has_source(c)
         trait_vocab = active_traits_by_facet(session)
+        # The model's pending suggestions lead the page: one click turns any
+        # of them into a clip, which is far less work than an empty editor.
+        suggested_clips = (_pending_proposals(session, c.id)
+                           if c.status == STATUS_ARCHIVED else [])
 
     return templates.TemplateResponse(
         request, "video.html",
         {"c": c, "state": state, "step": step,
          "cut_rows": cut_rows, "posts": posts,
+         "suggested_clips": suggested_clips,
          "transcript_segments": transcript_segments,
          "has_local": has_local,
          "trait_vocab": trait_vocab,
@@ -1441,13 +1457,17 @@ def toggle_multi_clip(candidate_id: int):
     return JSONResponse({"multi_clip": flag})
 
 
-def _proposal_payload(row, used: list[dict]) -> dict | None:
-    """One pending proposal, shaped for the trim editor's panel + overlay.
+def _proposal_payload(row, used: list[dict], words: list[dict] | None = None,
+                      transcript: list[dict] | None = None) -> dict | None:
+    """One pending proposal, shaped for the suggestion cards + waveform overlay.
 
     Material already claimed by another clip is cut out here rather than at
     generation time: the archive-time pass runs before any cut exists, so a
     proposal only becomes a duplicate later. Nothing offered can overlap a clip
     that already exists, whatever the model asked for.
+
+    ``opening``/``closing`` are the words heard at either end of what's
+    actually offered (post-trim), so the card can be judged without playing.
     """
     try:
         proposed = json.loads(row.proposed_segments or "[]")
@@ -1456,15 +1476,24 @@ def _proposal_payload(row, used: list[dict]) -> dict | None:
     segments, trimmed = clip_proposals.visible_segments(proposed, used)
     if not segments:
         return None
+    lines = clip_proposals.excerpts(segments, words or [], transcript or [])
     return {"id": row.id, "story": row.story, "why": row.why,
             "confidence": row.confidence, "segments": segments,
-            "seconds": clip_proposals.duration(segments), "trimmed": trimmed}
+            "seconds": clip_proposals.duration(segments), "trimmed": trimmed,
+            "at": segments[0]["start"], "count": len(segments),
+            "opening": lines["opening"], "closing": lines["closing"],
+            "thumb": f"/clip-proposal/{row.id}/thumb"}
 
 
 def _pending_proposals(session, candidate_pk: int) -> list[dict]:
     used = clip_proposals.used_ranges(session, candidate_pk)
     rows = clip_proposals.pending_for_candidate(session, candidate_pk)
-    return [p for p in (_proposal_payload(r, used) for r in rows) if p]
+    if not rows:
+        return []
+    c = session.get(Candidate, candidate_pk)
+    words = clip_proposals.load_words(c) if c else []
+    transcript = [] if words or c is None else clip_proposals.load_transcript(c)
+    return [p for p in (_proposal_payload(r, used, words, transcript) for r in rows) if p]
 
 
 @app.post("/video/{candidate_id}/suggest-clips")
@@ -1642,6 +1671,76 @@ def accept_clip_proposal(proposal_id: int, cut_id: int = Form(...)):
         if row is None:
             return JSONResponse({"error": "Proposal already decided"}, status_code=409)
     return JSONResponse({"ok": True})
+
+
+@app.post("/clip-proposal/{proposal_id}/make-cut")
+def make_cut_from_proposal(proposal_id: int):
+    """Turn a suggestion into a clip in one click: a new cut holding the
+    proposal's (still-unclaimed) segments, opened in the trim editor.
+
+    This is "Use this clip" from outside the editor. The proposal is accepted
+    into the new cut, so the export-time score still measures it against what
+    actually ships after the operator's tweaks.
+    """
+    with session_scope() as session:
+        row = session.get(ClipProposal, proposal_id)
+        if row is None:
+            return _flash("/", "Suggestion not found")
+        back = f"/video/{row.candidate_pk}"
+        if row.verdict != ClipProposal.VERDICT_PENDING:
+            return _flash(back, "That suggestion was already used or dismissed")
+        c = session.get(Candidate, row.candidate_pk)
+        if c is None or c.status != STATUS_ARCHIVED:
+            return _flash(back, "Download the video before clipping it")
+        try:
+            proposed = json.loads(row.proposed_segments or "[]")
+        except (ValueError, TypeError):
+            proposed = []
+        segments, _ = clip_proposals.visible_segments(
+            proposed, clip_proposals.used_ranges(session, c.id))
+        if not segments:
+            return _flash(back, "Your other clips already use that footage")
+        cut = Cut(candidate_pk=c.id, trim_segments=json.dumps(segments))
+        session.add(cut)
+        session.flush()
+        clip_proposals.accept(session, row.id, cut.id)
+        cut_id = cut.id
+    return _flash(f"/cut/{cut_id}?step=trim",
+                  "Suggested clip loaded — preview it, tweak, then save")
+
+
+@app.get("/clip-proposal/{proposal_id}/thumb")
+def clip_proposal_thumb(proposal_id: int):
+    """The frame a suggestion opens on, cut from the downloaded source and
+    cached. 404 when the file isn't on disk; the card falls back to the
+    video's poster."""
+    with session_scope(read_only=True) as session:
+        row = session.get(ClipProposal, proposal_id)
+        c = session.get(Candidate, row.candidate_pk) if row else None
+        if row is None or c is None or not c.local_video_path:
+            return JSONResponse({"error": "no frame"}, status_code=404)
+        source = c.local_video_path
+        try:
+            first = json.loads(row.proposed_segments or "[]")[0]
+            at = float(first["start"])
+        except (ValueError, TypeError, KeyError, IndexError):
+            return JSONResponse({"error": "no frame"}, status_code=404)
+    # A beat past the cut point: the exact first frame is often mid-transition.
+    at += 0.4
+    key = f"proposal-{proposal_id}-{int(at * 1000)}"
+    cached = THUMBS_DIR / f"{key}.jpg"
+    if not Path(source).exists():
+        if cached.exists():
+            return FileResponse(str(cached), media_type="image/jpeg",
+                                headers={"Cache-Control": "public, max-age=86400"})
+        return JSONResponse({"error": "no frame"}, status_code=404)
+    try:
+        path = cached_still(source, key, at_seconds=at)
+    except Exception as exc:
+        log.info("No still for proposal %s: %s", proposal_id, exc)
+        return JSONResponse({"error": "no frame"}, status_code=404)
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.post("/clip-proposal/{proposal_id}/dismiss")

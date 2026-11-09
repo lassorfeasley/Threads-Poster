@@ -5112,6 +5112,190 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
   border-color: rgba(167, 139, 250, 0.65);
   background: rgba(167, 139, 250, 0.12);
 }
+.reason-pill.is-skip { border-style: dashed; color: var(--muted); }
+
+/* --- Suggestion cards, richer: opening frame, the words heard at either end,
+   and length/cuts/confidence on one line — enough to judge a suggestion
+   without pressing play, which is what gets them looked at at all. --- */
+.clip-proposals.is-lead {
+  border-color: rgba(167, 139, 250, 0.45);
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.07), transparent 140px), var(--panel);
+}
+.clip-proposals.is-lead .clip-proposals-title { font-size: var(--text-body); }
+.proposal-top { display: flex; gap: 10px; align-items: flex-start; }
+.proposal-thumb {
+  position: relative;
+  flex: none;
+  width: 92px;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+}
+.proposal-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.proposal-play {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  font-size: 13px; color: #fff;
+  background: rgba(0, 0, 0, 0.25);
+  opacity: 0; transition: opacity 0.15s ease;
+}
+.proposal-row:hover .proposal-play,
+.proposal-row.hot .proposal-play { opacity: 1; }
+.proposal-head { min-width: 0; flex: 1; }
+.proposal-meta { margin-top: 3px; font-variant-numeric: tabular-nums; }
+.proposal-line,
+.suggest-line {
+  margin: 8px 0 0;
+  padding-left: 9px;
+  border-left: 2px solid rgba(167, 139, 250, 0.45);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  font-style: italic;
+}
+.proposal-line-k,
+.suggest-line-k {
+  display: inline-block;
+  margin-right: 6px;
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.proposal-conf,
+.suggest-conf {
+  display: inline-block;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+.proposal-conf.is-strong,
+.suggest-conf.is-strong { color: var(--accent); border-color: var(--accent-border); }
+.proposal-conf.is-long-shot,
+.suggest-conf.is-long-shot { color: var(--muted); border-style: dashed; }
+.proposal-empty {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 4px 0 2px;
+}
+
+/* --- Video page: suggestions lead the page, above the clips already made. */
+.suggest-title::before {
+  content: "";
+  width: 8px; height: 8px;
+  border-radius: 2px;
+  background: rgba(167, 139, 250, 0.9);
+}
+.suggest-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.suggest-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: hidden;
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.suggest-card:hover { border-color: rgba(167, 139, 250, 0.5); box-shadow: var(--shadow-lift); }
+.suggest-card.is-playing { border-color: rgba(167, 139, 250, 0.85); }
+.suggest-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel2);
+  cursor: pointer;
+  overflow: hidden;
+}
+.suggest-thumb:disabled { cursor: default; }
+.suggest-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.suggest-play {
+  position: absolute; left: 50%; top: 50%;
+  width: 44px; height: 44px; margin: -22px 0 0 -22px;
+  display: grid; place-items: center;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  opacity: 0.85;
+  transition: transform 0.2s var(--ease), opacity 0.2s var(--ease);
+}
+.suggest-card:hover .suggest-play { opacity: 1; transform: scale(1.08); }
+.suggest-dur,
+.suggest-conf {
+  position: absolute;
+  bottom: 8px;
+}
+.suggest-dur {
+  right: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+}
+.suggest-thumb .suggest-conf {
+  left: 8px;
+  background: rgba(0, 0, 0, 0.75);
+  border-color: transparent;
+  color: #fff;
+}
+.suggest-thumb .suggest-conf.is-strong { color: var(--accent); }
+.suggest-x {
+  position: absolute; top: 8px; right: 8px; z-index: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; min-height: 0; padding: 0;
+  border: 0; border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+.suggest-x:hover { background: rgba(0, 0, 0, 0.85); }
+.suggest-body {
+  display: flex; flex-direction: column;
+  flex: 1;
+  padding: 12px 14px 14px;
+}
+.suggest-story { font-weight: 650; font-size: 15px; line-height: 1.35; }
+.suggest-why { margin-top: 8px; line-height: 1.45; }
+.suggest-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+.suggest-at { font-variant-numeric: tabular-nums; }
+.suggest-card.is-dismissed { border-style: dashed; }
+.suggest-reason { padding: 14px; }
+.suggest-reason .reason-pills { margin-top: 10px; }
+@media (max-width: 720px) {
+  .suggest-grid { grid-template-columns: 1fr; }
+}
+
+/* Dashboard "To trim": which videos have suggestions waiting. */
+.media-card .thumb-badge .badge.is-suggested { color: rgb(196, 181, 253); }
+.media-card .suggest-teaser {
+  color: var(--text-dim);
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
 
 /* --- Prompted edits: the "tell the AI to change this clip" field under the
    segment list. Violet is the AI-affordance colour in the trim rail (matching
