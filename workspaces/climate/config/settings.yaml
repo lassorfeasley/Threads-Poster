@@ -402,6 +402,24 @@ x:
   # How long to wait for X to finish processing an uploaded video.
   publish_poll_timeout_seconds: 600
 
+facebook:
+  # Facebook Page mirror: once connected on the Accounts page, every published
+  # Threads post goes to the Page as a regular video post (the 16:9 clip, not
+  # a Reel) with the same caption. Whatever first reply the Threads post got
+  # (same gates, same text) is posted as a Page comment once Facebook has
+  # processed the video. Off switch for the mirror without disconnecting.
+  enabled: true
+  # The Page to post as. Blank = the one Page the connecting login manages;
+  # set it (the numeric Page ID) if they manage several.
+  page_id: ""
+  # Copyright guard. The scheduler re-reads each mirrored video every
+  # copyright_check_minutes for copyright_watch_hours after it goes out, since
+  # rights claims often land hours later. A copyright match, a video that
+  # vanished from the Page, or an upload refused on copyright grounds pauses
+  # the mirror until you resume it on the Accounts page.
+  copyright_watch_hours: 72
+  copyright_check_minutes: 60
+
 vertical:
   # 1080x1920 branded composite for Instagram Reels: hook text at the top, the
   # 16:9 clip full-width in the upper-middle, burned-in captions below it, and

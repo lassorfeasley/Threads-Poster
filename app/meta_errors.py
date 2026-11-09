@@ -1,6 +1,6 @@
 """Readable messages for Meta Graph API failures.
 
-Shared by the Threads and Instagram clients: different hosts, identical error
+Shared by the Threads, Instagram and Facebook Page clients: different hosts, identical error
 envelope. Raw ``resp.text`` is unusable in the UI — it is JSON carrying
 ``\\uXXXX``-escaped, Meta-localized prose, and the request path has already had
 the account id substituted into it, so a stored error read as 400 characters of
@@ -30,6 +30,10 @@ _OPERATIONS = {
     "insights": "Fetch insights",
     "replies": "Fetch replies",
     "conversation": "Fetch conversation",
+    "accounts": "List Pages",
+    "videos": "Upload video",
+    "{video_id}": "Read video",
+    "comments": "Post comment",
 }
 
 

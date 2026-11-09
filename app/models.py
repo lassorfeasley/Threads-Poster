@@ -396,6 +396,9 @@ class ThreadsPost(Base):
     x_post: Mapped["XPost | None"] = relationship(
         back_populates="threads_post", uselist=False,
     )
+    facebook_post: Mapped["FacebookPost | None"] = relationship(
+        back_populates="threads_post", uselist=False,
+    )
 
 
 class InstagramPost(Base):
@@ -492,6 +495,46 @@ class XPost(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     threads_post: Mapped["ThreadsPost"] = relationship(back_populates="x_post")
+
+
+class FacebookPost(Base):
+    """The Facebook Page mirror of a published ThreadsPost — same shape as
+    LinkedInPost.
+
+    ``flagged`` is a video that went out but then hit a copyright match, or
+    vanished from the Page (which is what a rights takedown looks like from
+    here). Flagging one pauses the mirror until the operator resumes it.
+    ``checked_at`` is the last time the scheduler read the video back.
+
+    ``comment_*`` is the first comment: whatever first reply the Threads post
+    actually got, posted as a Page comment once the video is ready. A post
+    whose Threads reply was skipped or suppressed gets none here either.
+    """
+
+    __tablename__ = "facebook_posts"
+    __table_args__ = (UniqueConstraint("threads_post_pk", name="uq_facebook_threads_post"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    threads_post_pk: Mapped[int] = mapped_column(ForeignKey("threads_posts.id"))
+    caption: Mapped[str] = mapped_column(Text, default="")
+    video_id: Mapped[str] = mapped_column(String(40), default="")
+    permalink: Mapped[str] = mapped_column(String(300), default="")
+    # publishing | published | failed | flagged
+    status: Mapped[str] = mapped_column(String(20), default="publishing")
+    error: Mapped[str] = mapped_column(Text, default="")
+    checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    comment_id: Mapped[str] = mapped_column(String(60), default="")
+    comment_error: Mapped[str] = mapped_column(Text, default="")
+    # Claim on posting the comment, so two runners don't both post it.
+    comment_claimed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    attention_dismissed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    threads_post: Mapped["ThreadsPost"] = relationship(back_populates="facebook_post")
 
 
 class SchedulerState(Base):

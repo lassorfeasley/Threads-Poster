@@ -1,7 +1,7 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel, LinkedIn and X for automatic mirrors.{% endset %}
+{% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel, LinkedIn, X and Facebook for automatic mirrors.{% endset %}
 {{ ui.pagebar("Connected accounts", sub=ta_sub) }}
 
 <div class="card">
@@ -97,6 +97,54 @@
   {% if x_configured %}
     <p class="meta"><a href="{{ x_auth_url }}">{{ 'Reconnect' if x_authenticated else 'Authorize' }} with X ↗</a>
       while signed in to the account you want to post as. X sends you back here to finish.</p>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top: 14px;">
+  <div class="card-title" style="margin-bottom: 8px;">Facebook Page</div>
+  {% if fb_pause %}
+    <p class="meta"><span class="badge hostile">Paused for copyright</span>
+      {{ fb_pause.reason }}
+      {% if fb_pause.threads_post_pk %}<a href="/post/{{ fb_pause.threads_post_pk }}">Open the post</a>.{% endif %}
+      Nothing goes to Facebook until you resume. Check the Page's Support Inbox for the claim first.</p>
+    <form method="post" action="/facebook/resume"
+          data-confirm="Resume posting to the Facebook Page? Every published Threads post will be mirrored again."
+          data-confirm-ok="Resume">
+      <input type="hidden" name="next" value="/connections">
+      <div style="margin: 4px 0 12px;"><button class="sm">Resume Facebook mirror</button></div>
+    </form>
+  {% endif %}
+  {% if fb_authenticated %}
+    <p class="meta"><span class="badge supportive">Connected</span>
+      Every published Threads post is mirrored to
+      {% if fb_info.page_name %}<strong>{{ fb_info.page_name }}</strong>{% else %}the Page{% endif %}
+      with the same caption and clip, as a regular Page video. The first reply Threads got is posted as a Page comment once the video is ready.
+      A copyright match pauses the mirror automatically.
+      {% if not fb_enabled %}<span class="badge hostile">Off</span> <code>facebook.enabled</code> is off in settings.yaml.{% endif %}</p>
+  {% elif not fb_configured %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not configured</span></p>
+    <p class="meta">Add the <strong>Facebook Login for Business</strong> product (Page permissions
+      <code>pages_show_list</code>, <code>pages_manage_posts</code>, <code>pages_read_engagement</code>,
+      <code>pages_manage_engagement</code>)
+      to a Meta app, then set <code>FACEBOOK_APP_ID</code>, <code>FACEBOOK_APP_SECRET</code> and
+      <code>FACEBOOK_REDIRECT_URI</code> in <code>.env</code> and restart.</p>
+  {% else %}
+    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
+  {% endif %}
+  {% if fb_configured and fb_authenticated %}
+    <p class="meta">The Page token doesn't expire.
+      <a href="{{ fb_auth_url }}" target="_blank">Reconnect with Facebook ↗</a> only if posts start
+      failing with a token error, or to switch Pages.</p>
+  {% elif fb_configured %}
+    <p class="meta">1. <a href="{{ fb_auth_url }}" target="_blank">Authorize with Facebook ↗</a>
+      as someone who manages the Page, and tick the Page on the consent screen.<br>
+       2. If you land on this dashboard you're done. Otherwise copy the <code>?code=...</code>
+       from the redirect URL (or the whole URL) and paste it here.</p>
+    <form method="post" action="/facebook/connect">
+      <input type="hidden" name="next" value="/connections">
+      <input type="text" name="code" placeholder="AQD..." required style="max-width: 460px;">
+      <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
+    </form>
   {% endif %}
 </div>
 

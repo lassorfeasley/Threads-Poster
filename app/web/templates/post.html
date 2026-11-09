@@ -79,6 +79,9 @@
               {% if xp and xp.permalink %}
               <a href="{{ xp.permalink }}" target="_blank">Open on X</a>
               {% endif %}
+              {% if fb and fb.permalink %}
+              <a href="{{ fb.permalink }}" target="_blank">Open on Facebook</a>
+              {% endif %}
             </div>
           </details>
         </span>
@@ -273,6 +276,18 @@
         <div class="ti-text-static is-pending">{{ attribution_text }}</div>
         {% else %}
         <div class="meta" style="margin-top: 2px;">No first reply.</div>
+        {% endif %}
+        {% if fb and fb.status == "published" and first_reply_id %}
+        <div class="meta" style="margin-top: 6px;{% if fb.comment_error %} color: var(--danger);{% endif %}">
+          {%- if fb.comment_id %}Also posted as a comment on Facebook.
+          {%- elif fb.comment_error %}Facebook comment failed: {{ fb.comment_error[:200] }}
+          {%- else %}Facebook comment pending — it posts once Facebook finishes processing the video.{% endif %}
+        </div>
+        {% if fb.comment_error %}
+        <form class="inline" method="post" action="/fbpost/{{ fb.id }}/comment">
+          <input type="hidden" name="next" value="/post/{{ pid }}">
+          <button class="sm">Retry Facebook comment</button></form>
+        {% endif %}
         {% endif %}
       {% endif %}
     </div>

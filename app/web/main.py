@@ -26,7 +26,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import chapters as chapter_index
-from .. import (channel_health, clip_proposals, instagram_api, linkedin_api, spend, threads_api,
+from .. import (channel_health, clip_proposals, facebook_api, instagram_api, linkedin_api, spend, threads_api,
                vision, x_api, youtube)
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
@@ -81,6 +81,7 @@ from ..models import (
     Channel,
     Cut,
     DraftProposal,
+    FacebookPost,
     InstagramPost,
     LinkedInPost,
     MetricSnapshot,
@@ -99,6 +100,7 @@ from ..publishing import (
     clear_publishing,
     draft_first_reply,
     draft_first_reply_for_cut,
+    facebook_pause_info,
     first_comment_suppressed,
     first_reply_context,
     first_reply_gate,
@@ -106,7 +108,9 @@ from ..publishing import (
     generate_attribution,
     mark_publishing,
     maybe_post_first_reply,
+    post_facebook_comment,
     publish_clip,
+    publish_facebook_mirror,
     publish_instagram_post,
     publish_linkedin_mirror,
     publish_paired_reel,
@@ -117,6 +121,7 @@ from ..publishing import (
     record_instagram_post,
     record_post,
     resolve_first_reply_text,
+    resume_facebook_mirror,
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_clauses, sort_candidates
@@ -229,10 +234,10 @@ def _source_ready(candidate_id: int) -> JSONResponse | None:
     return None
 
 
-def _unacknowledged(model):
+def _unacknowledged(model, statuses: tuple[str, ...] = ("failed",)):
     return (
         select(func.count()).select_from(model)
-        .where(model.status == "failed", model.attention_dismissed_at.is_(None))
+        .where(model.status.in_(statuses), model.attention_dismissed_at.is_(None))
         .scalar_subquery()
     )
 
@@ -271,6 +276,7 @@ def _load_attention_count() -> int:
         count = int(session.execute(
             select(_unacknowledged(ThreadsPost) + _unacknowledged(InstagramPost)
                    + _unacknowledged(LinkedInPost) + _unacknowledged(XPost)
+                   + _unacknowledged(FacebookPost, ("failed", "flagged"))
                    + _stranded_reels())
         ).scalar_one())
         try:
@@ -3575,6 +3581,11 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
         msg += " · X live"
     elif xp is not None:
         msg += f" · X {xp.status}: {(xp.error or '')[:120]}"
+    fb = publish_facebook_mirror(post_id)
+    if fb is not None and fb.status == "published":
+        msg += " · Facebook live"
+    elif fb is not None:
+        msg += f" · Facebook {fb.status}: {(fb.error or '')[:120]}"
     return _flash(f"/cut/{cut_id}?step=post", msg)
 
 
@@ -3908,6 +3919,7 @@ def _publish_in_thread(post_id: int) -> None:
             publish_paired_reel(post_id)
             publish_linkedin_mirror(post_id)
             publish_x_mirror(post_id)
+            publish_facebook_mirror(post_id)
     finally:
         clear_publishing(post_id)
 
@@ -4246,6 +4258,13 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
         ).scalar_one_or_none()
         ctx["xp"] = ({"status": xp.status, "permalink": xp.permalink, "error": xp.error}
                      if xp else None)
+        fb = session.execute(
+            select(FacebookPost).where(FacebookPost.threads_post_pk == p.id)
+        ).scalar_one_or_none()
+        ctx["fb"] = ({"id": fb.id, "status": fb.status, "permalink": fb.permalink,
+                      "error": fb.error, "comment_id": fb.comment_id,
+                      "comment_error": fb.comment_error}
+                     if fb else None)
         instagram_ok = instagram_api.is_authenticated()
         ctx["instagram_ok"] = instagram_ok
         ctx["include_instagram"] = bool(
@@ -4388,6 +4407,35 @@ def linkedin_callback(code: str = "", state: str = "", error: str = "",
     return linkedin_connect(code=code, next="/connections")
 
 
+@app.post("/facebook/connect")
+def facebook_connect(code: str = Form(...), next: str = Form("/connections")):
+    try:
+        token = facebook_api.exchange_code(_clean_auth_code(code))
+        return _flash(next, f"Facebook connected — posting as {token.get('page_name') or token['page_id']}")
+    except Exception as exc:
+        return _flash(next, f"Facebook auth failed: {exc}")
+
+
+@app.get("/facebook/callback")
+def facebook_callback(code: str = "", state: str = "", error: str = "",
+                      error_description: str = ""):
+    """OAuth redirect target, for when FACEBOOK_REDIRECT_URI points at this
+    dashboard. Otherwise the code is pasted into the Accounts page."""
+    if error:
+        return _flash("/connections", f"Facebook auth failed: {error_description or error}")
+    if not facebook_api.check_state(state):
+        return _flash("/connections", "Facebook auth failed: unrecognized state — "
+                      "start again from the Accounts page")
+    return facebook_connect(code=code, next="/connections")
+
+
+@app.post("/facebook/resume")
+def facebook_resume(next: str = Form("/connections")):
+    """Lift the copyright pause on the Facebook mirror."""
+    resume_facebook_mirror()
+    return _flash(next, "Facebook mirror resumed — the next published post goes to the Page")
+
+
 @app.get("/x/callback")
 def x_callback(code: str = "", state: str = "", error: str = "",
                error_description: str = ""):
@@ -4407,7 +4455,7 @@ def x_callback(code: str = "", state: str = "", error: str = "",
 
 @app.get("/connections", response_class=HTMLResponse)
 def connections_page(request: Request, msg: str = ""):
-    """Threads, Instagram, LinkedIn and X connection status (Configure area)."""
+    """Threads, Instagram, LinkedIn, X and Facebook connection status (Configure area)."""
     authenticated = threads_api.is_authenticated()
     ig_authenticated = instagram_api.is_authenticated()
     try:
@@ -4418,6 +4466,8 @@ def connections_page(request: Request, msg: str = ""):
     li_authenticated = linkedin_api.is_authenticated()
     x_configured = x_api.is_configured()
     x_authenticated = x_api.is_authenticated()
+    fb_configured = facebook_api.is_configured()
+    fb_authenticated = facebook_api.is_authenticated()
     return templates.TemplateResponse(
         request, "connections.html",
         {"authenticated": authenticated,
@@ -4436,6 +4486,12 @@ def connections_page(request: Request, msg: str = ""):
          "x_auth_url": x_api.authorize_url() if x_configured else "",
          "x_info": x_api.connection_info() if x_authenticated else {},
          "x_enabled": bool(load_settings().get("x.enabled", True)),
+         "fb_configured": fb_configured,
+         "fb_authenticated": fb_authenticated,
+         "fb_auth_url": facebook_api.authorize_url() if fb_configured else "",
+         "fb_info": facebook_api.connection_info() if fb_authenticated else {},
+         "fb_enabled": bool(load_settings().get("facebook.enabled", True)),
+         "fb_pause": facebook_pause_info(),
          "msg": msg, "active": "connections"},
     )
 
@@ -4993,6 +5049,16 @@ def _notifications_data() -> dict:
             .where(XPost.status == "failed", XPost.attention_dismissed_at.is_(None))
             .order_by(XPost.created_at.desc())
         ).scalars().all()
+        fb_failed = session.execute(
+            select(FacebookPost)
+            .options(selectinload(FacebookPost.threads_post)
+                     .selectinload(ThreadsPost.cut).selectinload(Cut.candidate),
+                     selectinload(FacebookPost.threads_post)
+                     .selectinload(ThreadsPost.candidate))
+            .where(FacebookPost.status.in_(("failed", "flagged")),
+                   FacebookPost.attention_dismissed_at.is_(None))
+            .order_by(FacebookPost.created_at.desc())
+        ).scalars().all()
         # Timely posts that went stale in the queue. The scored scheduler
         # never auto-places an expired post, so without this they'd sink
         # silently; the operator decides — post now, or delete.
@@ -5004,7 +5070,8 @@ def _notifications_data() -> dict:
             log.exception("Expired-post check failed")
             expired = []
     return {"failed": failed, "ig_failed": ig_failed, "ig_stranded": ig_stranded,
-            "li_failed": li_failed, "x_failed": x_failed, "expired": expired}
+            "li_failed": li_failed, "x_failed": x_failed, "fb_failed": fb_failed,
+            "expired": expired}
 
 
 pagecache.register("notifications", _notifications_data)
@@ -5464,6 +5531,53 @@ def dismiss_x_attention(request: Request, x_id: int, next: str = Form("/notifica
             return (JSONResponse({"error": "X post not found"}, status_code=404)
                     if wants_json else _flash("/notifications", "X post not found"))
         xp.attention_dismissed_at = utcnow()
+    return JSONResponse({"ok": True}) if wants_json else _flash(next, "Dismissed")
+
+
+@app.post("/fbpost/{fb_id}/retry")
+def retry_facebook_post(fb_id: int, next: str = Form("/notifications")):
+    """Operator-confirmed retry of a failed Facebook mirror. Synchronous."""
+    with session_scope(read_only=True) as session:
+        fb = session.get(FacebookPost, fb_id)
+        if fb is None:
+            return _flash(next, "Facebook post not found")
+        if fb.status != "failed":
+            return _flash(next, "This Facebook post is not retryable")
+        post_id = fb.threads_post_pk
+    fb = publish_facebook_mirror(post_id, force=True)
+    if fb is not None and fb.status == "published":
+        return _flash(next, f"Posted to Facebook: {fb.permalink}")
+    return _flash(next, f"Facebook post failed: {(fb.error if fb else '')[:200]}")
+
+
+@app.post("/fbpost/{fb_id}/comment")
+def retry_facebook_comment(fb_id: int, next: str = Form("")):
+    """Operator retry of the Facebook first comment after a failure."""
+    with session_scope(read_only=True) as session:
+        fb = session.get(FacebookPost, fb_id)
+        if fb is None:
+            return _flash(next or "/notifications", "Facebook post not found")
+        dest = next or f"/post/{fb.threads_post_pk}"
+    if post_facebook_comment(fb_id, force=True):
+        return _flash(dest, "First comment posted on Facebook")
+    with session_scope(read_only=True) as session:
+        fb = session.get(FacebookPost, fb_id)
+        err = fb.comment_error if fb else ""
+    return _flash(dest, f"Facebook comment not posted: {err[:200] or 'nothing to post yet'}")
+
+
+@app.post("/fbpost/{fb_id}/dismiss")
+def dismiss_facebook_attention(request: Request, fb_id: int,
+                               next: str = Form("/notifications")):
+    """Acknowledge a failed or flagged Facebook mirror so it leaves the
+    notifications list. Dismissing does not lift a copyright pause."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with session_scope() as session:
+        fb = session.get(FacebookPost, fb_id)
+        if fb is None:
+            return (JSONResponse({"error": "Facebook post not found"}, status_code=404)
+                    if wants_json else _flash("/notifications", "Facebook post not found"))
+        fb.attention_dismissed_at = utcnow()
     return JSONResponse({"ok": True}) if wants_json else _flash(next, "Dismissed")
 
 

@@ -60,16 +60,19 @@ from .placement import (
     window_key_date,
 )
 from .publishing import (
+    check_facebook_videos,
     clear_publishing,
     draft_first_reply,
     first_comment_suppressed,
     first_reply_context,
     first_reply_needs_metrics,
+    is_facebook_publish_active,
     is_linkedin_publish_active,
     is_publish_active,
     is_x_publish_active,
     mark_publishing,
     maybe_post_first_reply,
+    publish_facebook_mirror,
     publish_linkedin_mirror,
     publish_paired_reel,
     publish_post,
@@ -176,6 +179,19 @@ def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
                     "X account to see if this clip went out; if it didn't, retry from here.")
         recovered += 1
         log.warning("Recovered X post %s stuck in 'publishing' -> 'failed'", xp.id)
+    from .models import FacebookPost
+
+    fb_rows = session.execute(
+        select(FacebookPost).where(FacebookPost.status == STATUS_PUBLISHING)
+    ).scalars().all()
+    for fb in fb_rows:
+        if only_inactive and is_facebook_publish_active(fb.id):
+            continue
+        fb.status = "failed"
+        fb.error = ("Publishing to Facebook was interrupted before it finished. Check "
+                    "the Page to see if this clip went out; if it didn't, retry from here.")
+        recovered += 1
+        log.warning("Recovered Facebook post %s stuck in 'publishing' -> 'failed'", fb.id)
     return recovered
 
 
@@ -2144,6 +2160,7 @@ def _claim_and_publish(post_id: int, window_key: str, state_action: str,
             publish_paired_reel(post_id)
             publish_linkedin_mirror(post_id)
             publish_x_mirror(post_id)
+            publish_facebook_mirror(post_id)
     finally:
         clear_publishing(post_id)
 
@@ -3314,6 +3331,15 @@ def run_tick() -> None:
             log.info("Metrics poll took %d snapshot(s)", n)
     except Exception:
         log.exception("Metrics poll failed")
+
+    # Copyright claims and processing failures on the Facebook mirror only
+    # surface after the upload; a match pauses the mirror.
+    try:
+        n = check_facebook_videos()
+        if n:
+            log.info("Facebook check: %d mirrored video(s) changed state", n)
+    except Exception:
+        log.exception("Facebook video check failed")
 
     try:
         action = run_window_tick()

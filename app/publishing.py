@@ -22,13 +22,14 @@ from sqlalchemy import or_, select, update
 
 import requests
 
-from . import linkedin_api, x_api
+from . import facebook_api, linkedin_api, x_api
 from .categories import is_first_party
 from .config import load_first_reply, load_settings, scheduler_timezone
 from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
 from .instagram_api import publish_reel
 from .llm import caption_attributes, suggest_attribution, suggest_first_reply
-from .models import Candidate, Cut, InstagramPost, LinkedInPost, ThreadsPost, XPost, utcnow
+from .models import (AppToken, Candidate, Cut, FacebookPost, InstagramPost, LinkedInPost,
+                     ThreadsPost, XPost, utcnow)
 from .outro import with_outro
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import publish_text_reply, publish_video
@@ -75,6 +76,14 @@ _ACTIVE_X: set[int] = set()
 def is_x_publish_active(x_id: int) -> bool:
     with _ACTIVE_LOCK:
         return x_id in _ACTIVE_X
+
+
+_ACTIVE_FACEBOOK: set[int] = set()
+
+
+def is_facebook_publish_active(fb_id: int) -> bool:
+    with _ACTIVE_LOCK:
+        return fb_id in _ACTIVE_FACEBOOK
 
 
 def _clip_duration_seconds(path: Path) -> int | None:
@@ -1048,6 +1057,290 @@ def publish_x_mirror(post_id: int, *, force: bool = False) -> XPost | None:
         with _ACTIVE_LOCK:
             _ACTIVE_X.discard(x_id)
     return _x_snapshot(post_id)
+
+
+# --- Facebook Page mirror -------------------------------------------------------
+
+# AppToken row holding the copyright pause: {"reason", "at", "threads_post_pk"}.
+# In the database rather than settings.yaml so a headless runner can set it
+# and the dashboard sees it.
+FACEBOOK_PAUSE_TOKEN = "facebook_pause"
+
+
+def facebook_pause_info() -> dict | None:
+    """Why the Facebook mirror paused itself, or None when it hasn't."""
+    from .db import session_scope
+
+    with session_scope(read_only=True) as session:
+        row = session.get(AppToken, FACEBOOK_PAUSE_TOKEN)
+        if row is None or not row.value:
+            return None
+        try:
+            return json.loads(row.value)
+        except ValueError:
+            return {"reason": row.value}
+
+
+def pause_facebook_mirror(reason: str, threads_post_pk: int | None = None) -> None:
+    from .db import session_scope
+
+    payload = json.dumps({"reason": reason, "at": utcnow().isoformat(),
+                          "threads_post_pk": threads_post_pk})
+    with session_scope() as session:
+        row = session.get(AppToken, FACEBOOK_PAUSE_TOKEN)
+        if row is None:
+            session.add(AppToken(name=FACEBOOK_PAUSE_TOKEN, value=payload, updated_at=utcnow()))
+        elif not row.value:  # keep the first reason if it's already paused
+            row.value = payload
+            row.updated_at = utcnow()
+    log.warning("Facebook mirror paused: %s", reason)
+
+
+def resume_facebook_mirror() -> None:
+    from .db import session_scope
+
+    with session_scope() as session:
+        row = session.get(AppToken, FACEBOOK_PAUSE_TOKEN)
+        if row is not None:
+            session.delete(row)
+
+
+def facebook_mirror_enabled() -> bool:
+    """Whether published Threads posts should mirror to Facebook right now."""
+    return (bool(load_settings().get("facebook.enabled", True))
+            and facebook_api.is_authenticated()
+            and facebook_pause_info() is None)
+
+
+def _write_fb_row(fb_id: int, **values) -> None:
+    """Update a FacebookPost through a fresh connection (see ``_write_ig_row``)."""
+    from sqlalchemy.exc import OperationalError
+
+    from .db import session_scope
+
+    last_exc: Exception | None = None
+    for _ in range(2):
+        try:
+            with session_scope() as s:
+                s.execute(update(FacebookPost).where(FacebookPost.id == fb_id)
+                          .values(**values))
+            return
+        except OperationalError as exc:
+            last_exc = exc
+    raise last_exc
+
+
+def _claim_facebook_mirror(post_id: int) -> tuple[int, str, str, str] | None:
+    """``_claim_linkedin_mirror`` for Facebook."""
+    from sqlalchemy.exc import IntegrityError
+
+    from .db import session_scope
+
+    try:
+        with session_scope() as session:
+            post = session.get(ThreadsPost, post_id)
+            if post is None or post.status != "published" or not post.threads_media_id:
+                return None
+            caption = post.caption or ""
+            row = session.execute(
+                select(FacebookPost).where(FacebookPost.threads_post_pk == post_id)
+            ).scalar_one_or_none()
+            if row is None:
+                row = FacebookPost(threads_post_pk=post_id, caption=caption,
+                                   status="publishing")
+                session.add(row)
+                session.flush()
+            else:
+                won = session.execute(
+                    update(FacebookPost)
+                    .where(FacebookPost.id == row.id, FacebookPost.status == "failed")
+                    .values(status="publishing", error="", caption=caption,
+                            attention_dismissed_at=None)
+                ).rowcount
+                if won != 1:
+                    return None
+            return (row.id, caption, post.clip_local_path or "", post.clip_object_path or "")
+    except IntegrityError:
+        return None
+
+
+def _facebook_retryable(exc: Exception) -> bool:
+    if isinstance(exc, FileNotFoundError) or _storage_object_missing(exc):
+        return False
+    if isinstance(exc, facebook_api.FacebookError) and exc.is_copyright:
+        return False
+    status = getattr(exc, "status", None)
+    return status is None or status >= 500 or status == 429
+
+
+def _facebook_snapshot(post_id: int) -> FacebookPost | None:
+    from .db import session_scope
+
+    with session_scope(read_only=True) as session:
+        row = session.execute(
+            select(FacebookPost).where(FacebookPost.threads_post_pk == post_id)
+        ).scalar_one_or_none()
+        if row is not None:
+            session.expunge(row)
+        return row
+
+
+def publish_facebook_mirror(post_id: int, *, force: bool = False) -> FacebookPost | None:
+    """Mirror a just-published Threads post to the Facebook Page: caption and
+    clip. The first comment follows from ``check_facebook_videos`` once the
+    video is ready. Same contract as
+    ``publish_linkedin_mirror``; ``force`` (the operator retrying by hand) also
+    goes through a copyright pause.
+
+    An upload Facebook refuses on copyright grounds pauses the mirror, so one
+    match can't turn into a run of strikes against the Page."""
+    if not force and not facebook_mirror_enabled():
+        return None
+    claim = _claim_facebook_mirror(post_id)
+    if claim is None:
+        return _facebook_snapshot(post_id)
+    fb_id, caption, local_path, object_path = claim
+
+    settings = load_settings()
+    retries = max(0, int(settings.get("scheduler.publish_retries", 1)))
+    retry_delay = max(0, int(settings.get("scheduler.publish_retry_delay_seconds", 30)))
+    with _ACTIVE_LOCK:
+        _ACTIVE_FACEBOOK.add(fb_id)
+    try:
+        result = None
+        for attempt in range(retries + 1):
+            try:
+                with _mirror_clip(local_path, object_path) as video:
+                    result = facebook_api.publish_video(video, caption)
+                break
+            except Exception as exc:
+                log.warning("Facebook mirror attempt %d/%d failed for post %s: %s",
+                            attempt + 1, retries + 1, post_id, exc)
+                if attempt >= retries or not _facebook_retryable(exc):
+                    _write_fb_row(fb_id, status="failed", error=str(exc)[:1000])
+                    if isinstance(exc, facebook_api.FacebookError) and exc.is_copyright:
+                        pause_facebook_mirror(
+                            f"Facebook refused a clip on copyright grounds: {str(exc)[:300]}",
+                            post_id)
+                    break
+                time.sleep(retry_delay)
+        if result is not None:
+            _write_fb_row(fb_id, video_id=result["video_id"], permalink=result["permalink"],
+                          status="published", published_at=utcnow(), error="")
+            log.info("Mirrored post %s to Facebook (%s)", post_id, result["permalink"])
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE_FACEBOOK.discard(fb_id)
+    return _facebook_snapshot(post_id)
+
+
+# How long after the Facebook upload a first comment is still worth posting,
+# and when an unfinished claim on one can be retaken.
+_FB_COMMENT_HORIZON = dt.timedelta(days=7)
+_FB_COMMENT_CLAIM_STALE = dt.timedelta(minutes=15)
+
+
+def post_facebook_comment(fb_id: int, *, force: bool = False) -> bool:
+    """Post the Threads post's first reply as a Page comment on its Facebook
+    video. Only text Threads actually posted goes out, so every Threads gate
+    (delay, traction floor, promo suppression) carries over. ``force`` is the
+    operator retrying by hand: it clears a stored error and takes over a claim.
+    Returns True when a comment went out; failures land in ``comment_error``.
+    """
+    from .db import session_scope
+
+    now = utcnow()
+    with session_scope() as session:
+        row = session.get(FacebookPost, fb_id)
+        post = session.get(ThreadsPost, row.threads_post_pk) if row else None
+        text = (post.first_reply_text or "").strip() if post and post.first_reply_id else ""
+        if row is None or row.status != "published" or not row.video_id or not text \
+                or row.comment_id or (row.comment_error and not force):
+            return False
+        where = [FacebookPost.id == fb_id, FacebookPost.comment_id == ""]
+        if not force:
+            where.append(or_(FacebookPost.comment_claimed_at.is_(None),
+                             FacebookPost.comment_claimed_at < now - _FB_COMMENT_CLAIM_STALE))
+        won = session.execute(
+            update(FacebookPost).where(*where)
+            .values(comment_claimed_at=now, comment_error="")
+            .execution_options(synchronize_session=False)
+        ).rowcount
+        video_id = row.video_id
+    if won != 1:
+        return False
+    try:
+        comment_id = facebook_api.publish_comment(video_id, text)
+    except Exception as exc:
+        log.warning("Facebook first comment failed for row %s: %s", fb_id, exc)
+        _write_fb_row(fb_id, comment_error=str(exc)[:1000])
+        return False
+    _write_fb_row(fb_id, comment_id=comment_id or "posted", comment_error="")
+    log.info("Posted Facebook first comment %s on video %s", comment_id, video_id)
+    return True
+
+
+def check_facebook_videos(now: dt.datetime | None = None) -> int:
+    """Read mirrored Facebook videos back, catching what only shows up after
+    the upload — processing failures, copyright matches, takedowns — and
+    posting the first comment once the video is ready.
+
+    A video is read when its copyright watch is due (every
+    ``facebook.copyright_check_minutes`` for ``facebook.copyright_watch_hours``
+    after it went out — rights claims often land hours later) or when its
+    Threads post has a first reply the Page hasn't commented yet. A match or a
+    vanished video flags the post and pauses the mirror. Returns the number of
+    posts whose state changed (comments included)."""
+    from .db import session_scope
+
+    if not facebook_api.is_authenticated():
+        return 0
+    settings = load_settings()
+    now = now or utcnow()
+    watch = dt.timedelta(hours=float(settings.get("facebook.copyright_watch_hours", 72)))
+    every = dt.timedelta(minutes=float(settings.get("facebook.copyright_check_minutes", 60)))
+    copyright_due = (FacebookPost.published_at >= now - watch) & or_(
+        FacebookPost.checked_at.is_(None), FacebookPost.checked_at <= now - every)
+    comment_due = ((FacebookPost.comment_id == "") & (FacebookPost.comment_error == "")
+                   & (ThreadsPost.first_reply_id != "")
+                   & (FacebookPost.published_at >= now - _FB_COMMENT_HORIZON)
+                   & or_(FacebookPost.comment_claimed_at.is_(None),
+                         FacebookPost.comment_claimed_at < now - _FB_COMMENT_CLAIM_STALE))
+    with session_scope(read_only=True) as session:
+        due = session.execute(
+            select(FacebookPost.id, FacebookPost.video_id, FacebookPost.threads_post_pk,
+                   comment_due)
+            .join(ThreadsPost, ThreadsPost.id == FacebookPost.threads_post_pk)
+            .where(FacebookPost.status == "published", FacebookPost.video_id != "",
+                   or_(copyright_due, comment_due))
+        ).all()
+    changed = 0
+    for fb_id, video_id, post_pk, wants_comment in due:
+        try:
+            info = facebook_api.video_status(video_id)
+        except Exception as exc:
+            log.warning("Facebook status check failed for video %s: %s", video_id, exc)
+            continue
+        values: dict = {"checked_at": now}
+        if info.get("permalink"):
+            values["permalink"] = info["permalink"]
+        if info["copyright_match"] or info["state"] == "missing":
+            reason = ("Facebook's copyright check matched this video against someone's "
+                      "content." if info["copyright_match"] else
+                      "This video is no longer on the Page — deleted by hand, or taken "
+                      "down by a rights claim.")
+            values.update(status="flagged", error=reason)
+            pause_facebook_mirror(reason, post_pk)
+            changed += 1
+        elif info["state"] == "error":
+            values.update(status="failed",
+                          error=("Facebook couldn't process the video, so it never went "
+                                 "out" + (f": {info['detail']}" if info.get("detail") else ".")))
+            changed += 1
+        _write_fb_row(fb_id, **values)
+        if wants_comment and info["state"] == "ready" and not info["copyright_match"]:
+            changed += post_facebook_comment(fb_id)
+    return changed
 
 
 def _annotate_footage(session, post: ThreadsPost) -> None:

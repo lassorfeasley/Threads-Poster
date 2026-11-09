@@ -14,6 +14,7 @@ name: Threads scheduler
 # LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET are only used to refresh the
 # LinkedIn token (stored in the database) when it nears expiry. X_CLIENT_ID /
 # X_CLIENT_SECRET do the same for the X token, which lasts only two hours.
+# The Facebook Page token never expires, so it needs no secrets here.
 #
 # Schedule notes:
 # - GitHub cron is UTC only; posting windows are ET (see scheduler.windows in

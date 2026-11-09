@@ -78,6 +78,7 @@ Optional extras:
 | `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_REDIRECT_URI` | Optional. Same Meta app with the **Instagram API with Instagram Login** product — required only to queue/publish paired Reels. |
 | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REDIRECT_URI` | Optional. LinkedIn app with the **Community Management API** — mirrors every published post to the company page. |
 | `X_CLIENT_ID`, `X_CLIENT_SECRET`, `X_REDIRECT_URI` | Optional. X API app (pay-per-use credits) — mirrors every published post to X, without links. |
+| `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `FACEBOOK_REDIRECT_URI` | Optional. Meta app with **Facebook Login for Business** — mirrors every published post, and its first reply, to a Facebook Page. |
 
 ### Threads / Meta app + OAuth
 
@@ -146,6 +147,33 @@ and posts X rejects as duplicates are skipped too. Failures show under
 Notifications with a retry button; pause with `x.enabled: false`. Access tokens
 last two hours and refresh themselves, which needs `X_CLIENT_ID`/`X_CLIENT_SECRET`
 wherever the scheduler runs.
+
+### Facebook Page (optional, automatic mirror)
+
+1. At developers.facebook.com, add **Facebook Login for Business** to a Meta app
+   (the Threads app or a new one) with the Page permissions `pages_show_list`,
+   `pages_manage_posts`, `pages_read_engagement` and `pages_manage_engagement`.
+   In development mode these
+   work without App Review for anyone with a role on the app.
+2. Register `http://localhost:8321/facebook/callback` as a valid OAuth redirect
+   URI, and put the app ID/secret and that URL in `.env`.
+3. Open **Accounts** → "Authorize with Facebook" as someone who manages the Page,
+   and tick the Page on the consent screen. If the login manages several Pages,
+   set `facebook.page_id` in `settings.yaml` first.
+
+From then on every Threads post that publishes also goes to the Page as a
+regular video post (the 16:9 clip, not a Reel) with the same caption. Once
+Facebook has processed the video, the first reply the Threads post actually got
+is posted as a Page comment — same text, same timing gates, nothing for posts
+whose Threads reply was skipped. Failures show under Notifications with a retry button;
+switch the mirror off with `facebook.enabled: false`.
+
+TV stations use Meta's Rights Manager, so the mirror guards the Page: for 72
+hours after each upload the scheduler re-reads the video, and a copyright match,
+a video that vanished from the Page, or an upload Facebook refuses on copyright
+grounds flags the post and **pauses the mirror** until you resume it on the
+Accounts page. The Page token never expires, so the scheduler needs no Facebook
+secrets; reconnect only if the token is revoked.
 
 ## Running
 
