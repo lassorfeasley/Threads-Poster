@@ -274,6 +274,7 @@ def log_run(session, candidate_pk: int, clips: list[dict], *,
             story=str(clip.get("story", ""))[:200],
             why=str(clip.get("why", ""))[:300],
             confidence=clip.get("confidence"),
+            flag=str(clip.get("challenges_rules") or "")[:300],
             model=model,
             policy_version=policy,
         )

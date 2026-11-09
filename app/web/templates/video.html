@@ -169,6 +169,7 @@
         </button>
         <div class="suggest-body">
           <div class="suggest-story">{{ p.story or "Suggested clip" }}</div>
+          {% if p.flag %}<div class="rule-flag" title="This clip carries a claim your brand rules reject. Check its framing before it goes anywhere.">⚑ Check the framing: {{ p.flag }}</div>{% endif %}
           {% if p.opening %}<blockquote class="suggest-line"><span class="suggest-line-k">Opens</span>“{{ p.opening }}”</blockquote>{% endif %}
           {% if p.closing %}<blockquote class="suggest-line"><span class="suggest-line-k">Ends</span>“{{ p.closing }}”</blockquote>{% endif %}
           {% if p.why %}<div class="meta suggest-why">{{ p.why }}</div>{% endif %}

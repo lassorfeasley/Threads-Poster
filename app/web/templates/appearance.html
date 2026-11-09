@@ -1,0 +1,30 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+{% import "components/toolbar.html" as ui %}
+{% set ap_sub %}White label the app itself: the name and logo in the sidebar and window title. Clip caption colors and fonts are separate — they're the clip's look, not the app's (see <code>subtitles</code> in <code>config/settings.yaml</code>).{% endset %}
+{{ ui.pagebar("Appearance", sub=ap_sub) }}
+
+<form method="post" action="/appearance" enctype="multipart/form-data">
+  <div class="card">
+    <label for="brand-app-name" class="field-label" style="margin-top: 0;">App name</label>
+    <input type="text" id="brand-app-name" name="app_name" value="{{ brand.app_name }}"
+           placeholder="{{ default_app_name }}" style="max-width: 460px;">
+
+    <label for="brand-logo" class="field-label">Logo</label>
+    {% if brand.logo_file %}
+      <p class="meta" style="margin: 0 0 10px; display:flex; align-items:center; gap:12px;">
+        <img src="/brand-static/{{ brand.logo_file }}" alt="Current logo"
+             style="height: 28px; width: 28px; object-fit: contain; border-radius: 6px;">
+        <span><code>{{ brand.logo_file }}</code> — upload a new file to replace it.</span>
+        <button class="sm" type="submit" form="logo-remove-form">Remove</button>
+      </p>
+    {% endif %}
+    <input type="file" id="brand-logo" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp,.gif">
+    <p class="meta" style="margin: 6px 0 0;">Square works best; shown at sidebar size. PNG, JPG, SVG, WebP, or GIF up to 2 MB.</p>
+  </div>
+  <div class="btn-group" style="margin-top: 16px;">
+    <button class="primary" type="submit">Save</button>
+  </div>
+</form>
+<form id="logo-remove-form" method="post" action="/appearance/logo/remove"></form>
+{% endblock %}

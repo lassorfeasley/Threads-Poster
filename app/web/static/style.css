@@ -5889,3 +5889,73 @@ details.panel > .panel-body { padding: 14px 18px; }
   line-height: 1.6;
   color: var(--text-dim);
 }
+
+/* --- Brand & audience: topic + rules up front, the rest under Advanced. --- */
+.field-label {
+  display: block;
+  margin: 14px 0 6px;
+  font-size: var(--text-meta);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.field-hint { margin: 6px 0 0; }
+.brand-adv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+.brand-adv-grid .field-label { margin-top: 0; }
+@media (max-width: 720px) { .brand-adv-grid { grid-template-columns: 1fr; } }
+.brand-advanced > summary { cursor: pointer; list-style: none; margin: 0; }
+.brand-advanced > summary::-webkit-details-marker { display: none; }
+.brand-advanced > summary::before { content: "▸ "; color: var(--muted); }
+.brand-advanced[open] > summary::before { content: "▾ "; }
+.brand-retired {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--warn-border);
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.brand-rules-empty { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.brand-rules-empty p { flex-basis: 100%; }
+
+/* A suggested clip that carries a claim the brand rules reject. */
+.rule-flag {
+  margin-top: 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+}
+
+/* "+ Add a rule" under the caption editors. */
+.rule-capture { margin: 6px 0 10px; }
+.rule-capture-toggle {
+  min-height: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.rule-capture-toggle:hover { color: var(--text); }
+.rule-capture-from-edit { color: rgb(196, 181, 253); }
+.rule-capture-box {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.rule-capture-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.rule-capture-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.rule-capture-row .rule-capture-text { flex: 1 1 220px; min-width: 0; }
+.rule-capture-row .rule-capture-scope { flex: none; width: auto; }
+.rule-capture-status { margin-top: 6px; }

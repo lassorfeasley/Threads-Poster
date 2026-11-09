@@ -360,14 +360,80 @@ def load_brand() -> dict[str, str]:
     return {f: str(data.get(f) or "").strip() for f in _BRAND_TEXT_FIELDS}
 
 
+def _write_brand(fields: dict[str, str], rules: list[dict[str, Any]]) -> None:
+    body = yaml.safe_dump({**fields, "rules": rules}, default_flow_style=False,
+                          allow_unicode=True, width=88, sort_keys=False)
+    (CONFIG_DIR / "brand.yaml").write_text(BRAND_HEADER + body)
+
+
 def save_brand(values: dict[str, str]) -> None:
     current = load_brand()
     for f in _BRAND_TEXT_FIELDS:
         if f in values:
             current[f] = str(values[f] or "").strip()
-    body = yaml.safe_dump(current, default_flow_style=False, allow_unicode=True,
-                          width=88, sort_keys=False)
-    (CONFIG_DIR / "brand.yaml").write_text(BRAND_HEADER + body)
+    _write_brand(current, load_brand_rules())
+
+
+# ---- Brand rules -------------------------------------------------------------
+# The operator's hard constraints, kept with the brand because they say what
+# the account IS ("write as we", "never present climate denial as credible"),
+# not how a caption should sound — that style is learned. Unlike the caption
+# style guide's menu of moves, every enabled rule applies, always.
+#
+# ``applies_to`` scopes a rule: "everything" reaches the decisions about
+# content too (relevance scoring, clip selection), "captions" only the text
+# written about it (captions, hooks, re-air captions, the caption gut check).
+RULE_SCOPES = ("everything", "captions")
+
+
+def _coerce_brand_rule(item: Any) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        item = {"text": item}
+    if not isinstance(item, dict):
+        return None
+    text = " ".join(str(item.get("text") or "").split())
+    if not text:
+        return None
+    scope = str(item.get("applies_to") or "everything").lower()
+    return {"text": text[:400],
+            "applies_to": scope if scope in RULE_SCOPES else "everything",
+            "enabled": bool(item.get("enabled", True))}
+
+
+def load_brand_rules() -> list[dict[str, Any]]:
+    raw = _load_yaml(CONFIG_DIR / "brand.yaml").get("rules") or []
+    return [r for r in (_coerce_brand_rule(i) for i in raw) if r]
+
+
+def save_brand_rules(rules: list[Any]) -> list[dict[str, Any]]:
+    cleaned = [r for r in (_coerce_brand_rule(i) for i in (rules or [])) if r]
+    _write_brand(load_brand(), cleaned)
+    return cleaned
+
+
+def add_brand_rule(text: str, applies_to: str = "everything") -> dict[str, Any] | None:
+    """Append one rule (from the caption editor, say). Returns it, or None when
+    it's empty or already there."""
+    rule = _coerce_brand_rule({"text": text, "applies_to": applies_to})
+    if rule is None:
+        return None
+    rules = load_brand_rules()
+    if any(r["text"].lower() == rule["text"].lower() for r in rules):
+        return None
+    save_brand_rules(rules + [rule])
+    return rule
+
+
+def render_brand_rules(scope: str) -> str:
+    """Enabled rules that reach ``scope`` as a bullet list, or "".
+
+    ``scope="content"`` is a decision about material — only rules that apply
+    to everything. ``scope="captions"`` is text — every enabled rule, since a
+    rule about the account's stance binds what it writes too.
+    """
+    rules = [r for r in load_brand_rules() if r["enabled"]
+             and (scope == "captions" or r["applies_to"] == "everything")]
+    return "\n".join(f"- {r['text']}" for r in rules)
 
 
 CAPTION_STYLE_HEADER = """\

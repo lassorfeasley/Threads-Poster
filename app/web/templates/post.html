@@ -89,6 +89,8 @@
       {% if editable %}
       <textarea form="queue-form" name="caption" id="caption" class="ti-text" maxlength="500"
                 placeholder="Write the caption for this post…">{{ caption }}</textarea>
+      {% import "components/rule_capture.html" as rc %}
+      {{ rc.rule_capture(textarea_id="caption", draft=draft_caption) }}
       {% else %}
       <div class="ti-text-static" id="caption-static">{{ caption }}</div>
       {% endif %}

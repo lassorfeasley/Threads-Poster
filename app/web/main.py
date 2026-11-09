@@ -36,10 +36,10 @@ from ..clipper import (
     export_supercut, get_waveform,
 )
 from ..config import (
-    DATA_DIR, DEFAULT_APP_NAME, WORKSPACE, current_workspace, env, load_brand,
-    load_caption_rules, load_first_reply, load_keywords, load_settings,
-    load_workspaces, render_caption_guide, save_brand, save_caption_rules,
-    save_first_reply, save_keywords,
+    DATA_DIR, DEFAULT_APP_NAME, WORKSPACE, add_brand_rule, current_workspace, env,
+    load_brand, load_brand_rules, load_caption_rules, load_first_reply, load_keywords,
+    load_settings, load_workspaces, render_caption_guide, save_brand,
+    save_brand_rules, save_caption_rules, save_first_reply, save_keywords,
 )
 from ..db import (
     SessionLocal,
@@ -126,7 +126,7 @@ from ..publishing import (
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_clauses, sort_candidates
-from .. import labels, posting_schedule, rerun_review, triage_model
+from .. import labels, llm, posting_schedule, rerun_review, triage_model
 from ..config import scheduler_timezone
 from ..scheduler import (
     PIN_HORIZON_DAYS,
@@ -1486,7 +1486,7 @@ def _proposal_payload(row, used: list[dict], words: list[dict] | None = None,
             "seconds": clip_proposals.duration(segments), "trimmed": trimmed,
             "at": segments[0]["start"], "count": len(segments),
             "opening": lines["opening"], "closing": lines["closing"],
-            "thumb": f"/clip-proposal/{row.id}/thumb"}
+            "thumb": f"/clip-proposal/{row.id}/thumb", "flag": row.flag or ""}
 
 
 def _pending_proposals(session, candidate_pk: int) -> list[dict]:
@@ -1981,6 +1981,15 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         # always fresh footage — the dashed overlay and the violet one can
         # never describe the same seconds.
         suggested_clips = _pending_proposals(session, c.id)
+        # The AI caption the operator last accepted for this clip — what an
+        # edit gets compared against when turning it into a rule.
+        accepted_draft = session.execute(
+            select(DraftProposal.proposed)
+            .where(DraftProposal.cut_pk == cut.id,
+                   DraftProposal.kind == DraftProposal.KIND_CAPTION,
+                   DraftProposal.verdict == DraftProposal.VERDICT_ACCEPTED)
+            .order_by(DraftProposal.id.desc()).limit(1)
+        ).scalar_one_or_none() or ""
 
         transcript_segments = []
         if c.transcript_path and Path(c.transcript_path).exists():
@@ -2033,6 +2042,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "opener_seconds": load_settings().get("clips.opener_seconds", 2.0),
          "other_cut_segments": other_cut_segments,
          "suggested_clips": suggested_clips,
+         "accepted_caption_draft": accepted_draft,
          "clip_transcript": clip_transcript,
          "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
@@ -4259,6 +4269,9 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             reschedule_windows = reschedule_windows_for_post(session, p.id)
         ctx = {
             "pid": p.id, "status": p.status, "caption": p.caption or "",
+            # The AI draft this caption started from, so an edit can be
+            # turned into a rule ("+ Add a rule" under the caption).
+            "draft_caption": p.suggested_caption or "",
             "account_name": threads_api.account_username(),
             "permalink": p.permalink, "source": p.source, "error": p.error,
             "candidate_id": cand.id if cand else None,
@@ -5966,41 +5979,92 @@ _ALLOWED_LOGO_EXTS = (".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif")
 
 @app.get("/brand", response_class=HTMLResponse)
 def brand_page(request: Request, msg: str = ""):
-    """Workspace identity + white-label appearance (Configure area)."""
+    """What the account covers and the rules it never breaks (Configure area)."""
     return templates.TemplateResponse(
         request, "brand.html",
-        {"brand": load_brand(), "default_app_name": DEFAULT_APP_NAME,
+        {"brand": load_brand(), "rules": load_brand_rules(),
          "msg": msg, "active": "brand"},
     )
 
 
+# Fields the Brand & audience form may send. A field the form doesn't post is
+# left alone — never blanked — so moving a field off the page can't erase it.
+_BRAND_FORM_FIELDS = ("topic", "name", "cta_url", "mission", "audience",
+                      "voice_notes", "source_kind", "relevance_rules",
+                      "false_positives", "strong_openings", "weak_openings",
+                      "clip_guidance")
+
+
 @app.post("/brand")
-async def brand_save(
-    name: str = Form(""), cta_url: str = Form(""), mission: str = Form(""),
-    audience: str = Form(""),
-    topic: str = Form(""), voice_notes: str = Form(""), app_name: str = Form(""),
-    source_kind: str = Form(""), relevance_rules: str = Form(""),
-    false_positives: str = Form(""), strong_openings: str = Form(""),
-    weak_openings: str = Form(""), clip_guidance: str = Form(""),
-    logo: UploadFile | None = File(None),
-):
-    # Stored bare so captions can carry it as written: Threads auto-links a
-    # domain, and a scheme or tracking tail only eats characters.
-    cta_url = re.sub(r"^\s*https?://(www\.)?", "", cta_url or "").strip().strip("/")
-    values = {"name": name, "cta_url": cta_url, "mission": mission,
-              "audience": audience,
-              "topic": topic, "voice_notes": voice_notes, "app_name": app_name,
-              "source_kind": source_kind, "relevance_rules": relevance_rules,
-              "false_positives": false_positives,
-              "strong_openings": strong_openings,
-              "weak_openings": weak_openings, "clip_guidance": clip_guidance}
+async def brand_save(request: Request):
+    form = await request.form()
+    values = {f: str(form[f]) for f in _BRAND_FORM_FIELDS if f in form}
+    if "cta_url" in values:
+        # Stored bare so captions can carry it as written: Threads auto-links
+        # a domain, and a scheme or tracking tail only eats characters.
+        values["cta_url"] = re.sub(r"^\s*https?://(www\.)?", "",
+                                   values["cta_url"]).strip().strip("/")
+    save_brand(values)
+    if "rules_json" in form:
+        try:
+            rules = json.loads(str(form["rules_json"]) or "[]")
+        except ValueError:
+            return _flash("/brand", "Couldn't read the rules — nothing saved for them")
+        save_brand_rules(rules if isinstance(rules, list) else [])
+    return _flash("/brand", "Brand & audience saved")
+
+
+@app.post("/brand/rules/add")
+def brand_rule_add(text: str = Form(""), applies_to: str = Form("captions")):
+    """Add one rule without leaving the page you're on (the caption editor)."""
+    rule = add_brand_rule(text, applies_to)
+    if rule is None:
+        return JSONResponse({"error": "That rule is empty or already exists"},
+                            status_code=409)
+    return JSONResponse({"ok": True, "rule": rule})
+
+
+@app.post("/rules/suggest-from-edit")
+def rule_from_edit(draft: str = Form(""), final: str = Form("")):
+    """Turn a caption edit into a reusable rule, if it says something general.
+
+    The edit between the AI's draft and what the operator kept is the clearest
+    statement of a preference there is; this proposes it as a rule for the
+    operator to save or ignore. Empty when the edit was a one-off fix."""
+    if not draft.strip() or not final.strip() or draft.strip() == final.strip():
+        return JSONResponse({"rule": ""})
+    settings = load_settings()
+    try:
+        rule = llm.suggest_rule_from_edit(
+            settings.get("engagement.draft_model", "claude-sonnet-5"),
+            draft=draft, final=final,
+            existing=[r["text"] for r in load_brand_rules()])
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"rule": rule})
+
+
+@app.get("/appearance", response_class=HTMLResponse)
+def appearance_page(request: Request, msg: str = ""):
+    """White-label app chrome: the name and logo in the sidebar."""
+    return templates.TemplateResponse(
+        request, "appearance.html",
+        {"brand": load_brand(), "default_app_name": DEFAULT_APP_NAME,
+         "msg": msg, "active": "appearance"},
+    )
+
+
+@app.post("/appearance")
+async def appearance_save(app_name: str = Form(""),
+                          logo: UploadFile | None = File(None)):
+    values = {"app_name": app_name}
     if logo is not None and (logo.filename or "").strip():
         ext = Path(logo.filename).suffix.lower()
         if ext not in _ALLOWED_LOGO_EXTS:
-            return _flash("/brand", "Logo must be a PNG, JPG, SVG, WebP, or GIF")
+            return _flash("/appearance", "Logo must be a PNG, JPG, SVG, WebP, or GIF")
         data = await logo.read()
         if len(data) > 2 * 1024 * 1024:
-            return _flash("/brand", "Logo is too large — keep it under 2 MB")
+            return _flash("/appearance", "Logo is too large — keep it under 2 MB")
         _BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
         # One canonical file: a new upload replaces the old, whatever its type.
         for old in _BRAND_LOGO_DIR.glob("logo.*"):
@@ -6008,15 +6072,15 @@ async def brand_save(
         (_BRAND_LOGO_DIR / f"logo{ext}").write_bytes(data)
         values["logo_file"] = f"logo{ext}"
     save_brand(values)
-    return _flash("/brand", "Brand & audience saved")
+    return _flash("/appearance", "Appearance saved")
 
 
-@app.post("/brand/logo/remove")
-def brand_logo_remove():
+@app.post("/appearance/logo/remove")
+def appearance_logo_remove():
     for old in _BRAND_LOGO_DIR.glob("logo.*"):
         old.unlink(missing_ok=True)
     save_brand({"logo_file": ""})
-    return _flash("/brand", "Logo removed")
+    return _flash("/appearance", "Logo removed")
 
 
 # --- Keywords ----------------------------------------------------------------

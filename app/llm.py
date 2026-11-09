@@ -19,7 +19,8 @@ _client: Anthropic | None = None
 # workspace's values reproduce the framing that used to be hardcoded here.
 _BRAND_DEFAULTS = {
     "topic": "the channel's topic",
-    "source_kind": "online video",
+    # The product clips news archives, so that's the default framing.
+    "source_kind": "TV news footage",
     "relevance_rules": "it substantively covers the topic",
     "false_positives": "the topic is only incidental to the video",
     "strong_openings": (
@@ -50,6 +51,35 @@ def _brand() -> dict:
     for key in ("mission", "audience", "voice_notes", "cta_url"):
         out[key] = str(raw.get(key) or "").strip()
     return out
+
+
+def _operator_rules(scope: str) -> str:
+    """The operator's brand rules for one kind of prompt, as a prompt block —
+    or "" when there are none. ``scope`` is "content" (decisions about
+    material) or "captions" (text). Never raises: a broken brand.yaml must not
+    stop a prompt."""
+    try:
+        from .config import render_brand_rules
+        rules = render_brand_rules(scope)
+    except Exception:
+        return ""
+    if not rules:
+        return ""
+    if scope == "captions":
+        return (
+            "\n\nTHE OPERATOR'S RULES — hard constraints every word you write "
+            "must follow. They outrank the voice examples, the style notes and "
+            "any style menu; only the facts and the length limit outrank them. "
+            "If the clip challenges them, never present that as credible — "
+            "make the account's own position clear:\n" + rules[:2500]
+        )
+    return (
+        "\n\nTHE OPERATOR'S RULES — hard constraints that outrank everything "
+        "else here:\n" + rules[:2500] + "\n"
+        "Material that challenges these rules or the account's premise is "
+        "never credible. It can still be worth using — as something to "
+        "respond to — so judge that on its merits rather than discarding it."
+    )
 
 
 def client() -> Anthropic:
@@ -121,12 +151,15 @@ def score_relevance(model: str, title: str, description: str, matched_keywords: 
     optional ``rationale`` key for old cached responses.
     """
     b = _brand()
+    rules = _operator_rules("content")
     system = (
         f"You score {b['source_kind']} videos for genuine relevance to "
         f"{b['topic']}. "
         f"A video is relevant if {b['relevance_rules']}. "
         f"It is NOT relevant if {b['false_positives']}. "
-        "JSON shape: {\"score\": 0.0-1.0}"
+        + (rules + "\nScore relevance, not agreement: a video arguing against "
+           "the rules is relevant if it's worth responding to.\n" if rules else "")
+        + "JSON shape: {\"score\": 0.0-1.0}"
     )
     user = json.dumps(
         {"title": title, "description": description[:2000], "matched_keywords": matched_keywords}
@@ -423,6 +456,7 @@ def suggest_rerun_caption(model: str, *, title: str, channel: str,
         )
         if style_guide:
             system += "\n\nStyle notes:\n" + style_guide[:1500]
+    system += _operator_rules("captions")
     system += "\nJSON shape: {\"caption\": \"...\"}"
     user = json.dumps({
         "today": today,
@@ -481,6 +515,12 @@ def check_caption(model: str, *, caption: str, clip_transcript: str, title: str,
             "- This is a re-air: flag wording that pins the clip to a moment "
             "('today', 'this week', 'just announced', a date) or presents a "
             "past event as happening now.\n"
+        )
+    rules = _operator_rules("captions")
+    if rules:
+        system += (
+            "- It breaks one of the operator's rules below, or presents "
+            "something they reject as credible." + rules + "\n"
         )
     system += (
         "Do NOT flag style, tone, length, or a caption you'd merely have "
@@ -717,6 +757,7 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         if floor <= t < horizon:
             moments.append({"t": t, "what": str(m.get("why", ""))[:160]})
     context = {k: v for k, v in (context or {}).items() if v}
+    rules = _operator_rules("content")
 
     b = _brand()
     system = (
@@ -765,7 +806,12 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         "high-status figure, or a quotable, emotional or confrontational "
         "line. An unknown official reading a statement does not; prefer the "
         "moments where what is said implies footage worth watching.\n"
-        "\n"
+        + (rules + "\nWhen a clip you propose challenges those rules — it "
+           "carries a claim the account rejects — set `challenges_rules` to "
+           "one line naming what it challenges, so the operator checks its "
+           "framing before it goes anywhere. Otherwise leave it empty.\n"
+           if rules else "")
+        + "\n"
         + (f"EDITORIAL GUIDANCE for this channel: {b['clip_guidance']}\n\n"
            if b["clip_guidance"] else "")
         + "THE OPENING SHOT decides whether anyone watches the rest. Start on "
@@ -814,7 +860,8 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         "JSON shape: {\"clips\": [{\"story\": \"one line\", \"hook\": \"...\", "
         "\"payoff\": \"...\", \"segments\": [{\"start\": n, \"end\": n}], "
         "\"why\": \"one line\", \"confidence\": 0.0-1.0, "
-        "\"draft_caption\": \"...\"}]}"
+        "\"draft_caption\": \"...\""
+        + (", \"challenges_rules\": \"\"" if rules else "") + "}]}"
     )
     payload = {"title": title, "segments": compact}
     if window:
@@ -855,6 +902,7 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
             "why": str(raw.get("why", ""))[:300],
             "confidence": confidence,
             "draft_caption": str(raw.get("draft_caption", ""))[:400],
+            "challenges_rules": str(raw.get("challenges_rules") or "").strip()[:300],
         })
     return clips
 
@@ -1560,6 +1608,7 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
             "notes above, but never the length target or the hard "
             "constraints:\n" + operator_guide[:2000]
         )
+    system += _operator_rules("captions")
     system += "\nJSON shape: {\"caption\": \"...\"}"
     payload: dict = {
         "video_title": title,
@@ -1625,6 +1674,7 @@ def suggest_hook_text(model: str, title: str, station: str, market: str,
             "Never reuse their facts.\n"
             + "\n".join(f"<example>{e[:120]}</example>" for e in examples) + "\n"
         )
+    system += _operator_rules("captions") + "\n"
     system += "JSON shape: {\"hook\": \"...\"}"
     payload: dict = {
         "video_title": title,
@@ -1772,6 +1822,28 @@ def suggest_first_reply(model: str, instruction: str, *, video_title: str = "",
         return ""
     text = re.sub(r"@[\w.]+", "", text).strip()
     return " ".join(text.split())[:480]
+
+
+def suggest_rule_from_edit(model: str, *, draft: str, final: str,
+                           existing: list[str] | None = None) -> str:
+    """One reusable rule implied by how the operator edited a drafted caption,
+    or "" when the edit was a one-off fix (a fact, a name, a typo) that says
+    nothing general. The operator saves it or ignores it."""
+    system = (
+        "An operator edited an AI-drafted social caption. If the edit shows a "
+        "GENERAL preference that should apply to future captions — tone, point "
+        "of view, words or moves they cut or add, how they frame a kind of "
+        "story — write it as ONE short imperative rule (under 20 words), "
+        "phrased so it holds for any clip. If the edit only fixed something "
+        "specific to this clip (a fact, a name, a number, a typo) or just "
+        "rewrote for taste with no clear pattern, return an empty rule. Don't "
+        "repeat a rule they already have.\n"
+        "JSON shape: {\"rule\": \"...\"}"
+    )
+    user = json.dumps({"draft": draft[:1500], "edited": final[:1500],
+                       "existing_rules": (existing or [])[:30]})
+    data = _json_chat(model, system, user, max_tokens=200, temperature=0.0)
+    return " ".join(str(data.get("rule") or "").split())[:300]
 
 
 def distill_style_guide(model: str, captions: list[str]) -> str:

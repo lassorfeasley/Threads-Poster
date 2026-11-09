@@ -1,109 +1,186 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set br_sub %}Who this account is and who it talks to. These fields drive the AI prompts: relevance scoring, clip selection, caption drafting, titles, and the analytics digest all read them. Blank fields fall back to generic phrasing.{% endset %}
+{% set br_sub %}What this account covers, and the rules it never breaks. Everything else — how captions sound, which footage works — is learned from what you post and how it performs.{% endset %}
 {{ ui.pagebar("Brand & audience", sub=br_sub) }}
 
-<form method="post" action="/brand" enctype="multipart/form-data">
+<form method="post" action="/brand" id="brand-form" onsubmit="return packRules()">
+  <input type="hidden" name="rules_json" id="rules-json">
+
   <div class="card">
-    <div class="card-title" style="margin-bottom: 4px;">Who you are</div>
-
-    <label for="brand-name" class="card-title" style="display:block; margin-bottom: 6px;">Name</label>
-    <input type="text" id="brand-name" name="name" value="{{ brand.name }}"
-           placeholder="e.g. Renewables.org" style="max-width: 460px;">
-
-    <label for="brand-cta-url" class="card-title" style="display:block; margin: 14px 0 6px;">Call-to-action URL</label>
-    <input type="text" id="brand-cta-url" name="cta_url" value="{{ brand.cta_url }}"
-           placeholder="e.g. renewables.org" style="max-width: 460px;">
-    <p class="meta" style="margin: 6px 0 0;">
-      Where you send people. Appended to captions drafted for your own promo
-      footage, which is the only content whose caption has to carry the ask —
-      found-footage clips make it in the first comment instead. Stored bare, with
-      no <code>https://</code> and no tracking parameters; Threads links a plain
-      domain on its own.
-    </p>
-
-    <label for="brand-mission" class="card-title" style="display:block; margin: 14px 0 6px;">Mission</label>
-    <textarea id="brand-mission" name="mission" rows="2"
-              placeholder="What this account exists to do, in a sentence or two.">{{ brand.mission }}</textarea>
-
-    <label for="brand-audience" class="card-title" style="display:block; margin: 14px 0 6px;">Audience</label>
-    <textarea id="brand-audience" name="audience" rows="2"
-              placeholder="Who you're talking to — the people the captions should land with.">{{ brand.audience }}</textarea>
-
-    <label for="brand-topic" class="card-title" style="display:block; margin: 14px 0 6px;">Topic</label>
-    <textarea id="brand-topic" name="topic" rows="2"
-              placeholder="The subject this channel covers, as a short phrase — e.g. 'climate change' or 'the clean energy transition'.">{{ brand.topic }}</textarea>
-
-    <label for="brand-voice" class="card-title" style="display:block; margin: 14px 0 6px;">Voice notes</label>
-    <textarea id="brand-voice" name="voice_notes" rows="3"
-              placeholder="Tone, phrases to favor or avoid, point of view. Caption style rules live on the Style guide page — this is broader.">{{ brand.voice_notes }}</textarea>
+    <label for="brand-topic" class="card-title" style="display:block; margin-bottom: 4px;">What this account is about</label>
+    <p class="meta" style="margin: 0 0 10px;">A short phrase. It keeps every pick on topic, so the account doesn't drift and draws the audience you want.</p>
+    <input type="text" id="brand-topic" name="topic" value="{{ brand.topic }}" required
+           placeholder="e.g. climate change" style="max-width: 460px;">
   </div>
 
   <div class="card" style="margin-top: 14px;">
-    <div class="card-title" style="margin-bottom: 4px;">Prompt framing</div>
-    <p class="meta" style="margin: 0 0 14px;">
-      How the AI understands your source material. These feed the scoring, clip
-      selection, and drafting prompts directly; leave a field blank to use
-      neutral generic phrasing.
+    <div class="card-title" style="margin-bottom: 4px;">Rules</div>
+    <p class="meta" style="margin: 0 0 12px;">
+      Hard constraints, not suggestions: every enabled rule applies, every time.
+      <strong>Everything</strong> rules also shape which videos get picked up and how
+      clips are chosen — a stance belongs here. <strong>Captions</strong> rules apply only
+      to what gets written. A clip that challenges your rules is never treated as
+      credible, and is flagged for you to check its framing. You can also add a rule
+      straight from the caption editor.
     </p>
-
-    <label for="brand-source-kind" class="card-title" style="display:block; margin-bottom: 6px;">Source kind</label>
-    <input type="text" id="brand-source-kind" name="source_kind" value="{{ brand.source_kind }}"
-           placeholder="e.g. 'local TV news' or 'conference talk'" style="max-width: 460px;">
-
-    <label for="brand-relevance-rules" class="card-title" style="display:block; margin: 14px 0 6px;">What makes a video relevant</label>
-    <textarea id="brand-relevance-rules" name="relevance_rules" rows="3"
-              placeholder="Completes: 'A video is relevant if …' — e.g. 'it covers climate change, its impacts, clean energy, emissions, or climate policy'.">{{ brand.relevance_rules }}</textarea>
-
-    <label for="brand-false-positives" class="card-title" style="display:block; margin: 14px 0 6px;">What to exclude</label>
-    <textarea id="brand-false-positives" name="false_positives" rows="3"
-              placeholder="Completes: 'It is NOT relevant if …' — the false positives your keywords attract.">{{ brand.false_positives }}</textarea>
-
-    <label for="brand-strong-openings" class="card-title" style="display:block; margin: 14px 0 6px;">Strong openings</label>
-    <textarea id="brand-strong-openings" name="strong_openings" rows="3"
-              placeholder="What a scroll-stopping first frame looks like for this content, as a comma-separated list.">{{ brand.strong_openings }}</textarea>
-
-    <label for="brand-weak-openings" class="card-title" style="display:block; margin: 14px 0 6px;">Weak openings</label>
-    <textarea id="brand-weak-openings" name="weak_openings" rows="3"
-              placeholder="First frames to avoid — e.g. 'an anchor at a desk, station graphics' or 'an instructor still talking through setup'.">{{ brand.weak_openings }}</textarea>
-
-    <label for="brand-clip-guidance" class="card-title" style="display:block; margin: 14px 0 6px;">Clip selection guidance</label>
-    <textarea id="brand-clip-guidance" name="clip_guidance" rows="3"
-              placeholder="Extra editorial guidance for choosing clips — e.g. for a continuous class: 'the video is one session, not separate stories; pick self-contained excerpts that each demonstrate one exercise'.">{{ brand.clip_guidance }}</textarea>
+    <div id="rules-list"></div>
+    <div class="btn-group" style="margin-top: 12px;">
+      <button type="button" class="btn ghost sm" onclick="addRule()">＋ Add rule</button>
+    </div>
   </div>
 
-  <div class="card" style="margin-top: 14px;">
-    <div class="card-title" style="margin-bottom: 4px;">Appearance</div>
-    <p class="meta" style="margin: 0 0 14px;">
-      White label the app itself: the name and logo shown in the sidebar and window
-      title. Clip caption colors and fonts are separate — they're the clip's look,
-      not the app's (see <code>subtitles</code> in <code>config/settings.yaml</code>).
+  <details class="card brand-advanced" style="margin-top: 14px;"{% if brand.voice_notes %} open{% endif %}>
+    <summary class="card-title">Advanced</summary>
+    <p class="meta" style="margin: 8px 0 14px;">
+      Fine-tuning for the prompts. Every field is optional — leave one blank and the
+      built-in default applies.
     </p>
 
-    <label for="brand-app-name" class="card-title" style="display:block; margin-bottom: 6px;">App name</label>
-    <input type="text" id="brand-app-name" name="app_name" value="{{ brand.app_name }}"
-           placeholder="{{ default_app_name }}" style="max-width: 460px;">
-
-    <label for="brand-logo" class="card-title" style="display:block; margin: 14px 0 6px;">Logo</label>
-    {% if brand.logo_file %}
-      <p class="meta" style="margin: 0 0 10px; display:flex; align-items:center; gap:12px;">
-        <img src="/brand-static/{{ brand.logo_file }}" alt="Current logo"
-             style="height: 28px; width: 28px; object-fit: contain; border-radius: 6px;">
-        <span><code>{{ brand.logo_file }}</code> — upload a new file to replace it.</span>
-        <button class="sm" type="submit" form="logo-remove-form">Remove</button>
-      </p>
+    {% if brand.voice_notes %}
+    <div class="brand-retired">
+      <strong>Voice notes are no longer used.</strong> Move what matters into a rule:
+      <q>{{ brand.voice_notes }}</q>
+      <input type="hidden" name="voice_notes" value="{{ brand.voice_notes }}">
+    </div>
     {% endif %}
-    <input type="file" id="brand-logo" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp,.gif">
-    <p class="meta" style="margin: 6px 0 0;">Square works best; shown at sidebar size. PNG, JPG, SVG, WebP, or GIF up to 2 MB.</p>
-  </div>
+
+    <div class="brand-adv-grid">
+      <div>
+        <label for="brand-name" class="field-label">Account name</label>
+        <input type="text" id="brand-name" name="name" value="{{ brand.name }}" placeholder="e.g. Renewables.org">
+      </div>
+      <div>
+        <label for="brand-cta-url" class="field-label">Call-to-action link</label>
+        <input type="text" id="brand-cta-url" name="cta_url" value="{{ brand.cta_url }}" placeholder="e.g. renewables.org">
+        <p class="meta field-hint">Only used in captions for your own promo footage.</p>
+      </div>
+    </div>
+
+    <label for="brand-mission" class="field-label">Mission</label>
+    <textarea id="brand-mission" name="mission" rows="2"
+              placeholder="What the account exists to do. Read by caption drafting.">{{ brand.mission }}</textarea>
+
+    <label for="brand-audience" class="field-label">Audience</label>
+    <textarea id="brand-audience" name="audience" rows="2"
+              placeholder="Who captions should land with.">{{ brand.audience }}</textarea>
+
+    <label for="brand-source-kind" class="field-label">Source footage</label>
+    <input type="text" id="brand-source-kind" name="source_kind" value="{{ brand.source_kind }}"
+           placeholder="Default: TV news footage" style="max-width: 460px;">
+
+    <label for="brand-relevance-rules" class="field-label">On topic when…</label>
+    <textarea id="brand-relevance-rules" name="relevance_rules" rows="2"
+              placeholder="Completes 'A video is relevant if …'. Default: it substantively covers the topic.">{{ brand.relevance_rules }}</textarea>
+
+    <label for="brand-false-positives" class="field-label">Off topic when…</label>
+    <textarea id="brand-false-positives" name="false_positives" rows="2"
+              placeholder="Completes 'It is NOT relevant if …' — the false positives your keywords attract.">{{ brand.false_positives }}</textarea>
+
+    <label for="brand-strong-openings" class="field-label">Strong opening shots</label>
+    <textarea id="brand-strong-openings" name="strong_openings" rows="2"
+              placeholder="Default: action in progress, people doing something concrete, movement, a person visibly reacting.">{{ brand.strong_openings }}</textarea>
+
+    <label for="brand-weak-openings" class="field-label">Weak opening shots</label>
+    <textarea id="brand-weak-openings" name="weak_openings" rows="2"
+              placeholder="Default: static graphics, title cards, logos, text-heavy frames.">{{ brand.weak_openings }}</textarea>
+
+    <label for="brand-clip-guidance" class="field-label">Clip selection guidance</label>
+    <textarea id="brand-clip-guidance" name="clip_guidance" rows="2"
+              placeholder="Anything else the clip picker should know about this footage.">{{ brand.clip_guidance }}</textarea>
+  </details>
 
   <div class="btn-group" style="margin-top: 16px;">
     <button class="primary" type="submit">Save</button>
   </div>
 </form>
 
-<form id="logo-remove-form" method="post" action="/brand/logo/remove"></form>
+<p class="meta" style="margin-top: 12px;">Stored in <code>config/brand.yaml</code>. The app's name and logo are on <a href="/appearance">Appearance</a>.</p>
 
-<p class="meta" style="margin-top: 12px;">Stored in <code>config/brand.yaml</code> if you'd rather edit it by hand.</p>
+<script>
+  let rules = {{ rules|tojson }};
+  const RULE_EXAMPLES = [
+    ['Write as "we" — the account speaks in the first person plural.', 'captions'],
+    ['Never present climate denial or misinformation as credible.', 'everything'],
+    ['No emojis or hashtags.', 'captions'],
+  ];
+  const TRASH_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+
+  function renderRules() {
+    const box = document.getElementById('rules-list');
+    box.textContent = '';
+    if (!rules.length) {
+      const empty = document.createElement('div');
+      empty.className = 'brand-rules-empty';
+      empty.innerHTML = '<p class="meta" style="margin:0 0 8px;">No rules yet. Some starting points:</p>';
+      RULE_EXAMPLES.forEach(([text, scope]) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'reason-pill';
+        b.textContent = text;
+        b.addEventListener('click', () => addRule(text, scope));
+        empty.appendChild(b);
+      });
+      box.appendChild(empty);
+      return;
+    }
+    rules.forEach((r, i) => {
+      const row = document.createElement('div');
+      row.className = 'rule-row' + (r.enabled ? '' : ' is-off');
+
+      const sw = document.createElement('label');
+      sw.className = 'switch';
+      sw.title = r.enabled ? 'On — click to pause' : 'Paused — click to turn on';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!r.enabled;
+      cb.addEventListener('change', () => { rules[i].enabled = cb.checked; renderRules(); });
+      const track = document.createElement('span');
+      track.className = 'switch-track';
+      track.innerHTML = '<span class="switch-thumb"></span>';
+      sw.append(cb, track);
+
+      const text = document.createElement('input');
+      text.type = 'text';
+      text.className = 'rule-text';
+      text.maxLength = 400;
+      text.placeholder = 'e.g. Never present climate denial as credible.';
+      text.value = r.text || '';
+      text.addEventListener('input', () => { rules[i].text = text.value; });
+
+      const scope = document.createElement('select');
+      scope.className = 'rule-priority';
+      scope.title = 'Everything: also shapes which videos and clips get picked. Captions: only what gets written.';
+      scope.innerHTML = '<option value="everything">Everything</option><option value="captions">Captions</option>';
+      scope.value = r.applies_to === 'captions' ? 'captions' : 'everything';
+      scope.addEventListener('change', () => { rules[i].applies_to = scope.value; });
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'reject sm icon-btn';
+      del.title = 'Delete rule';
+      del.setAttribute('aria-label', 'Delete rule');
+      del.innerHTML = TRASH_SVG;
+      del.addEventListener('click', () => { rules.splice(i, 1); renderRules(); });
+
+      row.append(sw, text, scope, del);
+      box.appendChild(row);
+    });
+  }
+
+  function addRule(text, scope) {
+    rules.push({ text: text || '', applies_to: scope || 'everything', enabled: true });
+    renderRules();
+    const inputs = document.querySelectorAll('#rules-list .rule-text');
+    if (inputs.length && !text) inputs[inputs.length - 1].focus();
+  }
+
+  function packRules() {
+    document.getElementById('rules-json').value =
+      JSON.stringify(rules.filter(r => (r.text || '').trim()));
+    return true;
+  }
+
+  renderRules();
+</script>
 {% endblock %}

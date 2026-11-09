@@ -1928,6 +1928,7 @@ function proposalCard(clip, shown) {
         <div class="proposal-meta meta">${proposalMeta(clip, shown)}</div>
       </div>
     </div>
+    ${clip.flag ? `<div class="rule-flag" title="This clip carries a claim your brand rules reject. Check its framing before it goes anywhere.">⚑ Check the framing: ${escapeHtml(clip.flag)}</div>` : ''}
     ${clip.opening ? `<div class="proposal-line"><span class="proposal-line-k">Opens</span>“${escapeHtml(clip.opening)}”</div>` : ''}
     ${clip.closing ? `<div class="proposal-line"><span class="proposal-line-k">Ends</span>“${escapeHtml(clip.closing)}”</div>` : ''}
     ${clip.why ? `<div class="proposal-why meta">${escapeHtml(clip.why)}</div>` : ''}
@@ -2661,6 +2662,8 @@ async function retryExport() {
           <button type="button" class="ghost sm" onclick="dismissProposal()">Dismiss</button>
         </div>
       </div>
+      {% import "components/rule_capture.html" as rc %}
+      {{ rc.rule_capture(textarea_id="caption", draft=accepted_caption_draft) }}
       {# ---- Platform preview toggle: what each platform receives — Threads
            the 16:9 clip, Instagram the vertical composite. ---- #}
       <div class="ti-clip-tools" style="margin-bottom: 6px;">
@@ -3410,6 +3413,7 @@ async function retryExport() {
       function acceptProposal() {
         if (!proposedCaption) return;
         reportVerdict('accepted');
+        if (typeof RuleCapture !== 'undefined') RuleCapture.setDraft(proposedCaption);
         const ta = document.getElementById('caption');
         ta.value = proposedCaption;
         ta.dispatchEvent(new Event('input')); // re-grow to the new text

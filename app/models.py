@@ -853,6 +853,10 @@ class ClipProposal(Base):
     story: Mapped[str] = mapped_column(Text, default="")
     why: Mapped[str] = mapped_column(Text, default="")
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Set when the clip carries a claim the operator's brand rules reject —
+    # what it challenges, in a line. Shown on the card so its framing gets a
+    # human look; empty for ordinary clips.
+    flag: Mapped[str] = mapped_column(Text, default="")
 
     verdict: Mapped[str] = mapped_column(String(20), default=VERDICT_PENDING)
     # Why a dismissal happened, when the operator volunteered it — one optional
