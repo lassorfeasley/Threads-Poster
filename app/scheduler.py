@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
+import json
 import logging
 import math
 import threading
@@ -37,7 +38,7 @@ from sqlalchemy import func, not_, or_, select, update
 from sqlalchemy.orm import defer, selectinload
 
 from . import threads_api
-from .analytics import poll_recent_metrics, refresh_metrics_for
+from .analytics import poll_recent_metrics, refresh_metrics_for, snapshot_account
 from .categories import category_by_slug, default_shelf_life, is_first_party
 from .config import load_first_reply, load_settings, scheduler_timezone
 from .db import session_scope
@@ -45,6 +46,7 @@ from .models import (
     Candidate,
     Channel,
     Cut,
+    PlacementLog,
     RerunReview,
     SchedulerState,
     ThreadsPost,
@@ -755,6 +757,12 @@ def _queue_head_for_window(session, window_key: str,
                            organic_fallback: bool = False) -> ThreadsPost | None:
     """Post that should publish at ``window_key`` (pin-aware). A rerun slot
     only yields a post pinned to it unless ``organic_fallback``."""
+    return _queue_head_and_decision(session, window_key, organic_fallback)[0]
+
+
+def _queue_head_and_decision(session, window_key: str, organic_fallback: bool = False):
+    """``_queue_head_for_window`` plus the engine's reasoning for it — the
+    ``PlacementDecision`` (score parts, runners-up), or None in FIFO mode."""
     tz = _tz()
     now = utcnow()
     state = _get_state(session)
@@ -779,10 +787,67 @@ def _queue_head_for_window(session, window_key: str,
     if window_key not in keys:
         keys.insert(0, window_key)
     _clear_stale_pins(posts, set(keys))
-    assignment, _ = _assign_with_mode(
+    assignment, ctx = _assign_with_mode(
         session, posts, keys,
         open_keys=frozenset({window_key}) if organic_fallback else frozenset())
-    return assignment[keys.index(window_key)]
+    head = assignment[keys.index(window_key)]
+    decision = ctx.decisions.get(window_key) if ctx is not None else None
+    return head, decision
+
+
+def _decision_context(session, now: dt.datetime) -> dict:
+    """The account's state when a window was decided: how deep the queue was,
+    how the last few posts are doing, and the follower count. Raw numbers, not
+    judgments — whatever "momentum" turns out to mean can be derived later,
+    but a post's views as they stood at that moment can't be."""
+    from .analytics import followers_at, latest_metrics_bulk
+
+    recent = session.execute(
+        select(ThreadsPost.id, ThreadsPost.published_at)
+        .where(ThreadsPost.status == "published", ThreadsPost.published_at.is_not(None))
+        .order_by(ThreadsPost.published_at.desc()).limit(5)
+    ).all()
+    views = latest_metrics_bulk(session, [r.id for r in recent])
+    out_recent = []
+    for r in recent:
+        published = r.published_at
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=dt.timezone.utc)
+        out_recent.append({
+            "post_id": r.id,
+            "hours_ago": round((now - published).total_seconds() / 3600, 1),
+            "views": (views.get(r.id) or {}).get("views"),
+        })
+    return {
+        "queue_size": len(_queue_regular(session)),
+        "recent_posts": out_recent,
+        "followers": followers_at(session),
+    }
+
+
+def _log_placement(window_key: str, post_id: int, action: str, decision) -> None:
+    """Keep the decision behind a successful publish (see ``PlacementLog``).
+    Record-keeping only: any failure is logged and swallowed — it must never
+    turn a published post into an error."""
+    try:
+        with session_scope() as session:
+            alternatives = [
+                {"post_id": pid, "score": score, "parts": parts}
+                for pid, score, parts in (decision.alternatives if decision else ())
+            ]
+            session.add(PlacementLog(
+                window_key=window_key,
+                post_pk=post_id,
+                action=action,
+                pinned=bool(decision and decision.pinned),
+                relax_step=decision.relax_step if decision else None,
+                score=decision.score if decision else None,
+                parts=json.dumps(decision.parts if decision else {}),
+                alternatives=json.dumps(alternatives),
+                context=json.dumps(_decision_context(session, utcnow())),
+            ))
+    except Exception:
+        log.exception("Placement log failed for window %s", window_key)
 
 
 def pin_post_to_window(session, post_id: int, window_key: str) -> str:
@@ -2310,7 +2375,7 @@ def run_window_tick() -> str | None:
             state.updated_at = utcnow()
             return f"spacing_block:{key}"
 
-        head = _queue_head_for_window(session, key)
+        head, decision = _queue_head_and_decision(session, key)
         if head is not None:
             post_id = head.id
             verb = "publish"
@@ -2328,13 +2393,15 @@ def run_window_tick() -> str | None:
             # post rather than going silent (scheduler.placement.filler).
             post_id = _stage_filler_jit(session, state, key, now)
             verb = "filler_publish"
-            fallback = (_queue_head_for_window(session, key, organic_fallback=True)
-                        if post_id is None else None)
+            fallback, fallback_decision = (
+                _queue_head_and_decision(session, key, organic_fallback=True)
+                if post_id is None else (None, None))
             if post_id is not None:
                 expected_key = key
             elif fallback is not None:
                 # No rerun to give: a new clip beats silence.
                 post_id, verb = fallback.id, "publish"
+                decision = fallback_decision
             else:
                 state.last_window_key = key
                 state.last_action = f"empty:{key}"
@@ -2352,6 +2419,7 @@ def run_window_tick() -> str | None:
         return f"window_taken:{key}"
     if result:
         log.info("Published queue post %s at window %s", post_id, key)
+        _log_placement(key, post_id, verb, decision)
         return action
 
     with session_scope() as session:
@@ -2520,7 +2588,14 @@ def run_metrics_poll() -> int:
         n = poll_recent_metrics(session)
         state.last_metrics_poll_at = now
         state.updated_at = now
-        return n
+    # Follower history can't be backfilled, so it rides the same tick. Its own
+    # session: a failed API call here must not undo the metrics just written.
+    try:
+        with session_scope() as session:
+            snapshot_account(session)
+    except Exception:
+        log.exception("Account snapshot failed")
+    return n
 
 
 # How long a deferred first comment stays worth posting. Past this the sweep

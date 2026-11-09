@@ -126,7 +126,7 @@ from ..publishing import (
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_clauses, sort_candidates
-from .. import posting_schedule, rerun_review, triage_model
+from .. import labels, posting_schedule, rerun_review, triage_model
 from ..config import scheduler_timezone
 from ..scheduler import (
     PIN_HORIZON_DAYS,
@@ -286,6 +286,10 @@ def _load_attention_count() -> int:
             count += 1 if expired_queued_posts(session) else 0
         except Exception:
             log.exception("Expired-post check failed")
+        try:
+            count += 1 if labels.review_due(session, load_settings()) else 0
+        except Exception:
+            log.exception("Review reminder check failed")
         return count
 
 
@@ -5183,11 +5187,64 @@ def notifications_page(request: Request, msg: str = ""):
     # Only when the review list is already built: computing it ranks every
     # post's metric series, too slow to put on the notifications page's path.
     review = pagecache.peek("rerun-review")
+    settings = load_settings()
+    with session_scope(read_only=True) as session:
+        model_review = labels.review_due(session, settings)
+        label_counts = labels.counts(session) if model_review else None
     return templates.TemplateResponse(
         request, "notifications.html",
         {**pagecache.read("notifications"), "msg": msg, "active": "notifications",
-         "rerun_pending": len(review["pending"]) if review else None},
+         "rerun_pending": len(review["pending"]) if review else None,
+         "model_review": model_review, "label_counts": label_counts,
+         "review_note": labels.REVIEW_NOTE},
     )
+
+
+# --- Labels: the operator's own calls, kept as an eval set --------------------
+@app.get("/labels", response_class=HTMLResponse)
+def labels_page(request: Request, msg: str = ""):
+    """One tap per posted clip: is it visually gripping? See app/labels.py."""
+    settings = load_settings()
+    with session_scope(read_only=True) as session:
+        items = labels.queue(session)
+        stats = labels.counts(session)
+    return templates.TemplateResponse(
+        request, "labels.html",
+        {"items": items, "stats": stats, "target": labels.TARGET,
+         "review_on": labels.review_date(settings), "review_note": labels.REVIEW_NOTE,
+         "msg": msg, "active": "analytics"},
+    )
+
+
+@app.post("/labels/{cut_id}")
+def label_clip(cut_id: int, value: str = Form("")):
+    with session_scope() as session:
+        if not labels.set_label(session, cut_id, value):
+            return JSONResponse({"error": "Unknown clip or value"}, status_code=400)
+        stats = labels.counts(session)
+    return JSONResponse({"ok": True, "stats": stats})
+
+
+@app.get("/notes/six-month-review", response_class=HTMLResponse)
+def six_month_review_note(request: Request):
+    """The review checklist, served from the repo so the reminder can link it."""
+    path = Path(__file__).resolve().parents[2] / labels.REVIEW_NOTE
+    try:
+        text = path.read_text()
+    except OSError:
+        text = f"{labels.REVIEW_NOTE} isn't on this machine — open it in the repo."
+    return templates.TemplateResponse(
+        request, "note.html",
+        {"title": "Six-month review", "text": text, "active": "notifications"},
+    )
+
+
+@app.post("/reminders/model-review/done")
+def model_review_done():
+    with session_scope() as session:
+        labels.mark_review_done(session)
+    pagecache.drop("attention")
+    return _flash("/notifications", "Review marked done")
 
 
 def _rerun_review_data() -> dict:

@@ -758,9 +758,21 @@ subtitles:
 analytics:
   # How often the metrics puller re-snapshots each post's stats (hours).
   snapshot_interval_hours: 12
-  # Stop re-pulling metrics for posts older than this many days.
+  # Past this many days a post drops from every-12h snapshots to the sparse
+  # long tail below.
   max_post_age_days: 60
+  # Long tail: evergreen clips and reruns keep earning for months, so older
+  # posts are still snapshotted every long_tail_interval_days until they're
+  # long_tail_max_age_days old.
+  long_tail_interval_days: 7
+  long_tail_max_age_days: 365
   # Model used for the written digest (Anthropic model ID).
   digest_model: claude-sonnet-5
   # Minimum posts before the digest is allowed to claim any pattern.
   min_sample_size: 8
+
+reminders:
+  # From this date the Notifications bell lights up with the six-month review
+  # (docs/six-month-review.md): test video models against your labelled clips
+  # and decide what to automate. Stays until you mark it done.
+  model_review_on: "2027-05-09"
