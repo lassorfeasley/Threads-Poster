@@ -853,6 +853,10 @@ class ClipProposal(Base):
     story: Mapped[str] = mapped_column(Text, default="")
     why: Mapped[str] = mapped_column(Text, default="")
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Set when the clip carries a claim the operator's brand rules reject —
+    # what it challenges, in a line. Shown on the card so its framing gets a
+    # human look; empty for ordinary clips.
+    flag: Mapped[str] = mapped_column(Text, default="")
 
     verdict: Mapped[str] = mapped_column(String(20), default=VERDICT_PENDING)
     # Why a dismissal happened, when the operator volunteered it — one optional
@@ -1046,3 +1050,74 @@ class MetricSnapshot(Base):
     shares: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     post: Mapped[ThreadsPost] = relationship(back_populates="metrics")
+
+
+class AccountSnapshot(Base):
+    """The account's size over time, captured about daily.
+
+    Without it a post's views can't be separated from the account simply being
+    bigger than it was, and "does a home run bring followers who stay, or just
+    a few days of reach?" has no answer. Unlike per-post metrics this can never
+    be backfilled: Threads only reports the CURRENT follower count.
+    """
+
+    __tablename__ = "account_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    followers_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class PlacementLog(Base):
+    """What the scheduler published into a window, what else it could have
+    published, and the state of the account when it decided.
+
+    The placement engine scores every queued post for every window and then
+    forgets why. Keeping the decision — the winner's score parts, the
+    runners-up, and a snapshot of recent performance — is what lets a later
+    analysis (or a smarter scheduler) ask "would a different choice have done
+    better?" Written once per published window, by the runner that won the
+    claim, after the publish succeeded.
+    """
+
+    __tablename__ = "placement_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    window_key: Mapped[str] = mapped_column(String(20), default="")
+    decided_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    post_pk: Mapped[int | None] = mapped_column(ForeignKey("threads_posts.id"), nullable=True)
+    # publish (scored or pinned queue head) | filler_publish (rerun stand-in)
+    action: Mapped[str] = mapped_column(String(30), default="")
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    relax_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # JSON {part: value} — the winner's score breakdown.
+    parts: Mapped[str] = mapped_column(Text, default="")
+    # JSON [{post_id, score, parts}] — the best of what else passed the gates.
+    alternatives: Mapped[str] = mapped_column(Text, default="")
+    # JSON — queue size, recent posts' views and ages, latest follower count.
+    context: Mapped[str] = mapped_column(Text, default="")
+    # Set when a post was deliberately chosen off-pattern to test something,
+    # so experiments never blend into ordinary decisions. Empty = ordinary.
+    experiment: Mapped[str] = mapped_column(String(60), default="")
+
+
+class ContentLabel(Base):
+    """An operator's quick judgment about a clip, kept as training/eval data.
+
+    Started for one label — "gripping": would this stop a scroll? — so that
+    when video models improve there's a set of the operator's own calls to
+    test them against. One row per (cut, label); re-labelling overwrites.
+    """
+
+    __tablename__ = "content_labels"
+    __table_args__ = (UniqueConstraint("cut_pk", "label", name="uq_content_label"),)
+
+    LABEL_GRIPPING = "gripping"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cut_pk: Mapped[int] = mapped_column(ForeignKey("cuts.id"))
+    label: Mapped[str] = mapped_column(String(30), default="")
+    value: Mapped[str] = mapped_column(String(20), default="")   # "yes" | "no"
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

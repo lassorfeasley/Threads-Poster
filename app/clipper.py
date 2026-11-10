@@ -221,8 +221,12 @@ def extract_still(source_path: str | Path, dest_path: str | Path,
     return dest
 
 
-def cached_still(source_path: str | Path, key: str) -> Path:
+def cached_still(source_path: str | Path, key: str,
+                 at_seconds: float | None = None) -> Path:
     """Poster frame for ``source_path``, extracted once and reused thereafter.
+
+    ``at_seconds`` picks the moment (default: a short way in); callers asking
+    for a specific moment must fold it into ``key``.
 
     Keyed rather than written next to the source because clips live in several
     trees (per-channel, uploads, pasted URLs) and some of those are pruned.
@@ -242,7 +246,7 @@ def cached_still(source_path: str | Path, key: str) -> Path:
     # clip can race here, and a half-written JPEG would be cached as a valid one.
     tmp = dest.with_name(f"{key}.{uuid4().hex[:8]}.tmp.jpg")
     try:
-        extract_still(source, tmp)
+        extract_still(source, tmp, at_seconds=at_seconds)
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)

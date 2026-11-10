@@ -5112,6 +5112,190 @@ a.cal-event.cal-wk-card:hover { background: var(--panel); border-color: var(--bo
   border-color: rgba(167, 139, 250, 0.65);
   background: rgba(167, 139, 250, 0.12);
 }
+.reason-pill.is-skip { border-style: dashed; color: var(--muted); }
+
+/* --- Suggestion cards, richer: opening frame, the words heard at either end,
+   and length/cuts/confidence on one line — enough to judge a suggestion
+   without pressing play, which is what gets them looked at at all. --- */
+.clip-proposals.is-lead {
+  border-color: rgba(167, 139, 250, 0.45);
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.07), transparent 140px), var(--panel);
+}
+.clip-proposals.is-lead .clip-proposals-title { font-size: var(--text-body); }
+.proposal-top { display: flex; gap: 10px; align-items: flex-start; }
+.proposal-thumb {
+  position: relative;
+  flex: none;
+  width: 92px;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+}
+.proposal-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.proposal-play {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  font-size: 13px; color: #fff;
+  background: rgba(0, 0, 0, 0.25);
+  opacity: 0; transition: opacity 0.15s ease;
+}
+.proposal-row:hover .proposal-play,
+.proposal-row.hot .proposal-play { opacity: 1; }
+.proposal-head { min-width: 0; flex: 1; }
+.proposal-meta { margin-top: 3px; font-variant-numeric: tabular-nums; }
+.proposal-line,
+.suggest-line {
+  margin: 8px 0 0;
+  padding-left: 9px;
+  border-left: 2px solid rgba(167, 139, 250, 0.45);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  font-style: italic;
+}
+.proposal-line-k,
+.suggest-line-k {
+  display: inline-block;
+  margin-right: 6px;
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.proposal-conf,
+.suggest-conf {
+  display: inline-block;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+.proposal-conf.is-strong,
+.suggest-conf.is-strong { color: var(--accent); border-color: var(--accent-border); }
+.proposal-conf.is-long-shot,
+.suggest-conf.is-long-shot { color: var(--muted); border-style: dashed; }
+.proposal-empty {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 4px 0 2px;
+}
+
+/* --- Video page: suggestions lead the page, above the clips already made. */
+.suggest-title::before {
+  content: "";
+  width: 8px; height: 8px;
+  border-radius: 2px;
+  background: rgba(167, 139, 250, 0.9);
+}
+.suggest-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.suggest-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: hidden;
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.suggest-card:hover { border-color: rgba(167, 139, 250, 0.5); box-shadow: var(--shadow-lift); }
+.suggest-card.is-playing { border-color: rgba(167, 139, 250, 0.85); }
+.suggest-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel2);
+  cursor: pointer;
+  overflow: hidden;
+}
+.suggest-thumb:disabled { cursor: default; }
+.suggest-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.suggest-play {
+  position: absolute; left: 50%; top: 50%;
+  width: 44px; height: 44px; margin: -22px 0 0 -22px;
+  display: grid; place-items: center;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  opacity: 0.85;
+  transition: transform 0.2s var(--ease), opacity 0.2s var(--ease);
+}
+.suggest-card:hover .suggest-play { opacity: 1; transform: scale(1.08); }
+.suggest-dur,
+.suggest-conf {
+  position: absolute;
+  bottom: 8px;
+}
+.suggest-dur {
+  right: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+}
+.suggest-thumb .suggest-conf {
+  left: 8px;
+  background: rgba(0, 0, 0, 0.75);
+  border-color: transparent;
+  color: #fff;
+}
+.suggest-thumb .suggest-conf.is-strong { color: var(--accent); }
+.suggest-x {
+  position: absolute; top: 8px; right: 8px; z-index: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; min-height: 0; padding: 0;
+  border: 0; border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+.suggest-x:hover { background: rgba(0, 0, 0, 0.85); }
+.suggest-body {
+  display: flex; flex-direction: column;
+  flex: 1;
+  padding: 12px 14px 14px;
+}
+.suggest-story { font-weight: 650; font-size: 15px; line-height: 1.35; }
+.suggest-why { margin-top: 8px; line-height: 1.45; }
+.suggest-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+.suggest-at { font-variant-numeric: tabular-nums; }
+.suggest-card.is-dismissed { border-style: dashed; }
+.suggest-reason { padding: 14px; }
+.suggest-reason .reason-pills { margin-top: 10px; }
+@media (max-width: 720px) {
+  .suggest-grid { grid-template-columns: 1fr; }
+}
+
+/* Dashboard "To trim": which videos have suggestions waiting. */
+.media-card .thumb-badge .badge.is-suggested { color: rgb(196, 181, 253); }
+.media-card .suggest-teaser {
+  color: var(--text-dim);
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
 
 /* --- Prompted edits: the "tell the AI to change this clip" field under the
    segment list. Violet is the AI-affordance colour in the trim rail (matching
@@ -5626,3 +5810,152 @@ details.panel > .panel-body { padding: 14px 18px; }
   margin-top: 8px;
   font-weight: 600;
 }
+
+/* --- Label clips: one tap per posted clip, building a small eval set. --- */
+.label-meter {
+  height: 4px;
+  margin: 4px 0 18px;
+  border-radius: 999px;
+  background: var(--panel2);
+  overflow: hidden;
+}
+.label-meter-fill {
+  display: block;
+  height: 100%;
+  background: rgba(167, 139, 250, 0.85);
+  transition: width 0.3s var(--ease);
+}
+.label-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+.label-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: hidden;
+}
+.label-card.is-labelled { opacity: 0.72; }
+.label-card.is-labelled:hover { opacity: 1; }
+.label-media { position: relative; aspect-ratio: 16 / 9; background: var(--panel2); }
+.label-media video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.label-missing {
+  display: none;
+  position: absolute; inset: 0;
+  place-items: center;
+  padding: 12px;
+  text-align: center;
+}
+.label-media.is-missing video { display: none; }
+.label-media.is-missing .label-missing { display: grid; }
+.label-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px 14px; flex: 1; }
+.label-caption {
+  font-size: 13px; line-height: 1.45; color: var(--text-dim);
+  display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.label-q { margin-top: auto; font-size: var(--text-meta); font-weight: 600; }
+.label-choices { display: flex; gap: 8px; }
+.label-choice {
+  flex: 1;
+  font: inherit;
+  font-weight: 600;
+  padding: 7px 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.label-choice:hover { color: var(--text); border-color: var(--text-dim); }
+.label-choice.is-on[data-v="yes"] { color: var(--accent); border-color: var(--accent-border); background: var(--accent-soft); }
+.label-choice.is-on[data-v="no"] { color: var(--text); border-color: var(--border-strong); background: var(--panel3); }
+
+/* --- Six-month review reminder on Notifications, and the note it opens. --- */
+.review-reminder {
+  border-color: rgba(167, 139, 250, 0.45);
+  margin-bottom: 16px;
+}
+.review-reminder-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.review-reminder p { margin: 8px 0 0; line-height: 1.5; }
+.review-reminder .btn-group { margin-top: 12px; }
+.note-text {
+  white-space: pre-wrap;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+/* --- Brand & audience: topic + rules up front, the rest under Advanced. --- */
+.field-label {
+  display: block;
+  margin: 14px 0 6px;
+  font-size: var(--text-meta);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.field-hint { margin: 6px 0 0; }
+.brand-adv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+.brand-adv-grid .field-label { margin-top: 0; }
+@media (max-width: 720px) { .brand-adv-grid { grid-template-columns: 1fr; } }
+.brand-advanced > summary { cursor: pointer; list-style: none; margin: 0; }
+.brand-advanced > summary::-webkit-details-marker { display: none; }
+.brand-advanced > summary::before { content: "▸ "; color: var(--muted); }
+.brand-advanced[open] > summary::before { content: "▾ "; }
+.brand-retired {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--warn-border);
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.brand-rules-empty { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.brand-rules-empty p { flex-basis: 100%; }
+
+/* A suggested clip that carries a claim the brand rules reject. */
+.rule-flag {
+  margin-top: 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+}
+
+/* "+ Add a rule" under the caption editors. */
+.rule-capture { margin: 6px 0 10px; }
+.rule-capture-toggle {
+  min-height: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.rule-capture-toggle:hover { color: var(--text); }
+.rule-capture-from-edit { color: rgb(196, 181, 253); }
+.rule-capture-box {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.rule-capture-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.rule-capture-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.rule-capture-row .rule-capture-text { flex: 1 1 220px; min-width: 0; }
+.rule-capture-row .rule-capture-scope { flex: none; width: auto; }
+.rule-capture-status { margin-top: 6px; }

@@ -36,10 +36,10 @@ from ..clipper import (
     export_supercut, get_waveform,
 )
 from ..config import (
-    DATA_DIR, DEFAULT_APP_NAME, WORKSPACE, current_workspace, env, load_brand,
-    load_caption_rules, load_first_reply, load_keywords, load_settings,
-    load_workspaces, render_caption_guide, save_brand, save_caption_rules,
-    save_first_reply, save_keywords,
+    DATA_DIR, DEFAULT_APP_NAME, WORKSPACE, add_brand_rule, current_workspace, env,
+    load_brand, load_brand_rules, load_caption_rules, load_first_reply, load_keywords,
+    load_settings, load_workspaces, render_caption_guide, save_brand,
+    save_brand_rules, save_caption_rules, save_first_reply, save_keywords,
 )
 from ..db import (
     SessionLocal,
@@ -79,6 +79,7 @@ from ..models import (
     STATUS_REJECTED,
     Candidate,
     Channel,
+    ClipProposal,
     Cut,
     DraftProposal,
     FacebookPost,
@@ -125,7 +126,7 @@ from ..publishing import (
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_clauses, sort_candidates
-from .. import posting_schedule, rerun_review, triage_model
+from .. import labels, llm, posting_schedule, rerun_review, triage_model
 from ..config import scheduler_timezone
 from ..scheduler import (
     PIN_HORIZON_DAYS,
@@ -285,6 +286,10 @@ def _load_attention_count() -> int:
             count += 1 if expired_queued_posts(session) else 0
         except Exception:
             log.exception("Expired-post check failed")
+        try:
+            count += 1 if labels.review_due(session, load_settings()) else 0
+        except Exception:
+            log.exception("Review reminder check failed")
         return count
 
 
@@ -876,6 +881,16 @@ def _workflow_buckets() -> dict:
                 trimmed_rows.append((c, state))
             else:
                 in_progress_rows.append((c, state))
+        # Which "To trim" videos have suggestions waiting, so the card can say
+        # so instead of every one looking like an empty editor.
+        try:
+            suggested = clip_proposals.pending_summary(
+                session, [c.id for c, _ in in_progress_rows])
+        except Exception as exc:
+            log.info("Suggestion summary failed: %s", exc)
+            suggested = {}
+        for c, state in in_progress_rows:
+            state["suggested"] = suggested.get(c.id)
     return {"in_progress": in_progress_rows, "trimmed": trimmed_rows}
 
 
@@ -1387,11 +1402,16 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
 
         has_local = _has_source(c)
         trait_vocab = active_traits_by_facet(session)
+        # The model's pending suggestions lead the page: one click turns any
+        # of them into a clip, which is far less work than an empty editor.
+        suggested_clips = (_pending_proposals(session, c.id)
+                           if c.status == STATUS_ARCHIVED else [])
 
     return templates.TemplateResponse(
         request, "video.html",
         {"c": c, "state": state, "step": step,
          "cut_rows": cut_rows, "posts": posts,
+         "suggested_clips": suggested_clips,
          "transcript_segments": transcript_segments,
          "has_local": has_local,
          "trait_vocab": trait_vocab,
@@ -1441,13 +1461,17 @@ def toggle_multi_clip(candidate_id: int):
     return JSONResponse({"multi_clip": flag})
 
 
-def _proposal_payload(row, used: list[dict]) -> dict | None:
-    """One pending proposal, shaped for the trim editor's panel + overlay.
+def _proposal_payload(row, used: list[dict], words: list[dict] | None = None,
+                      transcript: list[dict] | None = None) -> dict | None:
+    """One pending proposal, shaped for the suggestion cards + waveform overlay.
 
     Material already claimed by another clip is cut out here rather than at
     generation time: the archive-time pass runs before any cut exists, so a
     proposal only becomes a duplicate later. Nothing offered can overlap a clip
     that already exists, whatever the model asked for.
+
+    ``opening``/``closing`` are the words heard at either end of what's
+    actually offered (post-trim), so the card can be judged without playing.
     """
     try:
         proposed = json.loads(row.proposed_segments or "[]")
@@ -1456,15 +1480,24 @@ def _proposal_payload(row, used: list[dict]) -> dict | None:
     segments, trimmed = clip_proposals.visible_segments(proposed, used)
     if not segments:
         return None
+    lines = clip_proposals.excerpts(segments, words or [], transcript or [])
     return {"id": row.id, "story": row.story, "why": row.why,
             "confidence": row.confidence, "segments": segments,
-            "seconds": clip_proposals.duration(segments), "trimmed": trimmed}
+            "seconds": clip_proposals.duration(segments), "trimmed": trimmed,
+            "at": segments[0]["start"], "count": len(segments),
+            "opening": lines["opening"], "closing": lines["closing"],
+            "thumb": f"/clip-proposal/{row.id}/thumb", "flag": row.flag or ""}
 
 
 def _pending_proposals(session, candidate_pk: int) -> list[dict]:
     used = clip_proposals.used_ranges(session, candidate_pk)
     rows = clip_proposals.pending_for_candidate(session, candidate_pk)
-    return [p for p in (_proposal_payload(r, used) for r in rows) if p]
+    if not rows:
+        return []
+    c = session.get(Candidate, candidate_pk)
+    words = clip_proposals.load_words(c) if c else []
+    transcript = [] if words or c is None else clip_proposals.load_transcript(c)
+    return [p for p in (_proposal_payload(r, used, words, transcript) for r in rows) if p]
 
 
 @app.post("/video/{candidate_id}/suggest-clips")
@@ -1642,6 +1675,76 @@ def accept_clip_proposal(proposal_id: int, cut_id: int = Form(...)):
         if row is None:
             return JSONResponse({"error": "Proposal already decided"}, status_code=409)
     return JSONResponse({"ok": True})
+
+
+@app.post("/clip-proposal/{proposal_id}/make-cut")
+def make_cut_from_proposal(proposal_id: int):
+    """Turn a suggestion into a clip in one click: a new cut holding the
+    proposal's (still-unclaimed) segments, opened in the trim editor.
+
+    This is "Use this clip" from outside the editor. The proposal is accepted
+    into the new cut, so the export-time score still measures it against what
+    actually ships after the operator's tweaks.
+    """
+    with session_scope() as session:
+        row = session.get(ClipProposal, proposal_id)
+        if row is None:
+            return _flash("/", "Suggestion not found")
+        back = f"/video/{row.candidate_pk}"
+        if row.verdict != ClipProposal.VERDICT_PENDING:
+            return _flash(back, "That suggestion was already used or dismissed")
+        c = session.get(Candidate, row.candidate_pk)
+        if c is None or c.status != STATUS_ARCHIVED:
+            return _flash(back, "Download the video before clipping it")
+        try:
+            proposed = json.loads(row.proposed_segments or "[]")
+        except (ValueError, TypeError):
+            proposed = []
+        segments, _ = clip_proposals.visible_segments(
+            proposed, clip_proposals.used_ranges(session, c.id))
+        if not segments:
+            return _flash(back, "Your other clips already use that footage")
+        cut = Cut(candidate_pk=c.id, trim_segments=json.dumps(segments))
+        session.add(cut)
+        session.flush()
+        clip_proposals.accept(session, row.id, cut.id)
+        cut_id = cut.id
+    return _flash(f"/cut/{cut_id}?step=trim",
+                  "Suggested clip loaded — preview it, tweak, then save")
+
+
+@app.get("/clip-proposal/{proposal_id}/thumb")
+def clip_proposal_thumb(proposal_id: int):
+    """The frame a suggestion opens on, cut from the downloaded source and
+    cached. 404 when the file isn't on disk; the card falls back to the
+    video's poster."""
+    with session_scope(read_only=True) as session:
+        row = session.get(ClipProposal, proposal_id)
+        c = session.get(Candidate, row.candidate_pk) if row else None
+        if row is None or c is None or not c.local_video_path:
+            return JSONResponse({"error": "no frame"}, status_code=404)
+        source = c.local_video_path
+        try:
+            first = json.loads(row.proposed_segments or "[]")[0]
+            at = float(first["start"])
+        except (ValueError, TypeError, KeyError, IndexError):
+            return JSONResponse({"error": "no frame"}, status_code=404)
+    # A beat past the cut point: the exact first frame is often mid-transition.
+    at += 0.4
+    key = f"proposal-{proposal_id}-{int(at * 1000)}"
+    cached = THUMBS_DIR / f"{key}.jpg"
+    if not Path(source).exists():
+        if cached.exists():
+            return FileResponse(str(cached), media_type="image/jpeg",
+                                headers={"Cache-Control": "public, max-age=86400"})
+        return JSONResponse({"error": "no frame"}, status_code=404)
+    try:
+        path = cached_still(source, key, at_seconds=at)
+    except Exception as exc:
+        log.info("No still for proposal %s: %s", proposal_id, exc)
+        return JSONResponse({"error": "no frame"}, status_code=404)
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.post("/clip-proposal/{proposal_id}/dismiss")
@@ -1878,6 +1981,15 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         # always fresh footage — the dashed overlay and the violet one can
         # never describe the same seconds.
         suggested_clips = _pending_proposals(session, c.id)
+        # The AI caption the operator last accepted for this clip — what an
+        # edit gets compared against when turning it into a rule.
+        accepted_draft = session.execute(
+            select(DraftProposal.proposed)
+            .where(DraftProposal.cut_pk == cut.id,
+                   DraftProposal.kind == DraftProposal.KIND_CAPTION,
+                   DraftProposal.verdict == DraftProposal.VERDICT_ACCEPTED)
+            .order_by(DraftProposal.id.desc()).limit(1)
+        ).scalar_one_or_none() or ""
 
         transcript_segments = []
         if c.transcript_path and Path(c.transcript_path).exists():
@@ -1930,6 +2042,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "opener_seconds": load_settings().get("clips.opener_seconds", 2.0),
          "other_cut_segments": other_cut_segments,
          "suggested_clips": suggested_clips,
+         "accepted_caption_draft": accepted_draft,
          "clip_transcript": clip_transcript,
          "clip_transcript_text": clip_transcript_text,
          "posts": posts, "threads_ok": threads_ok,
@@ -4156,6 +4269,9 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             reschedule_windows = reschedule_windows_for_post(session, p.id)
         ctx = {
             "pid": p.id, "status": p.status, "caption": p.caption or "",
+            # The AI draft this caption started from, so an edit can be
+            # turned into a rule ("+ Add a rule" under the caption).
+            "draft_caption": p.suggested_caption or "",
             "account_name": threads_api.account_username(),
             "permalink": p.permalink, "source": p.source, "error": p.error,
             "candidate_id": cand.id if cand else None,
@@ -5084,11 +5200,64 @@ def notifications_page(request: Request, msg: str = ""):
     # Only when the review list is already built: computing it ranks every
     # post's metric series, too slow to put on the notifications page's path.
     review = pagecache.peek("rerun-review")
+    settings = load_settings()
+    with session_scope(read_only=True) as session:
+        model_review = labels.review_due(session, settings)
+        label_counts = labels.counts(session) if model_review else None
     return templates.TemplateResponse(
         request, "notifications.html",
         {**pagecache.read("notifications"), "msg": msg, "active": "notifications",
-         "rerun_pending": len(review["pending"]) if review else None},
+         "rerun_pending": len(review["pending"]) if review else None,
+         "model_review": model_review, "label_counts": label_counts,
+         "review_note": labels.REVIEW_NOTE},
     )
+
+
+# --- Labels: the operator's own calls, kept as an eval set --------------------
+@app.get("/labels", response_class=HTMLResponse)
+def labels_page(request: Request, msg: str = ""):
+    """One tap per posted clip: is it visually gripping? See app/labels.py."""
+    settings = load_settings()
+    with session_scope(read_only=True) as session:
+        items = labels.queue(session)
+        stats = labels.counts(session)
+    return templates.TemplateResponse(
+        request, "labels.html",
+        {"items": items, "stats": stats, "target": labels.TARGET,
+         "review_on": labels.review_date(settings), "review_note": labels.REVIEW_NOTE,
+         "msg": msg, "active": "analytics"},
+    )
+
+
+@app.post("/labels/{cut_id}")
+def label_clip(cut_id: int, value: str = Form("")):
+    with session_scope() as session:
+        if not labels.set_label(session, cut_id, value):
+            return JSONResponse({"error": "Unknown clip or value"}, status_code=400)
+        stats = labels.counts(session)
+    return JSONResponse({"ok": True, "stats": stats})
+
+
+@app.get("/notes/six-month-review", response_class=HTMLResponse)
+def six_month_review_note(request: Request):
+    """The review checklist, served from the repo so the reminder can link it."""
+    path = Path(__file__).resolve().parents[2] / labels.REVIEW_NOTE
+    try:
+        text = path.read_text()
+    except OSError:
+        text = f"{labels.REVIEW_NOTE} isn't on this machine — open it in the repo."
+    return templates.TemplateResponse(
+        request, "note.html",
+        {"title": "Six-month review", "text": text, "active": "notifications"},
+    )
+
+
+@app.post("/reminders/model-review/done")
+def model_review_done():
+    with session_scope() as session:
+        labels.mark_review_done(session)
+    pagecache.drop("attention")
+    return _flash("/notifications", "Review marked done")
 
 
 def _rerun_review_data() -> dict:
@@ -5810,41 +5979,92 @@ _ALLOWED_LOGO_EXTS = (".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif")
 
 @app.get("/brand", response_class=HTMLResponse)
 def brand_page(request: Request, msg: str = ""):
-    """Workspace identity + white-label appearance (Configure area)."""
+    """What the account covers and the rules it never breaks (Configure area)."""
     return templates.TemplateResponse(
         request, "brand.html",
-        {"brand": load_brand(), "default_app_name": DEFAULT_APP_NAME,
+        {"brand": load_brand(), "rules": load_brand_rules(),
          "msg": msg, "active": "brand"},
     )
 
 
+# Fields the Brand & audience form may send. A field the form doesn't post is
+# left alone — never blanked — so moving a field off the page can't erase it.
+_BRAND_FORM_FIELDS = ("topic", "name", "cta_url", "mission", "audience",
+                      "voice_notes", "source_kind", "relevance_rules",
+                      "false_positives", "strong_openings", "weak_openings",
+                      "clip_guidance")
+
+
 @app.post("/brand")
-async def brand_save(
-    name: str = Form(""), cta_url: str = Form(""), mission: str = Form(""),
-    audience: str = Form(""),
-    topic: str = Form(""), voice_notes: str = Form(""), app_name: str = Form(""),
-    source_kind: str = Form(""), relevance_rules: str = Form(""),
-    false_positives: str = Form(""), strong_openings: str = Form(""),
-    weak_openings: str = Form(""), clip_guidance: str = Form(""),
-    logo: UploadFile | None = File(None),
-):
-    # Stored bare so captions can carry it as written: Threads auto-links a
-    # domain, and a scheme or tracking tail only eats characters.
-    cta_url = re.sub(r"^\s*https?://(www\.)?", "", cta_url or "").strip().strip("/")
-    values = {"name": name, "cta_url": cta_url, "mission": mission,
-              "audience": audience,
-              "topic": topic, "voice_notes": voice_notes, "app_name": app_name,
-              "source_kind": source_kind, "relevance_rules": relevance_rules,
-              "false_positives": false_positives,
-              "strong_openings": strong_openings,
-              "weak_openings": weak_openings, "clip_guidance": clip_guidance}
+async def brand_save(request: Request):
+    form = await request.form()
+    values = {f: str(form[f]) for f in _BRAND_FORM_FIELDS if f in form}
+    if "cta_url" in values:
+        # Stored bare so captions can carry it as written: Threads auto-links
+        # a domain, and a scheme or tracking tail only eats characters.
+        values["cta_url"] = re.sub(r"^\s*https?://(www\.)?", "",
+                                   values["cta_url"]).strip().strip("/")
+    save_brand(values)
+    if "rules_json" in form:
+        try:
+            rules = json.loads(str(form["rules_json"]) or "[]")
+        except ValueError:
+            return _flash("/brand", "Couldn't read the rules — nothing saved for them")
+        save_brand_rules(rules if isinstance(rules, list) else [])
+    return _flash("/brand", "Brand & audience saved")
+
+
+@app.post("/brand/rules/add")
+def brand_rule_add(text: str = Form(""), applies_to: str = Form("captions")):
+    """Add one rule without leaving the page you're on (the caption editor)."""
+    rule = add_brand_rule(text, applies_to)
+    if rule is None:
+        return JSONResponse({"error": "That rule is empty or already exists"},
+                            status_code=409)
+    return JSONResponse({"ok": True, "rule": rule})
+
+
+@app.post("/rules/suggest-from-edit")
+def rule_from_edit(draft: str = Form(""), final: str = Form("")):
+    """Turn a caption edit into a reusable rule, if it says something general.
+
+    The edit between the AI's draft and what the operator kept is the clearest
+    statement of a preference there is; this proposes it as a rule for the
+    operator to save or ignore. Empty when the edit was a one-off fix."""
+    if not draft.strip() or not final.strip() or draft.strip() == final.strip():
+        return JSONResponse({"rule": ""})
+    settings = load_settings()
+    try:
+        rule = llm.suggest_rule_from_edit(
+            settings.get("engagement.draft_model", "claude-sonnet-5"),
+            draft=draft, final=final,
+            existing=[r["text"] for r in load_brand_rules()])
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"rule": rule})
+
+
+@app.get("/appearance", response_class=HTMLResponse)
+def appearance_page(request: Request, msg: str = ""):
+    """White-label app chrome: the name and logo in the sidebar."""
+    return templates.TemplateResponse(
+        request, "appearance.html",
+        {"brand": load_brand(), "default_app_name": DEFAULT_APP_NAME,
+         "msg": msg, "active": "appearance"},
+    )
+
+
+@app.post("/appearance")
+async def appearance_save(app_name: str = Form(""),
+                          logo: UploadFile | None = File(None)):
+    values = {"app_name": app_name}
     if logo is not None and (logo.filename or "").strip():
         ext = Path(logo.filename).suffix.lower()
         if ext not in _ALLOWED_LOGO_EXTS:
-            return _flash("/brand", "Logo must be a PNG, JPG, SVG, WebP, or GIF")
+            return _flash("/appearance", "Logo must be a PNG, JPG, SVG, WebP, or GIF")
         data = await logo.read()
         if len(data) > 2 * 1024 * 1024:
-            return _flash("/brand", "Logo is too large — keep it under 2 MB")
+            return _flash("/appearance", "Logo is too large — keep it under 2 MB")
         _BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
         # One canonical file: a new upload replaces the old, whatever its type.
         for old in _BRAND_LOGO_DIR.glob("logo.*"):
@@ -5852,15 +6072,15 @@ async def brand_save(
         (_BRAND_LOGO_DIR / f"logo{ext}").write_bytes(data)
         values["logo_file"] = f"logo{ext}"
     save_brand(values)
-    return _flash("/brand", "Brand & audience saved")
+    return _flash("/appearance", "Appearance saved")
 
 
-@app.post("/brand/logo/remove")
-def brand_logo_remove():
+@app.post("/appearance/logo/remove")
+def appearance_logo_remove():
     for old in _BRAND_LOGO_DIR.glob("logo.*"):
         old.unlink(missing_ok=True)
     save_brand({"logo_file": ""})
-    return _flash("/brand", "Logo removed")
+    return _flash("/appearance", "Logo removed")
 
 
 # --- Keywords ----------------------------------------------------------------

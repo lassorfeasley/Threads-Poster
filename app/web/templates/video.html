@@ -131,6 +131,66 @@
     <div class="meta" id="approve-dots" style="margin-top: 8px;">working…</div>
   </div>
 
+  {# ---- What the model thinks is worth clipping ----
+     Leads the page because it's the shortest path to a clip: each card shows
+     the opening frame and the words heard at either end, plays in the player
+     above, and becomes a clip in one click. Nothing is applied until then. #}
+  {% if state.scraped and (suggested_clips or transcript_segments) %}
+  <section class="video-section suggest-section" id="suggest-section">
+    <div class="video-section-head">
+      <h2 class="video-section-title suggest-title">Suggested clips
+        {% if suggested_clips %}<span class="crumb-count">{{ suggested_clips|length }}</span>{% endif %}
+      </h2>
+      <button type="button" class="ghost sm" id="suggest-video-btn" onclick="suggestVideoClips(this)"
+              title="Read the whole transcript again and propose fresh clips. Suggestions you haven't acted on are replaced.">
+        {{ "Re-suggest" if suggested_clips else "Suggest clips" }}
+      </button>
+    </div>
+    {% if suggested_clips %}
+    <div class="suggest-grid">
+      {% for p in suggested_clips %}
+      <article class="suggest-card" data-id="{{ p.id }}">
+        <button type="button" class="suggest-thumb" onclick="previewSuggestion({{ p.id }})"
+                {% if not has_local %}disabled title="Preview needs the downloaded video"{% else %}title="Play this clip in the player above"{% endif %}>
+          <img src="{{ p.thumb }}" alt="" loading="lazy"
+               onerror="this.onerror=null; {% if thumb_for(c) %}this.src='{{ thumb_for(c) }}'{% else %}this.remove(){% endif %};">
+          {% if has_local %}<span class="suggest-play" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>{% endif %}
+          <span class="suggest-dur">{{ p.seconds|round|int }}s{% if p.count > 1 %} · {{ p.count }} cuts{% endif %}</span>
+          {% if p.confidence is not none %}
+          {% set conf = "strong" if p.confidence >= 0.75 else ("good" if p.confidence >= 0.5 else "long shot") %}
+          <span class="suggest-conf is-{{ conf|replace(' ', '-') }}" title="The model's own confidence: {{ (p.confidence * 100)|round|int }}%">{{ conf }}</span>
+          {% endif %}
+        </button>
+        <button type="button" class="suggest-x" onclick="dismissSuggestion({{ p.id }}, this)"
+                title="Dismiss this suggestion" aria-label="Dismiss this suggestion">
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
+               stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+        <div class="suggest-body">
+          <div class="suggest-story">{{ p.story or "Suggested clip" }}</div>
+          {% if p.flag %}<div class="rule-flag" title="This clip carries a claim your brand rules reject. Check its framing before it goes anywhere.">⚑ Check the framing: {{ p.flag }}</div>{% endif %}
+          {% if p.opening %}<blockquote class="suggest-line"><span class="suggest-line-k">Opens</span>“{{ p.opening }}”</blockquote>{% endif %}
+          {% if p.closing %}<blockquote class="suggest-line"><span class="suggest-line-k">Ends</span>“{{ p.closing }}”</blockquote>{% endif %}
+          {% if p.why %}<div class="meta suggest-why">{{ p.why }}</div>{% endif %}
+          {% if p.trimmed %}<div class="meta suggest-why">Shortened around footage your other clips already use.</div>{% endif %}
+          <div class="suggest-actions">
+            <form method="post" action="/clip-proposal/{{ p.id }}/make-cut" class="inline">
+              <button class="approve sm">Make this clip →</button>
+            </form>
+            <span class="meta suggest-at">at {{ (p.at // 60)|int }}:{{ "%02d"|format((p.at % 60)|int) }}</span>
+          </div>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty video-section-empty"><strong>No suggestions waiting</strong>
+      Ask the model to read the transcript and propose the clips worth making.</div>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {# ---- Clips cut from this video ---- #}
   <section class="video-section">
     <div class="video-section-head">
@@ -346,6 +406,106 @@ async function scoreVisuals() {
     if (!r.ok) { alert(d.error || 'Tagging failed'); btn.disabled = false; return; }
     window.location.reload();
   } catch (e) { alert('Tagging failed: ' + e); btn.disabled = false; }
+}
+
+// ---- Suggested clips ------------------------------------------------------
+const suggestions = {{ suggested_clips | tojson }};
+
+async function suggestVideoClips(btn) {
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  btn.textContent = 'Reading the transcript…';
+  try {
+    const r = await fetch('/video/{{ c.id }}/suggest-clips', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok || !d.clips) throw new Error(d.error || `HTTP ${r.status}`);
+    if (!d.new) alert('The model found nothing worth clipping here.');
+    location.reload();
+    return;
+  } catch (e) {
+    alert('Suggestion failed: ' + (e.message || e));
+  }
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
+  btn.textContent = suggestions.length ? 'Re-suggest' : 'Suggest clips';
+}
+
+// Audition a suggestion in the page's player: play each segment in turn,
+// skipping the gaps, then stop. Any manual seek outside the clip ends it.
+let previewing = null;   // {segs, i, card}
+function stopPreview() {
+  if (!previewing) return;
+  previewing.card.classList.remove('is-playing');
+  previewing = null;
+}
+function previewSuggestion(id) {
+  const player = document.getElementById('player');
+  const clip = suggestions.find(s => s.id === id);
+  if (!player || !clip || !clip.segments.length) return;
+  stopPreview();
+  const card = document.querySelector(`.suggest-card[data-id="${id}"]`);
+  previewing = { segs: clip.segments, i: 0, card };
+  card && card.classList.add('is-playing');
+  player.currentTime = clip.segments[0].start;
+  player.play();
+  player.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+(function () {
+  const player = document.getElementById('player');
+  if (!player) return;
+  player.addEventListener('timeupdate', () => {
+    if (!previewing) return;
+    const seg = previewing.segs[previewing.i];
+    const t = player.currentTime;
+    if (t < seg.start - 0.5 || t > seg.end + 1.5) { stopPreview(); return; }   // user seeked away
+    if (t >= seg.end) {
+      previewing.i += 1;
+      if (previewing.i >= previewing.segs.length) { player.pause(); stopPreview(); return; }
+      player.currentTime = previewing.segs[previewing.i].start;
+    }
+  });
+  player.addEventListener('pause', () => { if (previewing && !player.seeking) stopPreview(); });
+})();
+
+const DISMISS_REASONS = [
+  ['off_topic', 'Off topic'], ['weak_visuals', 'Weak visuals'],
+  ['bad_boundaries', 'Bad boundaries'], ['too_long', 'Too long'],
+  ['already_covered', 'Already covered'], ['not_clipworthy', 'Not clipworthy'],
+];
+
+// Dismiss is one click and recorded immediately; the card then asks why,
+// optionally, in place — the reasons are what teach the next pass.
+async function dismissSuggestion(id, btn) {
+  const card = btn.closest('.suggest-card');
+  if (previewing && previewing.card === card) stopPreview();
+  try {
+    const r = await fetch(`/clip-proposal/${id}/dismiss`, { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+  } catch (e) {
+    alert('Could not dismiss: ' + e.message);
+    return;
+  }
+  card.classList.add('is-dismissed');
+  card.innerHTML = `
+    <div class="suggest-reason">
+      <div class="reason-ask-label">Dismissed — why? <span class="reason-ask-optional">(optional, teaches the next pass)</span></div>
+      <div class="reason-pills">${DISMISS_REASONS.map(([slug, label]) =>
+        `<button type="button" class="reason-pill" data-reason="${slug}">${label}</button>`).join('')}
+        <button type="button" class="reason-pill is-skip" data-reason="">Skip</button>
+      </div>
+    </div>`;
+  card.querySelectorAll('.reason-pill').forEach(pill => pill.addEventListener('click', () => {
+    const reason = pill.dataset.reason;
+    if (reason) {
+      fetch(`/clip-proposal/${id}/reason`, {
+        method: 'POST', body: new URLSearchParams({ reason }),
+      }).catch(() => {});
+    }
+    card.remove();
+    const left = document.querySelectorAll('.suggest-card').length;
+    const count = document.querySelector('.suggest-title .crumb-count');
+    if (count) count.textContent = left || '';
+  }));
 }
 
 async function toggleMultiClip(cb) {

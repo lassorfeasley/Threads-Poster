@@ -1843,9 +1843,10 @@ function proposalsInView() {
   const live = suggestedClips
     .map(clip => ({ clip, shown: visibleProposal(clip) }))
     .filter(({ shown }) => shown.segments.length > 0);
-  // A video with no chapters IS one chapter — on a three-minute news segment
-  // there is nothing to click into, so its suggestions stand on their own.
-  if (!view) return chapters.length ? [] : live;
+  // The whole-video view lists every suggestion. They used to wait until you
+  // zoomed into their chapter, which on any indexed video meant an empty rail
+  // and suggestions nobody saw. Zoomed in, the list narrows to what's on screen.
+  if (!view) return live;
   return live.filter(({ shown }) =>
     shown.segments.some(s => s.end > view.a && s.start < view.b));
 }
@@ -1872,9 +1873,14 @@ function renderClipProposals() {
   const live = proposalsInView();
   proposalScopeKey = live.map(({ clip }) => clip.id).join(',');
 
+  // An empty clip is where a suggestion saves the most work, so the panel
+  // leads there — and offers a pass when nothing is waiting, rather than
+  // vanishing. Once the clip has segments it steps back to a quiet list.
+  const empty = !segments.length;
+  panel.classList.toggle('is-lead', empty && live.length > 0);
   // The reason strip outlives the dismissal that emptied the list — that's
   // exactly the moment it exists for — so it keeps the panel open too.
-  panel.hidden = !live.length && !reasonAsk;
+  panel.hidden = !live.length && !reasonAsk && !empty;
   // The key answers for what's painted on the waveform, which is every pending
   // proposal — not just the ones the panel is listing right now.
   if (legend) {
@@ -1884,13 +1890,15 @@ function renderClipProposals() {
   const key = document.getElementById('wave-key');
   if (key) key.hidden = ![...key.children].some(item => !item.hidden);
   document.getElementById('clip-proposals-title').textContent = live.length
-    ? `${live.length} suggested clip${live.length === 1 ? '' : 's'}`
+    ? (empty ? `Start from a suggestion · ${live.length}`
+             : `${live.length} suggested clip${live.length === 1 ? '' : 's'}`)
     : 'Suggested clips';
 
   list.innerHTML = '';
   if (!panel.hidden) {
     renderReasonAsk(list);
     live.forEach(({ clip, shown }) => list.appendChild(proposalCard(clip, shown)));
+    if (!live.length && !reasonAsk) list.appendChild(proposalEmpty());
   }
   renderChapters();   // which chapters hold a suggestion just changed
 }
@@ -1912,11 +1920,24 @@ function proposalCard(clip, shown) {
         <path d="M6 6l12 12M18 6L6 18"/>
       </svg>
     </button>
-    <div class="proposal-story">${escapeHtml(clip.story || 'Suggested clip')}</div>
+    <div class="proposal-top">
+      ${clip.thumb ? `<span class="proposal-thumb"><img src="${clip.thumb}" alt="" loading="lazy"
+            onerror="this.parentNode.remove()"><span class="proposal-play" aria-hidden="true">▶</span></span>` : ''}
+      <div class="proposal-head">
+        <div class="proposal-story">${escapeHtml(clip.story || 'Suggested clip')}</div>
+        <div class="proposal-meta meta">${proposalMeta(clip, shown)}</div>
+      </div>
+    </div>
+    ${clip.flag ? `<div class="rule-flag" title="This clip carries a claim your brand rules reject. Check its framing before it goes anywhere.">⚑ Check the framing: ${escapeHtml(clip.flag)}</div>` : ''}
+    ${clip.opening ? `<div class="proposal-line"><span class="proposal-line-k">Opens</span>“${escapeHtml(clip.opening)}”</div>` : ''}
+    ${clip.closing ? `<div class="proposal-line"><span class="proposal-line-k">Ends</span>“${escapeHtml(clip.closing)}”</div>` : ''}
+    ${clip.why ? `<div class="proposal-why meta">${escapeHtml(clip.why)}</div>` : ''}
     ${shown.trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
     <div class="proposal-actions">
-      <button type="button" class="sm" data-act="use"
+      <button type="button" class="sm ${segments.length ? '' : 'approve'}" data-act="use"
               title="Load these segments into the editor, replacing what's there">Use this clip</button>
+      <button type="button" class="sm ghost" data-act="preview"
+              title="Play it through — nothing is applied">▶ Preview</button>
     </div>`;
   row.addEventListener('mouseenter', () => { hoveredProposal = clip.id; row.classList.add('hot'); });
   row.addEventListener('mouseleave', () => { hoveredProposal = null; row.classList.remove('hot'); });
@@ -1931,10 +1952,39 @@ function proposalCard(clip, shown) {
     btn.addEventListener('click', ev => {
       ev.stopPropagation();
       if (btn.dataset.act === 'use') useClipProposal(clip.id);
+      else if (btn.dataset.act === 'preview') previewClipProposal(clip.id);
       else dismissClipProposal(clip.id);
     });
   });
   return row;
+}
+
+// Length, cut count, where it sits, and how sure the model was — the facts
+// that decide whether it's worth a listen, on one line.
+function proposalMeta(clip, shown) {
+  const n = shown.segments.length;
+  const parts = [`${Math.round(shown.seconds)}s`];
+  if (n > 1) parts.push(`${n} cuts`);
+  parts.push(`at ${txFmt(shown.segments[0].start)}`);
+  const ch = chapters.length ? chapterAt(shown.segments[0].start) : null;
+  if (ch && ch.topic && !view) parts.push(escapeHtml(ch.topic));
+  let out = parts.join(' · ');
+  if (clip.confidence != null) {
+    const c = clip.confidence;
+    const label = c >= 0.75 ? 'strong' : c >= 0.5 ? 'good' : 'long shot';
+    out += ` <span class="proposal-conf is-${label.replace(' ', '-')}"
+      title="The model's own confidence: ${Math.round(c * 100)}%">${label}</span>`;
+  }
+  return out;
+}
+
+// Nothing waiting and nothing cut yet: one button away from a first draft.
+function proposalEmpty() {
+  const box = document.createElement('div');
+  box.className = 'proposal-empty';
+  box.innerHTML = `<div class="meta">No suggestions waiting${view ? ' in this stretch' : ''}.</div>
+    <button type="button" class="sm" onclick="suggestClips()">Suggest clips${view ? ' here' : ''}</button>`;
+  return box;
 }
 
 // Audition a proposal without committing it. Judging a clip by reading two
@@ -1989,10 +2039,6 @@ async function suggestClips() {
     if (!d.clips) throw new Error(d.error || 'No clips returned');
     suggestedClips = d.clips;
     reasonAsk = null;   // a fresh run makes the old strip stale
-    // A whole-video pass proposes into chapters you aren't looking at, where
-    // the panel won't show them. Land on the first one instead of leaving the
-    // rail empty and the run looking like it did nothing.
-    if (!view && d.new && suggestedClips.length) zoomToProposal(suggestedClips[0]);
     renderClipProposals();
     const toggle = document.getElementById('multi-clip-toggle');
     if (toggle) toggle.checked = !!d.multi_clip;
@@ -2009,13 +2055,6 @@ async function suggestClips() {
   }
   btn.disabled = false;
   btn.classList.remove('is-busy');
-}
-
-function zoomToProposal(clip) {
-  const segs = visibleProposal(clip).segments;
-  if (!segs.length) return;
-  const pad = Math.max(3, (segs[segs.length - 1].end - segs[0].start) * 0.15);
-  zoomTo(segs[0].start - pad, segs[segs.length - 1].end + pad);
 }
 
 // ---- Prompted edits ------------------------------------------------------
@@ -2623,6 +2662,8 @@ async function retryExport() {
           <button type="button" class="ghost sm" onclick="dismissProposal()">Dismiss</button>
         </div>
       </div>
+      {% import "components/rule_capture.html" as rc %}
+      {{ rc.rule_capture(textarea_id="caption", draft=accepted_caption_draft) }}
       {# ---- Platform preview toggle: what each platform receives — Threads
            the 16:9 clip, Instagram the vertical composite. ---- #}
       <div class="ti-clip-tools" style="margin-bottom: 6px;">
@@ -3372,6 +3413,7 @@ async function retryExport() {
       function acceptProposal() {
         if (!proposedCaption) return;
         reportVerdict('accepted');
+        if (typeof RuleCapture !== 'undefined') RuleCapture.setDraft(proposedCaption);
         const ta = document.getElementById('caption');
         ta.value = proposedCaption;
         ta.dispatchEvent(new Event('input')); // re-grow to the new text

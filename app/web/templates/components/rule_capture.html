@@ -1,0 +1,116 @@
+{#
+  "+ Add a rule" under a caption editor. Saves a brand rule without leaving
+  the page, and — when the caption started as an AI draft and you've edited
+  it — offers to turn that edit into a rule.
+
+  Usage:  {% import "components/rule_capture.html" as rc %}
+          {{ rc.rule_capture(textarea_id="caption", draft=some_draft) }}
+  A page that learns its draft later (accepting a suggestion) calls
+  RuleCapture.setDraft(text).
+#}
+{% macro rule_capture(textarea_id="caption", draft="") %}
+<div class="rule-capture" id="rule-capture" data-textarea="{{ textarea_id }}"
+     data-draft="{{ draft }}">
+  <button type="button" class="rule-capture-toggle" onclick="RuleCapture.open()">
+    <span class="rule-capture-label">＋ Add a rule</span>
+    <span class="rule-capture-from-edit" hidden>· ✦ from your edit</span>
+  </button>
+  <div class="rule-capture-box" hidden>
+    <div class="rule-capture-suggest" hidden>
+      <span class="meta">✦ Your edit suggests:</span>
+      <button type="button" class="reason-pill rule-capture-suggestion"></button>
+    </div>
+    <div class="rule-capture-row">
+      <input type="text" class="rule-capture-text" maxlength="400"
+             placeholder="A rule for every caption — e.g. Write as “we”.">
+      <select class="rule-capture-scope"
+              title="Captions: only what gets written. Everything: also which videos and clips get picked.">
+        <option value="captions">Captions</option>
+        <option value="everything">Everything</option>
+      </select>
+      <button type="button" class="sm approve" onclick="RuleCapture.save()">Save rule</button>
+      <button type="button" class="sm ghost" onclick="RuleCapture.close()">Cancel</button>
+    </div>
+    <div class="meta rule-capture-status" aria-live="polite">
+      Applies to every future caption. <a href="/brand" target="_blank">Manage rules</a>
+    </div>
+  </div>
+</div>
+<script>
+const RuleCapture = (() => {
+  const root = document.getElementById('rule-capture');
+  const q = sel => root.querySelector(sel);
+  let draft = root.dataset.draft || '';
+  let suggestedFor = null;   // the caption a suggestion was asked for
+
+  const caption = () => (document.getElementById(root.dataset.textarea) || {}).value || '';
+  const edited = () => draft.trim() && caption().trim() && draft.trim() !== caption().trim();
+
+  function refreshHint() { q('.rule-capture-from-edit').hidden = !edited(); }
+
+  async function suggest() {
+    if (!edited() || suggestedFor === caption()) return;
+    suggestedFor = caption();
+    const box = q('.rule-capture-suggest');
+    try {
+      const r = await fetch('/rules/suggest-from-edit', {
+        method: 'POST', body: new URLSearchParams({ draft, final: caption() }),
+      });
+      const d = await r.json();
+      if (d.rule) {
+        q('.rule-capture-suggestion').textContent = d.rule;
+        box.hidden = false;
+      } else {
+        box.hidden = true;
+      }
+    } catch (e) { box.hidden = true; }
+  }
+
+  q('.rule-capture-suggestion').addEventListener('click', ev => {
+    q('.rule-capture-text').value = ev.currentTarget.textContent;
+    q('.rule-capture-text').focus();
+  });
+  q('.rule-capture-text').addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); save(); }
+    if (ev.key === 'Escape') close();
+  });
+  const ta = document.getElementById(root.dataset.textarea);
+  if (ta) ta.addEventListener('input', refreshHint);
+
+  function open() {
+    q('.rule-capture-box').hidden = false;
+    q('.rule-capture-toggle').hidden = true;
+    q('.rule-capture-text').focus();
+    suggest();
+  }
+  function close() {
+    q('.rule-capture-box').hidden = true;
+    q('.rule-capture-toggle').hidden = false;
+    q('.rule-capture-text').value = '';
+  }
+  async function save() {
+    const text = q('.rule-capture-text').value.trim();
+    if (!text) return;
+    const status = q('.rule-capture-status');
+    try {
+      const r = await fetch('/brand/rules/add', {
+        method: 'POST',
+        body: new URLSearchParams({ text, applies_to: q('.rule-capture-scope').value }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      close();
+      const label = q('.rule-capture-label');
+      label.textContent = '✓ Rule saved — add another';
+      setTimeout(() => { label.textContent = '＋ Add a rule'; }, 4000);
+    } catch (e) {
+      status.textContent = 'Not saved: ' + e.message;
+    }
+  }
+  function setDraft(text) { draft = text || ''; suggestedFor = null; refreshHint(); }
+
+  refreshHint();
+  return { open, close, save, setDraft };
+})();
+</script>
+{% endmacro %}

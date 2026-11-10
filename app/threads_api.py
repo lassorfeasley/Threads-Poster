@@ -415,6 +415,31 @@ def fetch_replies(media_id: str) -> list[dict]:
     return out
 
 
+def fetch_followers_count() -> int | None:
+    """The account's current follower count, or None when unavailable.
+
+    User-level insight (``threads_manage_insights`` scope). Meta reports it as
+    a ``total_value`` rather than the per-day ``values`` list post metrics
+    use; both shapes are accepted.
+    """
+    try:
+        data = _api("GET", "{user_id}/threads_insights", metric="followers_count")
+    except ThreadsError as exc:
+        log.warning("Follower count fetch failed: %s", exc)
+        return None
+    for item in data.get("data", []):
+        if item.get("name") != "followers_count":
+            continue
+        value = (item.get("total_value") or {}).get("value")
+        if value is None:
+            value = ((item.get("values") or [{}])[-1] or {}).get("value")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def fetch_insights(media_id: str) -> dict:
     """Post metrics. Returns {views, likes, replies, reposts, quotes, shares} (missing -> None)."""
     try:

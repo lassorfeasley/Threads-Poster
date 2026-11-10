@@ -15,6 +15,32 @@
 {{ ui.pagebar("Notifications", title_extra=(ntitle if n_total else ''),
               sub="Posts and reels that dropped out of the queue, never made it out, or went stale waiting. Fix the issue (see the error), then re-queue or retry — or dismiss once you're OK with it.") }}
 
+{% if model_review %}
+<div class="card review-reminder">
+  <div class="review-reminder-head">
+    <strong>Six-month check-in: are video models ready yet?</strong>
+    <span class="badge">reminder</span>
+  </div>
+  <p class="meta">Back in November we held off on automating clip selection and scheduling until
+    video models could judge what's visually gripping, and started keeping richer data
+    for when they could. Time to test them against your own calls and decide what to build.</p>
+  {% if label_counts %}
+  <p class="meta">Your test set: <strong>{{ label_counts.total }}</strong> clips labelled
+    ({{ label_counts.yes }} gripping, {{ label_counts.no }} not).
+    {% if label_counts.total < 30 %}Label a few more first — <a href="/labels">Label clips</a>.{% endif %}</p>
+  {% endif %}
+  <div class="btn-group">
+    <a class="btn primary" href="/notes/six-month-review">Open the checklist</a>
+    <form class="inline" method="post" action="/reminders/model-review/done"
+          data-confirm="Mark the six-month review done? The reminder won't come back."
+          data-confirm-ok="Mark done">
+      <button class="btn ghost">Mark done</button>
+    </form>
+  </div>
+  <div class="meta" style="margin-top: 8px;">Also in the repo: <code>{{ review_note }}</code></div>
+</div>
+{% endif %}
+
 {% if not n_total %}
   <div class="empty">
     <span class="icon">

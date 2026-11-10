@@ -19,7 +19,8 @@ _client: Anthropic | None = None
 # workspace's values reproduce the framing that used to be hardcoded here.
 _BRAND_DEFAULTS = {
     "topic": "the channel's topic",
-    "source_kind": "online video",
+    # The product clips news archives, so that's the default framing.
+    "source_kind": "TV news footage",
     "relevance_rules": "it substantively covers the topic",
     "false_positives": "the topic is only incidental to the video",
     "strong_openings": (
@@ -50,6 +51,35 @@ def _brand() -> dict:
     for key in ("mission", "audience", "voice_notes", "cta_url"):
         out[key] = str(raw.get(key) or "").strip()
     return out
+
+
+def _operator_rules(scope: str) -> str:
+    """The operator's brand rules for one kind of prompt, as a prompt block —
+    or "" when there are none. ``scope`` is "content" (decisions about
+    material) or "captions" (text). Never raises: a broken brand.yaml must not
+    stop a prompt."""
+    try:
+        from .config import render_brand_rules
+        rules = render_brand_rules(scope)
+    except Exception:
+        return ""
+    if not rules:
+        return ""
+    if scope == "captions":
+        return (
+            "\n\nTHE OPERATOR'S RULES — hard constraints every word you write "
+            "must follow. They outrank the voice examples, the style notes and "
+            "any style menu; only the facts and the length limit outrank them. "
+            "If the clip challenges them, never present that as credible — "
+            "make the account's own position clear:\n" + rules[:2500]
+        )
+    return (
+        "\n\nTHE OPERATOR'S RULES — hard constraints that outrank everything "
+        "else here:\n" + rules[:2500] + "\n"
+        "Material that challenges these rules or the account's premise is "
+        "never credible. It can still be worth using — as something to "
+        "respond to — so judge that on its merits rather than discarding it."
+    )
 
 
 def client() -> Anthropic:
@@ -121,12 +151,15 @@ def score_relevance(model: str, title: str, description: str, matched_keywords: 
     optional ``rationale`` key for old cached responses.
     """
     b = _brand()
+    rules = _operator_rules("content")
     system = (
         f"You score {b['source_kind']} videos for genuine relevance to "
         f"{b['topic']}. "
         f"A video is relevant if {b['relevance_rules']}. "
         f"It is NOT relevant if {b['false_positives']}. "
-        "JSON shape: {\"score\": 0.0-1.0}"
+        + (rules + "\nScore relevance, not agreement: a video arguing against "
+           "the rules is relevant if it's worth responding to.\n" if rules else "")
+        + "JSON shape: {\"score\": 0.0-1.0}"
     )
     user = json.dumps(
         {"title": title, "description": description[:2000], "matched_keywords": matched_keywords}
@@ -423,6 +456,7 @@ def suggest_rerun_caption(model: str, *, title: str, channel: str,
         )
         if style_guide:
             system += "\n\nStyle notes:\n" + style_guide[:1500]
+    system += _operator_rules("captions")
     system += "\nJSON shape: {\"caption\": \"...\"}"
     user = json.dumps({
         "today": today,
@@ -481,6 +515,12 @@ def check_caption(model: str, *, caption: str, clip_transcript: str, title: str,
             "- This is a re-air: flag wording that pins the clip to a moment "
             "('today', 'this week', 'just announced', a date) or presents a "
             "past event as happening now.\n"
+        )
+    rules = _operator_rules("captions")
+    if rules:
+        system += (
+            "- It breaks one of the operator's rules below, or presents "
+            "something they reject as credible." + rules + "\n"
         )
     system += (
         "Do NOT flag style, tone, length, or a caption you'd merely have "
@@ -593,6 +633,29 @@ def _words_to_clauses(words: list[dict], max_words: int = 12,
     return clauses
 
 
+# Most transcript entries the clip suggester is shown in one pass.
+CLIP_TRANSCRIPT_ENTRIES = 400
+
+
+def _fit_entries(entries: list[dict], cap: int) -> list[dict]:
+    """Coarsen a timeline to at most ``cap`` entries by joining neighbours.
+
+    Truncating instead would hide the end of every long video from a
+    whole-video pass. Joined entries span first-start to last-end, so an entry
+    that sat on word boundaries still does — cut points stay as precise as the
+    entries they were built from, just fewer of them.
+    """
+    if cap <= 0 or len(entries) <= cap:
+        return list(entries)
+    group = -(-len(entries) // cap)   # ceil
+    out: list[dict] = []
+    for i in range(0, len(entries), group):
+        chunk = entries[i:i + group]
+        out.append({"start": chunk[0]["start"], "end": chunk[-1]["end"],
+                    "text": " ".join(str(e.get("text", "")) for e in chunk).strip()})
+    return out
+
+
 def suggest_clips(model: str, title: str, transcript_segments: list[dict],
                   max_clips: int = 3, max_segments_per_clip: int = 4,
                   min_seconds: int = 15, max_seconds: int = 40,
@@ -600,7 +663,9 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
                   used_ranges: list[dict] | None = None,
                   words: list[dict] | None = None,
                   description: str = "",
-                  window: dict | None = None, topic: str = "") -> list[dict]:
+                  window: dict | None = None, topic: str = "",
+                  context: dict | None = None,
+                  visual_moments: list[dict] | None = None) -> list[dict]:
     """Propose the clips worth cutting from one video. DRAFTS ONLY.
 
     The output is a partition, not a window, because clipping happens on two
@@ -630,7 +695,20 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     clips in an hour of footage. ``topic`` is what that stretch is about, when
     something already knows — a chapter label.
 
-    Returns ``[{segments, story, why, confidence, draft_caption}]`` where each
+    ``context`` is what this account's own history teaches (see
+    ``clip_context.build``): clips the operator shipped and how they did,
+    dismissals and why, measured boundary bias, recently posted stories. It is
+    the difference between "a plausible clip" and "a clip this operator posts".
+
+    ``visual_moments`` are frames a vision pass already judged worth opening
+    on (``[{t, why}]``) — the only window this text-only pass has onto the
+    pictures.
+
+    The model writes each clip's ``hook`` and ``payoff`` lines BEFORE its
+    segments: naming the first and last words heard first is what keeps it
+    from starting on context and trailing off after the point lands.
+
+    Returns ``[{segments, story, hook, payoff, why, confidence, draft_caption}]`` where each
     ``segments`` list is already clamped to the transcript, chronological, and
     non-overlapping — i.e. droppable straight into ``Cut.trim_segments``. An
     empty list means the model found nothing worth clipping.
@@ -656,7 +734,9 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     # The entry cap goes AFTER the window filter, never before: the first 400
     # clauses of a 57-minute video are its first quarter, and a section past
     # that would arrive here with an empty transcript and propose nothing.
-    compact = compact[:400]
+    # Over the cap, neighbours are merged rather than the tail dropped — a
+    # whole-video pass has to SEE the whole video to pick its best moment.
+    compact = _fit_entries(compact, CLIP_TRANSCRIPT_ENTRIES)
     if not compact:
         return []
     horizon = max(w["end"] for w in compact)
@@ -668,11 +748,25 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     used = [{"start": round(float(r["start"]), 1), "end": round(float(r["end"]), 1)}
             for r in (used_ranges or [])]
 
+    moments = []
+    for m in (visual_moments or []):
+        try:
+            t = round(float(m["t"]), 1)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if floor <= t < horizon:
+            moments.append({"t": t, "what": str(m.get("why", ""))[:160]})
+    context = {k: v for k, v in (context or {}).items() if v}
+    rules = _operator_rules("content")
+
     b = _brand()
     system = (
-        f"You cut short social clips out of {b['source_kind']} footage about "
-        f"{b['topic']}. "
-        "Given a timestamped transcript, propose the clips worth making.\n"
+        f"You are the editor of a social account about {b['topic']}, cutting "
+        f"short clips out of {b['source_kind']} footage. Given a timestamped "
+        "transcript, find the clips worth posting and cut each one tight. "
+        "Most proposals fail the same ways: they open on a dull frame, let "
+        "exposition drone on, wander between ideas, or bury the topic. Yours "
+        "must not.\n"
         "\n"
         + (f"You are looking at ONE SECTION of a longer video, "
            f"{floor:.0f}s to {horizon:.0f}s"
@@ -680,27 +774,62 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
            "must fall inside it. The rest of the video is not yours to cut, "
            "and it is being handled separately.\n\n" if window else "")
         + "Two levels, and they are NOT the same thing:\n"
-        "- SEGMENTS within one clip: one story, compressed. Cut the set-up, "
-        "filler, repetition and dead air; keep the vivid, concrete, "
-        "human beats. Most good clips are 2-4 segments joined together, not "
-        "one continuous take.\n"
+        "- SEGMENTS within one clip: one story, compressed. Most good clips "
+        "are 2-4 segments joined together, not one continuous take.\n"
         "- Separate CLIPS: separate stories that could not share a single "
         "caption. Only split when the video genuinely covers more than one "
         "story. Most videos yield exactly one clip.\n"
         "\n"
+        "Judge every clip against all five of these:\n"
+        f"1. ONE STORY, AND IT IS THE TOPIC. A viewer knows what the clip is "
+        f"about from its first segment, and every segment serves that one "
+        f"story. Cut tangents however interesting. If {b['topic']} is "
+        "incidental to a moment, it is not a clip for this account.\n"
+        "2. THE HOOK. The first words heard are the most arresting in the "
+        "clip: a stake, a surprising fact or number, a confrontation, a vivid "
+        "image, a strong claim. Never a greeting, a studio toss, a headline "
+        "read, or the question that sets up the piece.\n"
+        "3. NO DRONE. At most ONE short context beat — a sentence, about five "
+        "seconds — and only directly before the payoff it sets up. Cut "
+        "preamble, restatement, hedging, and a reporter re-explaining what "
+        "the witness just said. A segment that only explains goes.\n"
+        "4. A THROUGHLINE. Read only the kept words aloud, in order: they "
+        "flow as one line of thought — hook, escalation, payoff — with no "
+        "dangling 'he', 'that' or 'this' whose referent was cut. Every join "
+        "is the next beat, not a jump.\n"
+        "5. END ON THE PAYOFF. The last line lands: the consequence, the "
+        "punchline, the quote. Never trail into qualifiers, a sign-off, or "
+        "the next story's lead-in.\n"
+        "\n"
+        "PEOPLE ON SCREEN: a talking head carries a clip only when the "
+        "speaker is prominent or genuinely compelling — a famous or "
+        "high-status figure, or a quotable, emotional or confrontational "
+        "line. An unknown official reading a statement does not; prefer the "
+        "moments where what is said implies footage worth watching.\n"
+        + (rules + "\nWhen a clip you propose challenges those rules — it "
+           "carries a claim the account rejects — set `challenges_rules` to "
+           "one line naming what it challenges, so the operator checks its "
+           "framing before it goes anywhere. Otherwise leave it empty.\n"
+           if rules else "")
+        + "\n"
         + (f"EDITORIAL GUIDANCE for this channel: {b['clip_guidance']}\n\n"
            if b["clip_guidance"] else "")
         + "THE OPENING SHOT decides whether anyone watches the rest. Start on "
         "something worth looking at, and hold it: the first segment must run "
-        f"at least {opening_hold:g} seconds without a cut. You can't see the "
-        "footage, so infer it from what is being said. Strong openings: "
+        f"at least {opening_hold:g} seconds without a cut. Strong openings: "
         f"{b['strong_openings']}. "
         f"Do NOT open on: {b['weak_openings']}.\n"
-        "\n"
+        + ("visual_moments are frames a vision pass judged striking, with "
+           "timestamps. You can't see the footage otherwise: opening on or "
+           "just before one of them is the strongest start available.\n"
+           if moments else
+           "You can't see the footage, so infer it from what is being said.\n")
+        + "\n"
         f"Each clip totals {min_seconds}-{max_seconds} seconds across at most "
         f"{max_segments_per_clip} segments. Segments must be chronological and "
-        f"must not overlap. Propose at most {max_clips} clips, best first, and "
-        "return an empty list if nothing here is worth clipping.\n"
+        f"must not overlap. Propose at most {max_clips} clips, best first. "
+        "Only propose a clip you would stake the account on — below 0.5 "
+        "confidence, leave it out. An empty list is a fine answer.\n"
         + ("The transcript timestamps are word-accurate: every entry starts "
            "and ends exactly on a word boundary. Cut precisely — start a "
            "segment on the first word you want heard and end it right after "
@@ -710,11 +839,29 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
            "used_ranges below. Do not propose any of that material again, and "
            "do not build a clip that merely straddles it. Find fresh moments "
            "or return fewer clips.\n" if used else "")
-        + "Also draft a short caption (under 300 chars) the operator will "
-        "rewrite, and rate your own confidence in the clip.\n"
-        "JSON shape: {\"clips\": [{\"story\": \"one line\", \"segments\": "
-        "[{\"start\": n, \"end\": n}], \"why\": \"one line\", "
-        "\"confidence\": 0.0-1.0, \"draft_caption\": \"...\"}]}"
+        + ("\nLEARN FROM THIS ACCOUNT — account_context in the payload:\n"
+           "- shipped_examples: clips this operator actually posted, the "
+           "words heard in order, best-performing first. That is the bar: "
+           "match their density, pace and length.\n"
+           "- rejected_here: proposals already dismissed on THIS video. Do "
+           "not propose them again.\n"
+           "- rejected_elsewhere: recent dismissals and why. Don't repeat "
+           "those mistakes.\n"
+           "- calibration: measured biases in past proposals. Correct for "
+           "them.\n"
+           "- recently_posted: what the account posted lately. Don't retell a "
+           "story already told unless this footage moves it forward — and if "
+           "it does, say so in `why`.\n" if context else "")
+        + "\nFor each clip, write `hook` (the exact first words heard) and "
+        "`payoff` (the exact last line) BEFORE choosing segments, then cut "
+        "segments that start on the hook and end on the payoff. `why` says "
+        "in one line why this stops a scroll. Also draft a short caption "
+        "(under 300 chars) the operator will rewrite.\n"
+        "JSON shape: {\"clips\": [{\"story\": \"one line\", \"hook\": \"...\", "
+        "\"payoff\": \"...\", \"segments\": [{\"start\": n, \"end\": n}], "
+        "\"why\": \"one line\", \"confidence\": 0.0-1.0, "
+        "\"draft_caption\": \"...\""
+        + (", \"challenges_rules\": \"\"" if rules else "") + "}]}"
     )
     payload = {"title": title, "segments": compact}
     if window:
@@ -724,8 +871,12 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         payload["source_video_description"] = description[:2000]
     if used:
         payload["used_ranges"] = used
+    if moments:
+        payload["visual_moments"] = moments
+    if context:
+        payload["account_context"] = context
     user = json.dumps(payload)
-    data = _json_chat(model, system, user, max_tokens=2000)
+    data = _json_chat(model, system, user, max_tokens=3000)
 
     clips: list[dict] = []
     for raw in (data.get("clips") or [])[:max_clips]:
@@ -746,9 +897,12 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         clips.append({
             "segments": segments,
             "story": str(raw.get("story", ""))[:200],
+            "hook": str(raw.get("hook", ""))[:300],
+            "payoff": str(raw.get("payoff", ""))[:300],
             "why": str(raw.get("why", ""))[:300],
             "confidence": confidence,
             "draft_caption": str(raw.get("draft_caption", ""))[:400],
+            "challenges_rules": str(raw.get("challenges_rules") or "").strip()[:300],
         })
     return clips
 
@@ -1454,6 +1608,7 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
             "notes above, but never the length target or the hard "
             "constraints:\n" + operator_guide[:2000]
         )
+    system += _operator_rules("captions")
     system += "\nJSON shape: {\"caption\": \"...\"}"
     payload: dict = {
         "video_title": title,
@@ -1519,6 +1674,7 @@ def suggest_hook_text(model: str, title: str, station: str, market: str,
             "Never reuse their facts.\n"
             + "\n".join(f"<example>{e[:120]}</example>" for e in examples) + "\n"
         )
+    system += _operator_rules("captions") + "\n"
     system += "JSON shape: {\"hook\": \"...\"}"
     payload: dict = {
         "video_title": title,
@@ -1666,6 +1822,28 @@ def suggest_first_reply(model: str, instruction: str, *, video_title: str = "",
         return ""
     text = re.sub(r"@[\w.]+", "", text).strip()
     return " ".join(text.split())[:480]
+
+
+def suggest_rule_from_edit(model: str, *, draft: str, final: str,
+                           existing: list[str] | None = None) -> str:
+    """One reusable rule implied by how the operator edited a drafted caption,
+    or "" when the edit was a one-off fix (a fact, a name, a typo) that says
+    nothing general. The operator saves it or ignores it."""
+    system = (
+        "An operator edited an AI-drafted social caption. If the edit shows a "
+        "GENERAL preference that should apply to future captions — tone, point "
+        "of view, words or moves they cut or add, how they frame a kind of "
+        "story — write it as ONE short imperative rule (under 20 words), "
+        "phrased so it holds for any clip. If the edit only fixed something "
+        "specific to this clip (a fact, a name, a number, a typo) or just "
+        "rewrote for taste with no clear pattern, return an empty rule. Don't "
+        "repeat a rule they already have.\n"
+        "JSON shape: {\"rule\": \"...\"}"
+    )
+    user = json.dumps({"draft": draft[:1500], "edited": final[:1500],
+                       "existing_rules": (existing or [])[:30]})
+    data = _json_chat(model, system, user, max_tokens=200, temperature=0.0)
+    return " ".join(str(data.get("rule") or "").split())[:300]
 
 
 def distill_style_guide(model: str, captions: list[str]) -> str:

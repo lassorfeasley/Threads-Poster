@@ -92,18 +92,27 @@ def snapshot_metrics(session) -> int:
     ).scalars().all()
     last_by_post = _last_snapshot_times(session, [p.id for p in posts])
 
+    # Past max_age a post keeps a sparse long-tail record instead of none:
+    # evergreen clips and reruns keep earning for months, and that tail is
+    # invisible if sampling stops at day 60.
+    tail_interval = dt.timedelta(days=settings.get("analytics.long_tail_interval_days", 7))
+    tail_max_age = dt.timedelta(days=settings.get("analytics.long_tail_max_age_days", 365))
+
     taken = 0
     for post in posts:
         published = post.published_at
         if published and published.tzinfo is None:
             published = published.replace(tzinfo=dt.timezone.utc)
+        due_every = interval
         if published and now - published > max_age:
-            continue
+            if now - published > tail_max_age:
+                continue
+            due_every = tail_interval
         last = last_by_post.get(post.id)
         if last is not None:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=dt.timezone.utc)
-            if now - last < interval:
+            if now - last < due_every:
                 continue
 
         if _add_snapshot(session, post):
@@ -111,6 +120,45 @@ def snapshot_metrics(session) -> int:
     session.flush()
     log.info("Metric snapshots taken: %d", taken)
     return taken
+
+
+def snapshot_account(session, *, min_interval_hours: float = 20.0) -> bool:
+    """Record the account's follower count, at most about once a day.
+
+    True when a snapshot was written. Follower history can't be backfilled —
+    Threads only reports the current count — so this runs from the scheduler
+    tick rather than waiting for someone to open a page.
+    """
+    from .models import AccountSnapshot
+    from .threads_api import fetch_followers_count
+
+    last = session.execute(
+        select(func.max(AccountSnapshot.captured_at))
+    ).scalar_one_or_none()
+    now = utcnow()
+    last = _aware(last)
+    if last is not None and now - last < dt.timedelta(hours=min_interval_hours):
+        return False
+    count = fetch_followers_count()
+    if count is None:
+        return False
+    session.add(AccountSnapshot(captured_at=now, followers_count=count))
+    session.flush()
+    log.info("Account snapshot: %d followers", count)
+    return True
+
+
+def followers_at(session, when: dt.datetime | None = None) -> int | None:
+    """Latest follower count captured at or before ``when`` (default: now)."""
+    from .models import AccountSnapshot
+
+    q = select(AccountSnapshot.followers_count).where(
+        AccountSnapshot.followers_count.is_not(None))
+    if when is not None:
+        q = q.where(AccountSnapshot.captured_at <= when)
+    return session.execute(
+        q.order_by(AccountSnapshot.captured_at.desc()).limit(1)
+    ).scalar_one_or_none()
 
 
 def poll_recent_metrics(session) -> int:

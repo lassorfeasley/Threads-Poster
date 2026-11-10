@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{% set lb_sub %}Is each posted clip visually gripping — would it stop someone scrolling? One tap each. Label hits and flops alike: this becomes the test set for judging whether video models can make that call the way you do.{% if review_on %} Review on {{ review_on.strftime("%b %-d, %Y") }}.{% endif %}{% endset %}
+{% set lb_extra %}<span class="badge" id="label-progress">{{ stats.total }} / {{ target }} labelled</span>{% endset %}
+{{ ui.pagebar("Label clips", sub=lb_sub, title_extra=lb_extra) }}
+
+<div class="canvas canvas-wide">
+{% if not items %}
+  <div class="empty"><strong>No posted clips yet</strong>
+    Published clips show up here to label.</div>
+{% else %}
+<div class="label-meter" aria-hidden="true">
+  <span class="label-meter-fill" id="label-meter-fill"
+        style="width: {{ [100, (stats.total * 100 / target)|round|int]|min }}%"></span>
+</div>
+<div class="label-grid">
+  {% for it in items %}
+  <article class="label-card{{ ' is-labelled' if it.value }}" data-cut="{{ it.cut_id }}" data-value="{{ it.value }}">
+    <div class="label-media">
+      <video src="/media/post/{{ it.post_id }}" poster="/media/cut-thumb/{{ it.cut_id }}"
+             preload="none" controls playsinline
+             onerror="this.closest('.label-media').classList.add('is-missing')"></video>
+      <span class="label-missing meta">Clip file not on this machine —
+        {% if it.permalink %}<a href="{{ it.permalink }}" target="_blank" rel="noopener">watch on Threads</a>{% else %}no link{% endif %}</span>
+    </div>
+    <div class="label-body">
+      <div class="meta label-meta">
+        {{ it.published_at.strftime("%b %-d") if it.published_at else "?" }}
+        {%- if it.views is not none %} · {{ "{:,}".format(it.views) }} views{% endif %}
+        {%- if it.permalink %} · <a href="{{ it.permalink }}" target="_blank" rel="noopener">Threads ↗</a>{% endif %}
+      </div>
+      {% if it.caption %}<div class="label-caption">{{ it.caption }}</div>{% endif %}
+      <div class="label-q">Visually gripping?</div>
+      <div class="label-choices" role="group" aria-label="Visually gripping?">
+        <button type="button" class="label-choice{{ ' is-on' if it.value == 'yes' }}" data-v="yes">Yes</button>
+        <button type="button" class="label-choice{{ ' is-on' if it.value == 'no' }}" data-v="no">No</button>
+      </div>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% endif %}
+</div>
+
+<script>
+const LABEL_TARGET = {{ target }};
+document.querySelectorAll('.label-card').forEach(card => {
+  card.querySelectorAll('.label-choice').forEach(btn => btn.addEventListener('click', async () => {
+    // Tapping the current answer again clears it.
+    const value = card.dataset.value === btn.dataset.v ? '' : btn.dataset.v;
+    const prev = card.dataset.value;
+    paint(card, value);
+    try {
+      const r = await fetch(`/labels/${card.dataset.cut}`, {
+        method: 'POST', body: new URLSearchParams({ value }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      document.getElementById('label-progress').textContent = `${d.stats.total} / ${LABEL_TARGET} labelled`;
+      const fill = document.getElementById('label-meter-fill');
+      if (fill) fill.style.width = Math.min(100, Math.round(d.stats.total * 100 / LABEL_TARGET)) + '%';
+    } catch (e) {
+      paint(card, prev);
+      alert('Could not save: ' + e.message);
+    }
+  }));
+});
+function paint(card, value) {
+  card.dataset.value = value;
+  card.classList.toggle('is-labelled', !!value);
+  card.querySelectorAll('.label-choice').forEach(b => b.classList.toggle('is-on', b.dataset.v === value));
+}
+</script>
+{% endblock %}

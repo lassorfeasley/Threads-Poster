@@ -2,6 +2,8 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {% set an_actions %}
+  <a class="btn ghost" href="/labels"
+     title="One tap per posted clip — is it visually gripping? Builds the set future video models get tested against.">Label clips</a>
   <form class="inline" method="post" action="/analytics/snapshot">
     <button class="primary">Pull latest metrics</button>
   </form>

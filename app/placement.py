@@ -160,6 +160,13 @@ class PlacementDecision:
     score: float | None = None
     parts: dict[str, float] = field(default_factory=dict)
     pinned: bool = False
+    # Best of what else passed the same gates, ``(post_id, score, parts)``
+    # in score order. Record-keeping only — nothing reads it to decide.
+    alternatives: tuple = ()
+
+
+# How many runners-up a decision keeps for the record.
+ALTERNATIVES_KEPT = 5
 
 
 @dataclass
@@ -422,11 +429,11 @@ class PlacementContext:
     def record(self, post_id: int, window_key: str, *,
                relax_step: int | None, score: float | None = None,
                parts: dict[str, float] | None = None,
-               pinned: bool = False) -> None:
+               pinned: bool = False, alternatives: tuple = ()) -> None:
         self.facet_trail.append(self.facts_for(post_id).facets)
         self.decisions[window_key] = PlacementDecision(
             post_id=post_id, relax_step=relax_step, score=score,
-            parts=parts or {}, pinned=pinned,
+            parts=parts or {}, pinned=pinned, alternatives=alternatives,
         )
 
 
@@ -475,7 +482,7 @@ def _fifo_assign(posts: list, window_keys: list[str]) -> list:
 
 def choose_for_window(ctx: PlacementContext, remaining: list,
                       window_key: str, *, new_allowed: bool = True,
-                      must_fill: bool = False,
+                      must_fill: bool = False, ranked: list | None = None,
                       ) -> tuple[object | None, int | None, float | None, dict]:
     """Best eligible post for one window: ``(post, relax_step, score, parts)``.
 
@@ -491,6 +498,9 @@ def choose_for_window(ctx: PlacementContext, remaining: list,
     is a window the daily floor needs: the full ladder applies, so siblings
     may air on consecutive days — and as a last resort the same day — rather
     than leave the day short.
+
+    ``ranked``, when given, is filled with every post in the winning pool as
+    ``(score, post_id, parts)`` — for the decision record only.
     """
     day = window_key_date(window_key)
     if day is None:
@@ -513,6 +523,8 @@ def choose_for_window(ctx: PlacementContext, remaining: list,
         for p in pool:
             score, parts = ctx.score(p.id, day)
             key = (score, -p.id)
+            if ranked is not None:
+                ranked.append((score, p.id, parts))
             if best_key is None or key > best_key:
                 best, best_key, best_score, best_parts = p, key, score, parts
         return best, step, best_score, best_parts
@@ -577,8 +589,9 @@ def assign_posts_to_windows(posts: list, window_keys: list[str], *,
         pool = remaining
         if ctx.pace_capped(key, done.get(day, 0)):
             pool = [p for p in remaining if not ctx.facts_for(p.id).paced]
+        ranked: list = []
         pick, step, score, parts = choose_for_window(
-            ctx, pool, key, new_allowed=new_allowed, must_fill=must)
+            ctx, pool, key, new_allowed=new_allowed, must_fill=must, ranked=ranked)
         if pick is None:
             continue
         assignment[i] = pick
@@ -589,5 +602,9 @@ def assign_posts_to_windows(posts: list, window_keys: list[str], *,
             done[day] = done.get(day, 0) + 1
         if day is not None:
             ctx.note_air_dates(pick.id, day)
-        ctx.record(pick.id, key, relax_step=step, score=score, parts=parts)
+        runners_up = tuple(
+            (pid, sc, pa) for sc, pid, pa in sorted(ranked, key=lambda r: (-r[0], r[1]))
+            if pid != pick.id)[:ALTERNATIVES_KEPT]
+        ctx.record(pick.id, key, relax_step=step, score=score, parts=parts,
+                   alternatives=runners_up)
     return assignment
