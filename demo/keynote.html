@@ -1,0 +1,1090 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Threads Poster — Demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+@font-face { font-family: "Funnel Sans"; src: url("fonts/FunnelSans-Variable.ttf"); font-weight: 300 800; }
+@font-face { font-family: "Funnel Display"; src: url("fonts/FunnelDisplay-SemiBold.ttf"); font-weight: 600; }
+@font-face { font-family: "Funnel Display"; src: url("fonts/FunnelDisplay-Bold.ttf"); font-weight: 700; }
+@font-face { font-family: "Funnel Display"; src: url("fonts/FunnelDisplay-ExtraBold.ttf"); font-weight: 800; }
+
+/* Day mode: the app's own light theme tokens (app/web/static/style.css). */
+:root {
+  --bg: #f3f2ef; --bg-raised: #f8f7f5; --panel: #ffffff; --panel2: #eeece8; --panel3: #e5e2dc;
+  --border: #e5e2dc; --border-strong: #d3cfc7;
+  --text: #0d0d0d; --text-dim: #45464c; --muted: #7f7c75;
+  --accent: #16794c; --accent-soft: rgba(22,121,76,.1); --accent-border: rgba(22,121,76,.36);
+  --danger: #c63a2f; --danger-soft: rgba(198,58,47,.09); --danger-border: rgba(198,58,47,.38);
+  --warn: #a2690f; --warn-soft: rgba(162,105,15,.11); --warn-border: rgba(162,105,15,.38);
+  --shadow-lift: 0 2px 6px rgba(28,24,18,.06), 0 22px 44px -20px rgba(28,24,18,.25);
+  /* Programming categories (validated categorical palette, light surface) */
+  --c-news: #2a78d6; --c-nature: #1baa7c; --c-culture: #8b5bd6; --c-promo: #eb6834;
+  /* Diverging pair for lift vs. baseline */
+  --pos: #2a78d6; --neg: #d9534a;
+  --ease: cubic-bezier(.2,.8,.2,1);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: #e6e3dd; overflow: hidden; cursor: default; }
+body { font-family: "Funnel Sans", -apple-system, system-ui, sans-serif; color: var(--text); -webkit-font-smoothing: antialiased; }
+button { font: inherit; color: inherit; border: 0; background: none; cursor: default; }
+
+/* ---------- stage ---------- */
+#stage { position: absolute; left: 50%; top: 50%; width: 1920px; height: 1080px; transform-origin: center; overflow: hidden;
+  background: radial-gradient(1100px 760px at 18% 28%, rgba(22,121,76,.09), transparent 62%),
+              radial-gradient(900px 700px at 92% 88%, rgba(42,120,214,.07), transparent 60%),
+              radial-gradient(800px 600px at 70% 10%, rgba(255,255,255,.9), transparent 60%), #efede8; }
+
+/* ---------- browser ---------- */
+#browser { position: absolute; left: 72px; top: 92px; width: 1200px; height: 896px; border-radius: 16px; overflow: hidden; background: var(--bg);
+  box-shadow: 0 0 0 1px rgba(28,24,18,.10), 0 50px 110px -30px rgba(40,30,20,.40), 0 18px 36px -12px rgba(40,30,20,.18);
+  transition: opacity .7s var(--ease), transform .7s var(--ease); }
+#stage.is-title #browser { opacity: 0; transform: translateY(40px) scale(.96); }
+.chrome { height: 52px; background: #e9e7e2; border-bottom: 1px solid #d9d6cf; display: flex; align-items: center; padding: 0 18px; gap: 18px; }
+.lights { display: flex; gap: 8px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.lights i:nth-child(1){ background:#ff5f57 } .lights i:nth-child(2){ background:#febc2e } .lights i:nth-child(3){ background:#28c840 }
+.navarrows { display: flex; gap: 14px; color: #a09c94; font-size: 18px; }
+.urlbar { flex: 1; margin: 0 120px 0 40px; height: 32px; border-radius: 8px; background: #fff; border: 1px solid #dcd9d2; display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim); font-size: 14px; gap: 8px; }
+.urlbar svg { opacity: .5 }
+#vp { position: absolute; top: 52px; left: 0; right: 0; bottom: 0; overflow: hidden; }
+#content { position: absolute; inset: 0; transition: opacity .35s var(--ease); }
+#content.out { opacity: 0; }
+
+/* ---------- right column ---------- */
+#copy { position: absolute; left: 1350px; top: 0; width: 490px; height: 1080px; display: flex; flex-direction: column; justify-content: center;
+  transition: opacity .5s var(--ease), transform .5s var(--ease); }
+#copy.out { opacity: 0; transform: translateX(20px); }
+#stage.is-title #copy { opacity: 0; pointer-events: none; }
+.kicker { font-size: 18px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); font-weight: 700; margin-bottom: 22px; }
+.headline { font-family: "Funnel Display"; font-weight: 700; font-size: 62px; line-height: 1.04; letter-spacing: -.02em; }
+.sub { margin-top: 26px; font-size: 25px; line-height: 1.4; color: var(--text-dim); }
+
+#dots { position: absolute; left: 1350px; bottom: 92px; display: flex; gap: 10px; align-items: center; transition: opacity .5s; }
+#dots i { width: 10px; height: 10px; border-radius: 6px; background: rgba(28,24,18,.16); transition: all .45s var(--ease); cursor: pointer; }
+#dots i.on { width: 34px; background: var(--accent); }
+#dots i.done { background: rgba(28,24,18,.38); }
+#stage.is-title #dots { left: 50%; transform: translateX(-50%); }
+
+/* ---------- title ---------- */
+#title { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  transition: opacity .7s var(--ease), transform .7s var(--ease); }
+#stage:not(.is-title) #title { opacity: 0; transform: scale(1.04); pointer-events: none; }
+#title .mark { width: 92px; height: 92px; border-radius: 26px; background: var(--accent); display: grid; place-items: center; margin-bottom: 40px;
+  box-shadow: 0 20px 50px -14px rgba(22,121,76,.55); }
+#title h1 { font-family: "Funnel Display"; font-weight: 800; font-size: 132px; letter-spacing: -.035em; line-height: 1; }
+#title p { margin-top: 30px; font-size: 32px; color: var(--text-dim); max-width: 1200px; line-height: 1.35; }
+#title .by { margin-top: 48px; font-size: 20px; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
+#title .cats { margin-top: 34px; display: flex; gap: 12px; justify-content: center; }
+#title .cats .cat { font-size: 18px; height: 40px; padding: 0 18px; border-radius: 20px; }
+#title .cats .cat i { width: 10px; height: 10px; }
+
+#hint { position: absolute; left: 72px; bottom: 34px; font-size: 15px; color: var(--muted); transition: opacity 1s; }
+
+/* ---------- cursor ---------- */
+#cursor { position: absolute; left: 0; top: 0; width: 26px; height: 32px; z-index: 50; pointer-events: none; transform: translate(900px, 700px);
+  transition-property: transform, opacity; transition-timing-function: cubic-bezier(.45,.05,.25,1); filter: drop-shadow(0 2px 3px rgba(0,0,0,.3)); opacity: 0; }
+#cursor svg { transition: transform .12s; transform-origin: 4px 3px; }
+#cursor.down svg { transform: scale(.82); }
+.ripple { position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%; border: 2px solid rgba(22,121,76,.55);
+  pointer-events: none; z-index: 49; animation: ripple .55s ease-out forwards; }
+@keyframes ripple { from { transform: scale(.3); opacity: 1 } to { transform: scale(1.4); opacity: 0 } }
+
+/* ---------- app shell ---------- */
+.app { position: absolute; inset: 0; display: flex; background: var(--bg); font-size: 15px; }
+.rail { width: 68px; flex: none; border-right: 1px solid var(--border); background: var(--bg-raised); display: flex; flex-direction: column; align-items: center; padding: 16px 0; gap: 6px; }
+.rail .logo { width: 34px; height: 34px; border-radius: 10px; background: var(--accent); margin-bottom: 18px; display: grid; place-items: center; }
+.rail .ic { width: 44px; height: 40px; border-radius: 10px; display: grid; place-items: center; color: var(--muted); }
+.rail .ic.on { background: #fff; color: var(--text); box-shadow: 0 0 0 1px var(--border-strong); }
+.rail .sp { flex: 1 }
+.main { flex: 1; padding: 34px 40px; overflow: hidden; position: relative; }
+.pt { font-family: "Funnel Display"; font-weight: 700; font-size: 30px; letter-spacing: -.01em; }
+.lede { color: var(--muted); margin-top: 6px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+.btn { height: 38px; padding: 0 18px; border-radius: 10px; background: var(--panel); border: 1px solid var(--border-strong); font-weight: 600; font-size: 14px;
+  display: inline-flex; align-items: center; gap: 8px; transition: transform .12s, background .2s, color .2s, border-color .2s; white-space: nowrap; }
+.btn.primary { background: var(--text); color: #fff; border-color: var(--text); }
+.btn.accent { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.ghost { background: transparent; }
+.btn.pressed { transform: scale(.95); }
+.btn.ok { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 1px 2px rgba(28,24,18,.04); }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 13px; font-size: 13px; font-weight: 600;
+  background: var(--panel2); border: 1px solid var(--border-strong); color: var(--text-dim); white-space: nowrap; transition: all .25s; }
+.chip.g { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent); }
+.cat { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 11px; font-size: 12px; font-weight: 600; color: var(--text-dim);
+  background: var(--panel); border: 1px solid var(--border-strong); white-space: nowrap; }
+.cat i { width: 8px; height: 8px; border-radius: 50%; display: block; flex: none; }
+.hidden { display: none !important; }
+.fade { opacity: 0; transform: translateY(8px); transition: opacity .45s var(--ease), transform .45s var(--ease); }
+.fade.in { opacity: 1; transform: none; }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin .7s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg) } }
+.caret { display: inline-block; width: 2px; height: 1.1em; background: var(--accent); vertical-align: -3px; margin-left: 1px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0 } }
+.lbl { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+
+/* ---------- scenes (footage placeholders) ---------- */
+.scene { position: relative; overflow: hidden; border-radius: 8px; background: #ccc; }
+.scene svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.l3 { position: absolute; left: 6%; right: 18%; bottom: 9%; display: flex; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; }
+.l3 b { background: #d42a2a; color: #fff; padding: .25em .5em; }
+.l3 span { background: rgba(255,255,255,.94); color: #111; padding: .25em .6em; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bug { position: absolute; right: 4%; top: 6%; color: rgba(255,255,255,.9); font-weight: 800; font-size: .9em; letter-spacing: .04em; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+.subs { position: absolute; left: 0; right: 0; bottom: 8%; text-align: center; }
+.subs span { background: rgba(0,0,0,.72); color: #fff; padding: .2em .55em; border-radius: .25em; font-weight: 600; }
+
+/* ---------- slide: onboarding ---------- */
+.steps { display: flex; gap: 8px; margin-bottom: 20px; }
+.steps span { font-size: 13px; font-weight: 600; color: var(--muted); padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border-strong); }
+.steps span.on { color: var(--text); background: #fff; }
+.steps span.done { color: var(--accent); border-color: var(--accent-border); }
+.form { margin-top: 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px 22px; }
+.f { display: flex; flex-direction: column; gap: 7px; }
+.f.wide { grid-column: span 2; }
+.f > span { font-size: 13px; font-weight: 600; color: var(--text-dim); }
+.in { min-height: 46px; border-radius: 10px; background: var(--panel); border: 1px solid var(--border-strong); padding: 12px 14px; font-size: 16px; line-height: 1.4;
+  transition: border-color .2s, box-shadow .2s; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.in.tall { min-height: 76px; align-items: flex-start; }
+.in.focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.in .ph { color: #b0aca4; }
+.mix { display: flex; gap: 10px; }
+.mix .opt { flex: 1; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--panel); display: flex; gap: 10px; align-items: center;
+  font-size: 14px; font-weight: 600; color: var(--text-dim); transition: all .25s; }
+.mix .opt i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.mix .opt small { display: block; font-weight: 500; color: var(--muted); font-size: 12px; margin-top: 1px; }
+.mix .opt .tick { margin-left: auto; width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid var(--border-strong); display: grid; place-items: center; color: #fff; transition: all .2s; flex: none; }
+.mix .opt.on { border-color: var(--accent-border); color: var(--text); box-shadow: 0 0 0 3px var(--accent-soft); }
+.mix .opt.on .tick { background: var(--accent); border-color: var(--accent); }
+.actions { margin-top: 22px; display: flex; justify-content: flex-end; gap: 12px; }
+
+/* ---------- slide: channels ---------- */
+.scanbar { margin-top: 22px; display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; }
+.scan-l { display: flex; align-items: center; gap: 12px; color: var(--text-dim); }
+.pdot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.pdot.live { background: var(--accent); box-shadow: 0 0 0 0 rgba(22,121,76,.5); animation: pulse 1.4s infinite; }
+@keyframes pulse { 70% { box-shadow: 0 0 0 10px rgba(22,121,76,0) } 100% { box-shadow: 0 0 0 0 rgba(22,121,76,0) } }
+.prog { height: 3px; background: var(--panel3); border-radius: 2px; margin-top: 10px; overflow: hidden; }
+.prog i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 3.2s linear; }
+.list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.row { display: grid; grid-template-columns: 44px 1.45fr 96px 1.35fr 140px 24px; align-items: center; gap: 14px; padding: 10px 16px; }
+.av { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; font-weight: 800; font-size: 12px; color: #fff; letter-spacing: .02em; }
+.row .nm b { display: block; font-size: 15px; } .row .nm small { color: var(--muted); font-size: 13px; }
+.row .stt { font-size: 13px; color: var(--text-dim); } .row .stt small { display: block; color: var(--muted); }
+.meter { height: 6px; border-radius: 3px; background: var(--panel3); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.mlabel { font-size: 12px; color: var(--muted); margin-top: 5px; }
+.chk { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); display: grid; place-items: center; color: #fff; }
+.foot { position: absolute; left: 40px; right: 40px; bottom: 28px; display: flex; justify-content: space-between; align-items: center; color: var(--text-dim); }
+
+/* ---------- slide: accounts ---------- */
+.accgrid { margin-top: 28px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.acc { padding: 20px; display: flex; gap: 16px; align-items: center; transition: border-color .3s; }
+.acc.on { border-color: var(--accent-border); }
+.acc .lg { width: 52px; height: 52px; border-radius: 14px; display: grid; place-items: center; font-weight: 800; font-size: 22px; flex: none; }
+.acc .tx { flex: 1; } .acc .tx b { font-size: 17px; display: block; } .acc .tx small { color: var(--muted); font-size: 13px; line-height: 1.4; display: block; margin-top: 3px; }
+.acc .stat { font-size: 13px; color: var(--accent); font-weight: 600; margin-top: 6px; display: none; align-items: center; gap: 6px; }
+.acc.on .stat { display: flex; }
+.acc.wide { grid-column: span 2; }
+
+/* ---------- slide: triage ---------- */
+.tri { display: grid; grid-template-columns: 370px 1fr; gap: 22px; margin-top: 20px; height: 690px; }
+.q { display: flex; flex-direction: column; gap: 9px; }
+.qc { padding: 9px; display: grid; grid-template-columns: 112px 1fr; gap: 12px; transition: border-color .25s, opacity .4s, transform .4s; }
+.qc.sel { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.qc.gone { opacity: .4; }
+.qc .scene { height: 63px; font-size: 6px; }
+.qc b { font-size: 13px; line-height: 1.3; display: block; }
+.qc small { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.prob { margin-top: 5px; font-size: 12px; font-weight: 700; }
+.detail { padding: 22px; display: flex; flex-direction: column; gap: 15px; position: relative; }
+.detail .hero { height: 272px; font-size: 13px; }
+.film { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+.film .scene { height: 50px; border-radius: 4px; font-size: 4px; }
+.film-lbl { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+.tr { font-size: 14px; color: var(--text-dim); line-height: 1.5; background: var(--bg-raised); border-radius: 10px; padding: 12px 14px; border: 1px solid var(--border); }
+.tr mark { background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 0 3px; }
+.dbar { display: flex; gap: 10px; align-items: center; }
+.toast { position: absolute; right: 22px; bottom: 22px; padding: 14px 18px; display: flex; gap: 12px; align-items: center; font-size: 14px; z-index: 5;
+  box-shadow: var(--shadow-lift); background: var(--panel); border: 1px solid var(--border-strong); border-radius: 12px; }
+.toast small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+/* ---------- slide: cut ---------- */
+.cut { display: grid; grid-template-columns: 1fr 330px; gap: 22px; margin-top: 18px; }
+.player { height: 380px; font-size: 16px; border-radius: 12px; }
+.tl { margin-top: 16px; padding: 14px; }
+.tl-frames { position: relative; display: grid; grid-template-columns: repeat(8,1fr); gap: 2px; height: 56px; border-radius: 6px; overflow: hidden; }
+.tl-frames .scene { border-radius: 0; height: 56px; font-size: 3px; }
+.wave { display: flex; align-items: center; gap: 2px; height: 34px; margin-top: 8px; }
+.wave i { flex: 1; background: var(--panel3); border-radius: 1px; }
+.tl-inner { position: relative; }
+.selbox { position: absolute; top: -4px; bottom: -4px; border: 2px solid var(--accent); border-radius: 8px; background: rgba(22,121,76,.12);
+  opacity: 0; transition: left .9s var(--ease), width .9s var(--ease), opacity .3s; pointer-events: none; }
+.selbox.in { opacity: 1; }
+.selbox .h { position: absolute; top: 50%; width: 10px; height: 34px; margin-top: -17px; background: var(--accent); border-radius: 4px; }
+.selbox .h.l { left: -6px } .selbox .h.r { right: -6px }
+.tl-times { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 8px; }
+.sugs { display: flex; flex-direction: column; gap: 10px; }
+.sug { padding: 14px; transition: border-color .25s, background .25s; }
+.sug.sel { border-color: var(--accent-border); background: rgba(22,121,76,.05); }
+.sug b { font-size: 14.5px; display: block; } .sug p { font-size: 13px; color: var(--text-dim); margin-top: 6px; line-height: 1.45; }
+.sug .meta { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.outs { display: flex; gap: 12px; align-items: flex-end; }
+.outs .scene { font-size: 4px; }
+
+/* ---------- slide: post ---------- */
+.post { display: grid; grid-template-columns: 400px 1fr; gap: 24px; margin-top: 20px; }
+.post .prev { height: 225px; font-size: 11px; }
+.capbox { min-height: 140px; font-size: 17px; line-height: 1.5; display: block; }
+.capbox .v { white-space: pre-wrap; }
+.checks { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.check { display: flex; gap: 10px; align-items: center; font-size: 14px; color: var(--text-dim); }
+.check .ico { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--panel2); flex: none; }
+.check.ok .ico { background: var(--accent-soft); color: var(--accent); }
+.tog { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; }
+.sw { width: 40px; height: 24px; border-radius: 12px; background: var(--panel3); position: relative; transition: background .25s; }
+.sw::after { content: ""; position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .25s var(--ease); box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+.sw.on { background: var(--accent); } .sw.on::after { transform: translateX(16px); }
+.promo { background: #fffaf3; border-color: rgba(235,104,52,.35); }
+
+/* ---------- slide: calendar ---------- */
+.calwrap { display: grid; grid-template-columns: 1fr 252px; gap: 18px; margin-top: 16px; }
+.cal { display: grid; grid-template-columns: 54px repeat(7, 1fr); gap: 6px; }
+.cal .hd { font-size: 12px; font-weight: 700; color: var(--muted); text-align: center; padding-bottom: 4px; }
+.cal .hd b { display: block; font-size: 18px; color: var(--text); font-family: "Funnel Display"; }
+.cal .hd.today b { color: var(--accent); }
+.cal .tm { font-size: 12px; color: var(--muted); padding-top: 10px; text-align: right; padding-right: 6px; }
+.slot { height: 140px; border-radius: 10px; border: 1px dashed var(--border-strong); position: relative; transition: background .3s, border-color .3s; }
+.slot.past .pc { opacity: .55; }
+.pc { position: absolute; inset: 4px; border-radius: 8px; padding: 6px; display: flex; flex-direction: column; gap: 4px; overflow: hidden; background: var(--panel);
+  border: 1px solid var(--border); border-top: 3px solid var(--cc, var(--border)); box-shadow: 0 1px 2px rgba(28,24,18,.05); }
+.pc .scene { height: 44px; border-radius: 5px; font-size: 3px; flex: none; }
+.pc b { font-size: 11.5px; line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.pc .meta { display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; color: var(--muted); margin-top: auto; }
+.pc .meta span { display: flex; align-items: center; gap: 4px; }
+.pc .meta i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+.pc.land { animation: land .9s var(--ease); }
+@keyframes land { 0% { box-shadow: 0 0 0 8px rgba(22,121,76,.25); } 100% { box-shadow: 0 0 0 0 rgba(22,121,76,0); } }
+.slot.consider { border-color: var(--danger); border-style: solid; background: var(--danger-soft); }
+.slot .nope { position: absolute; inset: 4px; border-radius: 8px; display: grid; place-items: center; text-align: center; font-size: 11px; font-weight: 700; color: var(--danger); padding: 6px; line-height: 1.3; }
+.why { position: absolute; width: 340px; padding: 16px; z-index: 6; box-shadow: var(--shadow-lift); background: var(--panel); border: 1px solid var(--border-strong); border-radius: 12px; }
+.why h4 { font-size: 14px; margin-bottom: 6px; }
+.why li { list-style: none; display: flex; gap: 8px; font-size: 13px; color: var(--text-dim); margin-top: 7px; line-height: 1.4; }
+.why li i { color: var(--accent); font-style: normal; font-weight: 800; }
+.why li.x i { color: var(--danger); }
+.qside { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.qitem { padding: 8px; border-radius: 10px; background: var(--bg-raised); border: 1px solid var(--border-strong); }
+.qitem .scene { height: 104px; font-size: 6px; }
+.qitem b { font-size: 13px; display: block; margin-top: 8px; line-height: 1.3; }
+.qitem small { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.mixbar { display: flex; height: 14px; border-radius: 4px; overflow: hidden; gap: 2px; background: var(--panel); }
+.mixbar i { display: block; height: 100%; transition: flex-grow .8s var(--ease); }
+.mixleg { display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; font-size: 12.5px; color: var(--text-dim); margin-top: 10px; }
+.mixleg span { display: flex; align-items: center; gap: 6px; }
+.mixleg span i { width: 8px; height: 8px; border-radius: 50%; display: block; }
+.mixleg b { font-weight: 700; color: var(--text); text-align: right; }
+.flyer { position: absolute; z-index: 40; transition: all 1.1s cubic-bezier(.6,.0,.2,1); }
+
+/* ---------- slide: threads (light) ---------- */
+.th { position: absolute; inset: 0; background: #fafafa; display: flex; justify-content: center; font-family: -apple-system, "Helvetica Neue", system-ui, sans-serif; color: #000; }
+.th-rail { position: absolute; left: 0; top: 0; bottom: 0; width: 76px; display: flex; flex-direction: column; align-items: center; padding-top: 22px; gap: 30px; color: #b8b8b8; }
+.th-col { width: 620px; margin-top: 16px; background: #fff; border: 1px solid #e5e5e5; border-radius: 26px 26px 0 0; padding: 26px 0 0; overflow: hidden; position: relative; box-shadow: 0 0 12px rgba(0,0,0,.04); }
+.th-prof { padding: 0 26px; display: flex; justify-content: space-between; align-items: center; }
+.th-prof h2 { font-size: 24px; font-weight: 700; }
+.th-prof .hd { font-size: 15px; color: #000; margin-top: 2px; }
+.th-bio { padding: 12px 26px 0; font-size: 15px; line-height: 1.4; }
+.th-meta { padding: 12px 26px 0; font-size: 15px; color: #999; }
+.th-av { width: 72px; height: 72px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; }
+.th-tabs { display: grid; grid-template-columns: repeat(3,1fr); margin-top: 18px; border-bottom: 1px solid #e5e5e5; }
+.th-tabs span { text-align: center; padding: 12px; font-size: 15px; font-weight: 600; color: #999; }
+.th-tabs span.on { color: #000; border-bottom: 1px solid #000; }
+.th-feed { position: relative; }
+.th-new { max-height: 0; overflow: hidden; opacity: 0; transition: max-height 1.1s var(--ease), opacity .6s var(--ease) .15s; }
+.th-new.shown { max-height: 780px; opacity: 1; }
+.tp { padding: 16px 22px; display: grid; grid-template-columns: 40px 1fr; gap: 12px; border-bottom: 1px solid #efefef; }
+.tp .a { width: 36px; height: 36px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; }
+.tp .who { font-size: 15px; font-weight: 600; } .tp .who span { color: #999; font-weight: 400; margin-left: 6px; }
+.tp .txt { font-size: 15px; line-height: 1.42; margin-top: 2px; }
+.tp .txt a { color: #0a58ca; text-decoration: none; }
+.tp .vid { margin-top: 10px; height: 280px; border-radius: 10px; font-size: 13px; border: 1px solid #e5e5e5; }
+.tp .acts { display: flex; gap: 22px; margin-top: 12px; color: #424242; font-size: 13.5px; }
+.tp .acts span { display: flex; align-items: center; gap: 6px; }
+.tp.small .vid { height: 120px; }
+.tp.fresh { background: rgba(22,121,76,.035); }
+.mirrors { position: absolute; right: 20px; top: 20px; display: flex; flex-direction: column; gap: 8px; width: 230px; }
+.mir { padding: 10px 12px; font-size: 13px; display: flex; gap: 10px; align-items: center; background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; font-family: "Funnel Sans"; box-shadow: var(--shadow-lift); }
+.mir .lg { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-weight: 800; font-size: 12px; flex: none; }
+.mir em { margin-left: auto; color: var(--accent); font-style: normal; font-weight: 700; }
+
+/* ---------- slide: learning ---------- */
+.cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+.pcard { padding: 16px; position: relative; overflow: hidden; }
+.pcard.win { border-color: rgba(42,120,214,.4); }
+.pcard.flop { border-color: rgba(217,83,74,.4); }
+.pcard .top { display: grid; grid-template-columns: 150px 1fr; gap: 14px; }
+.pcard .scene { height: 92px; font-size: 6px; }
+.pcard .tag { font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+.pcard.win .tag { color: var(--pos); } .pcard.flop .tag { color: var(--neg); }
+.pcard b.t { display: block; font-size: 14px; line-height: 1.3; margin: 4px 0 6px; }
+.pcard .nums { display: flex; align-items: baseline; gap: 10px; margin-top: 6px; }
+.pcard .nums strong { font-family: "Funnel Display"; font-size: 30px; font-weight: 700; }
+.pcard .nums span { font-size: 13px; font-weight: 700; padding: 2px 8px; border-radius: 6px; color: var(--muted); }
+.pcard.win .nums span.x { color: var(--pos); background: rgba(42,120,214,.1); }
+.pcard.flop .nums span.x { color: var(--neg); background: rgba(217,83,74,.1); }
+.taught { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-strong); }
+.taught .lbl { margin-bottom: 8px; }
+.taught .chips { display: flex; gap: 6px; flex-wrap: wrap; min-height: 26px; }
+.lg-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; margin-top: 16px; }
+.panel { padding: 16px 18px; }
+.panel h3 { font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
+.panel h3 small { font-weight: 500; color: var(--muted); font-size: 12px; }
+.ptag { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.trait { display: grid; grid-template-columns: 130px 1fr 80px; gap: 10px; align-items: center; margin-top: 11px; font-size: 13px; }
+.trait .nm { color: var(--text-dim); }
+.dv { position: relative; height: 18px; }
+.dv::before { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--border-strong); }
+.dv i { position: absolute; top: 2px; height: 14px; transition: width 1.1s var(--ease); }
+.dv i.p { left: calc(50% + 1px); background: var(--pos); border-radius: 0 4px 4px 0; }
+.dv i.n { right: calc(50% + 1px); background: var(--neg); border-radius: 4px 0 0 4px; }
+.dv .v { position: absolute; top: 0; font-size: 12px; color: var(--text); font-weight: 700; transition: left 1.1s var(--ease), right 1.1s var(--ease); white-space: nowrap; }
+.dv .v.bump { animation: bump .7s var(--ease); }
+@keyframes bump { 30% { transform: scale(1.25); } }
+.vst { font-size: 11px; font-weight: 700; text-align: right; }
+.vst.act { color: var(--accent); } .vst.prov { color: var(--warn); }
+.vst small { display: block; font-weight: 500; color: var(--muted); }
+.rerank { margin-top: 12px; font-size: 13px; color: var(--text-dim); display: flex; gap: 8px; align-items: center; padding: 9px 12px; border-radius: 10px; background: var(--accent-soft); border: 1px solid var(--accent-border); }
+.rerank svg { color: var(--accent); flex: none; }
+.log { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.le { display: grid; grid-template-columns: 26px 1fr; gap: 10px; font-size: 13px; line-height: 1.4; padding: 9px 10px; border-radius: 10px; background: var(--bg-raised); border: 1px solid var(--border); }
+.le .ico { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; font-size: 12px; font-weight: 800; }
+.le b { color: var(--text); font-weight: 600; } .le span { color: var(--text-dim); } .le small { display: block; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="stage" class="is-title">
+  <div id="title">
+    <div class="mark"><svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M5 19c0-8 5-13 14-14-1 9-6 14-14 14z"/><path d="M5 19l7-7"/></svg></div>
+    <h1>Threads Poster</h1>
+    <p>An AI agent that finds, cuts, captions and posts the footage<br>that moves the climate conversation, and gets better with every post.</p>
+    <div class="cats">
+      <span class="cat"><i style="background:var(--c-news)"></i>News &amp; politics</span>
+      <span class="cat"><i style="background:var(--c-nature)"></i>Nature &amp; wildlife</span>
+      <span class="cat"><i style="background:var(--c-culture)"></i>Archive &amp; pop culture</span>
+    </div>
+    <div class="by">Renewables.org · @climate_archives</div>
+  </div>
+
+  <div id="browser">
+    <div class="chrome">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <div class="navarrows">‹ ›</div>
+      <div class="urlbar"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span id="url"></span></div>
+    </div>
+    <div id="vp"><div id="content"></div>
+      <div id="cursor"><svg width="26" height="32" viewBox="0 0 26 32"><path d="M3 2 L3 25 L9 19.5 L13 29 L17 27.3 L13 18 L21 18 Z" fill="#000" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg></div>
+    </div>
+  </div>
+
+  <div id="copy"><div class="kicker" id="kicker"></div><div class="headline" id="headline"></div><div class="sub" id="sub"></div></div>
+  <div id="dots"></div>
+  <div id="hint">→ / space next · ← back · R replay · F fullscreen</div>
+</div>
+
+<script>
+/* =========================================================
+   Helpers: icons, footage scenes, categories, app shell
+   ========================================================= */
+const I = {
+  create: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5l4.5 2.5L10 14.5z" fill="currentColor"/></svg>',
+  lib: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>',
+  cal: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
+  bell: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21h4"/></svg>',
+  chart: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+  cog: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
+  check: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  leaf: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M5 19c0-8 5-13 14-14-1 9-6 14-14 14z"/><path d="M5 19l7-7"/></svg>',
+  heart: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20s-7-4.5-9-9a4.8 4.8 0 0 1 9-3 4.8 4.8 0 0 1 9 3c-2 4.5-9 9-9 9z"/></svg>',
+  bubble: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12a8 8 0 1 1-3.3-6.5A8 8 0 0 1 20 12z"/><path d="M20 12l1 6-5-2"/></svg>',
+  repost: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 11V9a3 3 0 0 1 3-3h12l-3-3M20 13v2a3 3 0 0 1-3 3H5l3 3"/></svg>',
+  send: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M21 3L10 14M21 3l-7 18-4-7-7-4z"/></svg>',
+  sparkle: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.2 6.6L21 11l-6.8 2.4L12 20l-2.2-6.6L3 11l6.8-2.4z"/></svg>',
+};
+const CK = I.check;  // inherits currentColor
+const leaf = n => I.leaf.replace('width="18" height="18"', `width="${n}" height="${n}"`);
+
+const CATS = {
+  news:    { label: 'News',    long: 'News & politics',       color: 'var(--c-news)' },
+  nature:  { label: 'Nature',  long: 'Nature & wildlife',     color: 'var(--c-nature)' },
+  culture: { label: 'Culture', long: 'Archive & pop culture', color: 'var(--c-culture)' },
+  promo:   { label: 'Promo',   long: 'Renewables.org promo',  color: 'var(--c-promo)' },
+};
+const cat = k => `<span class="cat"><i style="background:${CATS[k].color}"></i>${CATS[k].label}</span>`;
+
+function rail(active) {
+  const items = [['create', I.create], ['lib', I.lib], ['cal', I.cal], ['bell', I.bell], ['chart', I.chart]];
+  return `<nav class="rail"><div class="logo">${I.leaf}</div>${items.map(([k, s]) => `<div class="ic ${k === active ? 'on' : ''}">${s}</div>`).join('')}
+    <div class="sp"></div><div class="ic ${active === 'cog' ? 'on' : ''}">${I.cog}</div></nav>`;
+}
+const shell = (active, inner) => `<div class="app">${rail(active)}<main class="main">${inner}</main></div>`;
+
+const SVG = {
+  flood: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5f6872"/><stop offset="1" stop-color="#9aa1a6"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><path d="M0 40 Q20 30 40 38 T80 34 T120 37 T160 32 V60 H0z" fill="#3c4a3c"/>
+    <g fill="#33312d"><rect x="12" y="38" width="30" height="20"/><polygon points="9,40 27,27 45,40"/><rect x="100" y="36" width="36" height="22"/><polygon points="97,38 118,24 139,38"/></g>
+    <g fill="#d9d4c7"><rect x="18" y="43" width="6" height="6"/><rect x="108" y="42" width="7" height="6"/><rect x="122" y="42" width="7" height="6"/></g>
+    <rect y="51" width="160" height="39" fill="#5b5a4c" opacity=".97"/><g stroke="#8d8b78" stroke-width=".8" opacity=".7"><path d="M5 60h20M40 66h30M90 58h25M120 70h28M20 78h35M80 82h30"/></g>
+    <path d="M62 64 h34 l-5 7 h-24z" fill="#e8742a"/><g fill="#f2c94c"><circle cx="72" cy="61" r="2.2"/><circle cx="80" cy="60.5" r="2.2"/><circle cx="88" cy="61" r="2.2"/></g></svg>`,
+  fire: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a1208"/><stop offset="1" stop-color="#8a3510"/></linearGradient><filter id="bl"><feGaussianBlur stdDeviation="1.4"/></filter></defs>
+    <rect width="160" height="90" fill="url(#g)"/><g fill="#4a3028" opacity=".7"><ellipse cx="50" cy="20" rx="40" ry="14"/><ellipse cx="120" cy="16" rx="36" ry="12"/></g>
+    <g filter="url(#bl)"><path d="M20 62 L32 30 L40 50 L52 22 L62 52 L74 34 L84 60z" fill="#ff7a1a"/><path d="M90 62 L100 38 L108 54 L120 28 L130 56 L142 40 L150 62z" fill="#ff8f22"/>
+    <path d="M30 62 L40 42 L48 56 L56 38 L66 62z" fill="#ffc23a"/><path d="M104 62 L114 44 L122 58 L132 46 L140 62z" fill="#ffd25a"/></g>
+    <path d="M0 60 Q40 52 80 62 T160 58 V90 H0z" fill="#120806"/></svg>`,
+  storm: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#232b35"/><stop offset="1" stop-color="#4b5866"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><g stroke="#9fb0c0" stroke-width=".6" opacity=".55"><path d="M10 0l-8 30M30 5l-8 30M55 0l-8 30M80 8l-8 30M105 0l-8 30M130 4l-8 30M150 0l-8 30M20 40l-8 30M70 42l-8 30M120 40l-8 30"/></g>
+    <path d="M100 75 q4-30 2-46" stroke="#1a1f24" stroke-width="3" fill="none"/><g stroke="#1a1f24" stroke-width="2.2" fill="none"><path d="M102 30 q-20 2-30 12"/><path d="M102 30 q-18-6-30-2"/><path d="M102 30 q-14 10-18 24"/></g>
+    <rect y="72" width="160" height="18" fill="#1d2329"/></svg>`,
+  heat: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e9a54e"/><stop offset="1" stop-color="#c25a26"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><circle cx="118" cy="26" r="14" fill="#fff1c4" opacity=".85"/><g fill="#5a2e1a"><rect x="6" y="46" width="16" height="44"/><rect x="24" y="36" width="12" height="54"/><rect x="38" y="52" width="20" height="38"/><rect x="62" y="30" width="14" height="60"/><rect x="80" y="48" width="22" height="42"/><rect x="106" y="40" width="12" height="50"/><rect x="122" y="56" width="30" height="34"/></g></svg>`,
+  desk: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f2a52"/><stop offset="1" stop-color="#1f5a9e"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><g fill="#ffffff" opacity=".07"><rect x="0" y="12" width="160" height="4"/><rect x="0" y="22" width="160" height="2"/></g>
+    <rect x="96" y="14" width="50" height="30" rx="2" fill="#0a1a33" stroke="#4d7fc0" stroke-width=".8"/><circle cx="68" cy="34" r="9" fill="#c9a07a"/><path d="M50 72 q0-24 18-24 q18 0 18 24z" fill="#1a1a2a"/>
+    <rect x="20" y="64" width="120" height="26" fill="#0a1426"/></svg>`,
+  promo: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f3a35b"/><stop offset="1" stop-color="#e0662f"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><g fill="#1f3b5a"><path d="M40 70 L60 40 L120 40 L100 70z"/></g><g stroke="#8fb3d6" stroke-width="1"><path d="M55 47.5h58M51 55h58M47 62.5h58M75 40l-10 30M95 40l-10 30"/></g>
+    <rect x="76" y="70" width="4" height="14" fill="#1f3b5a"/><circle cx="128" cy="22" r="10" fill="#fff3c9"/></svg>`,
+  chart: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><rect width="160" height="90" fill="#123a6b"/><rect x="14" y="12" width="132" height="66" rx="3" fill="#0b2648"/>
+    <g fill="#5fa0e8"><rect x="26" y="52" width="10" height="20"/><rect x="42" y="46" width="10" height="26"/><rect x="58" y="40" width="10" height="32"/><rect x="74" y="34" width="10" height="38"/><rect x="90" y="30" width="10" height="42"/><rect x="106" y="24" width="10" height="48"/><rect x="122" y="20" width="10" height="52"/></g>
+    <rect x="14" y="80" width="132" height="6" fill="#fff" opacity=".85"/></svg>`,
+  smoke: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b9581f"/><stop offset="1" stop-color="#e2a05a"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><circle cx="40" cy="22" r="7" fill="#ffdcae" opacity=".6"/><g fill="#7a4428" opacity=".75"><rect x="70" y="20" width="8" height="70"/><rect x="82" y="34" width="14" height="56"/><rect x="100" y="28" width="10" height="62"/><rect x="114" y="44" width="20" height="46"/><rect x="40" y="46" width="22" height="44"/><rect x="138" y="38" width="16" height="52"/><rect x="10" y="54" width="24" height="36"/></g></svg>`,
+  glacier: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fbcd8"/><stop offset="1" stop-color="#d7e7f0"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><path d="M0 30 L30 26 L55 32 L80 22 L110 30 L135 20 L160 28 V62 H0z" fill="#f4f8fb"/>
+    <g stroke="#a9c7d8" stroke-width=".9"><path d="M18 29v33M44 30v32M70 26v36M96 27v35M124 22v40M148 27v35"/></g>
+    <path d="M0 62 H160 V90 H0z" fill="#2f5f7d"/><g fill="#e8f1f6"><path d="M28 70 l8-4 l10 3 l-4 4z"/><path d="M100 76 l6-3 l8 2 l-3 3z"/><path d="M64 66 l12-3 l9 3 l-6 3z"/></g></svg>`,
+  animal: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b9d3e3"/><stop offset="1" stop-color="#e6f0f5"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><rect y="50" width="160" height="40" fill="#3a6e8f"/><path d="M14 62 L58 54 L122 56 L146 64 L104 72 L28 70z" fill="#eef4f7"/>
+    <g fill="#e9e0cb"><ellipse cx="78" cy="50" rx="19" ry="9.5"/><circle cx="98" cy="45" r="6.5"/><circle cx="96" cy="39.5" r="1.8"/><rect x="63" y="52" width="6" height="9" rx="2.5"/><rect x="72" y="53" width="6" height="8" rx="2.5"/><rect x="84" y="53" width="6" height="8" rx="2.5"/><rect x="91" y="52" width="6" height="9" rx="2.5"/></g>
+    <circle cx="104" cy="46" r="1.3" fill="#222"/><circle cx="100" cy="43.5" r=".9" fill="#222"/></svg>`,
+  archive: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><radialGradient id="g" cx=".5" cy=".45" r=".75"><stop offset="0" stop-color="#d6c19c"/><stop offset="1" stop-color="#5c4a33"/></radialGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><g fill="#3d3022"><rect x="16" y="16" width="128" height="5" opacity=".3"/><circle cx="80" cy="36" r="8.5"/><path d="M63 72 q0-23 17-23 q17 0 17 23z"/><rect x="52" y="60" width="56" height="30"/></g>
+    <g stroke="#2a2016" stroke-width="1.3"><path d="M72 60 l-5-11M88 60 l5-11"/></g><g fill="#2a2016"><circle cx="67" cy="48" r="2"/><circle cx="93" cy="48" r="2"/></g>
+    <g fill="#fff" opacity=".2"><rect x="32" y="0" width=".7" height="90"/><rect x="121" y="0" width=".5" height="90"/></g></svg>`,
+  show: `<svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1d1747"/><stop offset="1" stop-color="#4a3388"/></linearGradient></defs>
+    <rect width="160" height="90" fill="url(#g)"/><g fill="#2b2366"><rect x="0" y="22" width="18" height="44"/><rect x="20" y="12" width="14" height="54"/><rect x="36" y="28" width="20" height="38"/><rect x="118" y="16" width="16" height="50"/><rect x="136" y="26" width="24" height="40"/></g>
+    <g fill="#f6d77a" opacity=".75"><rect x="4" y="28" width="2" height="2"/><rect x="24" y="20" width="2" height="2"/><rect x="28" y="34" width="2" height="2"/><rect x="42" y="36" width="2" height="2"/><rect x="122" y="24" width="2" height="2"/><rect x="142" y="34" width="2" height="2"/><rect x="128" y="40" width="2" height="2"/></g>
+    <circle cx="112" cy="40" r="8" fill="#d8a77f"/><path d="M95 72 q0-22 17-22 q17 0 17 22z" fill="#1c1c24"/><rect x="84" y="62" width="76" height="28" fill="#7a4a2c"/>
+    <circle cx="48" cy="44" r="7.5" fill="#b98b66"/><path d="M33 76 q0-21 15-21 q15 0 15 21z" fill="#a23b5c"/><rect x="20" y="70" width="56" height="20" rx="4" fill="#5a2f4a"/></svg>`,
+};
+let sceneN = 0;
+function scene(type, { l3 = '', tag = 'LIVE', bug = '', subs = '', cls = '', style = '' } = {}) {
+  const u = 'u' + (++sceneN);
+  const svg = SVG[type].replace(/id="(\w+)"/g, `id="$1${u}"`).replace(/url\(#(\w+)\)/g, `url(#$1${u})`);
+  return `<div class="scene ${cls}" style="${style}">${svg}${bug ? `<div class="bug">${bug}</div>` : ''}${l3 ? `<div class="l3"><b>${tag}</b><span>${l3}</span></div>` : ''}${subs ? `<div class="subs"><span>${subs}</span></div>` : ''}</div>`;
+}
+const FILM = ['desk', 'desk', 'flood', 'flood', 'storm', 'flood', 'flood', 'desk'];
+
+/* =========================================================
+   Animation engine: one run at a time, cancelled on slide change
+   ========================================================= */
+let scale = 1, runId = 0;
+const CANCEL = Symbol('cancel');
+const stage = document.getElementById('stage'), vp = document.getElementById('vp'), content = document.getElementById('content');
+const cursor = document.getElementById('cursor');
+let cx = 900, cy = 700;
+
+function fit() { scale = Math.min(innerWidth / 1920, innerHeight / 1080); stage.style.transform = `translate(-50%,-50%) scale(${scale})`; }
+addEventListener('resize', fit); fit();
+
+function mk(id) {
+  const live = () => { if (id !== runId) throw CANCEL; };
+  const $ = s => typeof s === 'string' ? content.querySelector(s) : s;
+  const wait = ms => new Promise(r => setTimeout(r, ms)).then(live);
+  const pos = (el, fx = .5, fy = .5) => {
+    const r = $(el).getBoundingClientRect(), v = vp.getBoundingClientRect();
+    return [(r.left - v.left + r.width * fx) / scale, (r.top - v.top + r.height * fy) / scale];
+  };
+  const a = {
+    $, wait,
+    show() { cursor.style.opacity = 1; },
+    async move(el, { fx = .5, fy = .5, dur } = {}) {
+      live(); a.show();
+      const [x, y] = pos(el, fx, fy);
+      const d = dur ?? Math.min(1100, Math.max(420, Math.hypot(x - cx, y - cy) * 1.1));
+      cursor.style.transitionDuration = d + 'ms';
+      cursor.style.transform = `translate(${x - 4}px, ${y - 3}px)`;
+      cx = x; cy = y;
+      await wait(d + 60);
+    },
+    async click(el, opts) {
+      if (el) await a.move(el, opts);
+      live();
+      cursor.classList.add('down');
+      const t = el && $(el); if (t) t.classList.add('pressed');
+      const r = document.createElement('div'); r.className = 'ripple'; r.style.left = cx + 'px'; r.style.top = cy + 'px'; vp.appendChild(r);
+      setTimeout(() => r.remove(), 600);
+      await wait(130);
+      cursor.classList.remove('down'); if (t) t.classList.remove('pressed');
+      await wait(160);
+    },
+    async type(el, text, speed = 32) {
+      const box = $(el), v = box.querySelector('.v') || box;
+      const ph = box.querySelector('.ph'); if (ph) ph.remove();
+      const caret = document.createElement('span'); caret.className = 'caret'; v.after(caret);
+      for (const ch of text) { v.textContent += ch; await wait(speed + (ch === ' ' ? 30 : 0) + Math.random() * 18); }
+      await wait(200); caret.remove();
+    },
+    async stream(el, text, speed = 14) {
+      const v = $(el); const caret = document.createElement('span'); caret.className = 'caret'; v.after(caret);
+      for (const w of text.split(/(\s+)/)) { v.textContent += w; await wait(speed * Math.max(1, w.length) * .55 + 20); }
+      caret.remove();
+    },
+    async count(el, to, dur = 1500, fmt = n => Math.round(n).toLocaleString(), from = 0) {
+      const e = $(el), t0 = performance.now();
+      while (true) { live(); const p = Math.min(1, (performance.now() - t0) / dur); e.textContent = fmt(from + (to - from) * (1 - Math.pow(1 - p, 3))); if (p >= 1) break; await wait(16); }
+    },
+    add(el, c) { $(el).classList.add(...c.split(' ')); }, rm(el, c) { $(el).classList.remove(...c.split(' ')); },
+    html(el, h) { $(el).innerHTML = h; },
+    async pop(parent, html, gap = 30) {
+      $(parent).insertAdjacentHTML('beforeend', html);
+      const el = $(parent).lastElementChild; await wait(gap); el.classList.add('in'); return el;
+    },
+  };
+  return a;
+}
+const kfmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(Math.round(n));
+
+/* =========================================================
+   Slides
+   ========================================================= */
+const slides = [
+  { title: true },
+
+  /* 1 ─ Onboarding */
+  {
+    kicker: 'Onboarding', head: 'Tell it who you are. Once.',
+    sub: 'Brand, positioning, the programming mix, and the rules the account never breaks shape every decision that follows.',
+    url: 'localhost:8321/setup/brand',
+    html: () => shell('cog', `
+      <div class="steps"><span class="on">1 · Brand</span><span>2 · Sources</span><span>3 · Accounts</span></div>
+      <h1 class="pt">Brand &amp; audience</h1>
+      <p class="lede">The agent reads this before it scores a video, picks a clip, writes a caption, or fills a slot.</p>
+      <div class="form">
+        <div class="f"><span>Organization</span><div class="in" id="f1"><span class="v"></span><span class="ph">Who's posting?</span></div></div>
+        <div class="f"><span>Topic</span><div class="in" id="f2"><span class="v"></span><span class="ph">What's the account about?</span></div></div>
+        <div class="f wide"><span>Positioning</span><div class="in tall" id="f3"><span class="v"></span><span class="ph">What makes this account different?</span></div></div>
+        <div class="f wide"><span>Programming mix</span><div class="mix">
+          ${['news', 'nature', 'culture'].map(k => `<div class="opt" id="m-${k}"><i style="background:${CATS[k].color}"></i><div>${CATS[k].long}<small>${{ news: 'Local & national news, hearings', nature: 'Documentary, wildlife, exploration', culture: 'Archival film, celebrities, late night' }[k]}</small></div><span class="tick">${CK}</span></div>`).join('')}
+        </div></div>
+        <div class="f wide"><span>Rules we never break</span><div class="in" id="f5"><span class="chips-list" style="display:contents"></span><span class="v"></span><span class="ph">Add a rule and press Enter</span></div></div>
+      </div>
+      <div class="actions"><button class="btn primary" id="next">Continue →</button></div>`),
+    async run(a) {
+      await a.wait(500);
+      const fields = [
+        ['#f1', 'Renewables.org', 40],
+        ['#f2', 'climate change', 40],
+        ['#f3', 'A living archive of climate on screen: breaking news, nature docs, archival film, and pop culture. Footage that moves the conversation forward.', 14],
+      ];
+      for (const [sel, txt, sp] of fields) {
+        await a.click(sel, { fx: .12 }); a.add(sel, 'focus');
+        await a.type(sel, txt, sp);
+        a.rm(sel, 'focus');
+      }
+      for (const k of ['news', 'nature', 'culture']) { await a.click('#m-' + k, { fx: .9 }); a.add('#m-' + k, 'on'); }
+      await a.click('#f5', { fx: .12 }); a.add('#f5', 'focus');
+      for (const rule of ['Never present climate denial as credible', 'Write as "we"', 'No engagement bait']) {
+        await a.type('#f5', rule, 24);
+        a.$('#f5 .chips-list').insertAdjacentHTML('beforeend', `<span class="chip g">${rule}</span>`);
+        a.$('#f5 .v').textContent = '';
+        await a.wait(220);
+      }
+      a.rm('#f5', 'focus');
+      await a.click('#next');
+    },
+  },
+
+  /* 2 ─ Sources */
+  {
+    kicker: 'Sources', head: 'It finds sources for the whole climate story.',
+    sub: 'Newsrooms, nature channels, film archives, late night. Every proposal is verified on YouTube and trial-run on recent uploads before it\'s added.',
+    url: 'localhost:8321/setup/sources',
+    html: () => shell('cog', `
+      <div class="steps"><span class="done">✓ Brand</span><span class="on">2 · Sources</span><span>3 · Accounts</span></div>
+      <h1 class="pt">Find sources</h1>
+      <p class="lede">YouTube channels that regularly carry footage about <b style="color:var(--text)">climate change</b>, across your programming mix.</p>
+      <div class="card scanbar"><div class="scan-l"><span class="pdot" id="pd"></span><span id="scan">Ready to search</span></div><button class="btn primary" id="go">Find channels</button></div>
+      <div class="prog"><i id="prog"></i></div>
+      <div class="list" id="list"></div>
+      <div class="foot"><span id="cnt"></span><button class="btn accent hidden" id="add">Monitor 64 channels</button></div>`),
+    async run(a) {
+      const rows = [
+        ['KHOU', '#c8102e', '#fff', 'KHOU 11', 'Local news · Houston', 'news', 23, 'flood, hurricane, heat', 94],
+        ['BBC', '#111', '#fff', 'BBC Earth', 'Nature documentary', 'nature', 31, 'ice, oceans, wildlife', 92],
+        ['BP', '#6b5638', '#fff', 'British Pathé', 'Newsreels, 1896–1978', 'culture', 14, 'smog, dust bowl, energy crisis', 88],
+        ['NG', '#f2c200', '#111', 'National Geographic', 'Nature & exploration', 'nature', 19, 'glaciers, wildfire, wildlife', 87],
+        ['CS', '#0b3d91', '#fff', 'C-SPAN', 'Hearings & archive', 'news', 12, 'testimony, policy', 79],
+        ['LN', '#4a3388', '#fff', 'Late-night clips', 'Talk shows & celebrity', 'culture', 7, 'interviews, satire', 71],
+      ];
+      await a.wait(500);
+      await a.click('#go');
+      a.html('#go', '<span class="spin"></span> Searching'); a.add('#pd', 'live');
+      a.$('#prog').style.width = '100%';
+      for (const m of ['Asking the agent for channels across news, nature & culture…', 'Resolving 238 handles on YouTube · 11 didn\'t exist, dropped', 'Trial-running the last 30 days of uploads against your keywords…']) { a.html('#scan', m); await a.wait(1000); }
+      a.html('#scan', 'Found <b style="color:var(--text)">64 channels</b> that regularly carry climate footage');
+      a.rm('#pd', 'live'); a.$('#go').className = 'btn ok'; a.html('#go', CK + ' Done');
+      for (const [cs, bg, fg, nm, sub, k, n, top, m] of rows) {
+        await a.pop('#list', `<div class="card row fade"><div class="av" style="background:${bg};color:${fg}">${cs}</div>
+          <div class="nm"><b>${nm}</b><small>${sub}</small></div>
+          <div>${cat(k)}</div>
+          <div class="stt">${n} climate pieces · 30 days<small>${top}</small></div>
+          <div><div class="meter"><i style="width:${m}%"></i></div><div class="mlabel">${m}% on-topic</div></div>
+          <div class="chk">${CK}</div></div>`);
+        await a.wait(240);
+      }
+      a.html('#cnt', '+ 58 more · News 26 · Nature 19 · Culture 19'); a.rm('#add', 'hidden');
+      await a.wait(500);
+      await a.click('#add');
+      a.$('#add').className = 'btn ok'; a.html('#add', CK + ' Monitoring 64 channels');
+    },
+  },
+
+  /* 3 ─ Accounts */
+  {
+    kicker: 'Accounts', head: 'One post. Five platforms.',
+    sub: 'Threads is home base. Every post can also go out as an Instagram Reel and to LinkedIn, Facebook, and X.',
+    url: 'localhost:8321/accounts',
+    html: () => {
+      const acc = [
+        ['th', 'Threads', '#000', '#fff', '@', 'Home base · posts, the promo comment, and insights', '@climate_archives', true],
+        ['ig', 'Instagram Reels', 'linear-gradient(135deg,#f9a03f,#d6249f,#5b4be0)', '#fff', 'IG', 'A 9:16 vertical cut of every clip', '@climate_archives'],
+        ['li', 'LinkedIn page', '#0a66c2', '#fff', 'in', 'Mirrors every post to the company page', 'Renewables.org'],
+        ['fb', 'Facebook Page', '#1877f2', '#fff', 'f', 'Video post + the promo as a comment', 'Renewables.org'],
+        ['x', 'X', '#000', '#fff', 'X', 'Same caption, no links, under 280 characters', '@renewablesorg'],
+      ];
+      return shell('cog', `
+        <div class="steps"><span class="done">✓ Brand</span><span class="done">✓ Sources</span><span class="on">3 · Accounts</span></div>
+        <h1 class="pt">Connect accounts</h1><p class="lede">Nothing posts without your approval. Connecting only grants permission.</p>
+        <div class="accgrid">${acc.map(([k, n, bg, fg, g, d, h, w]) => `
+          <div class="card acc ${w ? 'wide' : ''}" id="acc-${k}"><div class="lg" style="background:${bg};color:${fg}">${g}</div>
+          <div class="tx"><b>${n}</b><small>${d}</small><div class="stat"><span class="pdot" style="background:var(--accent)"></span>Connected · ${h}</div></div>
+          <button class="btn" id="b-${k}">Connect</button></div>`).join('')}</div>
+        <div class="foot"><span id="cnt">0 of 5 connected</span><button class="btn primary hidden" id="fin">Finish setup →</button></div>`);
+    },
+    async run(a) {
+      await a.wait(500);
+      let n = 0;
+      for (const k of ['th', 'ig', 'li', 'fb', 'x']) {
+        await a.click('#b-' + k);
+        a.html('#b-' + k, '<span class="spin"></span>');
+        await a.wait(k === 'th' ? 900 : 550);
+        a.add('#acc-' + k, 'on'); a.$('#b-' + k).className = 'btn ok'; a.html('#b-' + k, CK);
+        a.html('#cnt', `${++n} of 5 connected`);
+      }
+      a.rm('#fin', 'hidden'); await a.wait(300); await a.click('#fin');
+    },
+  },
+
+  /* 4 ─ Triage */
+  {
+    kicker: 'Video selection', head: 'It learns my taste from every call I make.',
+    sub: 'New footage arrives ranked by how likely I am to approve it. The model is trained on 1,285 of my own approve and reject decisions.',
+    url: 'localhost:8321/',
+    html: () => shell('create', `
+      <div style="display:flex;justify-content:space-between;align-items:flex-end"><div><h1 class="pt">Review queue</h1><p class="lede">41 new videos from 64 channels since this morning</p></div>
+      <span class="chip g">${I.sparkle} Sorted by approve likelihood</span></div>
+      <div class="tri">
+        <div class="q">
+          ${[['flood', 'Flash flood emergency: water rescues across north Houston', 'KHOU 11 · 4:12', 'news', 91, 'qc1'],
+            ['glacier', 'A glacier wall the height of a skyscraper collapses', 'BBC Earth · 6:40', 'nature', 88, 'qc2'],
+            ['archive', '1988: a NASA scientist tells Congress the planet is warming', 'C-SPAN · 12:05', 'culture', 84, 'qc3'],
+            ['show', 'Late-night monologue on the hottest summer on record', 'Late night · 3:18', 'culture', 63, 'qc4'],
+            ['desk', 'Sunny, mild weekend ahead. Your 7-day forecast', '9NEWS · 2:18', 'news', 6, 'qc5']]
+            .map(([s, t, m, k, p, id], i) => `<div class="card qc ${i === 0 ? 'sel' : ''}" id="${id}">${scene(s)}
+              <div><b>${t}</b><small>${cat(k)} ${m}</small><div class="prob" style="color:${p > 50 ? 'var(--accent)' : 'var(--muted)'}">${p}% likely to approve</div></div></div>`).join('')}
+        </div>
+        <div class="card detail" id="det">
+          ${scene('flood', { cls: 'hero', l3: 'Flash flood emergency · north Houston', tag: 'Breaking', bug: 'KHOU 11' })}
+          <div><div class="film-lbl"><span>Storyboard</span><span>4:12</span></div><div class="film" style="margin-top:6px">${FILM.map(s => scene(s)).join('')}</div></div>
+          <div class="tr">"…we've got crews pulling people off rooftops in Aldine right now. That's eleven inches in six hours, and the bayous just can't hold it. This is the <mark>flooding</mark> event we've been warning about…"</div>
+          <div class="dbar"><button class="btn accent" id="ap">Approve</button><button class="btn" id="rj">Reject</button><span style="flex:1"></span>${cat('news')}<span class="chip g">Strong opening: rescue in progress</span></div>
+        </div>
+      </div>`),
+    async run(a) {
+      await a.wait(600);
+      await a.move('#det .film', { fx: .1 }); await a.move('#det .film', { fx: .85, dur: 900 }); await a.wait(200);
+      await a.click('#ap');
+      a.$('#ap').className = 'btn ok'; a.html('#ap', CK + ' Approved');
+      await a.pop('#det', `<div class="toast fade" id="t1"><span class="spin" style="color:var(--accent)"></span><div>Downloading &amp; transcribing<small>KHOU 11 · Flash flood emergency</small></div></div>`);
+      a.add('#qc1', 'gone');
+      await a.wait(900);
+      await a.click('#qc5', { fx: .3 });
+      a.rm('#qc1', 'sel'); a.add('#qc5', 'sel');
+      a.$('#qc5 .prob').innerHTML = '<span style="color:var(--danger)">Rejected · routine forecast</span>';
+      a.add('#qc5', 'gone');
+      await a.wait(400);
+      a.html('#t1', `<span style="color:var(--accent)">${CK}</span><div>Ready to cut<small>Transcript + chapters ready · model updated with 2 new calls</small></div>`);
+    },
+  },
+
+  /* 5 ─ Clipping */
+  {
+    kicker: 'Clipping', head: 'It suggests the cut. I make the call.',
+    sub: 'Picks open on action, not the anchor desk. It also learns from how far my final cut drifts from its suggestion.',
+    url: 'localhost:8321/cut/khou-flash-flood',
+    html: () => {
+      let s = 7, w = ''; const r = () => (s = (s * 16807) % 2147483647) / 2147483647;
+      for (let i = 0; i < 110; i++) w += `<i style="height:${(18 + r() * 82).toFixed(0)}%"></i>`;
+      return shell('create', `
+        <div style="display:flex;justify-content:space-between;align-items:flex-end"><div><h1 class="pt">Flash flood emergency</h1><p class="lede">KHOU 11 · Houston · 4:12</p></div>
+        <div style="display:flex;gap:8px"><span class="chip">16:9</span><span class="chip">9:16</span></div></div>
+        <div class="cut">
+          <div>
+            ${scene('flood', { cls: 'player', l3: 'Water rescues · Aldine', tag: 'Live', bug: 'KHOU 11' })}
+            <div class="card tl"><div class="tl-inner"><div class="tl-frames">${FILM.map(f => scene(f)).join('')}</div>
+              <div class="selbox" id="sb" style="left:25%;width:50%"><div class="h l"></div><div class="h r"></div></div></div>
+              <div class="wave">${w}</div>
+              <div class="tl-times"><span>0:00</span><span>1:03</span><span>2:06</span><span>3:09</span><span>4:12</span></div></div>
+          </div>
+          <div class="sugs">
+            <div class="lbl">${I.sparkle} Suggested clips</div>
+            <div class="card sug" id="s1"><b>Rooftop rescue in Aldine</b><p>Opens on the boat reaching the roof. Skips the anchor toss and joins two field segments.</p>
+              <div class="meta"><span class="chip g">0:41</span><span class="chip">2 segments</span><span class="chip">Strong opening</span></div></div>
+            <div class="card sug" id="s2"><b>"Eleven inches in six hours"</b><p>Meteorologist explains the rainfall totals over drone shots of the bayou.</p>
+              <div class="meta"><span class="chip">0:28</span><span class="chip">1 segment</span></div></div>
+            <div style="flex:1"></div>
+            <button class="btn primary" id="cutb" style="justify-content:center;height:44px">Cut clip</button>
+            <div id="outs" class="hidden"><div class="lbl" style="margin:8px 0">Exports</div><div class="outs">
+              ${scene('flood', { style: 'width:150px;height:84px', subs: 'off rooftops' })}${scene('flood', { style: 'width:50px;height:88px' })}
+              <div style="font-size:13px;color:var(--text-dim)">Burned-in captions<br>+ branded outro</div></div></div>
+          </div>
+        </div>`);
+    },
+    async run(a) {
+      await a.wait(500);
+      await a.click('#s1');
+      a.add('#s1', 'sel'); a.add('#sb', 'in');
+      await a.wait(900);
+      await a.move('#sb .h.r');
+      cursor.classList.add('down');
+      a.$('#sb').style.transition = 'none';
+      const W = a.$('.tl-inner').getBoundingClientRect().width / scale;
+      for (let p = 50; p >= 43; p -= .5) { a.$('#sb').style.width = p + '%'; cx -= W * .005; cursor.style.transitionDuration = '0ms'; cursor.style.transform = `translate(${cx - 4}px,${cy - 3}px)`; await a.wait(40); }
+      cursor.classList.remove('down');
+      await a.wait(400);
+      await a.click('#cutb');
+      a.html('#cutb', '<span class="spin"></span> Rendering 16:9 + 9:16');
+      await a.wait(1600);
+      a.$('#cutb').className = 'btn ok'; a.$('#cutb').style.justifyContent = 'center'; a.html('#cutb', CK + ' Clip ready · 0:36');
+      a.rm('#outs', 'hidden');
+    },
+  },
+
+  /* 6 ─ Caption & post */
+  {
+    kicker: 'Captioning', head: 'Captions in my voice, checked against the footage.',
+    sub: 'Drafts learn from every edit I make, and a second model checks the caption matches what\'s on screen. The Renewables.org promo rides along as the first comment.',
+    url: 'localhost:8321/post/khou-flash-flood',
+    html: () => shell('create', `
+      <h1 class="pt">Post</h1><p class="lede">Rooftop rescue in Aldine · 0:36 ${cat('news')}</p>
+      <div class="post">
+        <div style="display:flex;flex-direction:column;gap:14px">
+          ${scene('flood', { cls: 'prev', subs: 'we\'ve got crews pulling people off rooftops', bug: 'KHOU 11' })}
+          <div class="card tog"><span>Burned-in subtitles</span><div class="sw on"></div></div>
+          <div class="card tog"><span>Instagram Reel (9:16)</span><div class="sw on"></div></div>
+          <div class="card tog"><span>Mirror to LinkedIn · Facebook · X</span><div class="sw on"></div></div>
+        </div>
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center"><span class="lbl">Caption</span><button class="btn ghost" id="draft">${I.sparkle} Draft in my voice</button></div>
+          <div class="in capbox" id="cap" style="margin-top:8px"><span class="v"></span></div>
+          <div class="checks">
+            <div class="check" id="c1"><span class="ico">·</span><span>Voice: learned from 212 captions I wrote or rewrote</span></div>
+            <div class="check" id="c2"><span class="ico">·</span><span>Gut check: caption matches the footage</span></div>
+            <div class="check" id="c3"><span class="ico">·</span><span>Brand rules: no engagement bait, no closing question</span></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px"><span class="lbl">First comment · promo</span><span class="cat"><i style="background:var(--c-promo)"></i>Posts the moment the clip goes live</span></div>
+          <div class="in promo" id="fr" style="margin-top:8px;font-size:15px">Take climate action 👉 Renewables.org — fund solar, create 5.5x the carbon impact, get repaid</div>
+          <div class="actions"><button class="btn">Post now</button><button class="btn primary" id="q">Add to queue</button></div>
+        </div>
+      </div>`),
+    async run(a) {
+      await a.wait(500);
+      await a.click('#draft');
+      a.html('#draft', '<span class="spin"></span> Drafting');
+      await a.wait(700);
+      a.html('#draft', `${I.sparkle} Redraft`);
+      await a.stream('#cap .v', 'Eleven inches of rain in six hours. Crews in Aldine spent the morning pulling families off their roofs.\n\nHouston\'s drainage was designed for storms that used to come once a century. They now come every few years.', 22);
+      for (const c of ['#c1', '#c2', '#c3']) { a.add(c, 'ok'); a.html(c + ' .ico', CK); await a.wait(320); }
+      await a.move('#fr', { fx: .5 }); await a.wait(600);
+      await a.click('#q');
+      a.$('#q').className = 'btn ok'; a.html('#q', CK + ' Queued');
+    },
+  },
+
+  /* 7 ─ Scheduling */
+  {
+    kicker: 'Scheduling', head: 'A varied feed, not a news ticker.',
+    sub: 'Every slot is checked against the posts around it, so news, nature, archive and pop culture stay in balance, sources stay spaced, and timely clips air before they go stale.',
+    url: 'localhost:8321/calendar',
+    html: () => {
+      const days = [['Mon', 9], ['Tue', 10], ['Wed', 11], ['Thu', 12], ['Fri', 13], ['Sat', 14], ['Sun', 15]];
+      const times = ['10:00', '13:00', '19:00'];
+      let grid = '<div></div>' + days.map(([d, n], i) => `<div class="hd ${i === 2 ? 'today' : ''}">${d}<b>${n}</b></div>`).join('');
+      times.forEach((t, r) => {
+        grid += `<div class="tm">${t}</div>`;
+        days.forEach((_, c) => {
+          const f = CAL[c + '-' + r];
+          grid += `<div class="slot ${c < 2 ? 'past' : ''}" id="sl-${c}-${r}">${f ? calCard(...f) : ''}</div>`;
+        });
+      });
+      return shell('cal', `
+        <div style="display:flex;justify-content:space-between;align-items:flex-end"><div><h1 class="pt">November 9 – 15</h1><p class="lede">3 windows a day · Eastern · new clips paced at 1.5/day, reruns fill the rest</p></div>
+        <div style="display:flex;gap:8px">${['news', 'nature', 'culture', 'promo'].map(cat).join('')}</div></div>
+        <div class="calwrap"><div class="cal" id="cal">${grid}</div>
+          <div class="card qside"><div class="lbl">Queue · 1</div>
+            <div class="qitem" id="qi">${scene('flood')}<b>Rooftop rescue in Aldine</b><small>${cat('news')} stale after Sat</small></div>
+            <button class="btn primary" id="place" style="justify-content:center">Auto-place</button>
+            <div style="flex:1"></div>
+            <div class="lbl">This week's mix</div>
+            <div id="mix"></div></div></div>`);
+    },
+    async run(a) {
+      renderMix(a.$('#mix'), false);
+      await a.wait(600);
+      await a.click('#place');
+      a.html('#place', '<span class="spin"></span> Checking slots');
+      // Open slots it considered and turned down
+      for (const [k, why] of [['4-2', 'News right after<br>a news clip'], ['6-0', 'Too late: stale<br>after Saturday']]) {
+        const s = a.$('#sl-' + k);
+        await a.move(s, { dur: 600 });
+        s.classList.add('consider'); s.insertAdjacentHTML('beforeend', `<div class="nope">✗ ${why}</div>`);
+        await a.wait(800);
+      }
+      const target = a.$('#sl-2-1'), src = a.$('#qi');
+      const v = vp.getBoundingClientRect(), r1 = src.getBoundingClientRect(), r2 = target.getBoundingClientRect();
+      const fl = src.cloneNode(true); fl.classList.add('flyer'); fl.removeAttribute('id');
+      Object.assign(fl.style, { left: (r1.left - v.left) / scale + 'px', top: (r1.top - v.top) / scale + 'px', width: r1.width / scale + 'px', margin: 0 });
+      vp.appendChild(fl); src.style.opacity = .25;
+      await a.wait(40);
+      Object.assign(fl.style, { left: (r2.left - v.left) / scale + 4 + 'px', top: (r2.top - v.top) / scale + 4 + 'px', width: r2.width / scale - 8 + 'px', opacity: 0, transform: 'scale(.98)' });
+      await a.wait(1000); fl.remove();
+      target.innerHTML = calCard('news', 'flood', 'Rooftop rescue in Aldine', '', '').replace('class="pc"', 'class="pc land"');
+      renderMix(a.$('#mix'), true);
+      a.$('#place').className = 'btn ok'; a.$('#place').style.justifyContent = 'center'; a.html('#place', CK + ' Wed 1:00 PM');
+      await a.wait(300);
+      await a.move(target, { fx: .6, fy: .4 });
+      const tr = target.getBoundingClientRect();
+      vp.insertAdjacentHTML('beforeend', `<div class="why fade" id="why" style="left:${(tr.right - v.left) / scale + 10}px;top:${(tr.top - v.top) / scale - 30}px">
+        <h4>Why Wed 1:00 PM</h4><ul>
+        <li><i>✓</i>Keeps the mix varied: archive film before it, a promo after</li>
+        <li><i>✓</i>Different footage type from the last 3 posts</li>
+        <li><i>✓</i>Timely: airs 3 days before it goes stale</li>
+        <li><i>✓</i>Nothing else from KHOU 11 within 4 days</li>
+        <li class="x"><i>✗</i>Passed on Fri 7 PM (news on news) and Sunday (too late)</li></ul></div>`);
+      await a.wait(30); document.getElementById('why').classList.add('in');
+    },
+  },
+
+  /* 8 ─ Live on Threads */
+  {
+    kicker: 'Publishing', head: 'Live on Threads, and everywhere else.',
+    sub: 'At 1:00 PM it publishes, drops the Renewables.org promo as the first comment, mirrors to every connected platform, and starts measuring.',
+    url: 'threads.com/@climate_archives',
+    html: () => `<div class="th">
+      <div class="th-rail"><div style="color:#000;font-weight:800;font-size:26px">@</div>${I.create}${I.heart}${I.bubble}</div>
+      <div class="th-col">
+        <div class="th-prof"><div><h2>Climate Archives</h2><div class="hd">climate_archives</div></div><div class="th-av">${leaf(34)}</div></div>
+        <div class="th-bio">Climate on screen: news, nature, archives and pop culture. By Renewables.org.</div>
+        <div class="th-meta"><span id="fol">18,402</span> followers · renewables.org</div>
+        <div class="th-tabs"><span class="on">Threads</span><span>Replies</span><span>Media</span></div>
+        <div class="th-feed" id="feed"><div class="th-new" id="new">
+          <div class="tp fresh"><div class="a">${I.leaf}</div><div>
+            <div class="who">climate_archives<span>Just now</span></div>
+            <div class="txt">Eleven inches of rain in six hours. Crews in Aldine spent the morning pulling families off their roofs.<br><br>Houston's drainage was designed for storms that used to come once a century. They now come every few years.</div>
+            ${scene('flood', { cls: 'vid', subs: 'we\'ve got crews pulling people off rooftops' })}
+            <div class="acts"><span>${I.heart}<b id="lk">0</b></span><span>${I.bubble}<b id="cm">0</b></span><span>${I.repost}<b id="rp">0</b></span><span>${I.send}<b id="sh">0</b></span></div>
+            <div style="font-size:13px;color:#999;margin-top:8px"><b id="vw" style="font-weight:600">0</b> views</div>
+          </div></div>
+          <div class="tp"><div class="a" style="width:28px;height:28px;margin-left:4px">${leaf(14)}</div><div>
+            <div class="who">climate_archives<span>Just now</span></div><div class="txt">Take climate action 👉 <a>Renewables.org</a> — fund solar, create 5.5x the carbon impact, get repaid</div></div></div></div>
+          <div class="tp small"><div class="a">${I.leaf}</div><div>
+            <div class="who">climate_archives<span>3h</span></div>
+            <div class="txt">Meltwater rivers carving through Greenland's ice sheet, filmed from a research plane.</div>
+            ${scene('glacier', { cls: 'vid' })}</div></div>
+        </div>
+      </div>
+      <div class="mirrors" id="mir"></div></div>`,
+    async run(a) {
+      await a.wait(700);
+      a.add('#new', 'shown');
+      await a.wait(1100);
+      const ms = [['linear-gradient(135deg,#f9a03f,#d6249f,#5b4be0)', 'IG', 'Instagram Reel'], ['#0a66c2', 'in', 'LinkedIn'], ['#1877f2', 'f', 'Facebook'], ['#000', 'X', 'X']];
+      const counts = Promise.all([
+        a.count('#vw', 48213, 5200, kfmt),
+        a.count('#lk', 1874, 5200), a.count('#cm', 96, 5200), a.count('#rp', 312, 5200), a.count('#sh', 141, 5200),
+        a.count('#fol', 18611, 5200, n => Math.round(n).toLocaleString(), 18402),
+      ]);
+      for (const [bg, g, n] of ms) {
+        await a.pop('#mir', `<div class="mir fade"><div class="lg" style="background:${bg};color:#fff">${g}</div>${n}<em>Posted</em></div>`);
+        await a.wait(600);
+      }
+      await counts;
+    },
+  },
+
+  /* 9 ─ Learning from performance + self-healing */
+  {
+    kicker: 'Self-improving', head: 'Every post teaches it something.',
+    sub: 'Breakouts and flops both feed back into what it ranks, cuts and schedules next. Statistics decide when the evidence is strong enough; agents handle the fixes.',
+    url: 'localhost:8321/analytics/learning',
+    html: () => shell('chart', `
+      <div style="display:flex;justify-content:space-between;align-items:flex-end"><div><h1 class="pt">Learning</h1><p class="lede">Each post is measured at 48 hours against this account's typical post</p></div>
+      <span class="chip g">${I.sparkle} 412 posts measured</span></div>
+      <div class="cmp">
+        <div class="card pcard win"><div class="top">${scene('flood', { subs: 'off rooftops' })}
+          <div><div class="tag">▲ Breakout</div><b class="t">Rooftop rescue in Aldine</b>${cat('news')}
+          <div class="nums"><strong id="w-v">0</strong><span id="w-x">views</span></div></div></div>
+          <div class="taught"><div class="lbl">What it learned</div><div class="chips" id="w-l"></div></div></div>
+        <div class="card pcard flop"><div class="top">${scene('chart')}
+          <div><div class="tag">▼ Underperformed</div><b class="t">New emissions report, explained</b>${cat('news')}
+          <div class="nums"><strong id="f-v">0</strong><span id="f-x">views</span></div></div></div>
+          <div class="taught"><div class="lbl">What it learned</div><div class="chips" id="f-l"></div></div></div>
+      </div>
+      <div class="lg-grid">
+        <div class="card panel"><div class="ptag">Statistical · evidence-gated</div>
+          <h3>Views vs. typical post, by footage type<small>recent posts weigh more</small></h3>
+          ${TRAITS.map(([n, b, , sc, sl, cnt], i) => `<div class="trait" title="${n}: ${signed(b)} vs. typical, ${cnt} posts"><span class="nm">${n}</span><div class="dv" id="dv${i}"><i class="${b >= 0 ? 'p' : 'n'}" style="width:${Math.abs(b) * PX}px"></i>
+            <span class="v" style="${barLabelPos(b)}">${signed(b)}</span></div><div class="vst ${sc}">${sl}<small id="n${i}">${cnt} posts</small></div></div>`).join('')}
+          <div class="rerank fade" id="rr">${I.sparkle}<span>Queue re-ranked: <b>3 rescue clips moved up</b>, 2 desk segments moved down</span></div>
+        </div>
+        <div class="card panel"><div class="ptag">Agentic · self-healing</div><h3>Activity<small>last 7 days</small></h3>
+          <div class="log" id="log"></div></div>
+      </div>`),
+    async run(a) {
+      await a.wait(500);
+      await Promise.all([a.count('#w-v', 48213, 1800, kfmt), a.count('#f-v', 2140, 1800, kfmt)]);
+      a.html('#w-x', '3.1× typical'); a.add('#w-x', 'x');
+      a.html('#f-x', '0.3× typical'); a.add('#f-x', 'x');
+      await a.wait(400);
+      const chip = (t, c, bg) => `<span class="chip" style="color:${c};border-color:${c};background:${bg}">${t}</span>`;
+      for (const t of ['▲ Rescue in progress', '▲ Dramatic weather', '▲ Opens on action']) { a.$('#w-l').insertAdjacentHTML('beforeend', chip(t, 'var(--pos)', 'rgba(42,120,214,.08)')); await a.wait(260); }
+      for (const t of ['▼ Anchor at desk', '▼ Chart / data screen', '▼ Text-heavy graphics']) { a.$('#f-l').insertAdjacentHTML('beforeend', chip(t, 'var(--neg)', 'rgba(217,83,74,.08)')); await a.wait(260); }
+      await a.wait(400);
+      // Both posts feed the verdicts: bars move, evidence counts tick up
+      TRAITS.forEach(([, , after, , , cnt], i) => {
+        const dv = a.$('#dv' + i), bar = dv.querySelector('i'), lab = dv.querySelector('.v');
+        bar.style.width = Math.abs(after) * PX + 'px';
+        lab.setAttribute('style', barLabelPos(after)); lab.textContent = signed(after);
+        lab.classList.add('bump');
+        a.html('#n' + i, (cnt + 1) + ' posts');
+      });
+      await a.wait(1200);
+      a.add('#rr', 'in');
+      await a.wait(500);
+      const ev = [
+        ['var(--warn-soft)', 'var(--warn)', '!', 'Channel retired', 'A Midwest station went silent: no on-topic uploads in 60 days', 'Agent proposed 4 stand-ins → 1 handle didn\'t exist → trial-ran the rest → added the best on probation'],
+        ['var(--accent-soft)', 'var(--accent)', '✓', 'Caption redrafted', 'A rerun caption said "wildfire" over flood footage', 'Gut check flagged it → redrafted → passed'],
+        ['rgba(42,120,214,.1)', 'var(--pos)', '★', 'Winner back in rotation', '"Smoke over Manhattan" still pulls 2× typical', 'Re-judged as evergreen → I confirmed → rerun scheduled'],
+        ['var(--danger-soft)', 'var(--danger)', '‖', 'Mirror paused', 'Facebook flagged a copyright match on one upload', 'Paused that mirror only and told me. Threads unaffected.'],
+      ];
+      for (const [bg, fg, g, t, d, s] of ev) {
+        await a.pop('#log', `<div class="le fade"><div class="ico" style="background:${bg};color:${fg}">${g}</div><div><b>${t}</b> · <span>${d}</span><small>${s}</small></div></div>`);
+        await a.wait(800);
+      }
+    },
+  },
+];
+
+/* Scheduling slide data: [category, scene, title, views, rerun] */
+const CAL = {
+  '0-0': ['news', 'fire', 'Crews hold the line at Hwy 50', '41K', ''],
+  '0-1': ['nature', 'glacier', 'Greenland\'s ice sheet from above', '22K', 'Rerun'],
+  '0-2': ['culture', 'show', 'Late night on the hottest July', '35K', ''],
+  '1-0': ['nature', 'animal', 'Polar bears stranded on shore', '58K', ''],
+  '1-1': ['culture', 'archive', '1988: Congress hears the warning', '19K', 'Rerun'],
+  '1-2': ['news', 'heat', 'Texas grid nears its limit', '33K', ''],
+  '2-0': ['culture', 'archive', 'Newsreel: 1950s smog in Los Angeles', '', ''],
+  '2-2': ['promo', 'promo', 'Renewables.org: how it works', '', ''],
+  '3-0': ['nature', 'glacier', 'Ice shelf calving, Antarctica', '', ''],
+  '3-1': ['news', 'storm', 'Hail shreds Denver suburbs', '', ''],
+  '3-2': ['culture', 'show', 'Celebrity climate PSA, 2007', '', 'Rerun'],
+  '4-0': ['nature', 'animal', 'Walruses crowd an Alaska beach', '', ''],
+  '4-1': ['news', 'smoke', 'Air quality alerts, Chicago', '', ''],
+  '5-0': ['culture', 'archive', 'Newsreel: the 1930s Dust Bowl', '', 'Rerun'],
+  '5-1': ['nature', 'glacier', 'A glacier, 1920 vs. today', '', ''],
+  '5-2': ['news', 'fire', 'Firefighters on 24-hour shifts', '', ''],
+  '6-1': ['culture', 'show', 'Satire: the climate summit', '', 'Rerun'],
+};
+function calCard(k, sc, title, views, rerun) {
+  return `<div class="pc" style="--cc:${CATS[k].color}">${scene(sc)}<b>${title}</b>
+    <div class="meta"><span><i style="background:${CATS[k].color}"></i>${CATS[k].label}${rerun ? ' · ' + rerun : ''}</span>${views ? `<span>${views}</span>` : ''}</div></div>`;
+}
+function renderMix(el, placed) {
+  const n = { news: 0, nature: 0, culture: 0, promo: 0 };
+  Object.values(CAL).forEach(([k]) => n[k]++);
+  if (placed) n.news++;
+  const tot = Object.values(n).reduce((s, x) => s + x, 0);
+  el.innerHTML = `<div class="mixbar">${Object.keys(n).map(k => `<i style="flex-grow:${n[k]};background:${CATS[k].color}" title="${CATS[k].long}: ${n[k]} posts"></i>`).join('')}</div>
+    <div class="mixleg">${Object.keys(n).map(k => `<span><i style="background:${CATS[k].color}"></i>${CATS[k].long}</span><b>${n[k]} · ${Math.round(n[k] / tot * 100)}%</b>`).join('')}</div>`;
+}
+
+/* Learning slide data: [name, before, after, statusClass, statusLabel, postsBefore] */
+const PX = 2.6;
+const TRAITS = [
+  ['Rescue in progress', 31, 38, 'act', 'Active', 63],
+  ['Dramatic weather', 18, 22, 'act', 'Active', 40],
+  ['Opens on action', 9, 12, 'prov', 'Provisional', 16],
+  ['Chart / data screen', -11, -17, 'act', 'Active', 28],
+  ['Anchor at desk', -19, -24, 'act', 'Active', 87],
+];
+const signed = v => (v > 0 ? '+' : v < 0 ? '−' : '±') + Math.abs(v) + '%';
+const barLabelPos = v => v >= 0 ? `left:calc(50% + ${Math.abs(v) * PX + 6}px)` : `right:calc(50% + ${Math.abs(v) * PX + 6}px)`;
+
+/* =========================================================
+   Navigation
+   ========================================================= */
+let cur = -1;
+const $id = id => document.getElementById(id);
+const dots = $id('dots');
+dots.innerHTML = slides.map((_, i) => `<i data-i="${i}"></i>`).join('');
+dots.addEventListener('click', e => { if (e.target.dataset.i) go(+e.target.dataset.i); });
+
+async function go(i, replay = false) {
+  i = Math.max(0, Math.min(slides.length - 1, i));
+  if (i === cur && !replay) return;
+  const s = slides[i], id = ++runId, wasTitle = cur <= 0;
+  cur = i;
+  [...dots.children].forEach((d, k) => { d.className = k === i ? 'on' : k < i ? 'done' : ''; });
+  history.replaceState(null, '', '#' + (i + 1));
+  cursor.style.opacity = 0;
+  stage.classList.toggle('is-title', !!s.title);
+  if (s.title) return;
+
+  $id('copy').classList.add('out'); content.classList.add('out');
+  await new Promise(r => setTimeout(r, wasTitle ? 150 : 350));
+  if (id !== runId) return;
+  $id('kicker').textContent = String(i).padStart(2, '0') + ' · ' + s.kicker;
+  $id('headline').textContent = s.head; $id('sub').textContent = s.sub; $id('url').textContent = s.url;
+  vp.querySelectorAll('.flyer,.why,.ripple').forEach(e => e.remove());
+  content.innerHTML = s.html();
+  cx = 900; cy = 760; cursor.style.transitionDuration = '0ms'; cursor.style.transform = `translate(${cx}px,${cy}px)`;
+  $id('copy').classList.remove('out'); content.classList.remove('out');
+  try { await s.run(mk(id)); } catch (e) { if (e !== CANCEL) console.error(e); }
+  if (id === runId) setTimeout(() => { if (id === runId) cursor.style.opacity = 0; }, 1400);
+}
+
+addEventListener('keydown', e => {
+  const k = e.key;
+  if (['ArrowRight', ' ', 'PageDown', 'Enter'].includes(k)) { e.preventDefault(); go(cur + 1); }
+  else if (['ArrowLeft', 'PageUp', 'Backspace'].includes(k)) { e.preventDefault(); go(cur - 1); }
+  else if (k === 'r' || k === 'R') go(cur, true);
+  else if (k === 'f' || k === 'F') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+  else if (k === 'Home') go(0); else if (k === 'End') go(slides.length - 1);
+  else if (/^[0-9]$/.test(k)) go(+k);
+});
+stage.addEventListener('click', e => { if (!e.target.closest('#dots')) go(cur + 1); });
+setTimeout(() => $id('hint').style.opacity = 0, 5000);
+go(Math.max(0, (parseInt(location.hash.slice(1)) || 1) - 1));
+</script>
+</body>
+</html>
