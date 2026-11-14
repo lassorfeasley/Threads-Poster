@@ -32,7 +32,8 @@ from .models import (AppToken, Candidate, Cut, FacebookPost, InstagramPost, Link
                      ThreadsPost, XPost, utcnow)
 from .outro import with_outro
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
-from .threads_api import publish_text_reply, publish_video
+from .threads_api import ThreadsError, publish_text_reply, publish_video
+from .watch_pages import apply_watch_link, display_url, ensure_watch_page
 
 log = logging.getLogger("publishing")
 
@@ -1584,6 +1585,25 @@ def _claim_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bo
     return won == 1
 
 
+def _publish_first_reply(text: str, reply_to_id: str, link: str) -> dict:
+    """Post the first reply, pinning the preview card to ``link`` when given.
+
+    ``link_attachment`` on a reply is the one part of this Meta hasn't been
+    seen to accept yet. If it rejects the parameter (code 100, raised while
+    creating the container, so nothing was published), post again without it.
+    The URL is still in the text, so Threads can build the card from that.
+    """
+    if not link:
+        return publish_text_reply(text, reply_to_id)
+    try:
+        return publish_text_reply(text, reply_to_id, link_attachment=link)
+    except ThreadsError as exc:
+        if exc.code != 100:
+            raise
+        log.warning("Threads rejected link_attachment on a reply (%s); posting without it", exc)
+        return publish_text_reply(text, reply_to_id)
+
+
 def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:
     """Post the first reply under a published post: the post's own attribution
     comment when the operator set one, else the static configured text. Never
@@ -1652,8 +1672,16 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
         log.debug("First reply for post %s already claimed elsewhere", post.id)
         return False
 
+    # Swap the bare Renewables.org mention for the full-segment page when one
+    # can be published and loads. Otherwise the text goes out unchanged
+    # (app/watch_pages.py). Done after the claim so two schedulers never
+    # both publish a page for the same reply.
+    watch_url = ensure_watch_page(post)
+    text = apply_watch_link(text, watch_url)
+    link = watch_url if watch_url and display_url(watch_url) in text else ""
+
     try:
-        result = publish_text_reply(text, post.threads_media_id)
+        result = _publish_first_reply(text, post.threads_media_id, link)
         post.first_reply_id = result["media_id"]
         post.first_reply_text = text
         post.first_reply_error = ""

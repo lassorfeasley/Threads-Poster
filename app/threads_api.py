@@ -346,17 +346,23 @@ def publish_video(video_url: str, caption: str, reply_to_id: str | None = None,
     return {"media_id": media_id, "permalink": info.get("permalink", "")}
 
 
-def publish_text_reply(text: str, reply_to_id: str, *, gif_id: str | None = None) -> dict:
+def publish_text_reply(text: str, reply_to_id: str, *, gif_id: str | None = None,
+                       link_attachment: str | None = None) -> dict:
     """Publish a text (and optional Giphy GIF) reply to a post or comment.
 
     ``reply_to_id`` is either a Threads post or comment id. ``gif_id`` is the
     Giphy GIF id; Threads only accepts provider ``GIPHY`` today.
+    ``link_attachment`` pins which URL the link-preview card shows, instead of
+    leaving Threads to pick one from the text. It can't be combined with a GIF.
     """
     params: dict = {"media_type": "TEXT", "reply_to_id": reply_to_id}
     text = (text or "").strip()
     if text:
         params["text"] = text
     gif_id = (gif_id or "").strip()
+    link_attachment = (link_attachment or "").strip()
+    if link_attachment and not gif_id:
+        params["link_attachment"] = link_attachment
     if gif_id:
         # Meta expects a JSON-encoded object in the form body.
         params["gif_attachment"] = json.dumps({"gif_id": gif_id, "provider": "GIPHY"})

@@ -4333,6 +4333,8 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "first_reply_id": p.first_reply_id or "",
             "first_reply_text": p.first_reply_text or "",
             "first_reply_error": p.first_reply_error or "",
+            "watch_page_url": p.watch_page_url or "",
+            "watch_page_error": p.watch_page_error or "",
             "first_reply_at": p.first_reply_at,
             # Why a published post has no first comment YET. Deferral writes
             # nothing to the post (a wait isn't a failure), so the reason is

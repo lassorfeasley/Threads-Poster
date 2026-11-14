@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "48"
+SCHEMA_VERSION = "49"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -158,6 +158,7 @@ _SCHEMA_SENTINELS = (
     "SELECT chapters FROM candidates LIMIT 0",
     "SELECT striking_frames FROM candidates LIMIT 0",
     "SELECT prior_override FROM rerun_reviews LIMIT 0",
+    "SELECT watch_page_url FROM threads_posts LIMIT 0",
     "SELECT effective_from FROM posting_schedules LIMIT 0",
     "SELECT rerun_slots FROM posting_schedules LIMIT 0",
     "SELECT last_rerun_slot_key FROM scheduler_state LIMIT 0",
@@ -295,6 +296,9 @@ def _ensure_new_columns() -> None:
             "repost_of_post_pk": "INTEGER",
             "published_window_key": "VARCHAR(40) DEFAULT ''",
             "clip_uploaded_at": "TIMESTAMP WITH TIME ZONE",
+            "watch_page_slug": "VARCHAR(120) DEFAULT ''",
+            "watch_page_url": "TEXT DEFAULT ''",
+            "watch_page_error": "TEXT DEFAULT ''",
         },
         "instagram_posts": {
             "clip_uploaded_at": "TIMESTAMP WITH TIME ZONE",

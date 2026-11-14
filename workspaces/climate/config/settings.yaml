@@ -377,6 +377,21 @@ threads:
   reply_ready_timeout_seconds: 45
   reply_ready_interval_seconds: 3
 
+# Full-segment pages on Renewables.org (app/watch_pages.py). When enabled, a
+# found-footage post's first reply links to renewables.org/watch/<slug>
+# instead of the bare "Renewables.org" mention: the station's YouTube video,
+# starting at the clip, followed by explainer copy and a call to action.
+# Needs WATCH_PAGES_SERVICE_TOKEN in the environment (same value as the
+# platform backend's). A post whose page can't be published or doesn't load
+# gets the plain reply, with the reason shown on its post page.
+watch_pages:
+  enabled: false
+  site_url: https://renewables.org
+  # Where the platform's /api lives. Blank = site_url (the site proxies /api).
+  api_url: ""
+  # Start the player this many seconds before the clip begins.
+  lead_in_seconds: 2
+
 instagram:
   # Instagram Reels publishing (Instagram API with Instagram Login: professional
   # account required, no linked Facebook Page). Same container -> poll ->

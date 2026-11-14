@@ -265,6 +265,13 @@
       {% else %}
         {% if first_reply_id %}
         <div class="ti-text-static">{{ first_reply_text }}</div>
+        {#- Muted either way: a reply without a watch page still did its job. -#}
+        {% if watch_page_url %}
+        <div class="meta" style="margin-top: 6px;">Links to its
+          <a href="{{ watch_page_url }}" target="_blank" rel="noopener">watch page</a>.</div>
+        {% elif watch_page_error %}
+        <div class="meta" style="margin-top: 6px;">{{ watch_page_error[:200] }}</div>
+        {% endif %}
         {% elif first_reply_wait or first_reply_skipped or first_reply_error %}
         {#- A skip is a decision the scheduler made, so it stays in the muted
             voice a wait uses; only a real failure earns the danger color. -#}

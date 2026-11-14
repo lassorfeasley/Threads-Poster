@@ -363,6 +363,13 @@ class ThreadsPost(Base):
     # when config/first_reply.yaml is enabled; failure does not fail the post.
     first_reply_id: Mapped[str] = mapped_column(String(60), default="")
     first_reply_text: Mapped[str] = mapped_column(Text, default="")
+    # The renewables.org/watch/{slug} page the first reply links to (see
+    # app/watch_pages.py). The slug is kept so a retry updates the same page.
+    # The url is set only once the page loaded; error says why a post went
+    # without one.
+    watch_page_slug: Mapped[str] = mapped_column(String(120), default="")
+    watch_page_url: Mapped[str] = mapped_column(Text, default="")
+    watch_page_error: Mapped[str] = mapped_column(Text, default="")
     first_reply_error: Mapped[str] = mapped_column(Text, default="")
     first_reply_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
