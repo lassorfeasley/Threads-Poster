@@ -385,10 +385,12 @@ threads:
 # platform backend's). A post whose page can't be published or doesn't load
 # gets the plain reply, with the reason shown on its post page.
 watch_pages:
-  enabled: false
+  enabled: true
   site_url: https://renewables.org
   # Where the platform's /api lives. Blank = site_url (the site proxies /api).
-  api_url: ""
+  # Must be the www host: renewables.org 307s to www, and requests drops the
+  # Authorization header on a cross-host redirect, so the PUT would 401.
+  api_url: https://www.renewables.org
   # Start the player this many seconds before the clip begins.
   lead_in_seconds: 2
 
