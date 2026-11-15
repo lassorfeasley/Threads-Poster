@@ -13,9 +13,9 @@ reply goes up:
   1. check the video is still public and embeddable (YouTube oEmbed),
   2. publish the row,
   3. fetch the page and require a 200,
-  4. only then put the link in the reply.
-If any step fails, the reply goes out exactly as before, with the plain
-Renewables.org mention, and the reason is recorded on the post. A watch page
+  4. only then post the watch text with the link.
+If any step fails, the reply uses the fallback text instead and the reason is
+recorded on the post (both texts live on the First reply page). A watch page
 can make a first reply better but can never block or break one.
 
 Settings (settings.yaml, ``watch_pages``):
@@ -43,15 +43,9 @@ from .models import Candidate, Cut, ThreadsPost
 log = logging.getLogger(__name__)
 
 TOKEN_ENV = "WATCH_PAGES_SERVICE_TOKEN"
-# Explicit placeholder an operator can put in first-reply text. It becomes the
-# watch link, or "Renewables.org" when there is no page.
-PLACEHOLDER = "{watch_url}"
-FALLBACK_MENTION = "Renewables.org"
 HTTP_TIMEOUT = 15
 
 _YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
-# A bare brand mention, not already part of a URL, path, handle or email.
-_BARE_MENTION = re.compile(r"(?<![\w/@.:-])renewables\.org(?![\w/.-])", re.IGNORECASE)
 
 
 def config() -> dict:
@@ -218,19 +212,3 @@ def display_url(url: str) -> str:
     """The link as written in the reply: no scheme, matching the house style
     for the bare mention ("Renewables.org", never "https://...")."""
     return re.sub(r"^https?://", "", url or "")
-
-
-def apply_watch_link(text: str, url: str) -> str:
-    """Put the watch link into first-reply text.
-
-    The ``{watch_url}`` placeholder always resolves: to the link, or to
-    "Renewables.org" when there's no page. Without a placeholder, the first
-    bare "Renewables.org" mention becomes the link, so the existing copy works
-    unchanged. Text with neither is left alone (it may be a citation with no
-    call to action).
-    """
-    if PLACEHOLDER in text:
-        return text.replace(PLACEHOLDER, display_url(url) if url else FALLBACK_MENTION)
-    if not url:
-        return text
-    return _BARE_MENTION.sub(display_url(url), text, count=1)

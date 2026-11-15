@@ -42,7 +42,7 @@
 <div class="post-layout{{ ' no-side' if not has_side }}">
 <div class="post-main">
 {# The main column replicates the post as it will appear on Threads: one
-   surface, caption + video as the post, the attribution as the first comment.
+   surface, caption + video as the post, then the automatic first reply.
    Text is edited in place; actions hide behind each item's "…" menu. #}
 {% set handle = account_name or "you" %}
 <div class="post-preview">
@@ -172,16 +172,7 @@
     </div>
   </article>
 
-  {# ---- The first comment: a source citation or a call to action ---- #}
-  {% set fr_invitation = first_reply_mode == "invitation" %}
-  {% set fr_when = ("held back until this post has replies of its own (see Reply settings)"
-                    if first_reply_deferred else
-                    "posts as the first comment right after this publishes") %}
-  {% set fr_placeholder = (("Leave empty to post: " ~ first_reply_static_text)
-                           if first_reply_mode == "static" else
-                           ("Invite viewers to act — " ~ fr_when ~ ". Leave empty and no reply is posted.")
-                           if fr_invitation else
-                           ("Credit the source — " ~ fr_when ~ ". Leave empty and no attribution is posted.")) %}
+  {# ---- The first reply: automatic, set on the First reply page ---- #}
   <article class="thread-item is-reply">
     <div class="ti-gutter" aria-hidden="true">
       <span class="ti-avatar">{{ handle[0]|upper }}</span>
@@ -189,33 +180,10 @@
     <div class="ti-main">
       <div class="ti-head">
         <span class="ti-name">{{ handle }}</span>
-        {% if editable %}
-        <span class="ti-type">first reply · {{ "attribution" if first_reply_mode == "citation" else "call to action" }}</span>
-        <span class="ti-tools">
-          <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
-          <details class="ti-menu">
-            <summary aria-label="Attribution actions" title="Attribution actions">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
-            </summary>
-            <div class="ti-menu-pop">
-              {% if can_suggest_attribution %}
-              <button type="button" id="attribution-regen"
-                      onclick="suggestAttribution(this)">{{ "Regenerate draft" if attribution_text else "Suggest draft" }}</button>
-              {% endif %}
-              <a href="/engagement/first-reply">Reply settings</a>
-            </div>
-          </details>
-        </span>
-        {% else %}
         <span class="ti-type">first reply
-          {#- Three non-posted states, none of which should read as a failure
-              except the last: held back until the post has replies of its own,
-              passed over because the post never found an audience, and the
-              catch-all "not posted" (an API error or a deliberately empty box). -#}
-          {%- if first_reply_wait %} · waiting
+          {%- if editable %} · automatic
           {%- elif first_reply_skipped %} · skipped
-          {%- elif first_reply_error %} · not posted
-          {%- elif not first_reply_id and attribution_text %} · pending{% endif %}</span>
+          {%- elif first_reply_error %} · not posted{% endif %}</span>
         <span class="ti-tools">
           <details class="ti-menu">
             <summary aria-label="First reply actions" title="First reply actions">
@@ -225,43 +193,18 @@
               {% if status == "published" and not first_reply_id %}
               <form method="post" action="/post/{{ pid }}/first-reply">
                 <input type="hidden" name="next" value="/post/{{ pid }}">
-                {#- The manual override skips the gates, so it stays available
-                    (and honestly labelled) whether the reply is waiting, was
-                    passed over, or failed outright. -#}
                 <button>{{ "Post first reply anyway" if first_reply_skipped
                           else ("Retry first reply" if first_reply_error
                                 else "Post first reply now") }}</button>
               </form>
               {% endif %}
-              <a href="/engagement/first-reply">Reply settings</a>
+              <a href="/engagement/first-reply">Edit first replies</a>
             </div>
           </details>
         </span>
-        {% endif %}
       </div>
       {% if editable %}
-      {% if can_suggest_attribution %}
-      <div class="ti-text-wrap">
-        <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                  placeholder="{{ fr_placeholder }}">{{ attribution_text }}</textarea>
-        <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
-                title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
-                aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
-        </button>
-      </div>
-      {% else %}
-      <textarea form="queue-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                placeholder="{{ fr_placeholder }}">{{ attribution_text }}</textarea>
-      {% endif %}
-      {% if first_reply_suppressed %}
-      <p class="field-hint">This is your own promo, and first comments are off for
-        those under <a href="/engagement/first-reply">Replies settings</a> — put the
-        call to action in the caption instead.</p>
-      {% elif not attribution_enabled %}
-      <p class="field-hint">First comments are off under
-        <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
-      {% endif %}
+      {% include "components/first_reply_preview.html" %}
       {% else %}
         {% if first_reply_id %}
         <div class="ti-text-static">{{ first_reply_text }}</div>
@@ -272,17 +215,12 @@
         {% elif watch_page_error %}
         <div class="meta" style="margin-top: 6px;">{{ watch_page_error[:200] }}</div>
         {% endif %}
-        {% elif first_reply_wait or first_reply_skipped or first_reply_error %}
-        {#- A skip is a decision the scheduler made, so it stays in the muted
-            voice a wait uses; only a real failure earns the danger color. -#}
-        <div class="meta" {% if first_reply_error and not first_reply_skipped %}
+        {% elif first_reply_error %}
+        {#- A skip (brand promo, replies switched off) is a decision, so it
+            stays muted; only a real failure earns the danger color. -#}
+        <div class="meta" {% if not first_reply_skipped %}
              style="color: var(--danger); margin-top: 2px;"
-             {% else %}style="margin-top: 2px;"{% endif %}>{{ first_reply_wait or first_reply_error }}</div>
-        {% if attribution_text %}
-        <div class="ti-text-static is-pending">{{ attribution_text }}</div>
-        {% endif %}
-        {% elif attribution_text %}
-        <div class="ti-text-static is-pending">{{ attribution_text }}</div>
+             {% else %}style="margin-top: 2px;"{% endif %}>{{ first_reply_error }}</div>
         {% else %}
         <div class="meta" style="margin-top: 2px;">No first reply.</div>
         {% endif %}
@@ -605,8 +543,7 @@
 <script>
   (function () {
     const MAX = 500;
-    for (const [taId, countId] of [['caption', 'caption-count'],
-                                   ['attribution', 'attribution-count']]) {
+    for (const [taId, countId] of [['caption', 'caption-count']]) {
       const ta = document.getElementById(taId);
       if (!ta) continue;
       const count = document.getElementById(countId);
@@ -621,12 +558,12 @@
       grow(); render();
     }
   })();
-  // Update stays dead until caption or attribution actually diverge from the
+  // Update stays dead until the caption actually diverges from the
   // saved values (queued posts only — Add to queue is always live).
   (function () {
     const btn = document.getElementById('update-btn');
     if (!btn || !btn.disabled) return;
-    const fields = ['caption', 'attribution']
+    const fields = ['caption']
       .map(id => document.getElementById(id))
       .filter(Boolean);
     if (!fields.length) return;
@@ -634,19 +571,9 @@
     const sync = () => {
       const dirty = fields.some(el => el.value !== baseline[el.id]);
       btn.disabled = !dirty;
-      btn.title = dirty ? 'Save caption and attribution changes' : 'No changes to save';
+      btn.title = dirty ? 'Save caption changes' : 'No changes to save';
     };
     fields.forEach(el => el.addEventListener('input', sync));
-  })();
-  // Sparkle titles track empty vs filled; the icon stays visible either way.
-  (function () {
-    const ta = document.getElementById('attribution');
-    const btn = document.getElementById('attribution-suggest');
-    if (!ta || !btn) return;
-    ta.addEventListener('input', () => {
-      const label = ta.value.trim() ? 'Regenerate draft' : 'Suggest a draft';
-      btn.title = btn.ariaLabel = label;
-    });
   })();
   {% if has_clip and ig and ig.video_url %}
   // Platform preview: swap the player between the Threads 16:9 file and the
@@ -783,54 +710,6 @@
       }
     }, 280);
   }
-  {% endif %}
-  async function suggestAttribution(btn, silent) {
-    const ta = document.getElementById('attribution');
-    if (!ta) return;
-    if (!btn) btn = document.getElementById('attribution-suggest');
-    const isSparkle = btn && btn.classList.contains('ti-sparkle');
-    const lbl = (btn && !isSparkle) ? (btn.querySelector('.lbl') || btn) : null;
-    const old = lbl ? lbl.textContent : '';
-    if (btn) {
-      btn.disabled = true;
-      if (isSparkle) btn.classList.add('is-busy');
-      else if (lbl) lbl.textContent = 'Drafting…';
-    }
-    try {
-      const r = await fetch('/post/{{ pid }}/suggest-attribution', { method: 'POST' });
-      const d = await r.json();
-      if (!r.ok) {
-        if (!silent) alert(d.error || 'Attribution draft failed.');
-        return;
-      }
-      if (d.unavailable || !d.text) {
-        if (!silent) alert(d.message || 'No citation drafted — the source data is not available.');
-        return;
-      }
-      ta.value = d.text;
-      ta.dispatchEvent(new Event('input'));
-      const regen = document.getElementById('attribution-regen');
-      if (regen) regen.textContent = 'Regenerate draft';
-      const sparkle = document.getElementById('attribution-suggest');
-      if (sparkle) sparkle.title = sparkle.ariaLabel = 'Regenerate draft';
-      if (!silent) {
-        closeMenu(btn);
-        ta.focus();
-      }
-    } catch (e) {
-      if (!silent) alert('Attribution draft failed: ' + e);
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        if (isSparkle) btn.classList.remove('is-busy');
-        else if (lbl && lbl.textContent === 'Drafting…') lbl.textContent = old;
-      }
-    }
-  }
-  // Invitation mode: draft into an empty box on load so the operator can
-  // review it. Skip when they deliberately cleared a prior draft.
-  {% if editable and fr_invitation and can_suggest_attribution and not attribution_text and not attribution_skipped %}
-  suggestAttribution(null, true);
   {% endif %}
   async function recaption(pos, force) {
     const line = document.getElementById('recap-line');

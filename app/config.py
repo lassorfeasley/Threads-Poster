@@ -119,96 +119,40 @@ def save_keywords(keywords: list[str]) -> None:
 
 
 FIRST_REPLY_HEADER = """\
-# Auto first-reply posted under every Threads post this app publishes.
-# Editable via the cog on the Replies page; no code changes needed.
+# The first reply posted under every found-footage Threads post. Edit it on the
+# First reply page (Engagement); no code changes needed.
 #
-# The Replies page saves these settings to the shared database AND to this file.
-# Every runner reads the database copy whenever one exists, so editing this
-# file by hand changes nothing until it's saved again from the Replies page.
-# The file only matters for a workspace that has never been saved from there.
+# The page saves to the shared database AND to this file. Every runner reads
+# the database copy whenever one exists, so editing this file by hand changes
+# nothing until it's saved again from the page. The file only matters for a
+# workspace that has never been saved from there.
 #
-# mode decides what the "Suggest a draft" button writes into the first-reply box
-# on the cut and post pages:
-#   citation   - a formal credit line for the source publisher (drafted only
-#                when you click Suggest; nothing is written automatically).
-#   invitation - a call to action written from `instruction` below, drafted
-#                automatically for every post so none goes out without one.
-#   static     - nothing is drafted: every post's first comment is `text`
-#                below, unless you type something else into its box.
-# Drafted text lands in an editable box you review before the post publishes;
-# the first comment is only ever the text sitting in that box, or `text` when
-# the box is empty.
+# Two texts, one per case:
+#   watch_text    - when the post's full-segment page on Renewables.org was
+#                   published and loads. Must contain {watch_url}, which
+#                   becomes renewables.org/watch/<slug>.
+#   fallback_text - when there's no page: the source isn't an embeddable
+#                   YouTube video, or the page couldn't be published.
+# enabled: false and no first reply posts at all.
 #
-# instruction is your own plain-language brief for invitation mode, passed to
-# the model as the authoritative spec. It is also the ONLY source of factual
-# claims the model may make, so any statistic or figure you want used has to
-# appear here verbatim.
-#
-# attribution_enabled: when false, the first comment never posts, whatever is in
-# the box. When enabled is true and text is non-empty, that static text is the
-# fallback for posts whose box is empty. A reply failure never rolls back the
-# post — check the post page and retry there.
-#
-# first_party_enabled: whether the brand's OWN promos get a first comment at all.
-# On those the clip IS the ad, so the call to action belongs in the caption where
-# it lands with the post, not in a comment the timing gates below can hold back
-# for hours — long enough for a viewer to ask where to go and get no answer. Set
-# it false and promo captions have to carry the URL themselves; found footage is
-# unaffected either way.
-#
-# WHEN the first comment posts. With all four gates at 0 it goes out seconds
-# after the post, which is the recommended setting: a post gets ~70% of its
-# lifetime views in its first 2 hours and ~99% within 6 (measured across 400+
-# of this account's posts, Nov 2026), so every hour of holding back hides the
-# comment from most of the people who will ever see the post. Holding until
-# other people reply also showed no benefit: posts commented under immediately
-# drew as many audience replies as posts that waited. The gates remain for
-# anyone who wants the comment held back until the post has a conversation of
-# its own:
-#   delay_minutes  - don't comment until the post is at least this old
-#   min_replies    - ...and until this many OTHER people have replied
-#   min_likes      - ...and until it has at least this many likes
-#   deadline_hours - comment anyway once the post is this old, so a post that
-#                    never got replies still gets its call to action
-#                    (0 = wait indefinitely)
-# All four at 0: comment immediately on publish.
-#
-# The deadline fires only on posts that FLOPPED — a post that got its replies
-# was commented under long before. Left unqualified it therefore attaches the
-# pitch to your weakest posts and only your weakest posts, which is backwards:
-# nobody is reading the comments on a post nobody engaged with, so the ask earns
-# nothing, while a Threads post that revives days later shows new arrivals a
-# pitch before anyone has had a chance to reply. These two put a floor under it:
-#   deadline_min_views - at the deadline, comment only if the post cleared this
-#   deadline_min_likes - ...or this (either one is enough)
-# A post under both is skipped for good rather than commented on. Both at 0
-# means no floor: the deadline comments on everything it reaches.
+# It posts right after the post publishes. The brand's own promos never get
+# one: on those the clip is the ad, so the call to action rides in the caption.
 
 """
 
-FIRST_REPLY_MODES = ("citation", "invitation", "static")
-
-
-def _positive_int(value: Any, default: int = 0) -> int:
-    """Non-negative int from YAML/form input; anything unparseable is 0."""
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return default
-
+WATCH_URL_PLACEHOLDER = "{watch_url}"
 
 # The first-reply settings live in the shared database as well as in
 # first_reply.yaml, for the same reason the posting windows do (see
 # models.PostingSchedule): the Fly worker that actually posts the comments runs
 # from a baked image, so a YAML-only edit made on the dashboard never reached it
-# until the next deploy — which is how a replaced first-reply text kept going
-# out for weeks. The DB copy wins whenever it exists; the YAML is the seed for a
-# workspace that has never saved from the dashboard, and the mirror a save
-# writes for the repo.
+# until the next deploy. The DB copy wins whenever it exists; the YAML is the
+# seed for a workspace that has never saved from the dashboard, and the mirror
+# a save writes for the repo.
 FIRST_REPLY_TOKEN = f"first_reply_config:{WORKSPACE}"
-# load_first_reply() runs per post in the reply sweep and on every cut/post
-# page; a short cache keeps that from being a DB round trip each time while a
-# dashboard save still reaches the worker within a minute.
+# load_first_reply() runs once per published post and on the post page; a short
+# cache keeps that from being a DB round trip each time while a dashboard save
+# still reaches the worker within a minute.
 _FIRST_REPLY_CACHE_TTL = 60.0
 _first_reply_cache: tuple[float, dict[str, Any] | None] | None = None
 
@@ -245,12 +189,13 @@ def _first_reply_from_db() -> dict[str, Any] | None:
 
 
 def load_first_reply() -> dict[str, Any]:
-    """Return the auto first-reply config: ``{enabled, text, attribution_enabled,
-    first_party_enabled, mode, instruction, delay_minutes, min_replies,
-    min_likes, deadline_hours, deadline_min_views, deadline_min_likes}``.
+    """Return ``{enabled, watch_text, fallback_text}``.
 
     Read from the shared DB when a copy has been saved there, else from
-    first_reply.yaml."""
+    first_reply.yaml. Settings saved before the two-text version carry a
+    single ``text``: it becomes the fallback as-is, and the watch text is the
+    same line with its Renewables.org mention swapped for the link, which is
+    what those posts were already getting."""
     data = _first_reply_from_db()
     if data is None:
         data = _load_yaml(CONFIG_DIR / "first_reply.yaml")
@@ -259,55 +204,26 @@ def load_first_reply() -> dict[str, Any]:
         val = data.get(key) or ""
         return val.strip() if isinstance(val, str) else str(val).strip()
 
-    mode = _text("mode").lower() or "citation"
-    if mode not in FIRST_REPLY_MODES:
-        mode = "citation"
+    fallback = _text("fallback_text") or _text("text")
+    watch = _text("watch_text")
+    if not watch and fallback:
+        import re
+        watch = re.sub(r"(?<![\w/@.:-])renewables\.org(?![\w/.-])",
+                       WATCH_URL_PLACEHOLDER, fallback, count=1, flags=re.IGNORECASE)
+        if WATCH_URL_PLACEHOLDER not in watch:
+            watch = ""
     return {
         "enabled": bool(data.get("enabled", False)),
-        "text": _text("text"),
-        "attribution_enabled": bool(data.get("attribution_enabled", True)),
-        # Absent from older config files, where every post got a first comment
-        # regardless of provenance — the behavior those files were written for.
-        "first_party_enabled": bool(data.get("first_party_enabled", True)),
-        "mode": mode,
-        "instruction": _text("instruction"),
-        # Timing gates. Absent from older config files, and 0 there means
-        # "post on publish" — the behavior those files were written for.
-        "delay_minutes": _positive_int(data.get("delay_minutes")),
-        "min_replies": _positive_int(data.get("min_replies")),
-        "min_likes": _positive_int(data.get("min_likes")),
-        "deadline_hours": _positive_int(data.get("deadline_hours")),
-        # Traction floor under the deadline. Absent from older config files,
-        # where 0 means the deadline comments unconditionally — what those
-        # files were written for.
-        "deadline_min_views": _positive_int(data.get("deadline_min_views")),
-        "deadline_min_likes": _positive_int(data.get("deadline_min_likes")),
+        "watch_text": watch,
+        "fallback_text": fallback,
     }
 
 
-def save_first_reply(*, enabled: bool, text: str, attribution_enabled: bool = True,
-                     first_party_enabled: bool = True,
-                     mode: str = "citation", instruction: str = "",
-                     delay_minutes: int = 0, min_replies: int = 0,
-                     min_likes: int = 0, deadline_hours: int = 0,
-                     deadline_min_views: int = 0,
-                     deadline_min_likes: int = 0) -> None:
-    mode = (mode or "citation").strip().lower()
-    if mode not in FIRST_REPLY_MODES:
-        mode = "citation"
+def save_first_reply(*, enabled: bool, watch_text: str, fallback_text: str) -> None:
     payload = {
-        "mode": mode,
         "enabled": bool(enabled),
-        "attribution_enabled": bool(attribution_enabled),
-        "first_party_enabled": bool(first_party_enabled),
-        "delay_minutes": _positive_int(delay_minutes),
-        "min_replies": _positive_int(min_replies),
-        "min_likes": _positive_int(min_likes),
-        "deadline_hours": _positive_int(deadline_hours),
-        "deadline_min_views": _positive_int(deadline_min_views),
-        "deadline_min_likes": _positive_int(deadline_min_likes),
-        "instruction": (instruction or "").strip(),
-        "text": (text or "").strip(),
+        "watch_text": (watch_text or "").strip(),
+        "fallback_text": (fallback_text or "").strip(),
     }
     _save_first_reply_to_db(payload)
     body = yaml.safe_dump(payload, default_flow_style=False, allow_unicode=True, width=88,

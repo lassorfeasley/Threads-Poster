@@ -15,7 +15,6 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import or_, select, update
@@ -24,16 +23,16 @@ import requests
 
 from . import facebook_api, linkedin_api, x_api
 from .categories import is_first_party
-from .config import load_first_reply, load_settings, scheduler_timezone
+from .config import WATCH_URL_PLACEHOLDER, load_first_reply, load_settings, scheduler_timezone
 from .draft_proposals import KIND_HOOK, attach_to_post as attach_draft_proposal
 from .instagram_api import publish_reel
-from .llm import caption_attributes, suggest_attribution, suggest_first_reply
+from .llm import caption_attributes
 from .models import (AppToken, Candidate, Cut, FacebookPost, InstagramPost, LinkedInPost,
                      ThreadsPost, XPost, utcnow)
 from .outro import with_outro
 from .storage_supabase import signed_clip_url, upload_trimmed_clip
 from .threads_api import ThreadsError, publish_text_reply, publish_video
-from .watch_pages import apply_watch_link, display_url, ensure_watch_page
+from .watch_pages import display_url, ensure_watch_page
 
 log = logging.getLogger("publishing")
 
@@ -137,8 +136,7 @@ def _storage_object_missing(exc: Exception) -> bool:
 
 
 def record_post(session, candidate: Candidate | None, clip_path: str, caption: str,
-                *, status: str, cut: Cut | None = None,
-                attribution: str = "") -> ThreadsPost:
+                *, status: str, cut: Cut | None = None) -> ThreadsPost:
     """Create a ThreadsPost row without contacting Threads. Used for immediate
     post, draft, and queue paths; publishing happens in ``publish_post``."""
     clip = Path(clip_path).expanduser()
@@ -178,14 +176,6 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
             session, cut.id if cut else None, caption, post_pk=post.id)
     except Exception:
         log.exception("Caption proposal resolution failed for post %s", post.id)
-    # First comment: only ever text the caller already has in hand — the
-    # operator's own, or a call-to-action draft the ship path produced via
-    # ``draft_first_reply_for_cut`` before opening this session. Nothing is
-    # drafted here, because a model call inside this transaction would hold a
-    # pooled connection for the seconds it takes. An empty field means this post
-    # gets no first comment beyond whatever static fallback is configured.
-    if attribution.strip():
-        post.attribution_text = attribution.strip()
     # Upload now, while the file is guaranteed to be on this machine, so a
     # headless scheduler (GitHub Actions / cron) can publish later without this
     # disk. Retried here, and again by the scheduler's repair sweep while the
@@ -198,34 +188,6 @@ def record_post(session, candidate: Candidate | None, clip_path: str, caption: s
         log.warning("Queue-time clip upload failed (repair sweep will retry "
                     "while the post is queued): %s", exc)
     return post
-
-
-def generate_attribution(candidate: Candidate) -> str:
-    """LLM-drafted formal citation crediting the source station/publisher (and
-    the program/journalists when the video's own material establishes them).
-    Only runs when the operator clicks Suggest — never automatically. Gets the
-    FULL source video context (title, description, publish date, complete
-    transcript), not just the clipped segments. Returns "" when the data can't
-    support a credible citation."""
-    channel = candidate.channel
-    settings = load_settings()
-    return suggest_attribution(
-        settings.get("engagement.draft_model", "claude-sonnet-5"),
-        channel={
-            "call_sign": channel.call_sign if channel else "",
-            "network": channel.network if channel else "",
-            "market": channel.market if channel else "",
-            "region": channel.region if channel else "",
-            "country": channel.country if channel else "",
-            "channel_title": channel.channel_title if channel else "",
-        },
-        video_title=candidate.title or "",
-        description=candidate.description or "",
-        transcript=candidate.transcript_text or "",
-        published_at=(candidate.published_at.strftime("%B %-d, %Y")
-                      if candidate.published_at else ""),
-        video_url=candidate.url or "",
-    )
 
 
 def _clip_transcript_text(cut: Cut | None) -> str:
@@ -285,112 +247,21 @@ def _slice_transcript(transcript: str, trim_segments: str) -> str:
     return " ".join(out).strip()
 
 
-def _recent_first_replies(session, limit: int = 12) -> list[str]:
-    """The most recent first comments, newest first, fed to the drafting prompt so
-    a fresh invitation doesn't echo the ones around it.
+def first_comment_suppressed(candidate: Candidate | None) -> bool:
+    """Whether this post gets no first reply because of where it came from.
 
-    Covers posted replies AND the text still sitting in unpublished posts' boxes:
-    a queue drafted in one sitting publishes days apart, so looking only at what
-    has already gone out would let every post in that batch open the same way.
+    True for the brand's own promos: on those the clip is the ad, so the call
+    to action belongs in the caption, visible the moment the post lands.
     """
-    rows = session.execute(
-        select(ThreadsPost.first_reply_text, ThreadsPost.attribution_text)
-        .where((ThreadsPost.first_reply_text != "") | (ThreadsPost.attribution_text != ""))
-        .order_by(ThreadsPost.id.desc())
-        .limit(limit)
-    ).all()
-    seen: list[str] = []
-    for posted, pending in rows:
-        text = (posted or "").strip() or (pending or "").strip()
-        if text and text not in seen:
-            seen.append(text)
-    return seen
+    return is_first_party(candidate)
 
 
-def first_comment_suppressed(candidate: Candidate | None,
-                             cfg: dict | None = None) -> bool:
-    """Whether first comments are switched off for this post's provenance.
-
-    Only ever true for the brand's own promos, and only when the operator has
-    turned ``first_party_enabled`` off. Those posts are the ad: their call to
-    action belongs in the caption, visible the moment the post lands, rather
-    than in a comment the timing gates can hold back for hours. Found footage
-    is never affected.
-    """
-    cfg = cfg or load_first_reply()
-    return not cfg.get("first_party_enabled", True) and is_first_party(candidate)
-
-
-def first_reply_context(session, candidate: Candidate | None, cut: Cut | None,
-                        caption: str = "") -> dict | None:
-    """Snapshot everything the call-to-action prompt needs as plain values.
-
-    Split from the model call on purpose: the draft takes several seconds, and
-    doing it mid-session pinned a pooled database connection for the whole of
-    it. Returns None when invitation mode is off or has no brief.
-    """
-    cfg = load_first_reply()
-    instruction = (cfg.get("instruction") or "").strip()
-    if cfg.get("mode") != "invitation" or not instruction:
-        return None
-    transcript = _clip_transcript_text(cut)
-    return {
-        "instruction": instruction,
-        "fallback": (cfg.get("text") or "").strip(),
-        "video_title": candidate.title if candidate else "",
-        "description": candidate.description if candidate else "",
-        "transcript": transcript,
-        "caption": caption or "",
-        "recent_replies": _recent_first_replies(session),
-    }
-
-
-def draft_first_reply(context: dict | None) -> str:
-    """Run the call-to-action draft for a ``first_reply_context`` snapshot.
-
-    Holds no database connection: callers gather the context in a short session,
-    let it close, then call this. It is only ever a DRAFT — the text lands in the
-    editable first-reply box and the operator can rewrite or clear it before the
-    post publishes.
-    """
-    if not context:
-        return ""
-    settings = load_settings()
-    text = suggest_first_reply(
-        settings.get("engagement.draft_model", "claude-sonnet-5"),
-        context["instruction"],
-        video_title=context.get("video_title", ""),
-        description=context.get("description", ""),
-        transcript=context.get("transcript", ""),
-        caption=context.get("caption", ""),
-        recent_replies=context.get("recent_replies") or [],
-    )
-    # The whole point of invitation mode is that the call to action rides under
-    # every post, so a clip the model declines to write a custom opener for
-    # falls back to the configured static pitch rather than to nothing.
-    return text or context.get("fallback", "")
-
-
-def draft_first_reply_for_cut(cut_id: int, caption: str = "") -> str:
-    """Call-to-action draft for a cut, from outside any caller's transaction.
-
-    Used by the ship paths (post now / queue / save draft) before they open the
-    session that records the post, so the model call never runs with a
-    connection checked out. Returns "" when invitation mode is off, or when the
-    cut is first-party and first comments are off for those — drafting one
-    there would spend a model call to fill a box nothing will ever post from.
-    The Suggest button stays available on the page either way, since clicking
-    it is the operator asking for the draft on purpose.
-    """
-    from .db import session_scope
-    with session_scope() as session:
-        cut = session.get(Cut, cut_id)
-        if cut is None:
-            return ""
-        if first_comment_suppressed(cut.candidate):
-            return ""
-        context = first_reply_context(session, cut.candidate, cut, caption)
-    return draft_first_reply(context)
+def first_reply_text(cfg: dict, watch_url: str) -> str:
+    """The first reply for a post: the watch text when its page is up, else
+    the fallback text."""
+    if watch_url and cfg.get("watch_text"):
+        return cfg["watch_text"].replace(WATCH_URL_PLACEHOLDER, display_url(watch_url))
+    return cfg.get("fallback_text", "")
 
 
 def post_time_attributes(when: dt.datetime) -> tuple[str, int]:
@@ -1362,197 +1233,11 @@ def _annotate_footage(session, post: ThreadsPost) -> None:
         log.warning("Footage annotation failed for post %s: %s", post.id, exc)
 
 
-def _no_first_comment_reason(post: ThreadsPost, cfg: dict) -> str:
-    """Plain-language reason a published post carries no first comment, stored on
-    the post so it shows up on the post page instead of looking untouched."""
-    kind = "attribution" if cfg.get("mode") == "citation" else "call to action"
-    if (post.attribution_text or "").strip() and not cfg.get("attribution_enabled"):
-        return (f"No first comment: this post has {kind} text, but first comments "
-                "are switched off under Replies settings.")
-    if post.attribution_skipped:
-        return (f"No first comment: the {kind} was cleared for this post, and "
-                "no static reply text is enabled under Replies settings.")
-    return (f"No first comment: no {kind} was set on this post, and no static "
-            "reply text is enabled under Replies settings.")
-
-
-def resolve_first_reply_text(post: ThreadsPost, cfg: dict, *,
-                             force: bool = False) -> str:
-    """The text this post's first comment would carry, or "" for none.
-
-    The post's own attribution/call-to-action wins; the configured static text
-    is the fallback. ``force`` is the operator posting by hand, which overrides
-    both "switched off" toggles. Nothing is drafted here — an empty box means
-    an empty result.
-    """
-    attribution = (post.attribution_text or "").strip()
-    static_text = (cfg.get("text") or "").strip()
-    if attribution and (cfg.get("attribution_enabled") or force):
-        return attribution
-    if static_text and (cfg.get("enabled") or force):
-        return static_text
-    return ""
-
-
-# --- When the first comment goes out ----------------------------------------
-#
-# By default: seconds after the post, which puts a promotional comment in the
-# slot the audience's own first reply would otherwise occupy. The gates below
-# hold it back until the post has a conversation of its own — see
-# FIRST_REPLY_HEADER in app/config.py for the operator-facing description.
-
 # A claim this old is treated as abandoned and can be retaken. Normally a claim
 # lives and dies with the transaction that set it; this is the safety valve for
 # one that somehow outlives it, so a comment is never blocked forever by a
 # claim no process is acting on.
 FIRST_REPLY_CLAIM_STALE = dt.timedelta(minutes=10)
-
-
-@dataclass(frozen=True)
-class FirstReplyGate:
-    """Whether a published post's first comment may go out yet.
-
-    Three outcomes, not two: ready, still waiting, and ``skipped`` — a final
-    decision that this post gets no comment at all. ``reason`` is a finished
-    sentence for the post page, so a comment that is waiting or was passed over
-    reads as deliberate rather than as a post that silently got nothing.
-    """
-    ready: bool
-    reason: str = ""
-    deadline_at: dt.datetime | None = None
-    skipped: bool = False
-
-
-def first_reply_is_deferred(cfg: dict | None = None) -> bool:
-    """Whether any gate can hold a first comment back after publishing.
-
-    ``deadline_hours`` alone doesn't defer anything — it only ends a wait the
-    other three started — so it isn't counted here.
-    """
-    cfg = cfg or load_first_reply()
-    return any(int(cfg.get(k, 0) or 0)
-               for k in ("delay_minutes", "min_replies", "min_likes"))
-
-
-def first_reply_needs_metrics(cfg: dict | None = None) -> bool:
-    """Whether any gate decides on a post's counts, so a caller knows whether
-    it has to have fresh insights in hand before asking."""
-    cfg = cfg or load_first_reply()
-    return any(int(cfg.get(k, 0) or 0) for k in
-               ("min_replies", "min_likes", "deadline_min_views", "deadline_min_likes"))
-
-
-def _clock(when: dt.datetime) -> str:
-    """A gate time as an operator-local wall clock, for the waiting message."""
-    return when.astimezone().strftime("%-I:%M %p")
-
-
-def first_reply_gate(session, post: ThreadsPost, cfg: dict | None = None,
-                     *, metrics: dict | None = None) -> FirstReplyGate:
-    """Whether ``post`` is ready for its first comment yet.
-
-    Ready when the post has cleared the configured delay AND carries the
-    configured organic engagement — or when ``deadline_hours`` has run out on a
-    post that at least cleared the traction floor.
-
-    The floor is what keeps the deadline honest. By construction the deadline
-    only ever fires on posts that flopped: anything that got its replies was
-    commented under hours earlier. Without a floor the pitch would land on the
-    weakest posts and *only* the weakest posts — earning nothing, since nobody
-    is reading the comments on a post nobody engaged with, while still sitting
-    there for whoever arrives if the post revives days later. Below the floor
-    the comment is dropped for good instead (``skipped``).
-
-    ``metrics`` (a ``{metric: value}`` mapping from the post's newest snapshot)
-    can be passed in by a caller that already has it; otherwise it's read here,
-    and only when a count actually gates the decision.
-    """
-    cfg = cfg or load_first_reply()
-    delay = int(cfg.get("delay_minutes", 0) or 0)
-    min_replies = int(cfg.get("min_replies", 0) or 0)
-    min_likes = int(cfg.get("min_likes", 0) or 0)
-    deadline_hours = int(cfg.get("deadline_hours", 0) or 0)
-    if not (delay or min_replies or min_likes):
-        return FirstReplyGate(True)
-
-    published = post.published_at
-    if published is None:
-        return FirstReplyGate(True)
-    if published.tzinfo is None:
-        published = published.replace(tzinfo=dt.timezone.utc)
-    now = utcnow()
-    deadline_at = (published + dt.timedelta(hours=deadline_hours)
-                   if deadline_hours else None)
-
-    resolved = metrics
-
-    def counts() -> dict:
-        """The post's newest snapshot, read at most once per call."""
-        nonlocal resolved
-        if resolved is None:
-            from .analytics import latest_metrics_bulk
-            resolved = latest_metrics_bulk(session, [post.id]).get(post.id) or {}
-        return resolved
-
-    if deadline_at is not None and now >= deadline_at:
-        floor_views = int(cfg.get("deadline_min_views", 0) or 0)
-        floor_likes = int(cfg.get("deadline_min_likes", 0) or 0)
-        if not (floor_views or floor_likes):
-            return FirstReplyGate(True, deadline_at=deadline_at)
-        seen = counts()
-        views = seen.get("views") or 0
-        likes = seen.get("likes") or 0
-        # Either signal is enough: both answer "did anyone actually see this".
-        if (floor_views and views >= floor_views) or (floor_likes and likes >= floor_likes):
-            return FirstReplyGate(True, deadline_at=deadline_at)
-        bar = " or ".join(filter(None, [
-            f"{floor_views} views" if floor_views else "",
-            f"{floor_likes} likes" if floor_likes else "",
-        ]))
-        return FirstReplyGate(
-            False,
-            f"No first comment: {deadline_hours}h on, this post had {views} views "
-            f"and {likes} likes — short of the {bar} a late comment needs. Nobody "
-            "is reading the replies on a post this quiet, so it was passed over "
-            "rather than left carrying a pitch. Post it by hand if you disagree.",
-            deadline_at, skipped=True)
-
-    if delay:
-        ready_at = published + dt.timedelta(minutes=delay)
-        if now < ready_at:
-            return FirstReplyGate(
-                False,
-                f"Holding the first comment until {_clock(ready_at)} "
-                f"({delay} min after publishing) so it doesn't take the slot "
-                "the audience's own first reply would.",
-                deadline_at)
-
-    if min_replies or min_likes:
-        # The escape hatch, appended to the waiting message: without it the
-        # page says what the post is waiting for but never that the wait ends.
-        if deadline_at is None:
-            fallback = " No deadline set, so it waits until that happens."
-        elif int(cfg.get("deadline_min_views", 0) or 0) or int(cfg.get("deadline_min_likes", 0) or 0):
-            fallback = (f" At {_clock(deadline_at)} it posts anyway if the post "
-                        "found an audience, and is dropped if it didn't.")
-        else:
-            fallback = f" Posts anyway by {_clock(deadline_at)}."
-        seen = counts()
-        replies = seen.get("replies") or 0
-        likes = seen.get("likes") or 0
-        short: list[str] = []
-        if replies < min_replies:
-            short.append(f"{replies} of {min_replies} replies")
-        if likes < min_likes:
-            short.append(f"{likes} of {min_likes} likes")
-        if short:
-            return FirstReplyGate(
-                False,
-                "Waiting for the conversation to start — "
-                + " and ".join(short) + " so far." + fallback,
-                deadline_at)
-
-    return FirstReplyGate(True)
 
 
 def _claim_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:
@@ -1605,18 +1290,16 @@ def _publish_first_reply(text: str, reply_to_id: str, link: str) -> dict:
 
 
 def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -> bool:
-    """Post the first reply under a published post: the post's own attribution
-    comment when the operator set one, else the static configured text. Never
-    drafts anything itself — a post whose attribution field was left empty
-    simply publishes without an attribution comment.
+    """Post the first reply under a published post.
 
-    Returns True if a reply was posted. Skips when disabled / already posted
-    (unless ``force``), recording why on the post either way. A post still
-    inside its timing gates is skipped silently and left for
-    ``scheduler.run_first_reply_sweep`` to pick up later — deliberately writing
-    nothing, because a wait is not a failure and must not read as one. Never
-    raises — stores ``first_reply_error`` so a reply hiccup cannot undo a
-    publish.
+    The watch text, linking the post's full-segment page, when that page can be
+    published and loads; otherwise the fallback text. ``force`` is the operator
+    posting by hand from the post page, which overrides the on/off switch and
+    the brand-promo rule.
+
+    Returns True if a reply was posted. Never raises: a post that gets no reply
+    records why in ``first_reply_error`` (which also drops it out of the
+    scheduler's sweep), so a reply hiccup can't undo a publish.
     """
     if post.status != "published" or not post.threads_media_id:
         return False
@@ -1624,60 +1307,32 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
         return False
 
     cfg = load_first_reply()
-    if not force and first_comment_suppressed(post.candidate, cfg):
-        # Final, and recorded like a gate skip is: the post page has to show
-        # this as a decision rather than as a post that silently got nothing,
-        # and writing ``first_reply_error`` is what drops the post out of the
-        # sweep instead of leaving it re-judged every tick.
+    if not force and first_comment_suppressed(post.candidate):
         post.first_reply_error = (
-            "No first comment: this is the brand's own promo, and first "
-            "comments are off for those under Replies settings — the call to "
+            "No first reply: this is the brand's own promo, so the call to "
             "action rides in the caption instead.")
         post.first_reply_skipped = True
         session.flush()
-        log.info("First comment suppressed for first-party post %s", post.id)
+        log.info("First reply suppressed for first-party post %s", post.id)
         return False
-
-    text = resolve_first_reply_text(post, cfg, force=force)
-    if not text:
-        # Record why, always — not just on ``force``. Publishing with no first
-        # comment used to write nothing anywhere, so four posts in a row went out
-        # bare and the post page showed a clean slate for each of them.
-        post.first_reply_error = _no_first_comment_reason(post, cfg)
+    if not force and not cfg["enabled"]:
+        post.first_reply_error = "No first reply: first replies are switched off on the First reply page."
         session.flush()
-        log.warning("Post %s published without a first comment: %s",
-                    post.id, post.first_reply_error)
         return False
-
-    if not force:
-        gate = first_reply_gate(session, post, cfg)
-        if gate.skipped:
-            # Final, and recorded: the reason belongs on the page, and writing
-            # ``first_reply_error`` is also what drops the post out of the
-            # sweep — otherwise it would be re-judged (and its insights
-            # re-polled) every tick until the horizon ran out. Deliberately not
-            # revisited if the post revives later: a post that comes back days
-            # on is exactly the case where a pitch under it greets new arrivals
-            # before anyone has had a chance to reply.
-            post.first_reply_error = gate.reason
-            post.first_reply_skipped = True
-            session.flush()
-            log.info("First comment skipped for post %s: %s", post.id, gate.reason)
-            return False
-        if not gate.ready:
-            log.debug("First reply for post %s deferred: %s", post.id, gate.reason)
-            return False
 
     if not _claim_first_reply(session, post, force=force):
         log.debug("First reply for post %s already claimed elsewhere", post.id)
         return False
 
-    # Swap the bare Renewables.org mention for the full-segment page when one
-    # can be published and loads. Otherwise the text goes out unchanged
-    # (app/watch_pages.py). Done after the claim so two schedulers never
-    # both publish a page for the same reply.
-    watch_url = ensure_watch_page(post)
-    text = apply_watch_link(text, watch_url)
+    # After the claim, so two schedulers never both publish a page for the
+    # same reply. No watch text means no page to link, so don't publish one.
+    watch_url = ensure_watch_page(post) if cfg["watch_text"] else ""
+    text = first_reply_text(cfg, watch_url)
+    if not text:
+        post.first_reply_error = "No first reply: there's no fallback text on the First reply page."
+        session.flush()
+        log.warning("Post %s published without a first reply: %s", post.id, post.first_reply_error)
+        return False
     link = watch_url if watch_url and display_url(watch_url) in text else ""
 
     try:
@@ -1702,15 +1357,13 @@ def maybe_post_first_reply(session, post: ThreadsPost, *, force: bool = False) -
 
 
 def publish_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
-                 *, cut: Cut | None = None, attribution: str = "") -> ThreadsPost:
+                 *, cut: Cut | None = None) -> ThreadsPost:
     """Immediate publish: record the post, then post it to Threads right away."""
-    post = record_post(session, candidate, clip_path, caption, status="draft", cut=cut,
-                       attribution=attribution)
+    post = record_post(session, candidate, clip_path, caption, status="draft", cut=cut)
     return publish_post(session, post)
 
 
 def queue_clip(session, candidate: Candidate | None, clip_path: str, caption: str,
-               *, cut: Cut | None = None, attribution: str = "") -> ThreadsPost:
+               *, cut: Cut | None = None) -> ThreadsPost:
     """Add a post to the adaptive FIFO queue. The window scheduler publishes it."""
-    return record_post(session, candidate, clip_path, caption, status="queued", cut=cut,
-                       attribution=attribution)
+    return record_post(session, candidate, clip_path, caption, status="queued", cut=cut)

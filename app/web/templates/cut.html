@@ -2736,17 +2736,8 @@ async function retryExport() {
     </div>
   </article>
 
-  {# ---- The first comment — a source citation or a call to action, per the
-       mode on the Replies page. Configured here, saved onto the post when it's
-       queued/drafted/published. ---- #}
-  {% set fr_invitation = first_reply_mode == "invitation" %}
-  {% set fr_static = first_reply_mode == "static" %}
-  {% set fr_when = ("held back until the post has replies of its own (see Reply settings)"
-                    if first_reply_deferred else
-                    "posts as the first comment right after this publishes") %}
-  {% set fr_placeholder = (("Leave empty to post: " ~ first_reply_static_text) if fr_static else
-                           ("Invite viewers to act — " ~ fr_when ~ ". Leave empty and no reply is posted.") if fr_invitation else
-                           ("Credit the source — " ~ fr_when ~ ". Leave empty and no attribution is posted.")) %}
+  {# ---- The first reply. Set once on the First reply page, not per post:
+       shown here so you can see what will go out under this clip. ---- #}
   <article class="thread-item is-reply">
     <div class="ti-gutter" aria-hidden="true">
       <span class="ti-avatar">{{ handle[0]|upper }}</span>
@@ -2754,42 +2745,10 @@ async function retryExport() {
     <div class="ti-main">
       <div class="ti-head">
         <span class="ti-name">{{ handle }}</span>
-        <span class="ti-type">first reply · {{ "attribution" if first_reply_mode == "citation" else "call to action" }}</span>
-        <span class="ti-tools">
-          <span class="meta char-count" id="attribution-count" aria-live="polite"></span>
-          <details class="ti-menu">
-            <summary aria-label="Attribution actions" title="Attribution actions">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
-            </summary>
-            <div class="ti-menu-pop">
-              {% if not fr_static %}
-              <button type="button" id="attribution-regen"
-                      onclick="suggestAttribution(this)">{{ "Regenerate draft" if attribution_text else "Suggest draft" }}</button>
-              {% endif %}
-              <a href="/engagement/first-reply">Reply settings</a>
-            </div>
-          </details>
-        </span>
+        <span class="ti-type">first reply · automatic</span>
+        <span class="ti-tools"><a class="meta" href="/engagement/first-reply">Edit</a></span>
       </div>
-      <div class="ti-text-wrap">
-        <textarea form="post-form" name="attribution" id="attribution" class="ti-text" maxlength="500"
-                  placeholder="{{ fr_placeholder }}">{{ attribution_text }}</textarea>
-        {% if not fr_static %}
-        <button type="button" class="ti-sparkle" id="attribution-suggest" onclick="suggestAttribution(this)"
-                title="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}"
-                aria-label="{{ 'Regenerate draft' if attribution_text else 'Suggest a draft' }}">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
-        </button>
-        {% endif %}
-      </div>
-      {% if first_reply_suppressed %}
-      <p class="field-hint">This is your own promo, and first comments are off for
-        those under <a href="/engagement/first-reply">Replies settings</a> — put the
-        call to action in the caption instead.</p>
-      {% elif not attribution_enabled %}
-      <p class="field-hint">First comments are off under
-        <a href="/engagement/first-reply">Replies settings</a> — this won't auto-post.</p>
-      {% endif %}
+      {% include "components/first_reply_preview.html" %}
     </div>
   </article>
 
@@ -3263,12 +3222,10 @@ async function retryExport() {
     </section>
   {% endif %}
     <script>
-      // In-place text fields grow with content like real post text; the
-      // attribution also shows a character budget while focused.
+      // In-place text fields grow with content like real post text.
       (function () {
         const MAX = 500;
-        for (const [taId, countId] of [['caption', null],
-                                       ['attribution', 'attribution-count']]) {
+        for (const [taId, countId] of [['caption', null]]) {
           const ta = document.getElementById(taId);
           if (!ta) continue;
           const count = countId && document.getElementById(countId);
@@ -3283,16 +3240,6 @@ async function retryExport() {
           grow(); render();
         }
       })();
-      // Sparkle titles track empty vs filled; the icon stays visible either way.
-      (function () {
-        const ta = document.getElementById('attribution');
-        const btn = document.getElementById('attribution-suggest');
-        if (!ta || !btn) return;
-        ta.addEventListener('input', () => {
-          const label = ta.value.trim() ? 'Regenerate draft' : 'Suggest a draft';
-          btn.title = btn.ariaLabel = label;
-        });
-      })();
       // Kebab menus: close when clicking anywhere outside the open menu.
       document.addEventListener('click', (e) => {
         document.querySelectorAll('details.ti-menu[open]').forEach((d) => {
@@ -3303,58 +3250,6 @@ async function retryExport() {
         const menu = el && el.closest ? el.closest('details.ti-menu') : null;
         if (menu) menu.removeAttribute('open');
       }
-      async function suggestAttribution(btn, silent) {
-        const ta = document.getElementById('attribution');
-        if (!ta) return;
-        if (!btn) btn = document.getElementById('attribution-suggest');
-        const isSparkle = btn && btn.classList.contains('ti-sparkle');
-        const lbl = (btn && !isSparkle) ? (btn.querySelector('.lbl') || btn) : null;
-        const old = lbl ? lbl.textContent : '';
-        if (btn) {
-          btn.disabled = true;
-          if (isSparkle) btn.classList.add('is-busy');
-          else if (lbl) lbl.textContent = 'Drafting…';
-        }
-        try {
-          const r = await fetch('/cut/{{ cut.id }}/suggest-attribution', { method: 'POST' });
-          const d = await r.json();
-          if (!r.ok) {
-            if (!silent) alert(d.error || 'Attribution draft failed.');
-            return;
-          }
-          if (d.unavailable || !d.text) {
-            if (!silent) alert(d.message || 'No citation drafted — the source data is not available.');
-            return;
-          }
-          ta.value = d.text;
-          ta.dispatchEvent(new Event('input'));
-          const regen = document.getElementById('attribution-regen');
-          if (regen) regen.textContent = 'Regenerate draft';
-          const sparkle = document.getElementById('attribution-suggest');
-          if (sparkle) sparkle.title = sparkle.ariaLabel = 'Regenerate draft';
-          if (!silent) {
-            closeMenu(btn);
-            ta.focus();
-          }
-        } catch (e) {
-          if (!silent) alert('Attribution draft failed: ' + e);
-        } finally {
-          if (btn) {
-            btn.disabled = false;
-            if (isSparkle) btn.classList.remove('is-busy');
-            else if (lbl && lbl.textContent === 'Drafting…') lbl.textContent = old;
-          }
-        }
-      }
-      // Invitation mode: draft the call to action into the box on load so it
-      // can be reviewed before queue/publish (same draft the ship path would
-      // write later if the box were still empty).
-      {% if fr_invitation %}
-      (function () {
-        const ta = document.getElementById('attribution');
-        if (ta && !ta.value.trim()) suggestAttribution(null, true);
-      })();
-      {% endif %}
       // The suggestion is only ever a PROPOSAL: it renders in a review card
       // and touches the caption field/DB only when the operator accepts it.
       let proposedCaption = '';
@@ -3576,7 +3471,7 @@ async function retryExport() {
           const igBox = document.getElementById('include-instagram');
           if (igBox && igBox.checked && !(await ensureReelReady('queued'))) return;
           {% if pending_post_status == "queued" %}
-          if (await confirmDialog('Update the queued post with this caption, clip and attribution?', { okText: 'Update queue' }))
+          if (await confirmDialog('Update the queued post with this caption and clip?', { okText: 'Update queue' }))
           {% else %}
           if (await confirmDialog('Add this clip to the posting queue?', { okText: 'Add to queue' }))
           {% endif %}
@@ -3691,8 +3586,8 @@ async function retryExport() {
 
   {% if threads_ok %}
   {# Ship controls live in the rail (same spot as the post page): Instagram
-     include on by default, then draft / post-now / queue. Caption + attribution
-     textareas associate via form="post-form"; buttons submit through form=. #}
+     include on by default, then draft / post-now / queue. The caption
+     textarea associates via form="post-form"; buttons submit through form=. #}
   <div class="card tight post-ship-card" style="margin-top: 14px;">
     <form method="post" action="/cut/{{ cut.id }}/post" id="post-form">
       <input type="hidden" name="use_subtitles" id="use-subtitles-field"

@@ -1,95 +1,24 @@
-# Auto first-reply posted under every Threads post this app publishes.
-# Editable via the cog on the Replies page; no code changes needed.
+# The first reply posted under every found-footage Threads post. Edit it on the
+# First reply page (Engagement); no code changes needed.
 #
-# The Replies page saves these settings to the shared database AND to this file.
-# Every runner reads the database copy whenever one exists, so editing this
-# file by hand changes nothing until it's saved again from the Replies page.
-# The file only matters for a workspace that has never been saved from there.
+# The page saves to the shared database AND to this file. Every runner reads
+# the database copy whenever one exists, so editing this file by hand changes
+# nothing until it's saved again from the page. The file only matters for a
+# workspace that has never been saved from there.
 #
-# mode decides what the "Suggest a draft" button writes into the first-reply box
-# on the cut and post pages:
-#   citation   - a formal credit line for the source publisher (drafted only
-#                when you click Suggest; nothing is written automatically).
-#   invitation - a call to action written from `instruction` below, drafted
-#                automatically for every post so none goes out without one.
-#   static     - nothing is drafted: every post's first comment is `text`
-#                below, unless you type something else into its box.
-# Drafted text lands in an editable box you review before the post publishes;
-# the first comment is only ever the text sitting in that box, or `text` when
-# the box is empty.
+# Two texts, one per case:
+#   watch_text    - when the post's full-segment page on Renewables.org was
+#                   published and loads. Must contain {watch_url}, which
+#                   becomes renewables.org/watch/<slug>.
+#   fallback_text - when there's no page: the source isn't an embeddable
+#                   YouTube video, or the page couldn't be published.
+# enabled: false and no first reply posts at all.
 #
-# instruction is your own plain-language brief for invitation mode, passed to
-# the model as the authoritative spec. It is also the ONLY source of factual
-# claims the model may make, so any statistic or figure you want used has to
-# appear here verbatim.
-#
-# attribution_enabled: when false, the first comment never posts, whatever is in
-# the box. When enabled is true and text is non-empty, that static text is the
-# fallback for posts whose box is empty. A reply failure never rolls back the
-# post — check the post page and retry there.
-#
-# first_party_enabled: whether the brand's OWN promos get a first comment at all.
-# On those the clip IS the ad, so the call to action belongs in the caption where
-# it lands with the post, not in a comment the timing gates below can hold back
-# for hours — long enough for a viewer to ask where to go and get no answer. Set
-# it false and promo captions have to carry the URL themselves; found footage is
-# unaffected either way.
-#
-# WHEN the first comment posts. With all four gates at 0 it goes out seconds
-# after the post, which is the recommended setting: a post gets ~70% of its
-# lifetime views in its first 2 hours and ~99% within 6 (measured across 400+
-# of this account's posts, Nov 2026), so every hour of holding back hides the
-# comment from most of the people who will ever see the post. Holding until
-# other people reply also showed no benefit: posts commented under immediately
-# drew as many audience replies as posts that waited. The gates remain for
-# anyone who wants the comment held back until the post has a conversation of
-# its own:
-#   delay_minutes  - don't comment until the post is at least this old
-#   min_replies    - ...and until this many OTHER people have replied
-#   min_likes      - ...and until it has at least this many likes
-#   deadline_hours - comment anyway once the post is this old, so a post that
-#                    never got replies still gets its call to action
-#                    (0 = wait indefinitely)
-# All four at 0: comment immediately on publish.
-#
-# The deadline fires only on posts that FLOPPED — a post that got its replies
-# was commented under long before. Left unqualified it therefore attaches the
-# pitch to your weakest posts and only your weakest posts, which is backwards:
-# nobody is reading the comments on a post nobody engaged with, so the ask earns
-# nothing, while a Threads post that revives days later shows new arrivals a
-# pitch before anyone has had a chance to reply. These two put a floor under it:
-#   deadline_min_views - at the deadline, comment only if the post cleared this
-#   deadline_min_likes - ...or this (either one is enough)
-# A post under both is skipped for good rather than commented on. Both at 0
-# means no floor: the deadline comments on everything it reaches.
+# It posts right after the post publishes. The brand's own promos never get
+# one: on those the clip is the ad, so the call to action rides in the caption.
 
-mode: static
 enabled: true
-attribution_enabled: true
-first_party_enabled: false
-delay_minutes: 0
-min_replies: 0
-min_likes: 0
-deadline_hours: 0
-deadline_min_views: 0
-deadline_min_likes: 0
-instruction: "Write a short, plain note pointing readers to Renewables.org, one or two\nsentences.\n\
-  \nIt should read like the poster adding a useful aside under their own clip,\nnot like an\
-  \ ad. No questions, no exclamation marks, no urgency, and never\ndescribe the reader's feelings.\
-  \ A light, natural bridge from the clip is fine\n(\"If you want to do something about this,\
-  \ ...\" or \"One practical thing you\ncan do: ...\") but it's equally fine to skip it and\
-  \ just state the ask. Don't\nuse the same bridge twice in a row.\n\nIt must contain the\
-  \ URL Renewables.org written exactly that way, with no\nhttps:// and no tracking parameters.\
-  \ Say that Renewables.org is a nonprofit\nand that the money finances solar projects in\
-  \ the Global South. Vary how you\nphrase this every time — different verbs, different sentence\
-  \ shape, different\nemphasis — so the same line never appears twice.\n\nYou may also use\
-  \ any of the following facts, but only word them in ways that\nstay true to them. Rotate\
-  \ which one you include rather than using all of them:\n  - Anyone can invest as little\
-  \ as $25.\n  - Investors are paid back as the panels generate and sell clean electricity\n\
-  \    to the grid.\n  - You don't earn an interest rate, but dollar-for-dollar you create\
-  \ 550% more\n    carbon avoidance than investing in the Global North would.\n\nNever promise\
-  \ a financial return. Always call it an investment: never a\ndonation, contribution, gift,\
-  \ or pledge, and never use the verb \"donate\" or\n\"give\". Never state any number that\
-  \ does not appear above."
-text: Take climate action 👉 Renewables.org — fund solar, create 5.5x the carbon impact, get
-  repaid
+watch_text: Take climate action 👉 {watch_url} — fund solar, create 5.5x the carbon impact,
+  get repaid
+fallback_text: Take climate action 👉 Renewables.org — fund solar, create 5.5x the carbon impact,
+  get repaid

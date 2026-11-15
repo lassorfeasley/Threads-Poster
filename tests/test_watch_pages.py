@@ -16,12 +16,13 @@ from unittest import mock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app import publishing, watch_pages
+from app import config, publishing, watch_pages
 from app.models import Base, Candidate, Channel, Cut, ThreadsPost
 from app.threads_api import ThreadsError
 
 SITE = "https://renewables.org"
 STATIC = "Take climate action 👉 Renewables.org — fund solar, create 5.5x the carbon impact, get repaid"
+WATCH = "Watch the full segment 👉 {watch_url}"
 
 
 class FakeSettings(dict):
@@ -76,29 +77,43 @@ class PureHelpersTest(unittest.TestCase):
         self.assertEqual(watch_pages.clip_start_seconds(Cut(trim_segments="[]")), 0)
         self.assertEqual(watch_pages.clip_start_seconds(None), 0)
 
-    def test_apply_replaces_first_bare_mention(self):
-        out = watch_pages.apply_watch_link(STATIC, f"{SITE}/watch/heat-wave-7")
-        self.assertIn("👉 renewables.org/watch/heat-wave-7 — fund solar", out)
-        self.assertNotIn("https://", out)
 
-    def test_apply_only_replaces_once(self):
-        out = watch_pages.apply_watch_link("Renewables.org and Renewables.org", f"{SITE}/watch/x-1")
-        self.assertEqual(out, "renewables.org/watch/x-1 and Renewables.org")
 
-    def test_apply_leaves_urls_handles_and_emails_alone(self):
-        url = f"{SITE}/watch/x-1"
-        for text in ("see renewables.org/faqs", "https://renewables.org", "@renewables.org",
-                     "hi@renewables.org", "www.renewables.org"):
-            self.assertEqual(watch_pages.apply_watch_link(text, url), text, text)
+class FirstReplyTextTest(unittest.TestCase):
+    CFG = {"enabled": True, "watch_text": WATCH, "fallback_text": STATIC}
 
-    def test_apply_without_url_leaves_text(self):
-        self.assertEqual(watch_pages.apply_watch_link(STATIC, ""), STATIC)
+    def test_watch_text_when_page_is_up(self):
+        self.assertEqual(publishing.first_reply_text(self.CFG, f"{SITE}/watch/heat-wave-7"),
+                         "Watch the full segment 👉 renewables.org/watch/heat-wave-7")
 
-    def test_placeholder(self):
-        self.assertEqual(watch_pages.apply_watch_link("Watch: {watch_url}", f"{SITE}/watch/x-1"),
-                         "Watch: renewables.org/watch/x-1")
-        self.assertEqual(watch_pages.apply_watch_link("Watch: {watch_url}", ""),
-                         "Watch: Renewables.org")
+    def test_fallback_when_no_page(self):
+        self.assertEqual(publishing.first_reply_text(self.CFG, ""), STATIC)
+
+    def test_fallback_when_no_watch_text(self):
+        cfg = dict(self.CFG, watch_text="")
+        self.assertEqual(publishing.first_reply_text(cfg, f"{SITE}/watch/x-1"), STATIC)
+
+
+class LoadFirstReplyTest(unittest.TestCase):
+    def load(self, data):
+        with mock.patch.object(config, "_first_reply_from_db", return_value=data):
+            return config.load_first_reply()
+
+    def test_two_text_settings(self):
+        self.assertEqual(self.load({"enabled": True, "watch_text": WATCH, "fallback_text": STATIC}),
+                         {"enabled": True, "watch_text": WATCH, "fallback_text": STATIC})
+
+    def test_single_text_settings_carry_over(self):
+        # Saved before the two-text version: the old line is the fallback, and
+        # its Renewables.org mention becomes the link in the watch text.
+        cfg = self.load({"enabled": True, "text": STATIC, "mode": "static",
+                         "attribution_enabled": True, "delay_minutes": 0})
+        self.assertEqual(cfg["fallback_text"], STATIC)
+        self.assertEqual(cfg["watch_text"], STATIC.replace("Renewables.org", "{watch_url}"))
+
+    def test_single_text_without_mention_has_no_watch_text(self):
+        cfg = self.load({"enabled": True, "text": "Footage courtesy of KTST."})
+        self.assertEqual(cfg["watch_text"], "")
 
 
 class DbCase(unittest.TestCase):
@@ -262,14 +277,12 @@ class EnsureWatchPageTest(DbCase):
 
 
 class FirstReplyIntegrationTest(DbCase):
-    CFG = {"enabled": True, "text": STATIC, "attribution_enabled": True,
-           "first_party_enabled": True, "mode": "static", "instruction": "",
-           "delay_minutes": 0, "min_replies": 0, "min_likes": 0, "deadline_hours": 0,
-           "deadline_min_views": 0, "deadline_min_likes": 0}
+    CFG = {"enabled": True, "watch_text": WATCH, "fallback_text": STATIC}
 
     def setUp(self):
         super().setUp()
-        p = mock.patch.object(publishing, "load_first_reply", return_value=dict(self.CFG))
+        self.cfg = dict(self.CFG)
+        p = mock.patch.object(publishing, "load_first_reply", side_effect=lambda: self.cfg)
         p.start()
         self.addCleanup(p.stop)
         self.reply = mock.Mock(return_value={"media_id": "r1"})
@@ -283,12 +296,12 @@ class FirstReplyIntegrationTest(DbCase):
         self.assertTrue(publishing.maybe_post_first_reply(self.session, post))
         text = self.reply.call_args.args[0]
         url = f"{SITE}/watch/record-heat-strains-the-grid-{post.id}"
-        self.assertIn(f"👉 renewables.org/watch/record-heat-strains-the-grid-{post.id} — fund", text)
+        self.assertEqual(text, f"Watch the full segment 👉 renewables.org/watch/record-heat-strains-the-grid-{post.id}")
         self.assertEqual(self.reply.call_args.kwargs, {"link_attachment": url})
         self.assertEqual(post.first_reply_text, text)
         self.assertEqual(post.watch_page_url, url)
 
-    def test_reply_falls_back_to_plain_text_when_no_page(self):
+    def test_reply_uses_fallback_text_when_no_page(self):
         post = self.post()
         self.http(oembed=401)
         self.assertTrue(publishing.maybe_post_first_reply(self.session, post))
@@ -297,13 +310,36 @@ class FirstReplyIntegrationTest(DbCase):
         self.assertEqual(post.first_reply_text, STATIC)
         self.assertIn("embedding", post.watch_page_error)
 
-    def test_text_without_mention_gets_no_card(self):
+    def test_no_watch_text_publishes_no_page(self):
+        self.cfg["watch_text"] = ""
         post = self.post()
-        post.attribution_text = "Footage courtesy of KTST News 4."
-        self.http()
+        get, put = self.http()
         self.assertTrue(publishing.maybe_post_first_reply(self.session, post))
-        self.assertEqual(self.reply.call_args.args[0], "Footage courtesy of KTST News 4.")
-        self.assertEqual(self.reply.call_args.kwargs, {})
+        put.assert_not_called()
+        self.assertEqual(self.reply.call_args.args, (STATIC, "m1"))
+
+    def test_switched_off_posts_nothing_and_says_why(self):
+        self.cfg["enabled"] = False
+        post = self.post()
+        self.http()
+        self.assertFalse(publishing.maybe_post_first_reply(self.session, post))
+        self.reply.assert_not_called()
+        self.assertIn("switched off", post.first_reply_error)
+
+    def test_posting_by_hand_overrides_the_switch(self):
+        self.cfg["enabled"] = False
+        post = self.post()
+        self.http()
+        self.assertTrue(publishing.maybe_post_first_reply(self.session, post, force=True))
+        self.assertIn("renewables.org/watch/", self.reply.call_args.args[0])
+
+    def test_brand_promo_gets_no_reply(self):
+        post = self.post(first_party=True)
+        self.http()
+        self.assertFalse(publishing.maybe_post_first_reply(self.session, post))
+        self.reply.assert_not_called()
+        self.assertTrue(post.first_reply_skipped)
+        self.assertIn("own promo", post.first_reply_error)
 
     def test_rejected_link_attachment_retries_without_it(self):
         post = self.post()

@@ -1,0 +1,14 @@
+{# What the automatic first reply will say under this post. Expects
+   ``first_reply`` from main._first_reply_preview(). #}
+{% if first_reply.suppressed %}
+<p class="field-hint">None: this is your own promo, so the call to action goes in the caption.</p>
+{% elif not first_reply.enabled %}
+<p class="field-hint">None: first replies are switched off on the
+  <a href="/engagement/first-reply">First reply page</a>.</p>
+{% elif first_reply.watch_preview %}
+<div class="ti-text-static is-pending">{{ first_reply.watch_preview }}</div>
+<p class="field-hint">If the video page can't go up, it posts this instead:
+  {{ first_reply.fallback_text }}</p>
+{% else %}
+<div class="ti-text-static is-pending">{{ first_reply.fallback_text }}</div>
+{% endif %}

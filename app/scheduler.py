@@ -38,9 +38,9 @@ from sqlalchemy import func, not_, or_, select, update
 from sqlalchemy.orm import defer, selectinload
 
 from . import threads_api
-from .analytics import poll_recent_metrics, refresh_metrics_for, snapshot_account
+from .analytics import poll_recent_metrics, snapshot_account
 from .categories import category_by_slug, default_shelf_life, is_first_party
-from .config import load_first_reply, load_settings, scheduler_timezone
+from .config import load_settings, scheduler_timezone
 from .db import session_scope
 from .models import (
     Candidate,
@@ -64,10 +64,6 @@ from .placement import (
 from .publishing import (
     check_facebook_videos,
     clear_publishing,
-    draft_first_reply,
-    first_comment_suppressed,
-    first_reply_context,
-    first_reply_needs_metrics,
     is_facebook_publish_active,
     is_linkedin_publish_active,
     is_publish_active,
@@ -80,7 +76,6 @@ from .publishing import (
     publish_post,
     publish_x_mirror,
     record_post,
-    resolve_first_reply_text,
 )
 
 log = logging.getLogger("scheduler")
@@ -1154,7 +1149,6 @@ def _stage_promo(session, cut: Cut, window_key: str) -> ThreadsPost | None:
 
     if (prior is not None and (prior.caption or "").strip()
             and (prior.clip_object_path or prior.clip_local_path)):
-        static = load_first_reply().get("mode") == "static"
         post = ThreadsPost(
             candidate_pk=cut.candidate_pk,
             cut_pk=cut.id,
@@ -1162,8 +1156,6 @@ def _stage_promo(session, cut: Cut, window_key: str) -> ThreadsPost | None:
             clip_local_path=prior.clip_local_path,
             clip_object_path=prior.clip_object_path,
             clip_length_seconds=prior.clip_length_seconds,
-            attribution_text="" if static else prior.attribution_text,
-            attribution_skipped=False if static else prior.attribution_skipped,
             status=STATUS_QUEUED,
             pinned_window_key=window_key,
         )
@@ -1499,36 +1491,8 @@ def _rerun_caption(session, cut: Cut, prior: ThreadsPost) -> str | None:
     return None if needs_new else (first.caption or prior.caption)
 
 
-def _rerun_first_reply(session, cut: Cut, prior: ThreadsPost,
-                       caption: str) -> tuple[str, bool]:
-    """``(attribution_text, attribution_skipped)`` for re-airing ``prior``.
-
-    In invitation mode the call to action is drafted fresh against the
-    re-air's caption: the prior airing may predate invitation mode and carry
-    a source citation, which must not ride along onto the rerun. An empty
-    draft leaves the static fallback text to cover it at publish time.
-    Static mode clears the box so the current static text covers it, whatever
-    the prior airing carried. Citation mode keeps the original credit."""
-    from . import spend
-
-    cfg = load_first_reply()
-    if cfg.get("mode") == "static":
-        return "", False
-    if cfg.get("mode") != "invitation":
-        return prior.attribution_text or "", bool(prior.attribution_skipped)
-    if first_comment_suppressed(cut.candidate, cfg) or not spend.within_budget():
-        return "", False
-    try:
-        text = draft_first_reply(first_reply_context(session, cut.candidate, cut, caption))
-    except Exception as exc:
-        log.warning("Rerun first-reply draft failed for post %s: %s", prior.id, exc)
-        text = ""
-    return (text or "").strip(), False
-
-
 def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str,
-                  caption: str | None = None,
-                  first_reply: tuple[str, bool] | None = None) -> ThreadsPost:
+                  caption: str | None = None) -> ThreadsPost:
     """Queue a re-air of ``prior``, pinned to ``window_key``.
 
     Clones the airing the way ``_stage_promo`` does — clip paths copied, so
@@ -1539,14 +1503,11 @@ def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str,
     ``repost_of_post_pk`` and ships as evergreen: the content's moment already
     happened, it re-airs on proven performance. Facet annotations are copied
     too (same file — re-annotating would spend an LLM call to learn the same
-    answer). The first comment comes from ``_rerun_first_reply`` (drafted
-    here unless the caller already has it in hand).
+    answer).
     """
     from .caption_check import first_airing
 
     caption = caption if caption is not None else prior.caption
-    attribution, skipped = (first_reply if first_reply is not None
-                            else _rerun_first_reply(session, cut, prior, caption))
     drafted = caption not in (prior.caption, first_airing(session, prior).caption)
     post = ThreadsPost(
         candidate_pk=cut.candidate_pk,
@@ -1556,8 +1517,6 @@ def _stage_repost(session, cut: Cut, prior: ThreadsPost, window_key: str,
         clip_local_path=prior.clip_local_path,
         clip_object_path=prior.clip_object_path,
         clip_length_seconds=prior.clip_length_seconds,
-        attribution_text=attribution,
-        attribution_skipped=skipped,
         status=STATUS_QUEUED,
         pinned_window_key=window_key,
         repost_of_post_pk=prior.id,
@@ -2118,7 +2077,6 @@ def _stage_filler_jit(session, state: SchedulerState, window_key: str,
     caption = _rerun_caption(session, pick["cut"], pick["prior"])
     if caption is None:
         return None
-    first_reply = _rerun_first_reply(session, pick["cut"], pick["prior"], caption)
 
     won = session.execute(
         update(SchedulerState)
@@ -2133,7 +2091,7 @@ def _stage_filler_jit(session, state: SchedulerState, window_key: str,
     session.expire(state)
 
     cut, prior = pick["cut"], pick["prior"]
-    post = _stage_repost(session, cut, prior, window_key, caption, first_reply)
+    post = _stage_repost(session, cut, prior, window_key, caption)
     log.info("Staged filler re-air of post %s (cut %s) as post %s for empty window %s",
              prior.id, cut.id, post.id, window_key)
     return post.id
@@ -2598,62 +2556,36 @@ def run_metrics_poll() -> int:
     return n
 
 
-# How long a deferred first comment stays worth posting. Past this the sweep
-# lets it go: the comment would land under a post the feed has finished with,
-# and a reply that keeps failing stops retrying forever rather than burning a
-# call every tick for days.
+# How long a missed first reply stays worth posting. Past this the sweep lets
+# it go: the reply would land under a post the feed has finished with.
 _FIRST_REPLY_HORIZON = dt.timedelta(hours=72)
 
 
 def run_first_reply_sweep(limit: int = 5) -> int:
-    """Post the deferred first comments whose gates have come good.
+    """Post first replies that the publish path never got to.
 
-    The counterpart to the deferral in ``publishing.maybe_post_first_reply``:
-    when a first comment is held back so it doesn't occupy the slot the
-    audience's own first reply would, this is what eventually posts it. Returns
+    A reply normally goes out seconds after its post, from the publish path.
+    This catches the posts where it didn't (the process died in between, or a
+    claim went stale) and still have no reply and no recorded reason. Returns
     how many went out.
-
-    Runs whatever the config says rather than only while a gate is set: turning
-    the gates off has to release the posts already waiting behind them, and an
-    early return on ``first_reply_is_deferred`` would instead strand every one
-    of them with no comment and nothing on the page explaining why.
     """
     if not threads_api.is_authenticated():
         return 0
-    cfg = load_first_reply()
 
     with session_scope() as session:
-        waiting = session.execute(
-            select(ThreadsPost).where(
+        pending_ids = session.execute(
+            select(ThreadsPost.id).where(
                 ThreadsPost.status == "published",
                 ThreadsPost.first_reply_id == "",
                 ThreadsPost.threads_media_id != "",
                 ThreadsPost.published_at.is_not(None),
                 ThreadsPost.published_at >= utcnow() - _FIRST_REPLY_HORIZON,
-                # Only posts still waiting for a first attempt. A reply that
-                # was tried and failed keeps its error and its Retry button —
-                # sweeping those too would re-hit Threads every few minutes for
-                # days on a post whose reply can never succeed.
+                # Only posts never attempted. A reply that was tried and failed
+                # keeps its error and its Retry button; sweeping those too
+                # would re-hit Threads every tick on a reply that can't succeed.
                 ThreadsPost.first_reply_error == "",
             ).order_by(ThreadsPost.published_at.asc())
         ).scalars().all()
-        # A post with nothing to say records that reason at publish time, which
-        # takes it out of the query above; this also covers a post whose text
-        # became unavailable when the config changed underneath it.
-        waiting = [p for p in waiting if resolve_first_reply_text(p, cfg)]
-        if not waiting:
-            return 0
-        # The gates read reply, like and view counts, and a post can wait well
-        # past ``metrics_poll_recency_hours`` — after which the frequent poller
-        # drops it and its counts freeze. Refresh the few posts actually
-        # pending, so neither the engagement gates nor the deadline's traction
-        # floor decides on stale numbers. The floor especially: a post judged
-        # on hour-six views would be dropped for a quiet spell it may have
-        # since come out of.
-        if first_reply_needs_metrics(cfg):
-            refresh_metrics_for(session, waiting, int(load_settings().get(
-                "scheduler.metrics_poll_interval_minutes", 15)))
-        pending_ids = [p.id for p in waiting]
 
     posted = 0
     for post_id in pending_ids:
@@ -2667,7 +2599,7 @@ def run_first_reply_sweep(limit: int = 5) -> int:
             if post is not None and maybe_post_first_reply(session, post):
                 posted += 1
     if posted:
-        log.info("Posted %d deferred first comment(s)", posted)
+        log.info("Posted %d missed first repl%s", posted, "y" if posted == 1 else "ies")
     return posted
 
 

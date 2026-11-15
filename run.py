@@ -163,7 +163,7 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _BLANK_KEYWORDS = "# Keyword list for the first-pass filter (edit via the Keywords page).\n\nkeywords: []\n"
 _BLANK_CHANNELS = "# Monitored YouTube channels (edit via the Channels page).\n\nchannels: []\n"
 _BLANK_CAPTION_STYLE = "# Operator style rules for AI-drafted captions (edit via the Style guide page).\n\nrules: []\n"
-_BLANK_FIRST_REPLY = "# Auto first-reply settings (edit via the Replies page).\n\nenabled: false\nattribution_enabled: true\ntext: ''\n"
+_BLANK_FIRST_REPLY = "# First reply settings (edit on the First reply page).\n\nenabled: false\nwatch_text: ''\nfallback_text: ''\n"
 
 _ENV_TEMPLATE = """\
 # Workspace-specific secrets for the '{slug}' workspace. The shared root .env

@@ -36,7 +36,7 @@ from ..clipper import (
     export_supercut, get_waveform,
 )
 from ..config import (
-    DATA_DIR, DEFAULT_APP_NAME, WORKSPACE, add_brand_rule, current_workspace, env,
+    DATA_DIR, DEFAULT_APP_NAME, WATCH_URL_PLACEHOLDER, WORKSPACE, add_brand_rule, current_workspace, env,
     load_brand, load_brand_rules, load_caption_rules, load_first_reply, load_keywords,
     load_settings, load_workspaces, render_caption_guide, save_brand,
     save_brand_rules, save_caption_rules, save_first_reply, save_keywords,
@@ -99,14 +99,8 @@ from ..models import (
 from ..monitor import failed_channels_note, run_monitor_once
 from ..publishing import (
     clear_publishing,
-    draft_first_reply,
-    draft_first_reply_for_cut,
     facebook_pause_info,
     first_comment_suppressed,
-    first_reply_context,
-    first_reply_gate,
-    first_reply_is_deferred,
-    generate_attribution,
     mark_publishing,
     maybe_post_first_reply,
     post_facebook_comment,
@@ -121,7 +115,6 @@ from ..publishing import (
     queue_clip,
     record_instagram_post,
     record_post,
-    resolve_first_reply_text,
     resume_facebook_mirror,
 )
 from ..placement import SHELF_LIVES
@@ -672,7 +665,6 @@ _POST_LIST_ONLY = (
     defer(ThreadsPost.suggested_caption, raiseload=True),
     defer(ThreadsPost.footage_traits, raiseload=True),
     defer(ThreadsPost.footage_rationale, raiseload=True),
-    defer(ThreadsPost.attribution_text, raiseload=True),
     defer(ThreadsPost.first_reply_text, raiseload=True),
 )
 
@@ -2062,18 +2054,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "shelf_life_tagged": bool((c.shelf_life or "").strip()),
          "tagging": needs_tags,
          "export_error": (cut.export_error or "") if export_failed else "",
-         # Attribution first-comment, editable before the post even exists:
-         # prefill from the pending post so requeueing round-trips cleanly.
-         "attribution_text": (pending.attribution_text or "") if pending else "",
-         "attribution_enabled": bool(load_first_reply().get("attribution_enabled")),
-         # A promo's box stays editable (posting by hand still works) but
-         # nothing in it will auto-post, so the box has to say so.
-         "first_reply_suppressed": first_comment_suppressed(c),
-         "first_reply_mode": load_first_reply().get("mode", "citation"),
-         "first_reply_static_text": load_first_reply().get("text", ""),
-         # Whether the comment rides along with the publish or is held back
-         # until the post has replies of its own — the box says which.
-         "first_reply_deferred": first_reply_is_deferred(),
+         "first_reply": _first_reply_preview(c),
          "auth_url": "" if threads_ok else threads_api.authorize_url(),
          "subs_position": (
              cut.subs_position if cut.use_subtitles
@@ -3330,7 +3311,7 @@ def suggest_caption(cut_id: int):
         operator_guide = render_caption_guide()
         target_words = voice.get("target_words")
         # Promo captions carry the call-to-action URL themselves, because those
-        # posts get no first comment to put it in (``first_party_enabled``).
+        # posts get no first reply to put it in.
         first_party = is_first_party(c)
         # What the scene means rarely lives in its few seconds of dialogue —
         # extra context only, so a failure here drafts without it.
@@ -3621,7 +3602,7 @@ def _drop_pending_copies(session, cut: Cut, keep: ThreadsPost) -> None:
 
 @app.post("/cut/{cut_id}/post")
 def post_to_threads(cut_id: int, caption: str = Form(...),
-                    use_subtitles: str = Form(""), attribution: str = Form(""),
+                    use_subtitles: str = Form(""),
                     include_instagram: str = Form(""),
                     publish_target: str = Form("")):
     """Operator-confirmed publish of the exported clip. ``publish_target`` picks
@@ -3632,7 +3613,6 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
     want_threads, want_ig = _publish_targets(publish_target, include_instagram)
     if not want_threads:
         return _publish_reel_only(cut_id, caption)
-    attribution = _with_first_reply_draft(cut_id, caption, attribution)
     with session_scope() as session:
         ok, wait_min = spacing_allows_publish(session)
         if not ok:
@@ -3652,7 +3632,7 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
             # publish so publish_paired_reel finds it afterwards.
             post = record_post(session, cut.candidate,
                                _chosen_clip_path(cut, use_subtitles), caption,
-                               status="draft", cut=cut, attribution=attribution)
+                               status="draft", cut=cut)
             if want_ig:
                 # Reel caption is the Threads caption — one copy for both.
                 record_instagram_post(session, cut, post, cut.vertical_clip_path,
@@ -3704,7 +3684,7 @@ def post_to_threads(cut_id: int, caption: str = Form(...),
 
 @app.post("/cut/{cut_id}/queue")
 def queue_to_threads(cut_id: int, caption: str = Form(...),
-                     use_subtitles: str = Form(""), attribution: str = Form(""),
+                     use_subtitles: str = Form(""),
                      include_instagram: str = Form("")):
     """Add the exported clip to the adaptive FIFO queue (no immediate post).
     With the Instagram toggle on, the same action queues the paired reel —
@@ -3713,7 +3693,6 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
     if not caption:
         return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
     want_ig = _wants_instagram(include_instagram)
-    attribution = _with_first_reply_draft(cut_id, caption, attribution)
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
@@ -3734,12 +3713,6 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
             if existing:
                 keep = existing[0]
                 keep.caption = caption
-                # The cut page pre-fills this field from the pending post, so
-                # whatever came back (edited or cleared) is the operator's call.
-                # Publishing never drafts a replacement — empty means no
-                # attribution comment.
-                keep.attribution_text = attribution.strip()
-                keep.attribution_skipped = not attribution.strip()
                 if keep.clip_local_path != clip_path:
                     # Captions were toggled since this post was created — point
                     # at the chosen file and refresh the cloud copy.
@@ -3765,8 +3738,7 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
                     session.delete(extra)
                 post = keep
             else:
-                post = queue_clip(session, cut.candidate, clip_path, caption, cut=cut,
-                                  attribution=attribution)
+                post = queue_clip(session, cut.candidate, clip_path, caption, cut=cut)
             if want_ig:
                 # Reel caption is the Threads caption — one copy for both.
                 record_instagram_post(session, cut, post, cut.vertical_clip_path,
@@ -3788,19 +3760,18 @@ def queue_to_threads(cut_id: int, caption: str = Form(...),
 
 @app.post("/cut/{cut_id}/save-draft")
 def save_draft(cut_id: int, caption: str = Form(...),
-               use_subtitles: str = Form(""), attribution: str = Form("")):
+               use_subtitles: str = Form("")):
     """Save the exported clip + caption as a draft to publish or queue later."""
     caption = caption.strip()
     if not caption:
         return _flash(f"/cut/{cut_id}?step=post", "Caption is empty")
-    attribution = _with_first_reply_draft(cut_id, caption, attribution)
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
         if cut is None or not cut.trimmed_clip_path:
             return _flash(f"/cut/{cut_id}", "Export a clip first")
         try:
             record_post(session, cut.candidate, _chosen_clip_path(cut, use_subtitles),
-                        caption, status="draft", cut=cut, attribution=attribution)
+                        caption, status="draft", cut=cut)
             # Keep the clip's caption in sync with the saved draft.
             cut.draft_caption = caption
         except Exception as exc:
@@ -3809,35 +3780,17 @@ def save_draft(cut_id: int, caption: str = Form(...),
                   "Saved as draft — publish or queue it any time from Posts")
 
 
-def _first_reply_is_invitation() -> bool:
-    return load_first_reply().get("mode") == "invitation"
-
-
-def _with_first_reply_draft(cut_id: int, caption: str, attribution: str) -> str:
-    """The operator's first-reply text, or a call-to-action draft when they left
-    the box empty and invitation mode is on.
-
-    Called BEFORE the ship path opens its session: the draft is a multi-second
-    model call, and running it inside that transaction would hold a pooled
-    database connection the whole time. Never raises — a draft that fails just
-    leaves the box empty, exactly as it would have been.
-    """
-    if attribution.strip() or not _first_reply_is_invitation():
-        return attribution
-    try:
-        return draft_first_reply_for_cut(cut_id, caption) or attribution
-    except Exception:
-        log.exception("First-reply draft failed for cut %s", cut_id)
-        return attribution
-
-
-def _no_suggestion_message(invitation: bool) -> str:
-    """Why the model returned nothing, in the operator's terms."""
-    if invitation:
-        return ("No invitation drafted — check that the brief under Replies "
-                "settings says what the call to action should be.")
-    return ("No citation drafted — the source data available isn't enough for a "
-            "reliable attribution.")
+def _first_reply_preview(candidate) -> dict:
+    """What the automatic first reply will say under a post that hasn't
+    published yet, for the cut and post pages."""
+    cfg = load_first_reply()
+    watch = cfg["watch_text"]
+    return {
+        "enabled": cfg["enabled"],
+        "suppressed": first_comment_suppressed(candidate),
+        "watch_preview": watch.replace(WATCH_URL_PLACEHOLDER, "renewables.org/watch/…") if watch else "",
+        "fallback_text": cfg["fallback_text"],
+    }
 
 
 @app.post("/cut/{cut_id}/caption-check")
@@ -3860,43 +3813,6 @@ def cut_caption_check(cut_id: int, caption: str = Form("")):
         verdict = check_caption(session, cut, caption, source=CaptionCheck.SOURCE_CUT_PAGE,
                                 reference=vetted_airing(session, cut))
     return {"ok": verdict.ok, "reason": verdict.reason}
-
-
-@app.post("/cut/{cut_id}/suggest-attribution")
-def suggest_cut_attribution(cut_id: int):
-    """(Re)draft the first-comment while still on the cut page — a source
-    citation or a call to action, per the mode on the Replies page. Returns the
-    suggestion only; it rides along with queue/post/draft."""
-    invitation = load_first_reply().get("mode") == "invitation"
-    with session_scope() as session:
-        cut = session.execute(
-            select(Cut)
-            .options(selectinload(Cut.candidate).selectinload(Candidate.channel))
-            .where(Cut.id == cut_id)
-        ).scalar_one_or_none()
-        if cut is None or cut.candidate is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        try:
-            # Gather inside the session, call the model outside it: see
-            # ``first_reply_context``.
-            if invitation:
-                pending = first_reply_context(session, cut.candidate, cut,
-                                              cut.draft_caption or "")
-            else:
-                text = generate_attribution(cut.candidate)
-        except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
-    if invitation:
-        try:
-            text = draft_first_reply(pending)
-        except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
-    if not text:
-        # The model declined rather than guess — surface that honestly instead
-        # of proposing a made-up credit.
-        return {"text": "", "unavailable": True,
-                "message": _no_suggestion_message(invitation)}
-    return {"text": text}
 
 
 @app.post("/post/{post_id}/cancel")
@@ -3930,18 +3846,12 @@ def cancel_queued_post(post_id: int, next: str = Form("/calendar")):
 
 @app.post("/post/{post_id}/queue")
 def queue_existing_post(post_id: int, caption: str = Form(""),
-                        attribution: str | None = Form(None),
                         next: str = Form("/calendar")):
     """Move a draft/failed post into the adaptive queue (or update a queued one)."""
     with session_scope() as session:
         p = session.get(ThreadsPost, post_id)
         if p is None or p.status not in ("draft", "failed", "queued"):
             return _flash(next, "Only a draft, failed, or queued post can be (re)queued")
-        # None = the form had no attribution field (e.g. requeue from
-        # Notifications); an empty string is a deliberate clear (skip the comment).
-        if attribution is not None:
-            p.attribution_text = attribution.strip()
-            p.attribution_skipped = not attribution.strip()
         if caption.strip():
             p.caption = caption.strip()
             # Mirror the edited caption onto the clip so re-opening the cut shows
@@ -4184,24 +4094,6 @@ def post_recaption(post_id: int, position: str = Form("bottom"), force: str = Fo
 _POST_METRICS = ("views", "likes", "replies", "reposts", "quotes", "shares")
 
 
-def _first_reply_wait(session, post, metrics: dict | None) -> str:
-    """Why a published post's first comment hasn't gone out yet, or "".
-
-    Only ever the LIVE, still-changing reason. Anything already settled — the
-    reply posted, an attempt that failed, a comment the scheduler passed over —
-    has its own message recorded on the post, and re-deriving it here would let
-    the page contradict what actually happened. ``metrics`` is the post's newest
-    snapshot, already loaded by the page, so the gates don't re-query it.
-    """
-    if post.status != "published" or post.first_reply_id or post.first_reply_error:
-        return ""
-    cfg = load_first_reply()
-    if not resolve_first_reply_text(post, cfg):
-        return ""
-    gate = first_reply_gate(session, post, cfg, metrics=metrics or {})
-    return "" if gate.ready else gate.reason
-
-
 @app.get("/post/{post_id}", response_class=HTMLResponse)
 def post_detail(request: Request, post_id: int, msg: str = ""):
     """A single post's profile: manage the queue before it publishes, and once
@@ -4318,29 +4210,13 @@ def post_detail(request: Request, post_id: int, msg: str = ""):
             "clip_transcript_text": clip_transcript_text,
             "scheduled_at": p.scheduled_at, "published_at": p.published_at,
             "created_at": p.created_at,
-            "attribution_text": p.attribution_text or "",
-            "attribution_skipped": bool(p.attribution_skipped),
-            "attribution_enabled": load_first_reply().get("attribution_enabled", True),
-            "first_reply_suppressed": first_comment_suppressed(cand),
-            "first_reply_mode": load_first_reply().get("mode", "citation"),
-            "first_reply_static_text": load_first_reply().get("text", ""),
-            "first_reply_deferred": first_reply_is_deferred(),
-            # A call to action is written from the brief, not from the source
-            # video, so it can be drafted even for a post with no candidate.
-            # Static mode drafts nothing.
-            "can_suggest_attribution": (load_first_reply().get("mode") != "static"
-                                        and (bool(cand) or _first_reply_is_invitation())),
+            "first_reply": _first_reply_preview(cand),
             "first_reply_id": p.first_reply_id or "",
             "first_reply_text": p.first_reply_text or "",
             "first_reply_error": p.first_reply_error or "",
             "watch_page_url": p.watch_page_url or "",
             "watch_page_error": p.watch_page_error or "",
             "first_reply_at": p.first_reply_at,
-            # Why a published post has no first comment YET. Deferral writes
-            # nothing to the post (a wait isn't a failure), so the reason is
-            # derived here from the gates — otherwise the page would show a
-            # bare "No first reply." on a post that's simply biding its time.
-            "first_reply_wait": _first_reply_wait(session, p, metrics),
             # A comment the scheduler passed over on purpose reads the same as
             # one that failed unless the page is told which it was.
             "first_reply_skipped": bool(p.first_reply_skipped),
@@ -5915,51 +5791,8 @@ def retry_first_reply(post_id: int, next: str = Form("")):
         # Manual action: use current configured text even if auto-post is disabled.
         if maybe_post_first_reply(session, p, force=True):
             return _flash(dest, "First reply posted")
-        err = p.first_reply_error or "First reply not posted — set text under Replies settings"
+        err = p.first_reply_error or "First reply not posted"
         return _flash(dest, err)
-
-
-@app.post("/post/{post_id}/suggest-attribution")
-def suggest_post_attribution(post_id: int):
-    """(Re)draft the first-comment for a post — a source citation or a call to
-    action, per the mode on the Replies page. Returns the suggestion only: it is
-    saved when the operator updates the queue, so nothing changes until they've
-    seen it."""
-    invitation = load_first_reply().get("mode") == "invitation"
-    with session_scope() as session:
-        p = session.execute(
-            select(ThreadsPost)
-            .options(selectinload(ThreadsPost.candidate).selectinload(Candidate.channel))
-            .where(ThreadsPost.id == post_id)
-        ).scalar_one_or_none()
-        if p is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        if p.candidate is None and not invitation:
-            return JSONResponse(
-                {"error": "No source video on record for this post, so there's "
-                          "nothing to attribute from."},
-                status_code=409)
-        try:
-            # Gather inside the session, call the model outside it: see
-            # ``first_reply_context``.
-            if invitation:
-                pending = first_reply_context(session, p.candidate, p.cut,
-                                              p.caption or "")
-            else:
-                text = generate_attribution(p.candidate)
-        except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
-    if invitation:
-        try:
-            text = draft_first_reply(pending)
-        except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
-    if not text:
-        # The model declined rather than guess — surface that honestly instead
-        # of proposing a made-up credit.
-        return {"text": "", "unavailable": True,
-                "message": _no_suggestion_message(invitation)}
-    return {"text": text}
 
 
 # --- Settings ----------------------------------------------------------------
@@ -6205,102 +6038,28 @@ def first_reply_page(request: Request, msg: str = ""):
     cfg = load_first_reply()
     return templates.TemplateResponse(
         request, "first_reply.html",
-        {"enabled": cfg["enabled"], "text": cfg["text"],
-         "attribution_enabled": cfg["attribution_enabled"],
-         "first_party_enabled": cfg["first_party_enabled"],
-         "mode": cfg["mode"], "instruction": cfg["instruction"],
-         "delay_minutes": cfg["delay_minutes"], "min_replies": cfg["min_replies"],
-         "min_likes": cfg["min_likes"], "deadline_hours": cfg["deadline_hours"],
-         "deadline_min_views": cfg["deadline_min_views"],
-         "deadline_min_likes": cfg["deadline_min_likes"],
+        {**cfg, "placeholder": WATCH_URL_PLACEHOLDER,
          "msg": msg, "active": "engagement"},
     )
 
 
-def _timing_summary(delay: int, min_replies: int, min_likes: int, deadline: int,
-                    floor_views: int, floor_likes: int) -> str:
-    """How the saved gates read back, so the flash confirms the actual rule
-    rather than just that something was written."""
-    waits = []
-    if delay:
-        waits.append(f"{delay} min")
-    if min_replies:
-        waits.append(f"{min_replies} repl{'y' if min_replies == 1 else 'ies'}")
-    if min_likes:
-        waits.append(f"{min_likes} likes")
-    if not waits:
-        return "posting immediately after each publish"
-    if not deadline:
-        return "waiting for " + " + ".join(waits) + ", with no deadline"
-    floor = " or ".join(filter(None, [
-        f"{floor_views} views" if floor_views else "",
-        f"{floor_likes} likes" if floor_likes else "",
-    ]))
-    tail = (f", then after {deadline}h only if it reached {floor}" if floor
-            else f", or after {deadline}h regardless")
-    return "waiting for " + " + ".join(waits) + tail
-
-
 @app.post("/engagement/first-reply")
-def first_reply_save(enabled: str = Form(""), text: str = Form(""),
-                     attribution_enabled: str = Form(""),
-                     first_party_enabled: str = Form(""),
-                     mode: str = Form("citation"),
-                     instruction: str = Form(""), delay_minutes: int = Form(0),
-                     min_replies: int = Form(0), min_likes: int = Form(0),
-                     deadline_hours: int = Form(0), deadline_min_views: int = Form(0),
-                     deadline_min_likes: int = Form(0)):
-    text = (text or "").strip()
-    instruction = (instruction or "").strip()
-    mode = (mode or "citation").strip().lower()
+def first_reply_save(enabled: str = Form(""), watch_text: str = Form(""),
+                     fallback_text: str = Form("")):
+    watch_text = (watch_text or "").strip()
+    fallback_text = (fallback_text or "").strip()
     on = str(enabled).lower() in ("1", "true", "on", "yes")
-    attribution_on = str(attribution_enabled).lower() in ("1", "true", "on", "yes")
-    first_party_on = str(first_party_enabled).lower() in ("1", "true", "on", "yes")
-    delay_minutes = max(0, delay_minutes)
-    min_replies = max(0, min_replies)
-    min_likes = max(0, min_likes)
-    deadline_hours = max(0, deadline_hours)
-    deadline_min_views = max(0, deadline_min_views)
-    deadline_min_likes = max(0, deadline_min_likes)
-    if on and not text:
-        return _flash("/engagement/first-reply", "Add reply text before enabling")
-    if len(text) > 500:
-        return _flash("/engagement/first-reply", f"Reply is {len(text)} characters — Threads limit is 500")
-    if mode == "invitation" and not instruction:
-        return _flash("/engagement/first-reply",
-                      "Write the brief before switching to call-to-action replies")
-    if mode == "static" and not (on and text):
-        return _flash("/engagement/first-reply",
-                      "Fixed-text replies need the static reply text set and enabled")
-    # A deadline shorter than the delay would fire first and make the delay
-    # meaningless — the reply would go out on every post at the deadline.
-    if deadline_hours and delay_minutes > deadline_hours * 60:
-        return _flash("/engagement/first-reply",
-                      f"The {delay_minutes} min wait is longer than the {deadline_hours}h "
-                      "deadline, so the deadline would always win — shorten the wait "
-                      "or push the deadline out")
-    # A floor with no deadline gates nothing: it only ever applies at one.
-    if (deadline_min_views or deadline_min_likes) and not deadline_hours:
-        return _flash("/engagement/first-reply",
-                      "The views/likes floor only applies at the deadline — set "
-                      "'post anyway after' or clear the floor")
-    save_first_reply(enabled=on, text=text, attribution_enabled=attribution_on,
-                     first_party_enabled=first_party_on,
-                     mode=mode, instruction=instruction, delay_minutes=delay_minutes,
-                     min_replies=min_replies, min_likes=min_likes,
-                     deadline_hours=deadline_hours,
-                     deadline_min_views=deadline_min_views,
-                     deadline_min_likes=deadline_min_likes)
-    drafts = {"invitation": "draft a call to action",
-              "static": "use the fixed text"}.get(mode, "draft a source citation")
-    state = "enabled" if on else "disabled"
-    attr_state = "on" if attribution_on else "off"
-    timing = _timing_summary(delay_minutes, min_replies, min_likes, deadline_hours,
-                             deadline_min_views, deadline_min_likes)
-    promos = "" if first_party_on else ", promos excluded"
-    return _flash("/engagement/first-reply",
-                  f"Saved — first replies {drafts}, posting {attr_state}"
-                  f"{promos}, static fallback {state}; {timing}")
+    back = "/engagement/first-reply"
+    if on and not (watch_text and fallback_text):
+        return _flash(back, "Fill in both replies before switching first replies on")
+    if watch_text and WATCH_URL_PLACEHOLDER not in watch_text:
+        return _flash(back, f"The video page reply needs {WATCH_URL_PLACEHOLDER} where the link goes")
+    # The link renders as renewables.org/watch/<slug>, up to ~70 characters.
+    longest = max(len(watch_text.replace(WATCH_URL_PLACEHOLDER, "x" * 70)), len(fallback_text))
+    if longest > 500:
+        return _flash(back, f"A reply runs to {longest} characters with the link; Threads allows 500")
+    save_first_reply(enabled=on, watch_text=watch_text, fallback_text=fallback_text)
+    return _flash(back, "Saved. First replies are " + ("on." if on else "off."))
 
 
 @app.get("/first-reply")
