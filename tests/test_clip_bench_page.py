@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
@@ -62,6 +66,35 @@ LEAKY_PAIR = {
     "a": {"arm": "gemini", "render": "renders/abc123def456-a.mp4"},
     "b": {"arm": "reference-cut", "render": "renders/abc123def456-b.mp4"},
 }
+
+# Just enough DOM for the judging page's own script to run in node. The
+# recognised box comes back ticked, as Firefox restores it after the reload
+# that follows saving the previous item.
+JUDGE_PAGE_STUB = """
+function element(fields) {
+  return Object.assign({ hidden: false, textContent: '', dataset: {}, handlers: {},
+    classList: { add() {}, remove() {}, toggle() {} },
+    addEventListener(type, fn) { this.handlers[type] = fn; },
+    querySelectorAll: () => [] }, fields);
+}
+const choice = element({ dataset: { choice: 'a' } });
+const elements = {
+  'cb-judge': element({ dataset: { run: 'test-1', item: 'abc123def456', solo: '0' },
+                        querySelectorAll: sel => (sel === '.cb-choice' ? [choice] : []) }),
+  'cb-reason': element({}), 'cb-reason-q': element({}), 'cb-confirm': element({}),
+  'cb-recognised': element({ checked: true }),
+  'cb-save': element({}), 'cb-cancel': element({}),
+};
+const document = { getElementById: id => elements[id] || null, addEventListener() {},
+                   querySelector: () => null };
+let posted = null, reloaded = false;
+async function fetch(url, opts) {
+  posted = String(opts.body);
+  return { ok: true, status: 200, json: async () => ({ ok: true }) };
+}
+const location = { reload() { reloaded = true; } };
+function alert(message) { throw new Error('alert: ' + message); }
+"""
 
 
 class PageTestCase(unittest.TestCase):
@@ -170,6 +203,35 @@ class JudgingViewTest(PageTestCase):
         for secret in ("SECRETVID01", "Secret Source Title", "ceiling", "reference-cut",
                        "gemini", "transcript", "renders/"):
             self.assertNotIn(secret, html)
+
+    def test_the_recognised_box_is_not_restored_onto_the_next_item(self):
+        # Saving reloads the page for the next item; Firefox restores a
+        # checkbox's state across a reload unless the box opts out.
+        html = self.client.get("/clip-bench", params={"run": "test-1"}).text
+        box = re.search(r'<input[^>]*id="cb-recognised"[^>]*>', html).group(0)
+        self.assertIn('autocomplete="off"', box)
+
+    @unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
+    def test_a_tick_the_browser_restored_is_never_saved(self):
+        html = self.client.get("/clip-bench", params={"run": "test-1"}).text
+        script = next(s for s in re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+                      if "cb-judge" in s)
+        harness = JUDGE_PAGE_STUB + script + """
+choice.handlers.click();             // "A is better"
+elements['cb-save'].handlers.click();
+setTimeout(() => process.stdout.write(JSON.stringify({ posted, reloaded })), 20);
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "judge.js"
+            path.write_text(harness)
+            result = subprocess.run(["node", str(path)], capture_output=True, text=True,
+                                    timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        out = json.loads(result.stdout)
+        self.assertTrue(out["reloaded"])
+        posted = parse_qs(out["posted"], keep_blank_values=True)
+        self.assertEqual(posted["choice"], ["a"])
+        self.assertEqual(posted["recognised"], [""])
 
     def test_a_solo_item_shows_one_player_and_would_post(self):
         self.next_item.return_value = {"item_id": "s0l0", "kind": "solo", "arm": "gemini"}

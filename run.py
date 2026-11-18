@@ -1428,11 +1428,16 @@ def cmd_clip_engine_shotlog(args) -> None:
     model = clip_engine.model_for(settings, perceiver, "perceiver")
     cand = _read_candidate(args.id)
     video_id = cand.get("video_id") or ""
+    # Shot logs are cached per perception settings, and which settings apply
+    # depends on the source's length (long sources sample at long_video_fps).
+    seconds = _duration(cand)
 
-    cached = None if args.force else shotlog.load_cached(video_id, perceiver, model)
+    cached = None if args.force else shotlog.load_cached(video_id, perceiver, model,
+                                                          settings=settings, seconds=seconds)
     if cached is not None:
         print(format_shotlog_report(cached, video_id=video_id))
-        print(f"\nCached (no new spend): {shotlog.cache_path(video_id, perceiver, model)}")
+        path = shotlog.cache_path(video_id, perceiver, model, settings=settings, seconds=seconds)
+        print(f"\nCached (no new spend): {path}")
         return
 
     _require_provider(perceiver)
@@ -1446,7 +1451,7 @@ def cmd_clip_engine_shotlog(args) -> None:
             shot_log = shotlog.build(
                 video_id=video_id, source=source, perceiver=perceiver, settings=settings,
                 brand=clip_engine.brand(), title=cand.get("title") or "",
-                description=cand.get("description") or "", duration=_duration(cand),
+                description=cand.get("description") or "", duration=seconds,
                 words=words, transcript=transcript, window=None, meter=meter,
                 force=args.force)
         except Exception as exc:
@@ -1456,7 +1461,9 @@ def cmd_clip_engine_shotlog(args) -> None:
     print(format_shotlog_report(shot_log, video_id=video_id))
     print()
     print("\n".join(_cost_lines(meter.total, meter.by_stage)))
-    print(f"Cached at {shotlog.cache_path(video_id, perceiver, model)}")
+    # The length build() worked with (it probes the file when the row has none).
+    logged = shot_log.get("source_seconds") or seconds
+    print(f"Cached at {shotlog.cache_path(video_id, perceiver, model, settings=settings, seconds=logged)}")
 
 
 def _backup_playbook(path: Path) -> Path | None:
@@ -1542,35 +1549,46 @@ def _bench_run_view(bench, name: str) -> dict:
 
 def cmd_clipbench_run(args) -> None:
     """Replay past videos through each arm and save every result (resumable:
-    rerun the same command to continue; finished results are kept)."""
+    rerun the same command to continue; finished results are kept).
+
+    Flags left out are passed on as None: a new run takes them from
+    clip_engine.bench.*, a resumed one keeps its own arms and cap (bench.py
+    decides both). Filling them in here would add the settings' arms to an
+    existing run and replace the cap it was given."""
     from app import clip_engine
     from app.config import load_settings
     from app.db import init_db
 
     bench = _bench()
     settings = load_settings()
-    arms = args.arms or _settings_list(
-        clip_engine.opt(settings, "clip_engine.bench.arms", ["gemini", "transcript"]))
-    if not arms:
+    existing = bench.run_manifest(args.name)
+    arms = args.arms or ([] if existing else _settings_list(
+        clip_engine.opt(settings, "clip_engine.bench.arms", ["gemini", "transcript"])))
+    if not arms and not existing:
         raise SystemExit("No arms to run (--arms gemini,transcript).")
     for spec in arms:
         try:
             bench.parse_arm(spec)
         except ValueError as exc:
             raise SystemExit(f"Bad arm {spec!r}: {exc}") from None
-    limit = args.limit if args.limit is not None else int(
-        clip_engine.opt(settings, "clip_engine.bench.limit", 60))
-    max_usd = args.max_usd if args.max_usd is not None else float(
-        clip_engine.opt(settings, "clip_engine.bench.max_usd", 40))
 
     init_db()
     candidate_ids = _resolve_candidate_pks(args.candidate) if args.candidate else None
-    picked = f"{len(candidate_ids)} hand-picked videos" if candidate_ids else f"up to {limit} videos"
-    print(f"Bench run {args.name!r}: arms {', '.join(arms)} · {picked} · seed {args.seed} · "
-          f"stops once results pass ${max_usd:.2f}", flush=True)
+    if existing:
+        print(f"Resuming bench run {args.name!r} (its own videos, arms and cap, unless "
+              "--arms or --max-usd say otherwise)…", flush=True)
+    else:
+        limit = args.limit if args.limit is not None else int(
+            clip_engine.opt(settings, "clip_engine.bench.limit", 60))
+        max_usd = args.max_usd if args.max_usd is not None else float(
+            clip_engine.opt(settings, "clip_engine.bench.max_usd", 40))
+        picked = (f"{len(candidate_ids)} hand-picked videos" if candidate_ids
+                  else f"up to {limit} videos")
+        print(f"Bench run {args.name!r}: arms {', '.join(arms)} · {picked} · seed {args.seed} · "
+              f"stops once results pass ${max_usd:.2f}", flush=True)
     try:
         summary = bench.run(
-            args.name, arms=arms, limit=limit, max_usd=max_usd, seed=args.seed,
+            args.name, arms=args.arms, limit=args.limit, max_usd=args.max_usd, seed=args.seed,
             workers=args.workers, candidate_ids=candidate_ids,
             require_words=not args.allow_no_words, negatives=args.negatives,
             new_version=args.new_version, keep_errors=args.keep_errors,
@@ -1905,12 +1923,16 @@ def _add_clip_engine_parsers(sub, common) -> None:
                     help="run name (a folder under data/clipbench)")
     bp.add_argument("--arms", type=_csv, default=None, metavar="A,B",
                     help="comma list of arms, e.g. gemini,transcript or "
-                         "gemini+editor_thinking=HIGH (default: clip_engine.bench.arms)")
+                         "gemini+editor_thinking=HIGH (default: clip_engine.bench.arms for a "
+                         "new run, the run's own arms on a resume; given on a resume, only "
+                         "these run, added to the run if new)")
     bp.add_argument("--limit", type=_int_at_least(1), default=None, metavar="N",
-                    help="videos to sample (default: clip_engine.bench.limit)")
+                    help="videos to sample (default: clip_engine.bench.limit; fixed once the "
+                         "run exists)")
     bp.add_argument("--max-usd", type=_positive_float, default=None, metavar="USD",
                     help="stop after the video whose results pass this spend "
-                         "(default: clip_engine.bench.max_usd)")
+                         "(default: clip_engine.bench.max_usd for a new run; a resumed run "
+                         "keeps its own cap unless this replaces it)")
     bp.add_argument("--seed", choices=("test", "dev"), default="test",
                     help="'dev' while tuning; 'test' (default) for the decision: it only draws "
                          "videos no try or earlier run has touched")
@@ -1924,7 +1946,10 @@ def _add_clip_engine_parsers(sub, common) -> None:
     bp.add_argument("--negatives", type=_int_at_least(0), default=0, metavar="K",
                     help="add K archived videos you never cut, judged 'would you post this?'")
     bp.add_argument("--new-version", action="store_true",
-                    help="resume after prompts or settings changed; new results get new arm labels")
+                    help="after prompts or settings changed: start every arm over on all the "
+                         "run's videos under new labels. The cap counts what the run already "
+                         "spent (raise --max-usd by about a full run's cost), and the pairs "
+                         "must be prepared and judged again")
     bp.add_argument("--keep-errors", action="store_true",
                     help="don't retry videos whose earlier attempt errored")
     bp.set_defaults(func=cmd_clipbench_run)

@@ -174,7 +174,10 @@ def write(session, candidate, clips: list[dict], *, model: str, policy: str,
         return []
     ids = clip_proposals.log_run(session, candidate.id, clips, model=str(model)[:60],
                                  policy=str(policy)[:40], window=window)
-    if window:
+    # As in ``propose``: a run that wrote nothing (every segment cleaned away)
+    # left the standing suggestions in place, so the markers that describe
+    # them stay as they were too.
+    if window or not ids:
         return ids
     if clips[0].get("draft_caption"):
         candidate.draft_caption = clips[0]["draft_caption"]

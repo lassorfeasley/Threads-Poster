@@ -351,6 +351,24 @@ class LegacyWriteTest(unittest.TestCase):
                 self.assertEqual(standing.verdict, ClipProposal.VERDICT_PENDING)
         self.assertEqual(self.video.draft_caption, "")
 
+    def test_a_run_that_cleans_away_to_nothing_changes_nothing(self):
+        """Every segment a sliver ``log_run`` cleans away: no rows, the standing
+        suggestion stays pending — and so do the caption seed and the
+        multi-clip marker that describe it (as in ``propose``)."""
+        standing = self.pending()
+        self.video.draft_caption = "the standing caption"
+        self.video.multi_clip_potential = False
+        self.video.multi_clip_auto = False
+        clips = [{"segments": [{"start": 5.0, "end": 5.3}], "story": "a",
+                  "draft_caption": "NEW CAPTION"},
+                 {"segments": [{"start": 9.0, "end": 9.2}], "story": "b"}]
+        self.assertEqual(legacy.write(self.session, self.video, clips, model="m", policy="p"), [])
+        self.session.refresh(standing)
+        self.assertEqual(standing.verdict, ClipProposal.VERDICT_PENDING)
+        self.assertEqual(self.video.draft_caption, "the standing caption")
+        self.assertFalse(self.video.multi_clip_potential)
+        self.assertFalse(self.video.multi_clip_auto)
+
     def test_clips_without_segments_are_dropped_not_counted(self):
         clips = [{"segments": []}] + copy.deepcopy(CLIPS[:1])
         ids = legacy.write(self.session, self.video, clips, model="m", policy="p")

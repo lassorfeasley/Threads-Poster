@@ -17,6 +17,7 @@ import contextlib
 import datetime as dt
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -24,6 +25,11 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows: no flock, no liveness locks
+    fcntl = None
 
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import OperationalError
@@ -35,6 +41,9 @@ from app.clip_engine import engine as engine_mod
 from app.clip_engine import jobs, legacy, media, sidecars, taste, util
 from app.config import Settings
 from app.models import STATUS_ARCHIVED, STATUS_REJECTED, Base, Candidate, Channel, ClipProposal, Cut, utcnow
+
+ROOT = Path(__file__).resolve().parents[1]
+REAL_BUCKET_SPEND = spend.bucket_spend   # before any test mocks it
 
 
 def make_engine():
@@ -279,6 +288,107 @@ class QueueTest(JobsTestBase):
         self.assertEqual(order, [1, 4, 5, 3, 2])
         # Behind the running job, then by priority and arrival.
         self.assertEqual(positions, {4: 1, 5: 2, 3: 3, 2: 4})
+
+    def test_suggest_on_a_waiting_unattended_run_moves_it_up(self):
+        """Approve a batch in triage, open the last video, press Suggest: its
+        archive run (or a restart's resume run) moves to the front instead of
+        waiting behind every earlier one."""
+        started, release = threading.Event(), threading.Event()
+        order: list[tuple[int, str]] = []
+
+        def fake_execute(job):
+            order.append((job.candidate_id, job.reason))
+            if len(order) == 1:
+                started.set()
+                release.wait(5)
+            return {"state": "done", "outcome": "proposals", "new": []}
+
+        with mock.patch.object(jobs, "_execute", side_effect=fake_execute):
+            jobs.enqueue(1, reason="archive")
+            self.assertTrue(started.wait(5), "the first job never started")
+            jobs.enqueue(2, reason="archive")
+            jobs.enqueue(3, reason="resume")
+            queued = jobs.enqueue(4, reason="archive")
+            self.assertEqual(queued["queue_position"], 2)   # behind the running one and 2
+            joined = jobs.enqueue(4, reason="reroll")
+            resumed = jobs.enqueue(3, reason="reroll")
+            positions = {cid: jobs.status(cid)["queue_position"] for cid in (2, 3, 4)}
+            release.set()
+            deadline = time.monotonic() + 5
+            while ((len(order) < 4 or any(jobs.status(c)["state"] != "done" for c in (2, 3, 4)))
+                   and time.monotonic() < deadline):
+                time.sleep(0.01)
+        self.assertEqual((joined["started"], joined["conflict"]), (False, False))
+        self.assertEqual((joined["state"], joined["reason"]), ("queued", "reroll"))
+        self.assertNotEqual(joined["job_id"], queued["job_id"])
+        self.assertEqual(resumed["reason"], "reroll")
+        self.assertEqual(positions, {4: 1, 3: 2, 2: 3})
+        # Each video ran once, the operator's first; the old queue slots were no-ops.
+        self.assertEqual(order, [(1, "archive"), (4, "reroll"), (3, "reroll"), (2, "archive")])
+
+    def test_a_moved_up_run_is_the_operators_not_budget_gated(self):
+        ids = [self.add_candidate(f"v{i}") for i in range(3)]
+        done = mock.Mock()
+        with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+            first = [jobs.enqueue(cid, reason="archive", on_done=done) for cid in ids]
+            joined = jobs.enqueue(ids[2], reason="reroll")
+        record = jobs._read_record(ids[2])
+        self.assertEqual((record["job_id"], record["reason"]), (joined["job_id"], "reroll"))
+        self.assertNotEqual(joined["job_id"], first[2]["job_id"])
+        # The engine's day is spent ($4.90 + $0.50 > $5.00) and so is the LLM's.
+        self.bucket_spend.return_value = 4.9
+        self.within_budget.return_value = False
+        self.run_engine.return_value = make_result([make_draft(1, [{"start": 2.0, "end": 20.0}])])
+        order = []
+        while not jobs._queue.empty():
+            _p, _s, job = jobs._queue.get_nowait()
+            order.append((job.candidate_id, job.reason))
+            jobs._run(job)
+        self.assertEqual(order, [(ids[2], "reroll"), (ids[0], "archive"), (ids[1], "archive"),
+                                 (ids[2], "archive")])
+        self.run_engine.assert_called_once()
+        self.assertEqual(self.run_engine.call_args.kwargs["video_id"], "v2")
+        st = jobs.status(ids[2])
+        self.assertEqual((st["state"], st["outcome"], st["reason"]),
+                         ("done", "proposals", "reroll"))
+        self.assertEqual(st["attempts"], 1)
+        for cid in ids[:2]:
+            self.assertEqual(jobs.status(cid)["outcome"], "budget")
+        self.assertEqual(done.call_count, 3)   # the callback came along, and ran once per video
+
+    def test_a_run_already_under_way_is_joined_as_it_is(self):
+        started, release = threading.Event(), threading.Event()
+
+        def fake_execute(job):
+            started.set()
+            release.wait(5)
+            return {"state": "done", "outcome": "proposals", "new": []}
+
+        with mock.patch.object(jobs, "_execute", side_effect=fake_execute):
+            first = jobs.enqueue(1, reason="archive")
+            self.assertTrue(started.wait(5), "the job never started")
+            joined = jobs.enqueue(1, reason="reroll")
+            release.set()
+            deadline = time.monotonic() + 5
+            while jobs.status(1)["state"] != "done" and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual((joined["started"], joined["conflict"]), (False, False))
+        self.assertEqual((joined["job_id"], joined["reason"], joined["state"]),
+                         (first["job_id"], "archive", "running"))
+        self.assertTrue(jobs._queue.empty())
+
+    def test_joining_never_moves_a_run_down(self):
+        cases = [("reroll", "archive"), ("reroll", "resume"), ("archive", "resume"),
+                 ("archive", "archive"), ("reroll", "reroll")]
+        for i, (first_reason, second_reason) in enumerate(cases):
+            with self.subTest(first=first_reason, second=second_reason):
+                cid = 50 + i
+                with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+                    first = jobs.enqueue(cid, reason=first_reason)
+                    joined = jobs.enqueue(cid, reason=second_reason)
+                self.assertEqual((joined["job_id"], joined["reason"]),
+                                 (first["job_id"], first_reason))
+        self.assertEqual(jobs._queue.qsize(), len(cases))
 
     def test_same_scope_joins_the_run_different_scope_conflicts(self):
         whole, chapter = None, {"start": 60.0, "end": 120.0}
@@ -678,6 +788,48 @@ class FallbackTest(JobsTestBase):
                     self.assertEqual((st["state"], st["outcome"]), ("done", "proposals"))
                     self.run_engine.assert_called_once()
 
+    def test_a_run_you_start_tries_gemini_again_after_a_402(self):
+        """Credit added after a 402: Suggest goes straight back to Gemini
+        instead of waiting out the breaker's 30 minutes (or a restart). An
+        archive run still waits, and a day's quota (429) holds for everyone."""
+        from app.clip_engine import gemini
+
+        for patcher in (mock.patch.object(gemini, "_breaker_until", 0.0),
+                        mock.patch.object(gemini, "_breaker_reason", ""),
+                        mock.patch.object(gemini, "_breaker_why", gemini._DAILY_QUOTA),
+                        mock.patch.object(gemini, "_breaker_status", 429)):
+            self.patch(patcher)
+        top = [make_draft(1, [{"start": 2.0, "end": 20.0}])]
+        cases = [
+            # (HTTP status that opened the breaker, reason, outcome, fallback starts with)
+            (402, "archive", "legacy", gemini._CREDITS_DEPLETED),
+            (402, "reroll", "proposals", ""),
+            (402, "section", "proposals", ""),
+            (429, "reroll", "legacy", gemini._DAILY_QUOTA),
+        ]
+        for i, (http, reason, outcome, fallback) in enumerate(cases):
+            with self.subTest(http=http, reason=reason):
+                why = gemini._CREDITS_DEPLETED if http == 402 else gemini._DAILY_QUOTA
+                with self.assertLogs("clip_engine.gemini", "WARNING"):
+                    gemini._open_breaker(why, f"HTTP {http}", http)
+                cid = self.add_candidate(f"credit{i}")
+                self.run_engine.reset_mock()
+                self.run_engine.return_value = make_result(top)
+                self.legacy_returns(ids=[900 + i])
+                window = {"start": 0, "end": 60} if reason == "section" else None
+                st = self.run_job(cid, reason=reason, window=window)
+                self.assertEqual(st["outcome"], outcome, st)
+                self.assertEqual(self.run_engine.called, outcome == "proposals")
+                if fallback:
+                    self.assertTrue(st["fallback"].startswith(fallback), st["fallback"])
+                    self.assertTrue(gemini.breaker_open())
+                else:
+                    self.assertFalse(gemini.breaker_open())
+        # What an archive run's page says while the credit breaker is open.
+        with self.assertLogs("clip_engine.gemini", "WARNING"):
+            gemini._open_breaker(gemini._CREDITS_DEPLETED, "HTTP 402", 402)
+        self.assertIn("at once when you press Suggest", jobs._provider_blocked("gemini"))
+
     def test_a_fallback_that_finds_nothing_still_says_why(self):
         """The engine's failure is the news (here: Gemini credit ran out), so
         the page must hear it even when the transcript suggester found nothing."""
@@ -711,6 +863,9 @@ class FallbackTest(JobsTestBase):
             # Mechanical empties are errors on the engine's side of the contract.
             (engine_mod.EngineError("no draft survived snapping and filtering (length: 9)"),
              "no draft survived snapping"),
+            # Drafts the editor wrote but its cleaning dropped, every one.
+            (engine_mod.EngineError("drafting failed: DraftsDropped: every one of the editor's "
+                                    "10 drafts was dropped (10 too long)"), "10 too long"),
             (engine_mod.EngineError("no draft could be rendered"), "no draft could be rendered"),
             (util.Cancelled("ran out of time"), "ran out of time"),
             (RuntimeError("GeminiQuota: breaker open"), "GeminiQuota"),
@@ -738,6 +893,65 @@ class FallbackTest(JobsTestBase):
                 self.assertEqual(write.kwargs["policy"], "legacypolicy")
                 self.release.assert_called()
 
+    def test_a_failed_run_keeps_its_notes_saves_its_pass_and_drops_its_renders(self):
+        notes = ["d3 duplicates d1.", "2 of 10 drafts couldn't be rendered (ffmpeg exploded)."]
+        renders = ["/tmp/renders/d1.mp4", "/tmp/renders/d2.mp4"]
+        cases = [
+            # (reason, LLM budget left, state, outcome, the record points at)
+            ("reroll", True, "done", "legacy", "-legacy.json"),
+            ("archive", False, "skipped", "budget", "-error.json"),
+        ]
+        for i, (reason, llm_ok, state, outcome, points_at) in enumerate(cases):
+            with self.subTest(reason=reason, llm_ok=llm_ok):
+                cid = self.add_candidate(f"stopped{i}")
+                self.drop.reset_mock()
+                self.within_budget.return_value = llm_ok
+                self.run_engine.side_effect = engine_mod.EngineError(
+                    "stopped at $4.10, past the hard cap (clip_engine.hard_cap_usd $4.00)",
+                    notes=notes, renders=renders)
+                self.legacy_returns(ids=[42])
+                st = self.run_job(cid, reason=reason)
+                self.assertEqual((st["state"], st["outcome"]), (state, outcome))
+                for note in notes:
+                    self.assertIn(note, st["notes"])
+                self.drop.assert_called_once_with([Path(p) for p in renders])
+                [saved] = jobs._runs_dir().glob(f"{cid}-*-error.json")
+                failed = json.loads(saved.read_text())
+                self.assertEqual(failed["kind"], "engine-error")
+                self.assertIn("past the hard cap", failed["error"])
+                self.assertEqual(failed["notes"], notes)
+                self.assertEqual(failed["job_id"], st["job_id"])
+                self.assertTrue(st["result_path"].endswith(points_at), st["result_path"])
+
+    def test_a_run_out_of_time_drops_its_renders_a_shutdown_keeps_them(self):
+        """A run stopped for the deadline is over: its renders go. One stopped
+        because the dashboard is going down resumes on the next start, which
+        renders the same cuts — those stay in the cache for it."""
+        for shutdown in (False, True):
+            with self.subTest(shutdown=shutdown):
+                cid = self.add_candidate(f"late{int(shutdown)}")
+                self.drop.reset_mock()
+
+                def stopped(**kwargs):
+                    if shutdown:
+                        jobs._cancel.set()
+                    exc = util.Cancelled("cancelled" if shutdown else "ran out of time")
+                    exc.notes, exc.renders = ["d1 duplicates d2."], ["/tmp/renders/d2.mp4"]
+                    raise exc
+
+                self.run_engine.side_effect = stopped
+                self.legacy_returns(ids=[7])
+                st = self.run_job(cid)
+                if shutdown:
+                    self.assertEqual(st["state"], "interrupted")
+                    self.drop.assert_not_called()
+                    jobs._cancel.clear()
+                else:
+                    self.assertEqual((st["outcome"], st["fallback"]),
+                                     ("legacy", "the video model ran out of time (1800 s)"))
+                    self.assertIn("d1 duplicates d2.", st["notes"])
+                    self.drop.assert_called_once_with([Path("/tmp/renders/d2.mp4")])
+
     def test_shutdown_mid_run_is_interrupted_not_a_fallback(self):
         cid = self.add_candidate()
 
@@ -750,6 +964,27 @@ class FallbackTest(JobsTestBase):
         self.assertEqual(st["state"], "interrupted")
         self.assertEqual(st["error"], jobs.INTERRUPTED_ERROR)
         self.legacy_suggest.assert_not_called()
+
+    def test_a_typo_in_a_number_setting_reads_as_its_default(self):
+        """A hand edit like ``30 min`` must not fail every run outright with
+        no fallback, nor leave the source pinned."""
+        top = [make_draft(1, [{"start": 2.0, "end": 20.0}])]
+        cases = [("job_timeout_seconds", "30 min", "reroll"), ("min_free_gb", "ten", "reroll"),
+                 ("daily_usd", "$5", "archive"), ("max_source_seconds", "1h", "archive")]
+        for i, (key, value, reason) in enumerate(cases):
+            with self.subTest(key=key, value=value):
+                cid = self.add_candidate(f"typo{i}")
+                self.settings = make_settings(**{key: value})
+                for m in (self.run_engine, self.link, self.release):
+                    m.reset_mock()
+                self.run_engine.return_value = make_result(top)
+                st = self.run_job(cid, reason=reason)
+                self.assertEqual((st["state"], st["outcome"]), ("done", "proposals"), st)
+                self.run_engine.assert_called_once()
+                self.assertEqual((self.link.call_count, self.release.call_count), (1, 1))
+                if key == "job_timeout_seconds":
+                    self.assertGreater(self.run_engine.call_args.kwargs["deadline"],
+                                       time.monotonic() + 1700)
 
     def test_both_suggesters_failing_is_a_failed_run(self):
         cid = self.add_candidate()
@@ -850,6 +1085,79 @@ class FallbackTest(JobsTestBase):
         self.assertIn("couldn't be checked", st["fallback"])
         self.run_engine.assert_not_called()
 
+    def test_a_damaged_ledger_fails_closed(self):
+        """The ledger's own reader takes a file it can't parse for "$0 spent"."""
+        self.bucket_spend.side_effect = REAL_BUCKET_SPEND
+        ledger = self.dir / "llm_spend.json"
+        day = {spend._today(): {"spend_usd": 0.1, "calls": 1, "by_model": {}, "buckets": {
+            "engine": {"spend_usd": 4.9, "calls": 9, "by_model": {}}}}}
+        self.legacy_returns(ids=[3])
+        cases = [
+            ("intact, the day spent", json.dumps(day), "daily budget is spent"),
+            ("cut short by a hand edit", json.dumps(day)[:-7], "couldn't be checked"),
+            ("not text at all", b"\xff\xfe\x00garbage", "couldn't be checked"),
+        ]
+        for i, (label, content, why) in enumerate(cases):
+            with self.subTest(label):
+                cid = self.add_candidate(f"ledger{i}")
+                if isinstance(content, bytes):
+                    ledger.write_bytes(content)
+                else:
+                    ledger.write_text(content)
+                self.run_engine.reset_mock()
+                st = self.run_job(cid, reason="archive")
+                self.assertEqual(st["outcome"], "legacy")
+                self.assertIn(why, st["fallback"])
+                self.run_engine.assert_not_called()
+
+    def test_runs_in_progress_hold_their_estimate(self):
+        self.bucket_spend.return_value = 4.2
+        self.estimate.return_value = 0.7
+        settings = make_settings()
+        self.assertEqual(jobs._budget_refusal("gemini", settings, 300.0, job_id="a"), "")
+        refused = jobs._budget_refusal("gemini", settings, 300.0, job_id="b")
+        self.assertIn("daily budget is spent", refused)
+        self.assertIn("plus $0.70 held for runs in progress", refused)
+        # A run asking again (its length was probed late) isn't counted twice.
+        self.assertEqual(jobs._budget_refusal("gemini", settings, 300.0, job_id="a"), "")
+        jobs._release_budget("a")
+        self.assertEqual(jobs._budget_refusal("gemini", settings, 300.0, job_id="b"), "")
+
+    def test_parallel_workers_cannot_all_pass_on_the_same_figure(self):
+        self.settings = make_settings(workers=2)
+        first, second = self.add_candidate("par1"), self.add_candidate("par2")
+        self.bucket_spend.return_value = 4.2      # room for one more ~$0.70 run, not two
+        self.estimate.return_value = 0.7
+        self.legacy_returns(ids=[9])
+        in_engine, release = threading.Event(), threading.Event()
+
+        def slow_run(**kwargs):
+            in_engine.set()
+            release.wait(5)
+            return make_result([make_draft(1, [{"start": 2.0, "end": 20.0}])])
+
+        self.run_engine.side_effect = slow_run
+        try:
+            jobs.enqueue(first, reason="archive")
+            self.assertTrue(in_engine.wait(5), "the first run never reached the engine")
+            jobs.enqueue(second, reason="archive")
+            deadline = time.monotonic() + 5
+            while jobs.status(second)["state"] != "done" and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            release.set()
+        deadline = time.monotonic() + 5
+        while jobs.status(first)["state"] != "done" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(jobs.status(first)["outcome"], "proposals")
+        second_status = jobs.status(second)
+        self.assertEqual(second_status["outcome"], "legacy")
+        self.assertIn("held for runs in progress", second_status["fallback"])
+        self.assertEqual(self.run_engine.call_count, 1)
+        while jobs._reserved and time.monotonic() < deadline:
+            time.sleep(0.01)                      # released as each run ends
+        self.assertEqual(jobs._reserved, {})
+
 
 # ---- inputs ----------------------------------------------------------------------
 
@@ -931,8 +1239,19 @@ class ResumeTest(JobsTestBase):
         fresh = self.add_candidate("fresh", archived_at=hours_ago(2))
         has_pending = self.add_candidate("pending", archived_at=hours_ago(2))
         self.add_proposal(has_pending, [{"start": 1.0, "end": 9.0}])
+        # Suggested before the engine ran here (no record) and dealt with since.
         dismissed_only = self.add_candidate("dismissed", archived_at=hours_ago(2))
         self.add_proposal(dismissed_only, [{"start": 1.0, "end": 9.0}], verdict="dismissed")
+        superseded_only = self.add_candidate("superseded", archived_at=hours_ago(2))
+        self.add_proposal(superseded_only, [{"start": 1.0, "end": 9.0}], verdict="superseded")
+        accepted_cleared = self.add_candidate("accepted", archived_at=hours_ago(2))
+        self.add_proposal(accepted_cleared, [{"start": 1.0, "end": 9.0}], verdict="accepted")
+        self.add_cut(accepted_cleared, "[]")
+        # ...but a run an earlier boot left unfinished is resumed whatever
+        # the video's old suggestions say.
+        killed_after_triage = self.add_candidate("killedtriaged", archived_at=hours_ago(2))
+        self.add_proposal(killed_after_triage, [{"start": 1.0, "end": 9.0}], verdict="dismissed")
+        self.record(killed_after_triage, boot_id="oldboot1", state="queued", attempts=0)
         empty_cut = self.add_candidate("emptycut", archived_at=hours_ago(2))
         self.add_cut(empty_cut, "")
         self.add_cut(empty_cut, "[]")
@@ -958,15 +1277,16 @@ class ResumeTest(JobsTestBase):
         with mock.patch.object(jobs, "_ensure_workers", lambda: None):
             count = jobs.resume_recent(hours=24, on_done=done)
         queued = {job.candidate_id: job for _p, _s, job in list(jobs._queue.queue)}
-        self.assertEqual(set(queued), {fresh, dismissed_only, empty_cut, killed, stopped})
+        self.assertEqual(set(queued), {fresh, empty_cut, killed, stopped, killed_after_triage})
         self.assertEqual(count, 5)
         self.assertTrue(all(job.reason == "resume" and job.window is None
                             and job.on_done is done for job in queued.values()))
         # The attempt count carries over from the run a restart killed.
         self.assertEqual(jobs.status(killed)["attempts"], 1)
         self.assertEqual(jobs.status(fresh)["attempts"], 0)
-        for skipped in (has_pending, clipped, old, no_transcript, not_archived, killed_twice,
-                        found_nothing, over_budget, this_boot):
+        for skipped in (has_pending, dismissed_only, superseded_only, accepted_cleared, clipped,
+                        old, no_transcript, not_archived, killed_twice, found_nothing,
+                        over_budget, this_boot):
             self.assertNotIn(skipped, queued)
 
     def test_nothing_when_the_transcript_suggester_is_in_charge(self):
@@ -985,6 +1305,110 @@ class ResumeTest(JobsTestBase):
         _p, _s, job = jobs._queue.get_nowait()
         jobs._run(job)
         self.assertEqual(jobs.status(cid)["attempts"], 2)
+
+
+# ---- records another process owns --------------------------------------------------------
+
+# Another process with this engine dir (the dashboard, while a script that
+# imports it runs): it queues a run for one video, then holds on until told.
+_OTHER_PROCESS = """
+import os, sys
+assert os.environ["DATABASE_URL"] == "sqlite://"
+from app.clip_engine import jobs
+jobs._ensure_workers = lambda: None      # queue the run, never start it
+jobs.enqueue(int(sys.argv[1]), reason="archive")
+print("queued", flush=True)
+sys.stdin.read()
+"""
+
+
+@unittest.skipIf(fcntl is None, "liveness locks need flock")
+class LivenessTest(JobsTestBase):
+    """A queued or running record counts as a dead boot's only once its
+    process is gone. Any process that imports the dashboard sees its records;
+    one that took a live dashboard's runs for interrupted would report them
+    so and run them a second time."""
+
+    def other_process(self, cid: int) -> subprocess.Popen:
+        env = dict(os.environ)    # CLIP_ENGINE_DIR is this test's
+        env.update({"DATABASE_URL": "sqlite://", "SCHEDULER_EMBEDDED": "false",
+                    "GEMINI_API_KEY": "", "ANTHROPIC_API_KEY": "", "SUPABASE_SERVICE_KEY": "",
+                    "CLIPBENCH_DIR": str(self.dir / "bench")})
+        proc = subprocess.Popen([sys.executable, "-c", _OTHER_PROCESS, str(cid)], cwd=ROOT,
+                                env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.communicate, timeout=60)
+        self.addCleanup(proc.kill)
+        line = proc.stdout.readline().strip()
+        if line != "queued":
+            proc.kill()
+            self.fail(f"the other process didn't start: {proc.stderr.read()[-3000:]}")
+        return proc
+
+    def resume(self) -> set[int]:
+        with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+            jobs.resume_recent()
+        return {job.candidate_id for _p, _s, job in list(jobs._queue.queue)}
+
+    def test_a_live_process_keeps_its_runs_until_it_is_gone(self):
+        cid = self.add_candidate()
+        proc = self.other_process(cid)
+        record = jobs._read_record(cid)
+        self.assertNotEqual(record["boot_id"], jobs.BOOT_ID)
+        self.assertEqual(jobs.status(cid)["state"], "queued")
+        self.assertFalse(jobs._resumable(record))
+        self.assertEqual(self.resume(), set())
+        proc.kill()               # however it ends — kill -9 included — its lock goes
+        proc.communicate(timeout=60)
+        self.assertEqual(jobs.status(cid)["state"], "interrupted")
+        self.assertTrue(jobs._resumable(record))
+        self.assertEqual(self.resume(), {cid})
+
+    def test_this_process_holds_its_lock_from_its_first_record(self):
+        with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+            jobs.enqueue(1, reason="archive")
+        lock = jobs._runs_dir() / f".boot-{jobs.BOOT_ID}.lock"
+        fd = os.open(lock, os.O_RDONLY)
+        try:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+        self.assertEqual(lock.read_text().strip(), str(os.getpid()))
+
+    def test_records_without_a_lock_read_as_an_earlier_boots(self):
+        """Written before there were locks (or where flock doesn't work)."""
+        for boot in ("oldboot1", "../../etc", ""):
+            with self.subTest(boot=boot):
+                self.assertFalse(jobs._owner_alive({"boot_id": boot, "state": "running"}))
+        self.assertTrue(jobs._owner_alive({"boot_id": jobs.BOOT_ID}))
+
+    def test_locks_of_processes_that_are_gone_are_pruned(self):
+        runs = jobs._runs_dir()
+        runs.mkdir(parents=True, exist_ok=True)
+        old = time.time() - 2 * 3600
+
+        def lock(boot: str, *, age: float | None = None) -> Path:
+            path = runs / f".boot-{boot}.lock"
+            path.write_text("1\n")
+            if age is not None:
+                os.utime(path, (age, age))
+            return path
+
+        dead = lock("deadbeef", age=old)
+        fresh = lock("newbeef1")              # its owner may be about to take it
+        alive = lock("livebeef", age=old)
+        fd = os.open(alive, os.O_RDWR)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+            jobs.enqueue(1, reason="archive")     # takes this process's own lock
+        own = runs / f".boot-{jobs.BOOT_ID}.lock"
+        os.utime(own, (old, old))
+        self.assertEqual(jobs._prune_boot_locks(), 1)
+        self.assertFalse(dead.exists())
+        for kept in (fresh, alive, own):
+            self.assertTrue(kept.exists(), kept.name)
 
 
 # ---- the archive hand-off (app/scrape.py) ---------------------------------------------------

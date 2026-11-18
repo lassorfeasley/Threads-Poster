@@ -124,6 +124,37 @@ class RecordTest(LedgerCase):
         self.assertEqual(backups[0].read_text(), "{not json")
         self.assertEqual(self.today()["calls"], 1)
 
+    def test_a_ledger_that_is_not_utf8_is_moved_aside_too(self):
+        """Bytes that aren't UTF-8 used to fail every record() (logged, never
+        repaired) while the readers saw an empty ledger: nothing was counted
+        and both daily caps read $0 until someone noticed."""
+        raw = json.dumps({spend._today(): {"spend_usd": 2.5, "calls": 10, "by_model": {}}},
+                         indent=2).encode() + b"\xff\xfe"
+        self.ledger.write_bytes(raw)
+        self.assertEqual(spend.today_spend(), 0.0)    # unreadable reads as empty
+        with self.assertLogs("spend", "WARNING") as logs:
+            spend.record("claude-opus-5-5", 10, 10)
+        self.assertIn("moved it to", logs.output[-1])
+        backups = list(self.dir.glob("llm_spend.json.corrupt-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), raw)
+        self.assertEqual(self.today()["calls"], 1)
+        spend.record("claude-opus-5-5", 10, 10, bucket="engine")
+        self.assertEqual(self.today()["calls"], 1)
+        self.assertEqual(self.today()["buckets"]["engine"]["calls"], 1)
+
+    def test_a_ledger_saved_with_a_byte_order_mark_is_still_read(self):
+        """A hand edit saved with a UTF-8 BOM is still a valid ledger: kept,
+        and read the same by the budget checks and by record()."""
+        self.ledger.write_bytes(b"\xef\xbb\xbf" + json.dumps(
+            {spend._today(): {"spend_usd": 1.25, "calls": 3, "by_model": {}}}).encode())
+        self.assertAlmostEqual(spend.today_spend(), 1.25)
+        with self.assertNoLogs("spend", "WARNING"):
+            spend.record("claude-haiku-4-5", 1_000_000, 0)
+        self.assertEqual(list(self.dir.glob("llm_spend.json.corrupt-*")), [])
+        self.assertEqual(self.today()["calls"], 4)
+        self.assertAlmostEqual(spend.today_spend(), 2.25)
+
     def test_a_hand_damaged_day_is_repaired(self):
         self.ledger.write_text(json.dumps({spend._today(): {"spend_usd": "x", "buckets": []}}))
         spend.record("claude-opus-5-5", 1_000_000, 0, bucket="engine")

@@ -19,12 +19,14 @@ import os
 import tempfile
 import threading
 import unittest
+from http.client import RemoteDisconnected
 from pathlib import Path
 from unittest import mock
 
 import anthropic
 import httpx
 import requests
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from app import config, llm, spend
 from app.clip_engine import claude, gemini, util
@@ -370,6 +372,146 @@ class GeminiRetryTest(GeminiCase):
         self.assertEqual(len(self.http.calls), 5)
 
 
+class GeminiSlowFailureTest(GeminiCase):
+    """A failure that arrives after minutes of waiting costs as much as a read
+    timeout, so it gets the same single retry, and no retry starts once a call
+    has run for twice its read timeout. Before, a 504 that took 10 minutes was
+    tried five times: 50 minutes of the engine's only worker."""
+
+    def setUp(self):
+        super().setUp()
+        self.wait = 0.0             # how long each scripted answer takes to arrive
+        self.now = [1000.0]
+
+        def send(method, url, **kwargs):
+            self.now[0] += self.wait
+            return self.http(method, url, **kwargs)
+
+        def sleep(seconds):
+            self.sleeps.append(seconds)
+            self.now[0] += seconds
+
+        for p in (mock.patch.object(gemini, "_send", send),
+                  mock.patch.object(gemini, "_sleep", sleep),
+                  mock.patch.object(gemini, "_now", lambda: self.now[0])):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_slow_failures_are_retried_only_once(self):
+        rq = requests.exceptions
+        cases = [
+            # (name, a fresh failure, the status the error carries)
+            ("504 DEADLINE_EXCEEDED", lambda: api_error(
+                504, "Deadline expired before operation could complete.", name="DEADLINE_EXCEEDED"), 504),
+            ("500 INTERNAL", lambda: api_error(500, "An internal error has occurred.",
+                                               name="INTERNAL"), 500),
+            ("503 UNAVAILABLE", lambda: api_error(503, "The model is overloaded.",
+                                                  name="UNAVAILABLE"), 503),
+            ("connection dropped mid-wait", lambda: rq.ConnectionError(ProtocolError(
+                "Connection aborted.",
+                RemoteDisconnected("Remote end closed connection without response"))), None),
+            ("chunked body cut off", lambda: rq.ChunkedEncodingError("cut"), None),
+        ]
+        self.wait = 600.0
+        for name, failure, status in cases:
+            with self.subTest(name):
+                self.http.calls.clear()
+                self.http.answers.clear()
+                self.sleeps.clear()
+                self.http.add(*[failure() for _ in range(5)], answer({"a": 1}))
+                started = self.now[0]
+                with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                        self.assertRaises(gemini.GeminiError) as ctx:
+                    self.generate(timeout_s=900)
+                self.assertEqual(ctx.exception.status, status)
+                self.assertEqual((len(self.http.calls), len(self.sleeps)), (2, 1))
+                self.assertLess(self.now[0] - started, 21 * 60)
+
+    def test_a_body_that_stalls_counts_as_a_read_timeout(self):
+        """requests reports a read timeout during the body as a ConnectionError
+        around urllib3's ReadTimeoutError; it still gets one retry, not four."""
+        def stalled():
+            return requests.exceptions.ConnectionError(
+                ReadTimeoutError(None, None, "Read timed out. (read timeout=900)"))
+
+        self.http.add(stalled(), stalled(), answer({"a": 1}))
+        with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                self.assertRaises(gemini.GeminiError) as ctx:
+            self.generate(timeout_s=900)
+        self.assertIn("no answer within 900s", str(ctx.exception))
+        self.assertEqual(len(self.http.calls), 2)
+
+    def test_read_timeouts_and_slow_failures_share_one_retry(self):
+        self.wait = 900.0
+        self.http.add(requests.exceptions.ReadTimeout("slow"), api_error(500, "internal"),
+                      answer({"a": 1}))
+        with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                self.assertRaises(gemini.GeminiError) as ctx:
+            self.generate(timeout_s=900)
+        self.assertEqual(ctx.exception.status, 500)
+        self.assertEqual(len(self.http.calls), 2)
+
+    def test_a_quick_504_is_retried_once_too(self):
+        """504 means the server's deadline passed; the same request won't fit
+        it the next time either."""
+        self.http.add(*[api_error(504, "Deadline expired", name="DEADLINE_EXCEEDED")
+                        for _ in range(2)], answer({"a": 1}))
+        with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                self.assertRaises(gemini.GeminiError) as ctx:
+            self.generate()
+        self.assertEqual(ctx.exception.status, 504)
+        self.assertEqual(len(self.http.calls), 2)
+
+    def test_quick_failures_keep_their_four_retries(self):
+        def per_minute():
+            return api_error(429, "Quota exceeded for requests per minute",
+                             name="RESOURCE_EXHAUSTED", headers={"Retry-After": "60"})
+
+        cases = [
+            # (name, timeout_s, seconds each failure takes, failures)
+            ("per-minute 429s on a short call", 30, 1.0, [per_minute() for _ in range(4)]),
+            ("503s just under a minute", 900, 59.0,
+             [api_error(503, "overloaded", name="UNAVAILABLE") for _ in range(4)]),
+            ("dropped connections", 900, 59.0,
+             [requests.exceptions.ConnectionError("reset") for _ in range(4)]),
+        ]
+        for name, timeout_s, wait, failures in cases:
+            with self.subTest(name):
+                self.http.calls.clear()
+                self.sleeps.clear()
+                self.wait = wait
+                self.http.add(*failures, answer({"a": 1}))
+                with self.assertLogs("clip_engine.gemini", "WARNING"):
+                    data, _ = self.generate(timeout_s=timeout_s)
+                self.assertEqual(data, {"a": 1})
+                self.assertEqual((len(self.http.calls), len(self.sleeps)), (5, 4))
+
+    def test_no_retry_starts_after_twice_the_read_timeout(self):
+        # 50 s is not slow by itself, but with 60 s between tries a fourth
+        # would start 330 s in, past twice the 150 s read timeout.
+        self.wait = 50.0
+        self.http.add(*[api_error(503, "overloaded", name="UNAVAILABLE",
+                                  headers={"Retry-After": "60"}) for _ in range(5)],
+                      answer({"a": 1}))
+        with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                self.assertRaises(gemini.GeminiError) as ctx:
+            self.generate(timeout_s=150)
+        self.assertEqual(ctx.exception.status, 503)
+        self.assertEqual((len(self.http.calls), self.sleeps), (3, [60.0, 60.0]))
+
+        # An answer that trickled in past the whole window (no single read hit
+        # the read timeout) and then broke off isn't tried again at all.
+        self.http.calls.clear()
+        self.http.answers.clear()
+        self.wait = 400.0
+        self.http.add(*[requests.exceptions.ConnectionError("reset") for _ in range(5)])
+        with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                self.assertRaises(gemini.GeminiError) as ctx:
+            self.generate(timeout_s=60)
+        self.assertIn("could not reach Gemini", str(ctx.exception))
+        self.assertEqual(len(self.http.calls), 1)
+
+
 class GeminiQuotaTest(GeminiCase):
     def daily(self, message="Quota exceeded for quota metric 'Generate Content requests' and limit "
                             "'GenerateRequestsPerDayPerProjectPerModel'"):
@@ -444,6 +586,69 @@ class GeminiQuotaTest(GeminiCase):
                 self.assertTrue(str(again.exception).startswith(
                     "Gemini prepaid credits are depleted"), str(again.exception))
                 self.assertEqual(len(self.http.calls), len(answers))
+
+    @staticmethod
+    def depleted():
+        return api_error(402, "Your prepayment credits are depleted. Please go to AI Studio at "
+                              "https://ai.studio/projects to manage your project and billing.",
+                         name="RESOURCE_EXHAUSTED")
+
+    def test_the_breaker_reason_says_when_gemini_is_tried_again(self):
+        """breaker_reason() is the fallback note a skipped run shows: it says
+        when Gemini will be tried again and, for credit (which the operator can
+        add in a minute), how to try it sooner."""
+        clock = [1000.0]
+        with mock.patch.object(gemini, "_now", lambda: clock[0]):
+            self.assertEqual(gemini.breaker_reason(), "")
+            self.http.add(self.depleted())
+            with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                    self.assertRaises(gemini.GeminiQuota):
+                self.generate()
+            reason = gemini.breaker_reason()
+            self.assertTrue(reason.startswith(gemini._CREDITS_DEPLETED), reason)
+            self.assertIn("in 30 min", reason)
+            self.assertIn("at once when you press Suggest", reason)
+            clock[0] += 14 * 60 + 30
+            self.assertIn("in 16 min", gemini.breaker_reason())
+            clock[0] = 1000.0 + 30 * 60 - 1
+            self.assertIn("in 1 min", gemini.breaker_reason())
+            clock[0] += 1
+            self.assertEqual(gemini.breaker_reason(), "")
+            # Pressing Suggest won't bring back a day's quota: no such hint.
+            self.http.add(self.daily())
+            with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                    self.assertRaises(gemini.GeminiQuota):
+                self.generate()
+            reason = gemini.breaker_reason()
+            self.assertTrue(reason.startswith(gemini._DAILY_QUOTA), reason)
+            self.assertIn("in 30 min", reason)
+            self.assertNotIn("Suggest", reason)
+
+    def test_reset_breaker_lets_the_next_call_through(self):
+        """For a run the operator starts after adding credit: closing the
+        breaker early, and only when the named cause opened it."""
+        clock = [1000.0]
+        with mock.patch.object(gemini, "_now", lambda: clock[0]):
+            self.assertFalse(gemini.reset_breaker())             # nothing to close
+            self.http.add(self.depleted())
+            with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                    self.assertRaises(gemini.GeminiQuota):
+                self.generate()
+            self.assertFalse(gemini.reset_breaker(status=429))   # opened by a 402, not a quota
+            self.assertTrue(gemini.breaker_open())
+            self.assertTrue(gemini.reset_breaker(status=402))
+            self.assertFalse(gemini.breaker_open())
+            self.assertEqual(gemini.breaker_reason(), "")
+            self.http.add(answer({"a": 1}))
+            self.assertEqual(self.generate()[0], {"a": 1})        # back on the network
+            self.assertEqual(len(self.http.calls), 2)
+            # Still no credit: the next call opens it again.
+            self.http.add(self.depleted())
+            with self.assertLogs("clip_engine.gemini", "WARNING"), \
+                    self.assertRaises(gemini.GeminiQuota):
+                self.generate()
+            self.assertTrue(gemini.breaker_open())
+            self.assertTrue(gemini.reset_breaker())              # any cause, when none is named
 
     def test_which_429s_count_as_daily(self):
         cases = [
@@ -699,13 +904,18 @@ class GeminiParseTest(GeminiCase):
 class GeminiUploadTest(GeminiCase):
     START = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 
-    def seed_cache(self, age_hours: float, name: str = "files/old1") -> None:
+    def seed_cache(self, age_hours: float, name: str = "files/old1",
+                   key: str | None = "test-key") -> None:
+        """One cached upload of ``self.video``, made under API key ``key``
+        (None: by a version that didn't record the key)."""
         st = self.video.stat()
         when = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=age_hours)
+        entry = {"name": name, "uri": f"{gemini.BASE}/v1beta/{name}", "mime_type": "video/mp4",
+                 "uploaded_at": when.replace(microsecond=0).isoformat().replace("+00:00", "Z")}
+        if key is not None:
+            entry["key_fingerprint"] = gemini._key_fingerprint(key)
         util.atomic_write_json(self.engine_dir / "gemini_files.json", {
-            f"{self.video.resolve()}|{st.st_size}|{st.st_mtime_ns}": {
-                "name": name, "uri": f"{gemini.BASE}/v1beta/{name}", "mime_type": "video/mp4",
-                "uploaded_at": when.replace(microsecond=0).isoformat().replace("+00:00", "Z")}})
+            f"{self.video.resolve()}|{st.st_size}|{st.st_mtime_ns}": entry})
 
     def test_resumable_upload_then_poll_until_active(self):
         file = self.script_upload(states=("PROCESSING", "PROCESSING", "ACTIVE"))
@@ -732,6 +942,9 @@ class GeminiUploadTest(GeminiCase):
         self.assertEqual(key, f"{self.video.resolve()}|{st.st_size}|{st.st_mtime_ns}")
         self.assertEqual({k: entry[k] for k in ("name", "uri", "mime_type")}, out)
         self.assertTrue(entry["uploaded_at"].endswith("Z"))
+        # Which key made it is recorded, but never the key itself.
+        self.assertEqual(entry["key_fingerprint"], gemini._key_fingerprint("test-key"))
+        self.assertNotIn("test-key", (self.engine_dir / "gemini_files.json").read_text())
 
     def test_cache_reuse(self):
         cases = [
@@ -757,6 +970,60 @@ class GeminiUploadTest(GeminiCase):
                 self.assertEqual([c["method"] for c in self.http.calls], methods)
                 names = [e["name"] for e in self.cache().values()]
                 self.assertEqual(names, ["files/old1"] if reused else ["files/new1"])
+
+    def test_uploads_are_reused_only_under_the_key_that_made_them(self):
+        """Uploads belong to the API key's project. Once GEMINI_API_KEY points
+        at another project (say, after the first one's credit ran out), the
+        old uploads can't be read with it, so they mustn't be handed out, not
+        even fresh ones that are reused without a check."""
+        cases = [
+            # (name, environment, key the cached upload was made with)
+            ("another project's key", {"GEMINI_API_KEY": "other-project-key"}, "test-key"),
+            ("an entry that didn't record its key", {}, None),
+        ]
+        for name, environ, made_with in cases:
+            with self.subTest(name), mock.patch.dict(os.environ, environ), \
+                    mock.patch.object(gemini, "_confirmed", {}):
+                self.http.calls.clear()
+                self.seed_cache(10 / 60, key=made_with)
+                self.script_upload(name="files/new1")
+                self.assertEqual(gemini.upload_file(self.video)["name"], "files/new1")
+                self.assertEqual([c["method"] for c in self.http.calls], ["POST", "POST"])
+                self.assertEqual(self.http.calls[0]["headers"]["x-goog-api-key"],
+                                 os.environ["GEMINI_API_KEY"])
+                self.assertEqual([e["name"] for e in self.cache().values()], ["files/new1"])
+        # The new upload is reused, without asking, under the key that made it.
+        self.http.calls.clear()
+        self.assertEqual(gemini.upload_file(self.video)["name"], "files/new1")
+        self.assertEqual(self.http.calls, [])
+
+    def test_an_upload_gemini_cannot_read_is_forgotten(self):
+        """A 4xx that names one of the request's uploads (another project's
+        file, or one already gone) drops it from the cache, so the next call
+        uploads the video again rather than failing until the hourly check."""
+        cases = [
+            ("another project's file", 403,
+             "You do not have permission to access the File abc123 or it may not exist.", True),
+            ("gone", 404, "Requested entity was not found: files/abc123", True),
+            ("not ready", 400, "The File abc123 is not in an ACTIVE state and usage is not allowed.",
+             True),
+            ("about something else", 403, "Method doesn't allow unregistered callers.", False),
+            ("another file", 403, "You do not have permission to access the File abc1234.", False),
+        ]
+        for name, status, message, forgotten in cases:
+            with self.subTest(name), mock.patch.object(gemini, "_confirmed", {}):
+                (self.engine_dir / "gemini_files.json").unlink(missing_ok=True)
+                self.script_upload()
+                uploaded = gemini.upload_file(self.video)
+                self.http.add(api_error(status, message, name="PERMISSION_DENIED"))
+                video = {"fileData": {"mimeType": "video/mp4", "fileUri": uploaded["uri"]}}
+                with self.assertRaises(gemini.GeminiError) as ctx:
+                    self.generate(parts=[video, gemini.text_part("payload")])
+                self.assertEqual(ctx.exception.status, status)
+                self.assertEqual([e["name"] for e in self.cache().values()],
+                                 [] if forgotten else ["files/abc123"])
+                self.assertEqual(gemini._confirmed, {} if forgotten else {"files/abc123": mock.ANY})
+                self.assertEqual(self.http.answers, [])
 
     def test_a_recent_upload_and_a_recent_check_are_reused(self):
         self.script_upload()
@@ -813,6 +1080,35 @@ class GeminiUploadTest(GeminiCase):
         self.assertEqual([c["url"] for c in self.http.calls],
                          [self.START, "https://upload.test/s1", self.START, "https://upload.test/s2"])
         self.assertEqual(self.http.calls[3]["sent_bytes"], self.video.read_bytes())
+
+    def test_a_transfer_gemini_never_answers_is_retried_only_once(self):
+        """Each try can wait _upload_timeout(size) for Google's answer (many
+        minutes for a whole-source proxy), so a read timeout gets one fresh
+        session, as in _request; a dropped connection still gets two."""
+        def started(n):
+            return http(200, {}, headers={"X-Goog-Upload-URL": f"https://upload.test/s{n}"})
+
+        rq = requests.exceptions
+        cases = [
+            ("read timeouts", [rq.ReadTimeout("slow"), rq.ReadTimeout("slow")], False),
+            ("body stalled", [rq.ConnectionError(ReadTimeoutError(None, None, "timed out")),
+                              rq.ReadTimeout("slow")], False),
+            ("dropped connections", [rq.ConnectionError("reset"), rq.ConnectionError("reset")], True),
+        ]
+        for name, failures, uploaded in cases:
+            with self.subTest(name), mock.patch.object(gemini, "_confirmed", {}):
+                (self.engine_dir / "gemini_files.json").unlink(missing_ok=True)
+                self.http.calls.clear()
+                self.http.answers.clear()
+                self.http.add(started(1), failures[0], started(2), failures[1],
+                              started(3), http(200, {"file": self.file_resource()}))
+                with self.assertLogs("clip_engine.gemini", "WARNING"):
+                    if uploaded:
+                        self.assertEqual(gemini.upload_file(self.video)["name"], "files/abc123")
+                    else:
+                        with self.assertRaises(gemini.GeminiError):
+                            gemini.upload_file(self.video)
+                self.assertEqual(len(self.http.calls), 6 if uploaded else 4)
 
     def test_a_missing_file(self):
         with self.assertRaises(gemini.GeminiError):

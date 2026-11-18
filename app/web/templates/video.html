@@ -437,8 +437,9 @@ async function scoreVisuals() {
 const suggestions = {{ suggested_clips | tojson }};
 // The clip engine's run for this video while it is queued or running, else
 // null. It works in the background for minutes; the line next to the button
-// says where it is, and the page reloads when it ends. A run belongs to one
-// server process: a different boot id means a restart killed it.
+// says where it is, and the page reloads when it ends with new suggestions. A
+// run belongs to one server process: a different boot id means a restart
+// killed it.
 let engineJob = {{ engine_job | tojson }};
 let engineBoot = engineJob ? engineJob.boot_id : null;
 let enginePollTimer = null;
@@ -459,9 +460,10 @@ async function suggestVideoClips(btn) {
       return;
     }
     if (!r.ok || !d.clips) throw new Error(d.error || `HTTP ${r.status}`);
-    if (!d.new) alert('The model found nothing worth clipping here.');
-    location.reload();
-    return;
+    if (d.new) { location.reload(); return; }
+    // An empty pass replaced nothing, so the cards on screen still stand and
+    // the page stays put (see handleEngineStatus for why it must).
+    alert('The model found nothing worth clipping here.');
   } catch (e) {
     alert('Suggestion failed: ' + (e.message || e));
   }
@@ -478,14 +480,22 @@ function engineStatusText(job) {
 function showEngineJob(job) {
   const line = document.getElementById('suggest-status');
   const btn = document.getElementById('suggest-video-btn');
+  // A run nobody pressed for (after archiving, or re-queued by a restart)
+  // still waiting its turn: the button stays live, and pressing it moves the
+  // run to the front as yours (jobs._promote) instead of leaving it queued
+  // behind other videos and then held to the engine's daily budget.
+  const waiting = !!job && job.state === 'queued'
+    && (job.reason === 'archive' || job.reason === 'resume');
+  const busy = !!job && !waiting;
   if (line) {
     line.hidden = !job;
     line.textContent = job ? engineStatusText(job) : '';
   }
   if (btn) {
-    btn.disabled = !!job;
-    btn.classList.toggle('is-busy', !!job);
-    btn.textContent = job ? 'Suggesting…' : (suggestions.length ? 'Re-suggest' : 'Suggest clips');
+    btn.disabled = busy;
+    btn.classList.toggle('is-busy', busy);
+    btn.textContent = waiting ? 'Suggest now'
+      : (job ? 'Suggesting…' : (suggestions.length ? 'Re-suggest' : 'Suggest clips'));
   }
 }
 
@@ -526,16 +536,21 @@ function handleEngineStatus(d) {
   engineJob = null;
   const found = (job.new || []).length;
   const lost = (restarted && active) || job.state === 'idle';
-  if (job.message && found && !lost) {
-    // A note to go with fresh suggestions: shown as the reloaded page's toast.
-    location.href = '/video/{{ c.id }}?msg=' + encodeURIComponent(job.message);
+  if (found && !lost) {
+    // Fresh suggestions: reload to show them, with a note that goes with them
+    // as the reloaded page's toast.
+    if (job.message) location.href = '/video/{{ c.id }}?msg=' + encodeURIComponent(job.message);
+    else location.reload();
     return;
   }
-  if (lost) alert('The suggestion run was interrupted — press Suggest again.');
-  else if (job.message) alert(job.message);
-  else if (!found) alert(job.window ? 'Nothing worth clipping in this stretch.'
-                                    : 'The model found nothing worth clipping here.');
-  location.reload();
+  // Nothing new. An empty run replaced nothing (the engine never supersedes
+  // with nothing), so the cards on screen still stand and the page stays put.
+  // It has to: alert() is dialogs.js's <dialog>, which doesn't block, so a
+  // reload would throw the reason away before anyone read it.
+  showEngineJob(null);
+  alert(lost ? 'The suggestion run was interrupted — press Suggest again.'
+             : job.message || (job.window ? 'Nothing worth clipping in this stretch.'
+                                          : 'The model found nothing worth clipping here.'));
 }
 
 if (engineJob && (engineJob.state === 'queued' || engineJob.state === 'running')) {

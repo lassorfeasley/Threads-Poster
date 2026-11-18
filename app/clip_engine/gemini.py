@@ -12,14 +12,18 @@ What callers (shotlog, editor, critic) can rely on:
   the error carries ``.usage`` for the engine's cost meter — an error-prone run
   must not look cheaper than it was.
 - Transient failures (408/429/5xx, dropped connections) are retried with
-  backoff, but a client read timeout only once: a 900 s timeout retried four
-  times would hold the dashboard's engine worker for over an hour.
+  backoff, but a costly one only once: a client read timeout, a 504, or any
+  failure that came after a minute or more of waiting. And no retry starts
+  once a call has run for twice its read timeout. A 900 s timeout retried
+  four times would hold the dashboard's engine worker for over an hour.
 - A 429 that names a per-DAY quota won't clear by retrying, so it opens a
   process-wide breaker for 30 minutes: every call fails fast with
   ``GeminiQuota`` and jobs go straight to the transcript suggester instead of
   burning retries all day. A 402 (prepaid credits depleted — seen live on
   both generateContent and the upload start) opens the same breaker: it is
   never transient, and its message tells the operator where to add credit.
+  ``reset_breaker`` closes it early, for a run the operator asks for after
+  adding credit.
 - A 400 that names one of the newer request fields (``systemInstruction``,
   thinking, ``mediaResolution``, ``responseJsonSchema``) is retried once
   without it, so a model that lacks a feature degrades instead of failing every
@@ -31,15 +35,19 @@ Video goes inline (base64) while a request's raw video bytes stay under a
 budget — Google's docs disagree on 20 MB vs 100 MB per request, so ~14 MiB by
 default — and through the resumable Files API otherwise. Uploads are cached by
 (path, size, mtime) for 46 h (Google keeps files 48 h), so taste examples and a
-source's proxy go up once and are reused across drafts, critics and jobs.
+source's proxy go up once and are reused across drafts, critics and jobs. An
+upload belongs to the API key's project, so it is reused only under the key
+that made it, and one that a request's 4xx names is forgotten.
 """
 from __future__ import annotations
 
 import base64
 import datetime as dt
 import email.utils
+import hashlib
 import json
 import logging
+import math
 import random
 import re
 import threading
@@ -49,6 +57,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import requests
+import urllib3
 
 from .. import spend
 from ..config import env
@@ -64,6 +73,14 @@ _RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_RETRIES = 4
 _MAX_BACKOFF = 60.0
 _CONNECT_TIMEOUT = 15.0
+# A failure that kept a request waiting this long (a 5xx after minutes of
+# server-side work, a connection dropped mid-answer) cost as much as a read
+# timeout, so it shares the read timeout's single retry.
+_SLOW_FAILURE = 60.0
+# No retry starts once a call has run for twice its read timeout, or for this
+# long if that is more: room for four full backoffs, so quick 503s and
+# per-minute 429s keep all their retries on short-timeout calls.
+_MIN_RETRY_WINDOW = 5 * 60.0
 _BREAKER_SECONDS = 30 * 60
 # Google deletes uploads after 48 h; stop reusing them comfortably before that.
 _FILE_TTL = 46 * 3600
@@ -154,9 +171,42 @@ def breaker_open() -> bool:
     return _now() < _breaker_until
 
 
+def _minutes_left(until: float) -> int:
+    """Whole minutes until ``until`` on the ``_now`` clock, rounded up (at least 1)."""
+    return max(1, math.ceil((until - _now()) / 60))
+
+
 def breaker_reason() -> str:
-    """Why the breaker is open, worded for the operator; "" while it is closed."""
-    return _breaker_why if breaker_open() else ""
+    """Why the breaker is open and when Gemini will be tried again, worded
+    for the operator (a skipped run shows it as its fallback note); "" while
+    it is closed."""
+    with _breaker_lock:
+        until, why, status = _breaker_until, _breaker_why, _breaker_status
+    if _now() >= until:
+        return ""
+    reason = f"{why}; trying Gemini again in {_minutes_left(until)} min"
+    if status == 402:
+        # Credit takes a minute to add, unlike waiting out a day's quota, and
+        # a run the operator starts closes this breaker first (jobs).
+        reason += ", or at once when you press Suggest"
+    return reason
+
+
+def reset_breaker(*, status: int | None = None) -> bool:
+    """Close the breaker now; with ``status``, only if that HTTP status
+    opened it. True when it was open.
+
+    For a run the operator asks for after fixing the cause, such as adding
+    prepaid credit (402). If the cause is still there, that run's first call
+    opens the breaker again."""
+    global _breaker_until
+    with _breaker_lock:
+        if _now() >= _breaker_until or (status is not None and status != _breaker_status):
+            return False
+        _breaker_until = 0.0
+        opened_by = _breaker_status
+    log.info("Gemini breaker closed early (it opened on HTTP %d)", opened_by)
+    return True
 
 
 def _open_breaker(why: str, reason: str, status: int) -> None:
@@ -171,9 +221,9 @@ def _open_breaker(why: str, reason: str, status: int) -> None:
 
 def _check_breaker(label: str) -> None:
     if breaker_open():
-        minutes = max(1, int((_breaker_until - _now()) // 60) + 1)
-        raise GeminiQuota(f"{_breaker_why}; not calling Gemini for another {minutes} min "
-                          f"({label}: {_breaker_reason})", status=_breaker_status)
+        raise GeminiQuota(f"{_breaker_why}; not calling Gemini for another "
+                          f"{_minutes_left(_breaker_until)} min ({label}: {_breaker_reason})",
+                          status=_breaker_status)
 
 
 # --- HTTP with retries -----------------------------------------------------------------
@@ -228,40 +278,49 @@ def _retry_delay(resp: requests.Response, retry: int) -> float:
     return _backoff(retry)
 
 
+def _is_read_timeout(exc: BaseException) -> bool:
+    """A client read timeout, including one that struck while the body was
+    being read: requests raises that as a ConnectionError around urllib3's
+    ReadTimeoutError."""
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return False
+    if isinstance(exc, requests.exceptions.Timeout):
+        return True
+    return any(isinstance(arg, urllib3.exceptions.ReadTimeoutError) for arg in exc.args)
+
+
 def _request(method: str, url: str, *, label: str, timeout: tuple[float, float],
              **kwargs: Any) -> requests.Response:
     """``_send`` under this module's retry policy.
 
     Retries HTTP 408/429/5xx and connection failures up to ``_MAX_RETRIES``
-    times; a read timeout at most once. Returns the last response (whatever
-    its status) for the caller to judge. Raises ``GeminiQuota`` (and opens the
-    breaker) on a per-day quota 429 or a 402 (prepaid credits depleted),
-    ``GeminiError`` on transport failure."""
+    times, but a costly failure only once between them: a read timeout, a
+    504 (the server's deadline passed, and the same request won't fit it the
+    next time either) or any failure that kept us waiting ``_SLOW_FAILURE``
+    seconds or more. No retry starts once the call has run for twice its read
+    timeout (``_MIN_RETRY_WINDOW`` at least): a slow, failing server must not
+    hold the engine's one worker for an hour. Returns the last response
+    (whatever its status) for the caller to judge. Raises ``GeminiQuota`` (and
+    opens the breaker) on a per-day quota 429 or a 402 (prepaid credits
+    depleted), ``GeminiError`` on transport failure."""
+    started = _now()
+    window = max(_MIN_RETRY_WINDOW, 2.0 * float(timeout[1]))
     retries = 0
-    read_timeouts = 0
+    costly = 0
     while True:
         _check_breaker(label)
-        why = ""
+        sent = _now()
+        resp: requests.Response | None = None
+        error: Exception | None = None
         try:
             resp = _send(method, url, timeout=timeout, **kwargs)
-        except requests.exceptions.ConnectTimeout as exc:
-            if retries >= _MAX_RETRIES:
-                raise GeminiError(f"{label}: could not connect to Gemini: {exc}") from exc
-            delay, why = _backoff(retries), "connect timeout"
-        except requests.exceptions.Timeout as exc:
-            read_timeouts += 1
-            if read_timeouts > 1 or retries >= _MAX_RETRIES:
-                raise GeminiError(f"{label}: Gemini sent no answer within {timeout[1]:.0f}s "
-                                  f"({read_timeouts} read timeouts)") from exc
-            delay, why = _backoff(retries), "read timeout"
-        except (requests.exceptions.ConnectionError,
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError,
                 requests.exceptions.ChunkedEncodingError) as exc:
-            if retries >= _MAX_RETRIES:
-                raise GeminiError(f"{label}: could not reach Gemini: {exc}") from exc
-            delay, why = _backoff(retries), f"connection error: {exc}"
+            error = exc
         except requests.exceptions.RequestException as exc:
             raise GeminiError(f"{label}: request to Gemini failed: {exc}") from exc
-        else:
+        waited = _now() - sent
+        if resp is not None:
             if resp.status_code == 402:
                 # Prepaid credits ran out. Not transient: every call fails the
                 # same way until someone adds credit, so fail fast for all.
@@ -272,9 +331,33 @@ def _request(method: str, url: str, *, label: str, timeout: tuple[float, float],
                 message = _error_message(resp)
                 _open_breaker(_DAILY_QUOTA, message, 429)
                 raise GeminiQuota(f"{_DAILY_QUOTA} ({label}: {message})", status=429)
-            if resp.status_code not in _RETRY_STATUS or retries >= _MAX_RETRIES:
+            if resp.status_code not in _RETRY_STATUS:
                 return resp
-            delay, why = _retry_delay(resp, retries), f"HTTP {resp.status_code}"
+            delay, why, problem = _retry_delay(resp, retries), f"HTTP {resp.status_code}", ""
+            is_costly = resp.status_code == 504
+        else:
+            delay = _backoff(retries)
+            is_costly = _is_read_timeout(error)
+            if isinstance(error, requests.exceptions.ConnectTimeout):
+                why, problem = "connect timeout", f"could not connect to Gemini: {error}"
+            elif is_costly:
+                why, problem = "read timeout", f"Gemini sent no answer within {timeout[1]:.0f}s"
+            else:
+                why, problem = f"connection error: {error}", f"could not reach Gemini: {error}"
+        if waited >= _SLOW_FAILURE:
+            is_costly = True
+            why += f" after {waited:.0f}s"
+        if is_costly:
+            costly += 1
+        elapsed = _now() - started
+        cut_short = costly > 1 or elapsed + delay > window
+        if cut_short or retries >= _MAX_RETRIES:
+            attempts = f"{retries + 1} attempt{'s' if retries else ''} in {elapsed:.0f}s"
+            if cut_short:
+                log.warning("%s: %s; giving up after %s", label, why, attempts)
+            if resp is not None:
+                return resp
+            raise GeminiError(f"{label}: {problem} ({attempts})") from error
         retries += 1
         log.warning("%s: %s; retry %d of %d in %.1fs", label, why, retries, _MAX_RETRIES, delay)
         _sleep(delay)
@@ -367,6 +450,20 @@ def _file_name(value: Any) -> str:
     return f"files/{text}" if re.fullmatch(r"[a-z0-9-]+", text) else ""
 
 
+def _forget_named_uploads(parts: list[dict], error: str, label: str) -> None:
+    """Forget each of a request's uploads that its 4xx names ("You do not
+    have permission to access the File <id> or it may not exist"): another
+    project's file, or one already gone. The next call then uploads the video
+    again instead of reusing the dead one until the hourly recheck."""
+    for part in parts:
+        data = part.get("fileData") if isinstance(part, dict) else None
+        name = _file_name(data.get("fileUri")) if isinstance(data, dict) else ""
+        file_id = name[len("files/"):]
+        if file_id and re.search(rf"(?<![a-z0-9-]){re.escape(file_id)}(?![a-z0-9-])", error):
+            log.info("%s: Gemini can't use %s; forgetting it so it's uploaded again", label, name)
+            _forget(name)
+
+
 def _get_file(file_name: str, key: str, label: str) -> requests.Response:
     return _request("GET", f"{_API}/{file_name}", label=label, timeout=(_CONNECT_TIMEOUT, 30.0),
                     headers={"x-goog-api-key": key})
@@ -394,9 +491,20 @@ def _still_active(file_name: str, key: str, label: str) -> bool:
     return False
 
 
+def _key_fingerprint(key: str) -> str:
+    """A short one-way tag for an API key, kept with each cached upload in
+    place of the key itself."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
 def _cached_upload(cache_key: str, key: str, label: str) -> dict | None:
     entry = _cache_load().get(cache_key)
     if not isinstance(entry, dict) or not entry.get("name") or not entry.get("uri"):
+        return None
+    if entry.get("key_fingerprint") != _key_fingerprint(key):
+        # Uploaded under another API key (a file belongs to its key's project,
+        # and another project's key can't read it), or by a version that
+        # didn't record the key: upload again rather than risk it.
         return None
     age = _age_seconds(entry)
     if age is None or age >= _FILE_TTL:
@@ -416,8 +524,11 @@ def _upload_bytes(path: Path, size: int, mime: str, display_name: str, key: str,
                   label: str) -> dict:
     """Resumable upload: start a session, then send every byte with
     ``upload, finalize``. A failed byte transfer starts a fresh session (a
-    half-sent session can't simply be restarted at offset 0)."""
+    half-sent session can't simply be restarted at offset 0), but one that
+    Google never answered only once: each try may wait
+    ``_upload_timeout(size)``, many minutes for a whole-source proxy."""
     attempt = 0
+    read_timeouts = 0
     while True:
         attempt += 1
         start = _request(
@@ -446,7 +557,9 @@ def _upload_bytes(path: Path, size: int, mime: str, display_name: str, key: str,
                              data=fh)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
                 requests.exceptions.ChunkedEncodingError) as exc:
-            if attempt >= _UPLOAD_ATTEMPTS:
+            if _is_read_timeout(exc):
+                read_timeouts += 1
+            if attempt >= _UPLOAD_ATTEMPTS or read_timeouts > 1:
                 raise GeminiError(f"{label}: upload failed: {exc}") from exc
             log.warning("%s: upload interrupted (%s); starting again", label, exc)
             _sleep(_backoff(attempt - 1))
@@ -527,7 +640,8 @@ def upload_file(path, *, mime: str = "video/mp4", display_name: str = "",
         out = {"name": info["name"], "uri": info["uri"],
                "mime_type": info.get("mimeType") or info.get("mime_type") or mime}
         _confirmed[out["name"]] = _now()
-        entry = {**out, "uploaded_at": util.utcnow_iso(), "size": st.st_size}
+        entry = {**out, "uploaded_at": util.utcnow_iso(), "size": st.st_size,
+                 "key_fingerprint": _key_fingerprint(key)}
         _cache_update(lambda data: data.__setitem__(cache_key, entry))
         log.info("%s: uploaded %.1f MB as %s in %.1fs", label, st.st_size / 1e6, out["name"],
                  _now() - started)
@@ -886,6 +1000,8 @@ def generate_json(model: str, *, system: str, parts: list[dict], schema: dict,
         log.warning("%s: Gemini rejected %s (%s); retrying without it", label,
                     ", ".join(changed), _error_message(resp))
     if resp.status_code != 200:
+        if resp.status_code in (400, 403, 404):
+            _forget_named_uploads(parts, _error_text(resp), label)
         raise GeminiError(f"{label}: Gemini HTTP {resp.status_code}: {_error_message(resp)}",
                           status=resp.status_code)
     data, usage = _parse_response(_json_body(resp, label), model=model, bucket=bucket, label=label)

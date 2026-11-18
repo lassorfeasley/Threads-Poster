@@ -29,7 +29,7 @@ If the engine fails (a provider outage, a render error, a run over its cost cap)
 
 ## What you see in the dashboard
 
-- **When it runs.** After a video is archived, the engine runs in the background. Pressing **Suggest** (or "Suggest a clip here" on a section) queues a run ahead of any unattended archive runs. A status line shows "Watching the video…" with the current stage, or "queued behind N".
+- **When it runs.** After a video is archived, the engine runs in the background. Pressing **Suggest** (or "Suggest a clip here" on a section) queues a run ahead of any unattended archive runs. A status line shows "Watching the video…" with the current stage, or "queued behind N". If the video's own archive run is still waiting its turn, Suggest stays pressable ("Suggest now" on the video page): pressing it moves that run to the front as yours, so it isn't held to the unattended daily budget.
 - **Suggestion cards.** Each card has a playable preview of the actual cut, an archetype badge, and one critic line, e.g. "Stops the scroll: Bill Nye pulls off his safety glasses", plus "Gets slow at 0:21" when it sags. The old confidence badge is hidden; the critic's score is still stored as the confidence. "Not reviewed (critic unavailable)" means the critic call failed for that draft; it was kept rather than thrown away.
 - **The preview is hidden** when a card was shortened around footage another clip already uses. The render no longer matches what "Use this clip" would load.
 - **Restarts.** A dashboard restart, including the auto-reload when code changes, interrupts a run. The card then says "interrupted — press Suggest again". Unattended runs from the last 24 hours are resumed at startup, with two attempts at most per video.
@@ -73,13 +73,13 @@ The budget settings, all under `clip_engine:`:
 |---|---|---|
 | `daily_usd` | 5.00 | Daily cap for **unattended** runs (after archiving, and resumes). A run whose estimate would cross it uses the transcript suggester instead. Your own Suggest presses aren't capped. |
 | `max_usd_per_video` | 1.50 | The optional revision round is skipped once a run has spent this much. |
-| `hard_cap_usd` | 4.00 | A run that passes this stops and falls back to the transcript suggester. |
+| `hard_cap_usd` | 4.00 | A run that passes this stops and falls back to the transcript suggester. It is checked before every window of the shot log too, so a very long source (a four-hour hearing) stops near the cap rather than after logging the whole video. The windows already logged are kept: pressing Suggest again carries on from there, each press capped on its own. To let one long video through in a single run, raise this. |
 | `max_source_seconds` | 3600 | Unattended whole-video runs on longer sources use the transcript suggester. Section passes still use the engine. |
 | `estimate_usd_base`, `estimate_usd_per_minute` | per setup | The reservation above. |
 
 Engine spend is booked to its own "engine" bucket in `data/llm_spend.json`, and the benchmark's to a "bench" bucket. Neither counts against `llm.daily_budget_usd`, so a busy engine day can't switch off caption checks, reruns or the digest.
 
-If Gemini's daily quota runs out, or the project's prepaid credit does, the dashboard stops calling Gemini for 30 minutes. Runs in that time use the transcript suggester, and the suggestion page says why (for example "Gemini prepaid credits are depleted — add credit at https://ai.studio/projects"). After adding credit, either wait out the 30 minutes or restart the dashboard.
+If Gemini's daily quota runs out, or the project's prepaid credit does, the dashboard stops calling Gemini for 30 minutes. Runs in that time use the transcript suggester, and the suggestion page says why (for example "Gemini prepaid credits are depleted — add credit at https://ai.studio/projects"). After adding credit, press **Suggest**: a run you start yourself tries Gemini again straight away (if the credit still isn't there, it falls back and says so). Archive-time runs wait out the 30 minutes, or a dashboard restart. A daily quota can't be fixed that way, so it holds for every run until it clears.
 
 ## Trying it on one video
 
@@ -131,15 +131,25 @@ What a test run does:
 
 - **Picks the videos.** It samples archived videos you exported at least one clip from, skipping every video in `touched.json`. It stratifies by source length (long sources oversampled) and by source kind.
 - **Freezes the sample** in `videos.json`.
-- **Replays each video as of its archive day.** The account context is the context of that day. Your later claims and dismissals are hidden, and the playbook's example titles are stripped.
-- **Is resumable.** Rerun the same command to continue; errored results are retried, finished ones are kept.
+- **Replays each video as of its archive day.** The account context is the context of that day. Your later claims and dismissals are hidden, and the playbook's example titles are stripped. The critic's taste examples are frozen per video when the run is created, and a flop counts only if you labelled it "not gripping" before the video was archived.
+- **Is resumable.** Rerun `clipbench run --name test-1` to continue: it keeps the run's own videos, arms and cap. `--arms` runs just those arms (adding any the run doesn't have yet), and `--max-usd` replaces the cap. Errored results are retried, finished ones are kept. One `clipbench run` of a run goes at a time; a second one refuses.
 - **Stops after the video whose results pass `--max-usd`.** The default is 40, and spend is counted at ledger prices. A gemini+transcript run costs very roughly $0.80 per video at those prices, so the default cap may stop a 60-video run early; raise `--max-usd` if you want all of it. The report flags a run that was stopped.
-- **Refuses to resume after prompts, settings or the playbook change.** Its fingerprint no longer matches. `--new-version` continues under new arm labels instead of mixing versions.
+- **Refuses to resume after prompts, settings or the playbook change.** Its fingerprint no longer matches. `--new-version` starts over under new arm labels instead of mixing versions, and it prints the spend so far and an estimate before it starts:
+  - every arm runs again on all the run's videos;
+  - what the run already spent still counts toward the cap, so raise `--max-usd` by about a full run's cost;
+  - the pairs must be prepared and judged again: judgments of the old version don't carry over.
 
 **Arms.** `--arms gemini,transcript` is the default (`clip_engine.bench.arms`).
 
 - An arm is a setup, optionally with setting overrides, e.g. `gemini+editor_thinking=HIGH` or `gemini+editor_model=gemini-4-hydrogen`.
-- A bare key with a role prefix (`editor_…`, `critic_…`, `perceiver_…`, `judge_…`) goes to the provider that plays that role in the setup. A dotted key is used as is (`clip_engine.snap.word_window=0.8`, or the short form `snap.word_window=0.8`).
+- A bare key with a role prefix (`editor_…`, `critic_…`, `perceiver_…`, `judge_…`) goes to the provider that plays that role in the setup. A dotted key is used as is (`clip_engine.snap.word_window=0.8`, or the short form `snap.word_window=0.8`). Engine arms take `clip_engine.*` keys; the transcript arm takes the `clips.*` keys its suggester reads.
+- Overrides are checked, so an arm's label never claims a setting that didn't run. A typo, a setting the setup doesn't read, or one that can't vary per arm is refused.
+- Taste examples and account context can only be reduced per arm:
+  - `taste_hits` / `taste_flops` show fewer of the examples frozen per video;
+  - `clips.learn_from_history=false` drops the account context, and `clips.context_examples` trims its shipped examples.
+
+  `taste_lookback_days` can't vary per arm. `job_timeout_seconds` sets the arm's own time limit per video.
+- Perception settings need a shot log of their own. They are `perception_fps`, `long_video_fps`, `media_resolution`, `perceiver_thinking` and `perception_window_seconds`, and for a Claude perceiver `frame_interval`, `frame_width`, `max_total_frames`, `max_frames_per_call` and `perceiver_effort`. Shot logs are cached per those settings, so an arm that changes one logs the video again with it (and pays for that) rather than reusing its baseline's log. The bench checks this when it reads the arm, and refuses the arm if a setting ever stopped being part of the cache key. A different `perceiver_model` always gets its own log.
 - `transcript` means today's transcript suggester (labelled `transcript-v3`), not the one behind past suggestions.
 
 **Other flags:**
@@ -172,12 +182,12 @@ python run.py clipbench reveal --name test-1     # or the "Reveal results" butto
 python run.py clipbench report --name test-1
 ```
 
-Results stay hidden until you reveal them, so they can't steer your judging. **Revealing closes judging for that run for good.** Judge everything first.
+Results stay hidden until you reveal them, so they can't steer your judging. **Revealing closes judging for that run for good**, even while a `clipbench run` of it is still going. Judge everything first.
 
 How to read the report:
 
 - **The decision is the arms test.** It gives the engine's win rate against the transcript suggester among non-tied judgments, with a 95% confidence interval and a sign-test p-value. The engine is better when the whole interval sits above 50% (p < 0.05). An interval straddling 50% means no detectable difference yet.
-- **The ceiling test is secondary.** It asks how often the engine's top pick wins or ties against your own cut. Videos where the engine proposed nothing count as losses, and "Neither" counts as not-a-win. It **passes** when the one-sided 95% lower bound is at least 40%, **fails** when the whole interval is below, and is **inconclusive** in between. Read the line with recognised items excluded too.
+- **The ceiling test is secondary.** It asks how often the engine's top pick wins or ties against your own cut. Videos where the engine proposed nothing count as losses, and "Neither" counts as not-a-win. It **passes** when the one-sided 95% lower bound (the "1-sided low" column) is at least 40%, **fails** when the whole printed 95% interval is below 40%, and is **inconclusive** in between. Read the line with recognised items excluded too.
 - **Loss reasons per arm** show which complaint is still open.
 - **Hit rates** compare each arm's picks with the clips you actually exported:
   - any-hit@1 and @3;
@@ -228,7 +238,7 @@ Everything is files; the engine adds nothing to the database except the suggesti
 
 | Path (under `workspaces/<workspace>/`) | What |
 |---|---|
-| `data/clip_engine/shotlogs/` | shot logs, one per video, perceiver and model (kept; they cost money to make) |
+| `data/clip_engine/shotlogs/` | shot logs, one per video, perceiver, model and perception settings, plus each finished window of a long source (kept; they cost money to make) |
 | `data/clip_engine/proposals/` | each suggestion's preview render and critic notes (kept 45 days) |
 | `data/clip_engine/runs/` | one job record per video, plus the full result of each run |
 | `data/clip_engine/proxies/`, `renders/`, `shotmaps/`, `taste/` | caches: 360p copies, draft renders, cut lists, this account's example clips (pruned after 14 days, at most daily) |

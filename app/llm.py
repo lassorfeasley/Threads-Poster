@@ -608,14 +608,17 @@ def _clean_clip_segments(raw, horizon: float, cap: int,
 
 
 def _words_to_clauses(words: list[dict], max_words: int = 12,
-                      max_gap: float = 0.8) -> list[dict]:
+                      max_gap: float = 0.8, ndigits: int = 1) -> list[dict]:
     """Compact a Whisper word stream into clause-sized ``{start, end, text}``.
 
     Each entry starts and ends exactly on a word boundary, so a clip cut at an
     entry's edge never clips a word in half — the precision the segment-level
     transcript (YouTube captions especially) can't offer. Splits at sentence
     punctuation, speech gaps, or ``max_words``, mirroring how the burned-in
-    captions group the same stream.
+    captions group the same stream. Times are rounded to ``ndigits``: the
+    default 1 keeps prompts short; the clip engine's editor asks for 2, since
+    a boundary copied from a 1 dp entry can land up to 0.05 s inside the
+    neighbouring word.
     """
     clauses: list[dict] = []
     cur: list[dict] = []
@@ -623,8 +626,8 @@ def _words_to_clauses(words: list[dict], max_words: int = 12,
     def flush() -> None:
         if cur:
             clauses.append({
-                "start": round(float(cur[0]["start"]), 1),
-                "end": round(float(cur[-1]["end"]), 1),
+                "start": round(float(cur[0]["start"]), ndigits),
+                "end": round(float(cur[-1]["end"]), ndigits),
                 "text": " ".join(w["word"] for w in cur),
             })
 

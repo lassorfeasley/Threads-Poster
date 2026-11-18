@@ -669,10 +669,26 @@ def _stop_clip_engine() -> None:
         log.exception("Couldn't stop the clip engine")
 
 
-_resume_stalled_scrapes()
-_resume_clip_engine_runs()
-_retrain_triage_model_in_background()
-# Not ``@app.on_event``: deprecated on this FastAPI, and this is the same hook.
+def _start_background_work() -> None:
+    """Pick up what a restart left behind, once the server starts serving.
+
+    A startup hook, not module-level calls: scripts import this module for
+    its loaders (scripts/diagnose_latency.py, count_queries.py, smoke_pages.py
+    against the live database) and must not restart downloads or queue paid
+    clip engine runs in a process that exits a moment later. uvicorn fires
+    it in the dashboard (under --reload too); a plain import, or a
+    TestClient used without ``with``, does not. Each step on its own: one
+    that fails must not keep the others, or the server, from starting."""
+    try:
+        _resume_stalled_scrapes()
+    except Exception:
+        log.exception("Couldn't resume stalled downloads")
+    _resume_clip_engine_runs()                 # never raises
+    _retrain_triage_model_in_background()      # its own thread, its own try
+
+
+# Not ``@app.on_event``: deprecated on this FastAPI, and these are the same hooks.
+app.router.add_event_handler("startup", _start_background_work)
 app.router.add_event_handler("shutdown", _stop_clip_engine)
 
 

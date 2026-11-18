@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import os
 import tempfile
 import threading
 import time
@@ -23,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 from app import clip_proposals, llm, spend
-from app.clip_engine import critic, editor, engine, media, shotlog, snap, taste, util
+from app.clip_engine import critic, editor, engine, gemini, media, shotlog, snap, taste, util
 from app.clip_engine import playbook as playbook_mod
 from app.config import Settings
 
@@ -1519,6 +1520,211 @@ class RunOutcomesAndErrorsTest(_SpendSafe):
         with self.assertRaises(engine.EngineError) as caught:
             h.run()
         self.assertTrue(any("No shot map" in n for n in caught.exception.notes))
+        self.assertEqual(caught.exception.renders, [])
+
+    def test_a_run_stopped_after_rendering_hands_back_its_renders(self):
+        """Nobody will be shown them: the caller deletes them (jobs does)."""
+        # perceive $0.05 + draft $0.10, then three critiques at $0.01 tip it over.
+        h = self.three(settings={"clip_engine.hard_cap_usd": 0.16})
+        with self.assertRaises(engine.EngineError) as caught:
+            h.run()
+        self.assertIn("hard cap", str(caught.exception))
+        self.assertEqual(sorted(caught.exception.renders),
+                         ["/renders/d1.mp4", "/renders/d2.mp4", "/renders/d3.mp4"])
+        self.assertEqual(h.calls["rank"], [])
+
+    def test_a_deadline_during_rendering_hands_back_the_renders_too(self):
+        h = self.three()
+        real = h.render
+
+        def slow_render(*args, **kwargs):
+            out = real(*args, **kwargs)
+            time.sleep(1.0)
+            return out
+
+        with mock.patch.object(media, "render_cached", new=slow_render):
+            with self.assertRaises(util.Cancelled) as caught:
+                h.run(deadline=time.monotonic() + 0.5)
+        self.assertEqual(sorted(caught.exception.renders),
+                         ["/renders/d1.mp4", "/renders/d2.mp4", "/renders/d3.mp4"])
+        self.assertEqual(h.calls["watch"], [])
+        self.assertIsInstance(caught.exception.notes, list)
+
+    def real_editor(self, h: Harness, answer: dict) -> None:
+        """The real ``editor.draft`` (cleaning included), its model answering ``answer``."""
+        def draft(**kw):
+            h.events.append("draft")
+            with mock.patch.object(gemini, "generate_json",
+                                   return_value=(copy.deepcopy(answer),
+                                                 usage(0.08, model="gemini-3.8-flash"))), \
+                    mock.patch.object(gemini, "video_parts", return_value=[{"fake": "video"}]):
+                return REAL["draft"](**kw)
+
+        p = mock.patch.object(editor, "draft", new=draft)
+        p.start()
+        self.addCleanup(p.stop)
+
+    @staticmethod
+    def raw_draft(i, *spans):
+        return {"id": f"d{i}", "moment_id": "m1", "archetype": "voice", "lens": "person",
+                "story": f"story {i}", "story_key": f"k{i}", "hook": "h", "payoff": "p",
+                "segments": [{"start": a, "end": b, "lead": "word"} for a, b in spans],
+                "why": "w", "risk": "", "draft_caption": "c", "challenges_rules": ""}
+
+    def test_drafts_lost_to_cleaning_are_a_failure_not_nothing_worth_drafting(self):
+        """The editor wrote drafts and its own cleaning dropped every one: a
+        mechanical loss, which must fall back like any other — not the
+        editorial answer "empty_drafts" that leaves an archived video with no
+        suggestions at all."""
+        moment = {"id": "m1", "start": 0, "end": 600, "kind": "person", "why": "x"}
+        cases = [
+            # 60 s each; max_seconds 45 allows up to 58.5 s.
+            ("too long", {"moments": [moment],
+                          "drafts": [self.raw_draft(i, (30.0 * i, 30.0 * i + 60.0))
+                                     for i in range(10)]}, None),
+            # A section pass whose drafts all fall outside the section.
+            ("outside the section", {"moments": [],
+                                     "drafts": [self.raw_draft(i, (300.0 + 20 * i, 330.0 + 20 * i))
+                                                for i in range(6)]},
+             {"start": 60.0, "end": 180.0}),
+        ]
+        for label, answer, window in cases:
+            with self.subTest(label):
+                h = self.harness()
+                self.real_editor(h, answer)
+                meter = engine.CostMeter()
+                with self.assertRaises(engine.EngineError) as caught:
+                    h.run(meter=meter, window=window)
+                self.assertIn("drafting failed", str(caught.exception))
+                self.assertAlmostEqual(meter.by_stage["draft"], 0.08)   # charged once
+                self.assertEqual(h.rendered(), [])
+
+    def test_an_editor_that_drafted_nothing_is_still_an_answer(self):
+        h = self.harness()
+        self.real_editor(h, {"moments": [], "drafts": []})
+        result = h.run()
+        self.assertEqual(result.outcome, "empty_drafts")
+        self.assertEqual(result.top, [])
+
+
+class PerceptionLimitsTest(_SpendSafe):
+    """The hard cap, the deadline and a cancel reach INSIDE perception: the
+    REAL ``shotlog.build`` logs an hour-long source window by window, only its
+    Gemini calls faked. The checkpoint used to run once the whole log was
+    back, so every window (and every split of a runaway answer) was paid for
+    before the cap was even looked at: $12.75 against a $4 cap for a
+    four-hour hearing, 91 calls for an hour of answers that all ran long."""
+
+    COST = 0.25          # what each window call bills
+    HOUR = 3600.0        # 13 windows of ~300 s
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.calls: list[str] = []
+        self.lock = threading.Lock()
+        self.truncate = False
+        self.on_call = None
+        for patcher in (
+            mock.patch.dict(os.environ, {"CLIP_ENGINE_DIR": tmp.name}),
+            mock.patch.object(gemini, "generate_json", new=self.generate),
+            mock.patch.object(gemini, "video_parts", new=self.video_parts),
+            mock.patch.object(gemini, "delete_file", new=lambda uri: None),
+            mock.patch.object(media, "drop", new=lambda paths: None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def video_parts(items, *, inline_budget_bytes=None):
+        return [{"fileData": {"mimeType": "video/mp4", "fileUri": "https://x/v1beta/files/p"}}]
+
+    def generate(self, model, *, system, parts, schema, label="", **kw):
+        with self.lock:
+            self.calls.append(label)
+            n = len(self.calls)
+        if self.on_call is not None:
+            self.on_call(n)
+        # 20k output tokens: long, but not so long it reads as a loop, so a
+        # truncated window is split all the way down (1 + 2 + 4 calls).
+        usage = {"model": model, "input_tokens": 20000, "output_tokens": 20000,
+                 "cost_usd": self.COST}
+        if self.truncate:
+            raise gemini.GeminiTruncated("MAX_TOKENS", usage=usage)
+        beat = {"start": "00:00", "end": "05:00", "shot": "interview", "on_screen": "a hearing",
+                "face": "close", "speaker": "", "line": "", "sound": "", "energy": 3,
+                "visual": 3, "topic": 2, "note": ""}
+        return ({"summary": "a hearing", "format": "hearing", "structure": "", "people": [],
+                 "beats": [beat], "highlights": []}, usage)
+
+    def harness_with_the_real_shot_log(self, **settings) -> Harness:
+        h = self.three(settings=settings)
+        p = mock.patch.object(shotlog, "build", new=REAL["build"])
+        p.start()
+        self.addCleanup(p.stop)
+        return h
+
+    def test_the_hard_cap_stops_a_long_source_mid_perception(self):
+        h = self.harness_with_the_real_shot_log(**{"clip_engine.hard_cap_usd": 1.0})
+        meter = engine.CostMeter()
+        with self.assertRaises(engine.EngineError) as caught:
+            h.run(duration=self.HOUR, meter=meter)
+        message = str(caught.exception)
+        self.assertIn("past the hard cap", message)
+        self.assertNotIn("perceiver failed", message)       # the cap's own words, not reworded
+        # At most four $0.25 calls fit under $1.00, plus whatever the other
+        # workers had in flight when the cap was crossed — not all 13 windows.
+        self.assertLessEqual(len(self.calls), 4 + shotlog._PART_WORKERS)
+        self.assertLessEqual(meter.total, 1.0 + shotlog._PART_WORKERS * self.COST + 1e-9)
+        self.assertEqual(h.calls["draft"], [])
+
+    def test_answers_that_all_run_long_cannot_split_past_the_cap(self):
+        h = self.harness_with_the_real_shot_log(**{"clip_engine.hard_cap_usd": 1.0})
+        self.truncate = True
+        meter = engine.CostMeter()
+        with self.assertRaises(engine.EngineError) as caught:
+            h.run(duration=self.HOUR, meter=meter)
+        self.assertIn("past the hard cap", str(caught.exception))
+        self.assertLessEqual(len(self.calls), 4 + shotlog._PART_WORKERS)   # was 13 x 7 = 91
+        self.assertEqual(h.calls["draft"], [])
+
+    def test_the_deadline_stops_perception_between_windows(self):
+        h = self.harness_with_the_real_shot_log()
+        self.on_call = lambda n: time.sleep(0.6)
+        meter = engine.CostMeter()
+        with self.assertRaises(util.Cancelled) as caught:
+            h.run(duration=self.HOUR, meter=meter, deadline=time.monotonic() + 0.4)
+        self.assertIn("out of time", str(caught.exception))
+        self.assertLessEqual(len(self.calls), shotlog._PART_WORKERS)   # the first round only
+        self.assertEqual(h.calls["draft"], [])
+
+    def test_a_cancel_stops_perception_between_windows(self):
+        h = self.harness_with_the_real_shot_log()
+        cancel = threading.Event()
+
+        def first_call_cancels(n):
+            if n == 1:
+                cancel.set()
+            time.sleep(0.05)
+
+        self.on_call = first_call_cancels
+        with self.assertRaises(util.Cancelled):
+            h.run(duration=self.HOUR, cancel=cancel)
+        self.assertLessEqual(len(self.calls), shotlog._PART_WORKERS)
+        self.assertEqual(h.calls["draft"], [])
+
+    def test_windows_logged_before_the_stop_are_kept_for_the_next_run(self):
+        h = self.harness_with_the_real_shot_log(**{"clip_engine.hard_cap_usd": 1.0})
+        with self.assertRaises(engine.EngineError):
+            h.run(duration=self.HOUR)
+        first = len(self.calls)
+        # The next run (cap raised) pays only for the windows still missing.
+        h.settings = {"clip_engine.hard_cap_usd": 10.0}
+        self.calls.clear()
+        result = h.run(duration=self.HOUR, meter=engine.CostMeter())
+        self.assertEqual(result.outcome, "proposals")
+        self.assertEqual(len(self.calls), 13 - first)
 
 
 if __name__ == "__main__":

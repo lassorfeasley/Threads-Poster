@@ -10,6 +10,7 @@ Run with:  DATABASE_URL="sqlite://" python -m unittest tests.test_clip_engine_me
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -21,7 +22,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app.clip_engine import media
+import requests
+
+from app.clip_engine import gemini, media
 
 HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
@@ -174,14 +177,16 @@ class FfmpegTest(_EngineDir):
         self.assertEqual(first.parent, self.tmp / "engine" / "renders")
         self.assertTrue(first.name.startswith("draft-"))
         before = first.stat()
-        os.utime(first, (before.st_atime - 3600, before.st_mtime - 3600))
+        hour_ago = before.st_mtime_ns - 3600 * 10**9
+        os.utime(first, ns=(hour_ago, hour_ago))
         with mock.patch.object(media.subprocess, "run",
                                side_effect=AssertionError("re-rendered")):
             again = media.render_cached(self.source, [{"start": 3.501, "end": 4.999},
                                                       {"start": 0.5, "end": 2.5}])
         self.assertEqual(again, first)
-        self.assertEqual(first.stat().st_ino, before.st_ino)          # the same file...
-        self.assertGreaterEqual(first.stat().st_mtime, before.st_mtime)  # ...touched for prune
+        self.assertEqual(first.stat().st_ino, before.st_ino)   # the same file...
+        # ...with the same mtime: it keys Gemini's upload cache (CacheReuseTest).
+        self.assertEqual(first.stat().st_mtime_ns, hour_ago)
         swapped = media.render_cached(self.source, [{"start": 0.5, "end": 2.5},
                                                     {"start": 3.5, "end": 5.0}], height=240,
                                       kind="judge/../x")
@@ -449,6 +454,59 @@ class InflightTest(_EngineDir):
         with self.assertRaises(media.MediaError):
             media.link_inflight(self.tmp / "missing.mp4", "v")
 
+    def test_a_prune_between_the_link_and_the_rename_leaves_the_tmp_alone(self):
+        """link_inflight makes its tmp outside the lock, as a hard link or a
+        copy of the source, and either carries the source's month-old mtime.
+        A prune landing before the rename (another process's, say) must not
+        take that fresh tmp for a crash's leftover."""
+        month_ago = time.time() - 30 * 86400
+        os.utime(self.source, (month_ago, month_ago))
+        real_link, real_copy2 = os.link, shutil.copy2
+        pruned: list[int] = []
+
+        def link_then_prune(src, dst, *args, **kwargs):
+            real_link(src, dst, *args, **kwargs)
+            pruned.append(media._prune_inflight(time.time()))
+
+        def copy_then_prune(src, dst, *args, **kwargs):
+            out = real_copy2(src, dst, *args, **kwargs)
+            pruned.append(media._prune_inflight(time.time()))
+            return out
+
+        cases = [
+            ("hard link", [mock.patch.object(media.os, "link", side_effect=link_then_prune)]),
+            ("copy", [mock.patch.object(media.os, "link", side_effect=OSError(18, "cross-device")),
+                      mock.patch.object(media.shutil, "copy2", side_effect=copy_then_prune)]),
+        ]
+        for name, patches in cases:
+            with self.subTest(name):
+                pruned.clear()
+                with contextlib.ExitStack() as stack:
+                    for patch in patches:
+                        stack.enter_context(patch)
+                    pin = media.link_inflight(self.source, name.replace(" ", "-"))
+                self.assertEqual(pruned, [0])
+                self.assertEqual(pin.read_bytes(), b"video bytes")
+                self.assertEqual(pin.stat().st_mtime_ns, self.source.stat().st_mtime_ns)
+                media.release_inflight(pin)
+                self.assertFalse(pin.exists())
+
+    def test_a_tmp_left_by_a_crash_goes_once_it_is_a_day_old(self):
+        month_ago = time.time() - 30 * 86400
+        os.utime(self.source, (month_ago, month_ago))
+        self.inflight().mkdir(parents=True, exist_ok=True)
+        # What a run that died between the link and the rename leaves behind
+        # (no process has pid 99999999), and the tmp of a run still going.
+        dead = self.inflight() / ".v-0123abcd.99999999.42.tmp.mp4"
+        live = self.inflight() / f".v-0123abcd.{os.getpid()}.42.tmp.mp4"
+        for tmp in (dead, live):
+            os.link(self.source, tmp)
+        self.assertEqual(media._prune_inflight(time.time()), 0)   # made just now
+        self.assertEqual(media._prune_inflight(time.time() + 2 * 86400), 1)
+        self.assertFalse(dead.exists())
+        self.assertTrue(live.exists())                           # its maker is running
+        self.assertTrue(self.source.exists())
+
 
 class HousekeepingTest(_EngineDir):
     def make(self, sub: str, name: str, age_days: float = 0.0) -> Path:
@@ -511,6 +569,101 @@ class HousekeepingTest(_EngineDir):
         self.assertGreater(media.disk_free_gb(self.tmp / "not" / "there.mp4"), 0.0)
         with mock.patch.object(media.shutil, "disk_usage", side_effect=PermissionError("no")):
             self.assertEqual(media.disk_free_gb(self.tmp), 0.0)
+
+
+def _http(status: int, body: dict, headers: dict | None = None) -> requests.Response:
+    r = requests.Response()
+    r.status_code = status
+    r._content = json.dumps(body).encode()
+    r.headers.update(headers or {})
+    r.encoding = "utf-8"
+    return r
+
+
+class _GeminiUploads:
+    """Stands in for ``gemini._send``: answers resumable uploads (start, then
+    the bytes) with an ACTIVE file and records each file sent."""
+
+    SESSION = "https://upload.test/session"
+
+    def __init__(self):
+        self.files: list[str] = []
+
+    def __call__(self, method, url, **kwargs):
+        if (kwargs.get("headers") or {}).get("X-Goog-Upload-Command") == "start":
+            return _http(200, {}, {"X-Goog-Upload-URL": self.SESSION})
+        if url == self.SESSION:
+            name = f"files/up{len(self.files) + 1}"
+            self.files.append(name)
+            return _http(200, {"file": {"name": name, "uri": f"{gemini.BASE}/v1beta/{name}",
+                                        "mimeType": "video/mp4", "state": "ACTIVE"}})
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+
+class CacheReuseTest(_EngineDir):
+    """A cache hit leaves a recently used file's mtime alone: gemini.upload_file
+    keys its 46 h upload cache on (path, size, mtime), so refreshing the mtime
+    on every hit sent the same proxy and renders to Gemini again every run.
+    The mtime still moves once it is two days old, so ``prune`` keeps what is
+    in use. ffmpeg is faked: it writes a few bytes to the file it was given."""
+
+    def setUp(self):
+        super().setUp()
+        self.source = self.tmp / "source.mp4"
+        self.source.write_bytes(b"source bytes")
+        self.encodes = 0
+        patcher = mock.patch.object(media.subprocess, "run", side_effect=self.ffmpeg)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def ffmpeg(self, cmd, **kwargs):
+        if cmd[0] == "ffprobe":
+            info = {"format": {"duration": "10.0"},
+                    "streams": [{"codec_type": "video"}, {"codec_type": "audio"}]}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(info).encode(), b"")
+        self.encodes += 1
+        Path(cmd[-1]).write_bytes(b"encoded bytes")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    def caches(self):
+        return [("proxy", lambda: media.perception_proxy(self.source)),
+                ("render", lambda: media.render_cached(self.source, [{"start": 1.0, "end": 4.0}]))]
+
+    def age(self, path: Path, seconds: float) -> int:
+        stamp = time.time_ns() - int(seconds * 1e9)
+        os.utime(path, ns=(stamp, stamp))
+        return stamp
+
+    def test_a_reused_file_is_not_uploaded_again(self):
+        sent = _GeminiUploads()
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                mock.patch.object(gemini, "_send", sent), \
+                mock.patch.object(gemini, "_breaker_until", 0.0), \
+                mock.patch.object(gemini, "_confirmed", {}), \
+                mock.patch.object(gemini, "_upload_locks", {}):
+            for name, cached in self.caches():
+                with self.subTest(name):
+                    sent.files.clear()
+                    path = cached()
+                    self.age(path, 3600)              # made by a run an hour ago
+                    first = gemini.upload_file(path)
+                    self.assertEqual(cached(), path)  # this run: a cache hit...
+                    self.assertEqual(gemini.upload_file(path), first)  # ...and its upload
+                    self.assertEqual(len(sent.files), 1)
+        self.assertEqual(self.encodes, 2)
+
+    def test_reuse_refreshes_the_mtime_only_once_it_is_two_days_old(self):
+        for name, cached in self.caches():
+            with self.subTest(name):
+                path = cached()
+                for age, refreshed in ((3600, False), (47 * 3600, False), (3 * 86400, True)):
+                    stamp = self.age(path, age)
+                    self.assertEqual(cached(), path)
+                    if refreshed:
+                        self.assertAlmostEqual(path.stat().st_mtime, time.time(), delta=60)
+                    else:
+                        self.assertEqual(path.stat().st_mtime_ns, stamp)
+        self.assertEqual(self.encodes, 2)
 
 
 class QuietRunsTest(unittest.TestCase):

@@ -9,7 +9,9 @@ Run with:
 """
 from __future__ import annotations
 
+import copy
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -263,6 +265,19 @@ class FilterAndCompactTest(unittest.TestCase):
         self.assertEqual(len(self.log()["beats"]), 3)
         self.assertIs(shotlog.filter_to_window(self.log(), None)["beats"][0]["start"], 0.0)
 
+    def test_filter_to_window_keeps_only_people_the_window_can_hold(self):
+        log = self.log()
+        log["people"] += [
+            {"name": "Tom Anchor", "role": "anchor", "prominence": "local", "evidence": "said"},
+            {"name": "Joe Farmer", "role": "farmer", "prominence": "local", "evidence": "said"}]
+        log["beats"][0]["speaker"] = "Tom Anchor"      # named only at 0-10 s
+        log["beats"][2]["speaker"] = "Joe Farmer"      # named at 25-40 s
+        out = shotlog.filter_to_window(log, {"start": 12, "end": 30})
+        # Ann Lee: named by no beat, so she may be anywhere (kept). Tom Anchor: named
+        # only outside the window (left out). Joe Farmer: named inside it (kept).
+        self.assertEqual([p["name"] for p in out["people"]], ["Ann Lee", "Joe Farmer"])
+        self.assertEqual(len(log["people"]), 3)                  # the input is untouched
+
     def test_compact_rounds_trims_and_attaches_cuts(self):
         cuts = [{"t": 9.7, "score": 40}, {"t": 10.04, "score": 35}, {"t": 18.33, "score": 25},
                 {"t": 19.0, "score": 5}, {"t": 30.5, "score": 60}]
@@ -354,15 +369,96 @@ class CreditsTest(unittest.TestCase):
         self.assertEqual(shotlog.credits_for({"beats": [], "people": []}, [{"start": 0, "end": 5}]), "")
         self.assertEqual(shotlog.credits_for(None, []), "")
 
+    def test_a_section_credits_like_the_whole_log(self):
+        # A section pass reuses the cached whole-video log filtered to its window.
+        # People named only outside the window must not turn into "on screen at
+        # some point" on every clip of the section.
+        def beat(start, end, speaker, on_screen=""):
+            return {"start": start, "end": end, "shot": "interview", "on_screen": on_screen,
+                    "face": "close", "speaker": speaker, "line": "", "sound": "", "energy": 3,
+                    "visual": 3, "topic": 2, "note": ""}
+        whole = {"beats": [beat(0, 10, "Bill Nye"), beat(10, 30, "narrator", "flood waters"),
+                           beat(100, 110, "Jane Doe", "Jane Doe at a lectern"),
+                           beat(200, 210, "Tom Roe")],
+                 "people": [
+                     {"name": "Bill Nye", "role": "science educator", "prominence": "famous",
+                      "evidence": "title"},
+                     {"name": "Jane Doe", "role": "senator", "prominence": "public_figure",
+                      "evidence": "on_screen"},
+                     {"name": "Tom Roe", "role": "climate scientist", "prominence": "expert",
+                      "evidence": "said"},
+                     {"name": "Al Gore", "role": "former vice president",
+                      "prominence": "public_figure", "evidence": "description"}]}
+        section = shotlog.filter_to_window(whole, {"start": 0, "end": 60})
+        segments = [{"start": 5, "end": 30}]
+        expected = ("0-5 s: Bill Nye, science educator (named in the title); On screen at some "
+                    "point: Al Gore, former vice president (named in the video description)")
+        self.assertEqual(shotlog.credits_for(whole, segments), expected)
+        self.assertEqual(shotlog.credits_for(section, segments), expected)
+
+    def test_names_are_matched_as_whole_words(self):
+        def beat(start, end, speaker, on_screen):
+            return {"start": start, "end": end, "shot": "b_roll", "on_screen": on_screen,
+                    "face": "none", "speaker": speaker, "line": "", "sound": "", "energy": 3,
+                    "visual": 3, "topic": 2, "note": ""}
+        log = {"beats": [beat(0, 6, "narrator", "residents fleeing the flood"),
+                         beat(6, 12, "Joann Leeds", "a woman on her porch"),
+                         beat(12, 20, "narrator", "a burning bush by the road"),
+                         beat(20, 28, "narrator", "protesters protesting outside the plant")],
+               "people": [
+                   {"name": "Lee", "role": "climate scientist", "prominence": "expert",
+                    "evidence": "said"},
+                   {"name": "Ann Lee", "role": "senator", "prominence": "public_figure",
+                    "evidence": "on_screen"},
+                   {"name": "Bush", "role": "former president", "prominence": "public_figure",
+                    "evidence": "said"},
+                   {"name": "Sting", "role": "musician", "prominence": "famous",
+                    "evidence": "title"}]}
+        # No beat names any of them, so nobody gets clip times.
+        self.assertEqual(shotlog.credits_for(log, [{"start": 0, "end": 28}]),
+                         "On screen at some point: Lee, climate scientist (named aloud), "
+                         "Ann Lee, senator (name shown on screen), Bush, former president "
+                         "(named aloud), Sting, musician (named in the title)")
+
+    def test_names_table(self):
+        def beat(speaker="", on_screen=""):
+            return {"speaker": speaker, "on_screen": on_screen}
+        cases = [
+            ("Bill Nye", beat(speaker="Bill Nye"), True),
+            ("Bill Nye", beat(speaker="bill nye (science educator)"), True),
+            ("Bill Nye", beat(speaker="Nye"), True),                       # surname, speaker
+            ("Bill Nye", beat(on_screen="Nye takes off his safety glasses"), True),
+            ("Bill Nye", beat(on_screen="Bill Nye's lab"), True),
+            ("Bill Nye", beat(on_screen="nye in lower case"), False),      # surname: capitalised
+            ("George Bush", beat(on_screen="a burning bush by the road"), False),
+            ("Lee", beat(on_screen="residents fleeing the flood"), False),
+            ("Lee", beat(speaker="Joann Leeds"), False),
+            ("Lee", beat(speaker="lee"), True),                            # speaker: any case
+            ("Ann Lee", beat(speaker="Joann Leeds"), False),
+            ("Ann Lee", beat(speaker="Senator Ann Lee"), True),
+            ("Ann Lee", beat(on_screen="lower third: ANN LEE, senator"), True),
+            ("Bush", beat(on_screen="a burning bush"), False),             # one word: capitalised
+            ("Bush", beat(on_screen="Bush waves from the stage"), True),
+            ("Sting", beat(on_screen="protesters protesting outside"), False),
+            ("Sting", beat(on_screen="Sting sings"), True),
+            ("Al Gore Jr.", beat(speaker="Al Gore Jr."), True),
+            ("Al Gore Jr.", beat(speaker="Al Gore Jr.s"), False),
+            ("", beat(speaker="anyone"), False),
+        ]
+        for name, b, expected in cases:
+            with self.subTest(name=name, beat=b):
+                self.assertIs(shotlog._names(b, {"name": name}), expected)
+
 
 class CachePathTest(EngineDirCase):
     def test_layout(self):
         path = shotlog.cache_path("abc_123", "gemini", "gemini-3.8-flash")
         self.assertEqual(path.parent, self.dir / "engine" / "shotlogs")
-        self.assertEqual(path.name, f"abc_123__gemini__gemini-3.8-flash__v2__"
-                                    f"{shotlog.prompt_hash('video')}.json")
+        self.assertRegex(path.name, rf"^abc_123__gemini__gemini-3\.8-flash__v2__"
+                                    rf"{shotlog.prompt_hash('video')}__s[0-9a-f]{{6}}\.json$")
         part = shotlog.cache_path("abc_123", "gemini", "gemini-3.8-flash", part=(290.0, 590.5))
         self.assertTrue(part.name.endswith("__p290-590.5.json"))
+        self.assertEqual(part.name[:-len("__p290-590.5.json")], path.name[:-len(".json")])
         frames = shotlog.cache_path("abc", "claude", "claude-opus-5-5")
         self.assertIn(shotlog.prompt_hash("frames"), frames.name)
         self.assertNotEqual(shotlog.prompt_hash("video"), shotlog.prompt_hash("frames"))
@@ -381,6 +477,70 @@ class CachePathTest(EngineDirCase):
         path.write_text("{half a file")
         self.assertIsNone(shotlog.load_cached("v", "gemini", "m"))
 
+    def test_perception_settings_are_part_of_the_key(self):
+        def settings(**gemini_or_claude):
+            raw = copy.deepcopy(GEMINI_SETTINGS)
+            raw["clip_engine"].setdefault("claude", {})
+            for key, value in gemini_or_claude.items():
+                block, _, name = key.partition("__")
+                if block == "top":
+                    raw["clip_engine"][name] = value
+                else:
+                    raw["clip_engine"][block][name] = value
+            return Settings(raw=raw)
+
+        def path(perceiver, s, seconds=200.0):
+            return shotlog.cache_path("v", perceiver, "m", settings=s, seconds=seconds)
+
+        base = settings()
+        # The workspace defaults and no settings at all give the same file.
+        self.assertEqual(path("gemini", base), shotlog.cache_path("v", "gemini", "m"))
+        self.assertEqual(path("gemini", base), path("gemini", settings()))
+        for change in ({"gemini__perception_fps": 2.0},
+                       {"gemini__media_resolution": "MEDIA_RESOLUTION_MEDIUM"},
+                       {"gemini__perceiver_thinking": "MEDIUM"},
+                       {"top__perception_window_seconds": 120}):
+            with self.subTest(change=change):
+                self.assertNotEqual(path("gemini", settings(**change)), path("gemini", base))
+        # Past 1200 s Gemini samples at long_video_fps: that rate is what counts there.
+        self.assertNotEqual(path("gemini", base, 1500.0), path("gemini", base, 200.0))
+        self.assertEqual(path("gemini", settings(gemini__perception_fps=2.0), 1500.0),
+                         path("gemini", base, 1500.0))
+        self.assertNotEqual(path("gemini", settings(gemini__long_video_fps=1.0), 1500.0),
+                            path("gemini", base, 1500.0))
+        for change in ({"claude__frame_interval": 1.0}, {"claude__max_total_frames": 300},
+                       {"claude__frame_width": 768}, {"claude__max_frames_per_call": 100},
+                       {"claude__perceiver_effort": "high"}):
+            with self.subTest(change=change):
+                self.assertNotEqual(path("claude", settings(**change)), path("claude", base))
+        # A Gemini knob doesn't touch Claude logs and vice versa.
+        self.assertEqual(path("claude", settings(gemini__perception_fps=2.0)), path("claude", base))
+        self.assertEqual(path("gemini", settings(claude__frame_interval=1.0)), path("gemini", base))
+        self.assertEqual(shotlog.perception_settings("gemini", base, 200.0)["fps"], 1.0)
+        self.assertEqual(shotlog.perception_settings("gemini", base, 1500.0)["fps"], 0.5)
+
+
+class CoverageTest(unittest.TestCase):
+    def test_share_of_the_span_the_beats_cover(self):
+        def beats(*spans):
+            return [{"start": s, "end": e} for s, e in spans]
+        cases = [
+            (beats((0, 50), (50, 100)), 0, 100, 0.0, 1.0),
+            (beats((0, 40)), 0, 100, 0.0, 0.4),                       # stopped early
+            (beats((60, 100)), 0, 100, 0.0, 0.4),                     # started late
+            (beats((0, 30), (70, 100)), 0, 100, 0.0, 0.6),            # a hole in the middle
+            (beats((0, 60), (20, 80)), 0, 100, 0.0, 0.8),             # overlaps count once
+            (beats((90, 160)), 100, 200, 0.0, 0.6),                   # clipped to the span
+            (beats((100, 194)), 100, 200, 6.0, 1.0),                  # last frame at 194 s
+            (beats((0, 10)), 0, 100, 60.0, 10 / 75),                  # slack is at most 1/4
+            ([], 0, 100, 0.0, 0.0),
+            ([], 5, 5, 0.0, 1.0),
+        ]
+        for items, start, stop, slack, expected in cases:
+            with self.subTest(items=items, start=start, stop=stop, slack=slack):
+                self.assertAlmostEqual(shotlog._coverage(items, start, stop, slack=slack),
+                                       expected)
+
 
 # ---- building -------------------------------------------------------------------------------
 
@@ -398,6 +558,8 @@ class GeminiBuildTest(EngineDirCase):
         self.proxy_args: list[tuple] = []
         self.fail: dict[tuple, Exception] = {}       # (start, end) -> error to raise
         self.always_truncate = False
+        self.truncated_usage = usage(0.5)             # what a MAX_TOKENS answer bills
+        self.coverage: dict = {}                      # (start, end) / "whole" -> share logged
         self.source_time_parts: set = set()
         self.lock = threading.Lock()
         for target, attr, fake in [
@@ -441,9 +603,9 @@ class GeminiBuildTest(EngineDirCase):
         key = span or "whole"
         if self.always_truncate or key in self.fail:
             exc = self.fail.get(key) or gemini.GeminiTruncated("MAX_TOKENS")
-            exc.usage = usage(0.5)
+            exc.usage = dict(self.truncated_usage)
             raise exc
-        length = (span[1] - span[0]) if span else self.duration
+        length = ((span[1] - span[0]) if span else self.duration) * self.coverage.get(key, 1.0)
         base = span[0] if (span and key in self.source_time_parts) else 0.0
         mid = round(length / 2, 1)
         return {"summary": f"part {key}", "format": "news", "structure": "",
@@ -540,6 +702,117 @@ class GeminiBuildTest(EngineDirCase):
         with self.assertRaises(shotlog.ShotLogError):
             self.build(200.0)
         self.assertEqual(len(self.calls), 1 + 2 + 4)
+
+    def test_a_looping_answer_is_not_split_again(self):
+        # 65,536 output tokens for a 233 s window (281 a second) could still be a
+        # dense window: it is split. For a ~120 s half (over 500 a second) it can only
+        # be the model repeating itself: that half fails rather than paying for quarters.
+        self.always_truncate = True
+        self.truncated_usage = {**usage(0.49), "output_tokens": 65536}
+        meter = FakeMeter()
+        with self.assertRaises(shotlog.ShotLogError) as caught:
+            self.build(456.0, meter=meter)
+        self.assertEqual(len(self.calls), 2 * (1 + 2))           # was 2 * (1 + 2 + 4)
+        self.assertIn("looping", str(caught.exception))
+        self.assertEqual(len(meter.added), 6)                    # every truncated call billed
+
+    def test_check_runs_before_every_window_and_split(self):
+        # Every answer runs past the output limit (billed $0.50 each). Without a
+        # check, a 60-minute source pays 13 windows x 7 calls = 91 calls ($45.50)
+        # inside this one stage, past any cap; the engine's checkpoint stops it.
+        self.always_truncate = True
+        meter = FakeMeter()
+
+        class OverCap(Exception):
+            pass
+
+        def check():
+            with meter._lock:
+                spent = sum(u.get("cost_usd", 0.0) for _, u in meter.added)
+            if spent > 1.0:
+                raise OverCap(f"stopped at ${spent:.2f}")
+
+        with self.assertRaises(OverCap):
+            self.build(3600.0, meter=meter, check=check)
+        self.assertLessEqual(len(self.calls), 6)
+        self.assertGreaterEqual(len(self.calls), 3)
+        self.assertFalse(shotlog.cache_path("vid1", "gemini", "gemini-3.8-flash",
+                                            seconds=3600.0).is_file())
+
+    def test_check_errors_are_not_swallowed_as_failed_windows(self):
+        # A Cancelled (a RuntimeError) raised by the check must end the log, not
+        # become one more failed window of a partial log.
+        def check():
+            raise util.Cancelled("ran out of time")
+
+        with self.assertRaises(util.Cancelled):
+            self.build(456.0, check=check)
+        self.assertEqual(self.calls, [])
+
+    def test_cancel_stops_windows_not_yet_started(self):
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaises(util.Cancelled):
+            self.build(456.0, cancel=cancel)
+        self.assertEqual(self.calls, [])
+
+    def test_a_window_that_stops_early_is_used_but_not_cached(self):
+        # Part 2 answers for only its first 40%: finishReason STOP, beats that end
+        # at 316 s of a window that runs to 456 s.
+        self.coverage[(223.0, 456.0)] = 0.4
+        log = self.build(456.0)
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(log["complete"])
+        self.assertEqual(log["beats"][-1]["end"], 316.2)         # the partial answer is used
+        self.assertFalse(shotlog.cache_path("vid1", "gemini", "gemini-3.8-flash",
+                                            part=(223.0, 456.0)).is_file())
+        self.assertTrue(shotlog.cache_path("vid1", "gemini", "gemini-3.8-flash",
+                                           part=(0.0, 233.0)).is_file())
+        self.assertFalse(shotlog.cache_path("vid1", "gemini", "gemini-3.8-flash").is_file())
+        self.assertIn("warning", shotlog.compact_for_prompt(log))
+        # Only that window is asked again; a full answer completes the log.
+        del self.coverage[(223.0, 456.0)]
+        self.calls.clear()
+        again = self.build(456.0)
+        self.assertEqual([c["span"] for c in self.calls], [(223.0, 456.0)])
+        self.assertTrue(again["complete"])
+        self.assertTrue(shotlog.cache_path("vid1", "gemini", "gemini-3.8-flash").is_file())
+
+    def test_a_change_in_perception_settings_logs_again(self):
+        first = self.build(200.0)
+        for change in ({"perception_fps": 2.0},
+                       {"media_resolution": "MEDIA_RESOLUTION_MEDIUM"},
+                       {"perceiver_thinking": "HIGH"}):
+            with self.subTest(change=change):
+                raw = copy.deepcopy(GEMINI_SETTINGS)
+                raw["clip_engine"]["gemini"].update(change)
+                self.settings = Settings(raw=raw)
+                self.calls.clear()
+                meter = FakeMeter()
+                log = self.build(200.0, meter=meter)
+                self.assertEqual(len(self.calls), 1)               # not the other arm's log
+                self.assertEqual(meter.cached, [])
+                key, value = next(iter(change.items()))
+                if key == "perception_fps":
+                    self.assertEqual(self.video_items[-1][0]["fps"], 2.0)
+                elif key == "media_resolution":
+                    self.assertEqual(self.calls[0]["media_resolution"], value)
+                else:
+                    self.assertEqual(self.calls[0]["thinking"], value)
+                # The same settings again: the log just made is reused.
+                self.calls.clear()
+                self.assertEqual(self.build(200.0)["beats"], log["beats"])
+                self.assertEqual(self.calls, [])
+        raw = copy.deepcopy(GEMINI_SETTINGS)
+        raw["clip_engine"]["perception_window_seconds"] = 120
+        self.settings = Settings(raw=raw)
+        self.calls.clear()
+        self.build(200.0)
+        self.assertEqual(len(self.calls), 2)                       # two 105 s windows now
+        # Each log records what it was made with.
+        self.assertEqual(first["perceiver_settings"],
+                         shotlog.perception_settings("gemini", Settings(raw=GEMINI_SETTINGS),
+                                                     200.0))
 
     def test_a_failed_window_leaves_an_uncached_incomplete_log(self):
         self.fail[(223.0, 456.0)] = gemini.GeminiBlocked("SAFETY")
@@ -681,9 +954,65 @@ class ClaudeBuildTest(EngineDirCase):
     def test_long_sources_are_sampled_more_sparsely(self):
         self.build(3600.0)
         self.assertEqual({s["interval"] for s in self.samples}, {6.0})
-        self.assertEqual(len(self.samples), 4)
+        # Still 600 frames in all, but in 5-minute chunks (50 frames each), not
+        # four 15-minute quarters.
+        self.assertEqual(sorted((s["start"], s["end"]) for s in self.samples),
+                         [(i * 300.0, (i + 1) * 300.0) for i in range(12)])
+        self.assertEqual({len(c["content"]) - 1 for c in self.calls}, {50})
         self.assertEqual(self.calls[0]["system"],
                          prompts.perceiver_system(BRAND, mode="frames", frame_interval=6.0))
+
+    def test_long_sources_send_each_chunk_its_whole_transcript(self):
+        # Steady speech at 2.8 words a second for an hour: a 15-minute chunk would
+        # need ~17k characters of transcript and lose its last ~5 minutes.
+        vocab = ("the water kept rising and nobody in the town had seen anything like it "
+                 "before the levee finally gave way").split()
+        words, t, i = [], 0.0, 0
+        while t < 3600.0:
+            word = vocab[i % len(vocab)] + ("." if i % 14 == 13 else "")
+            words.append({"word": word, "start": round(t, 2), "end": round(t + 0.3, 2)})
+            t += 1 / 2.8
+            i += 1
+        self.build(3600.0, words=words)
+        self.assertEqual(len(self.calls), 12)
+        for call in self.calls:
+            times = [b["t"] for b in call["content"] if b["type"] == "image"]
+            text = call["content"][0]["text"]
+            stretch = text.split("Transcript for this stretch:\n", 1)[1]
+            with self.subTest(start=times[0]):
+                self.assertNotIn("[…]", stretch)
+                self.assertNotIn("…", stretch)
+                last = float(re.findall(r"^\[(\d+(?:\.\d+)?)\]", stretch, re.MULTILINE)[-1])
+                self.assertGreater(last, times[0] + 300.0 - 30.0)
+
+    def test_an_over_long_transcript_is_shortened_line_by_line_not_cut_at_the_end(self):
+        entries = [{"start": float(t), "end": t + 2.0, "text": f"line {t} " + "word " * 60}
+                   for t in range(0, 300, 2)]
+        text = shotlog._stretch(entries, 0.0, 300.0)
+        lines = text.split("\n")
+        self.assertEqual(len(lines), 150)                         # every line is still there
+        self.assertTrue(lines[-1].startswith("[298.0] line 298"))
+        self.assertLessEqual(len(text), shotlog._STRETCH_CHARS)
+        self.assertTrue(all(line.endswith("…") for line in lines))
+        short = shotlog._stretch(entries[:3], 0.0, 300.0)
+        self.assertNotIn("…", short)
+        self.assertEqual(shotlog._stretch(entries, 400.0, 500.0), "")
+
+    def test_a_change_in_perception_settings_logs_again(self):
+        self.build(200.0)
+        first = len(self.calls)
+        self.settings = Settings(raw={"clip_engine": {"claude": {
+            "perceiver_model": "claude-opus-5-5", "perceiver_effort": "high", "frame_interval": 1.0,
+            "max_total_frames": 600, "frame_width": 768, "max_frames_per_call": 150}}})
+        self.calls.clear()
+        self.samples.clear()
+        self.build(200.0)
+        self.assertEqual(len(self.calls), 2 * first)               # 200 frames: two chunks
+        self.assertEqual({(s["interval"], s["width"]) for s in self.samples}, {(1.0, 768)})
+        self.assertEqual({c["effort"] for c in self.calls}, {"high"})
+        self.calls.clear()
+        self.build(200.0)
+        self.assertEqual(self.calls, [])
 
     def test_zero_frames_raises(self):
         self.zero_frames = True

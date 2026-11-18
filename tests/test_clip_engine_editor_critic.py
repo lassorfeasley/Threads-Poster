@@ -18,8 +18,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app import spend
-from app.clip_engine import claude, critic, editor, gemini, media, playbook, prompts
+from app import llm, spend
+from app.clip_engine import claude, critic, editor, engine, gemini, media, playbook, prompts, shotlog
 from app.config import Settings
 
 BRAND = {"name": "Renewables.org", "topic": "climate change"}
@@ -115,6 +115,22 @@ class EntriesForTest(unittest.TestCase):
         entries, _ = editor.entries_for(words, [])
         self.assertLessEqual(len(entries), 600)
         self.assertEqual((entries[0]["start"], entries[-1]["end"]), (0.0, 1499.5))
+
+    def test_word_edges_keep_two_decimals(self):
+        """The editor copies entry times into its cuts. At one decimal a
+        clause starting at 226.64 s read 226.6 — inside "fuels." — and the
+        cut opened on the previous sentence's last word."""
+        words = [{"word": "fuels.", "start": 225.98, "end": 226.64},
+                 {"word": "While", "start": 226.64, "end": 227.16},
+                 {"word": "others", "start": 227.2, "end": 227.56}]
+        entries, has_words = editor.entries_for(words, [])
+        self.assertTrue(has_words)
+        self.assertEqual(entries, [{"start": 225.98, "end": 226.64, "text": "fuels."},
+                                   {"start": 226.64, "end": 227.56, "text": "While others"}])
+        # The transcript suggester's prompts keep their one decimal.
+        from app import llm
+
+        self.assertEqual(llm._words_to_clauses(words)[1]["start"], 226.6)
 
 
 def raw_draft(segments, **kw):
@@ -359,8 +375,10 @@ class DraftTest(EditorCase):
                          [[{"start": 30.0, "end": 45.0, "lead": "word"}],
                           [{"start": 30.0, "end": 40.0, "lead": "word"}]])
         # A tighter section leaves both at 30-38 (8 s): below 0.8 x 12 s, so both go.
-        drafts, _ = self.run_draft(window={"start": 25, "end": 38})
-        self.assertEqual(drafts, [])
+        # The editor did draft, so that's a mechanical loss, not "nothing found".
+        with self.assertRaises(editor.DraftsDropped) as caught:
+            self.run_draft(window={"start": 25, "end": 38})
+        self.assertEqual(caught.exception.reasons, {"too short": 2})
 
     def test_claude_reads_the_payload_then_keyframes(self):
         frames = [(12.2, b"a"), (45.0, b"b")]
@@ -389,9 +407,101 @@ class DraftTest(EditorCase):
                 self.run_draft(meter=meter)
         self.assertEqual(meter.added, [("draft", usage(0.02))])
 
+    def test_a_video_that_cannot_be_attached_is_left_out(self):
+        # The whole proxy is too big to send inline and its upload times out (or
+        # Google can't process it): draft from the shot log rather than failing a
+        # run whose perception is already paid for.
+        self.video_parts.side_effect = gemini.GeminiError(
+            "upload proxy.mp4: upload failed: timed out")
+        drafts, _ = self.run_draft()
+        self.assertEqual([d["id"] for d in drafts], ["d1", "d2"])
+        (call,) = self.calls
+        self.assertEqual(len(call["parts"]), 1)
+        self.assertIn('"shot_log"', call["parts"][0]["text"])
+        self.assertIn("You can't watch the video", call["system"])
+        self.assertEqual(call["system"], prompts.editor_system(
+            BRAND, PLAYBOOK_TEXT, "Never fake a quote.", n=10, min_s=12, max_s=45, max_segments=6,
+            sees_video=False, section=None, section_topic="", has_words=True))
+
+    def test_an_exhausted_quota_still_stops_the_draft(self):
+        self.video_parts.side_effect = gemini.GeminiQuota("Gemini prepaid credits are depleted")
+        with self.assertRaises(gemini.GeminiQuota):
+            self.run_draft()
+        self.assertEqual(self.calls, [])
+
+    def test_drafts_all_dropped_by_cleaning_are_a_failure_not_an_answer(self):
+        # A reroll on a video whose best stretches are taken: every draft lies in
+        # used footage, so cleaning leaves nothing (or too little) of any of them.
+        self.answer = {"moments": [{"id": "m1", "start": 100, "end": 140, "kind": "line",
+                                    "why": "x"}],
+                       "drafts": [raw_draft([{"start": 100 + i, "end": 130 + i, "lead": "word"}])
+                                  for i in range(10)] + ["junk"]}
+        with self.assertRaises(editor.DraftsDropped) as caught:
+            self.run_draft(used=[{"start": 95, "end": 150}])
+        self.assertEqual(caught.exception.reasons, {"inside used footage": 10, "unreadable": 1})
+        self.assertIn("11 drafts", str(caught.exception))
+        self.assertEqual([s for s, _ in self.meter.added], ["draft"])   # the call was charged
+        # Some survive: an answer, as before. Used footage to 128 s leaves 128-138
+        # and 128-139 long enough (>= 9.6 s); the other eight are too short.
+        drafts, _ = self.run_draft(used=[{"start": 95, "end": 128}])
+        self.assertEqual([d["segments"] for d in drafts],
+                         [[{"start": 128.0, "end": 138.0, "lead": "word"}],
+                          [{"start": 128.0, "end": 139.0, "lead": "word"}]])
+
+    def test_an_answer_with_no_drafts_is_empty_not_a_failure(self):
+        self.answer = {"moments": [{"id": "m1", "start": 10, "end": 40, "kind": "line",
+                                    "why": "x"}], "drafts": []}
+        drafts, moments = self.run_draft()
+        self.assertEqual(drafts, [])
+        self.assertEqual([m["id"] for m in moments], ["m1"])
+
     def test_unknown_role(self):
         with self.assertRaises(ValueError):
             self.run_draft(role="gpt")
+
+
+class DraftsDroppedInTheRunTest(TempCase):
+    """The real editor inside ``engine.run`` (perception, the shot map and the
+    model faked): drafts that cleaning drops to the last one stop the run with
+    ``EngineError``, which jobs answers with the transcript suggester; an
+    editor that drafted nothing is still the ``empty_drafts`` answer."""
+
+    def setUp(self):
+        super().setUp()
+        self.answer = {"moments": [], "drafts": []}
+        self.patch(shotlog, "build", side_effect=lambda **kw: shot_log())
+        self.patch(media, "shot_map", return_value={"version": 1, "duration": 600.0,
+                                                    "cuts": [], "quiet": [], "error": ""})
+        self.patch(media, "perception_proxy", return_value=self.file("proxy.mp4"))
+        self.patch(gemini, "video_parts", side_effect=fake_video_parts)
+        self.patch(gemini, "generate_json",
+                   side_effect=lambda model, **kw: (self.answer, usage(0.04, model)))
+        self.patch(llm, "_operator_rules", return_value="")
+
+    def run_engine(self, **kw):
+        args = dict(setup="gemini", settings=SETTINGS, brand=BRAND,
+                    playbook=playbook.DEFAULT_PLAYBOOK, video_id="vid", title="Fire season",
+                    description="", duration=600.0, source=self.dir / "src.mp4", words=[],
+                    transcript=list(ENTRIES), context={}, rejected=[], examples=[], used=[],
+                    window=None)
+        args.update(kw)
+        return engine.run(**args)
+
+    def test_every_draft_cleaned_away_is_a_failure(self):
+        self.answer = {"moments": [],
+                       "drafts": [raw_draft([{"start": 100 + i, "end": 130 + i, "lead": "word"}])
+                                  for i in range(10)]}
+        meter = engine.CostMeter()
+        with self.assertRaises(engine.EngineError) as caught:
+            self.run_engine(used=[{"start": 95, "end": 150}], meter=meter)
+        self.assertIn("drafting failed: DraftsDropped", str(caught.exception))
+        self.assertIn("10 inside used footage", str(caught.exception))
+        self.assertAlmostEqual(meter.by_stage["draft"], 0.04)     # charged once
+
+    def test_an_editor_that_drafted_nothing_is_an_answer(self):
+        result = self.run_engine()
+        self.assertEqual(result.outcome, "empty_drafts")
+        self.assertEqual(result.top, [])
 
 
 class ReviseTest(EditorCase):
@@ -461,6 +571,20 @@ class ReviseTest(EditorCase):
             BRAND, PLAYBOOK_TEXT, "", min_s=12, max_s=45, max_segments=6, sees_video=True,
             has_words=True))
         self.assertEqual(call["schema"]["properties"]["archetype"]["enum"], ARCHETYPES + ["other"])
+
+    def test_a_video_that_cannot_be_attached_is_left_out(self):
+        self.video_parts.side_effect = gemini.GeminiError("files/abc: state FAILED")
+        out = self.run_revise({"change": "open on the flood", "archetype": "scene",
+                               "segments": [{"start": 102, "end": 125, "lead": "picture"}]})
+        self.assertEqual(out["id"], "d2r")
+        call = self.calls[-1]
+        self.assertEqual(len(call["parts"]), 1)
+        self.assertEqual(call["system"], prompts.revise_system(
+            BRAND, PLAYBOOK_TEXT, "", min_s=12, max_s=45, max_segments=6, sees_video=False,
+            has_words=True))
+        self.video_parts.side_effect = gemini.GeminiQuota("daily quota")
+        with self.assertRaises(gemini.GeminiQuota):
+            self.run_revise({"change": "x", "archetype": "voice", "segments": []})
 
     def test_claude_reviser_reads_the_payload_only(self):
         self.run_revise({"change": "x", "archetype": "voice",

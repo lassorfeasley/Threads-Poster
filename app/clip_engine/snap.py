@@ -12,7 +12,10 @@ How a segment STARTS depends on what it opens on (``lead``):
 
 - ``"word"`` (default): someone speaking. Start just before the first word —
   never inside a word and never on the tail of the one before — and prefer a
-  shot change in that gap, so the picture changes with the voice.
+  shot change in that gap, so the picture changes with the voice. A start
+  inside a word backs up to that word, unless rounding to a tenth explains it
+  as the next word's start (``_start_in``): Whisper's words mostly touch, so
+  "While" at 226.64, copied as 226.6, sits in the "fuels." before it.
 - ``"picture"``: an image (b-roll, an action, a face). Start ON the shot
   change. When narration runs across that cut (voice-over b-roll, or a J-cut
   where the speaker's face arrives a beat after their first word), move
@@ -23,6 +26,8 @@ How a segment STARTS depends on what it opens on (``lead``):
 ENDS land just after the last word with a short tail (ended inside the pause
 when there is one), never let the next shot flash in, and keep a deliberate
 hold past the line — a reaction, a look, an image landing after the words.
+An end rounded into the head of the next word stops before that word
+(``_end_in``) instead of taking it in.
 
 Neither boundary is left on a flash of a shot shorter than ``flash_guard``
 when moving off it splits no word. Blocked (already used) footage is never
@@ -48,6 +53,9 @@ _SPEECH_WITHIN = 0.8
 _WORD_GAP_REACH = 0.8
 # Clearance kept between a boundary and the word or shot it avoids.
 _GAP = 0.02
+# Transcript entries and the shot log show times to a tenth of a second, so a
+# word edge the editor copies arrives up to this far from where it really is.
+_ROUNDING = 0.05 + 1e-6
 # An end this close after the last word is "on the line" and gets tightened;
 # farther out it is a deliberate hold and is kept.
 _NEAR_LAST_WORD = 0.5
@@ -207,20 +215,50 @@ def _picture_start(a: float, b: float, words: _Words, cuts: list[float],
     return t
 
 
+def _start_in(a: float, word: tuple[float, float], words: _Words) -> float:
+    """Where a start inside ``word`` goes: back to the word's start, unless
+    ``a`` is a rounded copy of the NEXT word's start — within 0.05 s of it
+    and further than that from this word's start, so this word can't be the
+    one meant. Then it goes to this word's end, and the clip opens on the
+    next one. A word of 0.1 s or less can be either; it is kept."""
+    start, end = word
+    if a - start > _ROUNDING:
+        following = words.next(end)
+        if following is not None and following[0] - a <= _ROUNDING:
+            return end
+    return start
+
+
+def _end_in(b: float, word: tuple[float, float], words: _Words) -> float:
+    """Where an end inside ``word`` goes: on to the word's end, unless ``b``
+    is a rounded copy of the PREVIOUS word's end — within 0.05 s of it and
+    further than that from this word's end. Then it goes back to this word's
+    start, and the clip ends on the word before. A word of 0.1 s or less can
+    be either; it is kept."""
+    start, end = word
+    if end - b > _ROUNDING:
+        before = words.prev(start)
+        if before is not None and b - before[1] <= _ROUNDING:
+            return start
+    return end
+
+
 def _word_start(a: float, b: float, words: _Words, cuts: list[float],
                 r: _Rules) -> tuple[float, tuple | None, bool]:
     """START for a word lead: ``(a, first, speech)``.
 
-    A start inside a word backs up to that word's start. When speech begins
-    within 0.8 s the start tightens to just before the first word — but never
-    onto the previous word's tail. A cut near that start which splits no word
-    and comes no later than the first word wins: the picture changes with the
-    voice. The cut may not reach back across an earlier word either, which
-    would open the clip on a stray "and".
+    A start inside a word backs up to that word's start (or, when it is a
+    rounded copy of the next word's start, moves to this word's end:
+    ``_start_in``). When speech begins within 0.8 s the start tightens to
+    just before the first word — but never onto the previous word's tail. A
+    cut near that start which splits no word and comes no later than the
+    first word wins: the picture changes with the voice. The cut may not
+    reach back across an earlier word either, which would open the clip on a
+    stray "and".
     """
     word = words.inside(a)
     if word:
-        a = word[0]
+        a = _start_in(a, word, words)
     first, speech = _first_word(a, b, words)
     if speech:
         before = words.prev(first[0])
@@ -264,16 +302,18 @@ def _end(a: float, b: float, words: _Words, cuts: list[float],
          quiet: list[tuple[float, float]], r: _Rules) -> tuple[float, tuple | None]:
     """END: ``(b, last)`` where ``last`` is the segment's last word, if any.
 
-    An end inside a word extends to the word's end. An end on the line (within
-    0.5 s of the last word) is re-cut: ``end_pad`` after the word, or 0.15 s
-    into the pause that follows it, never into the next word, and onto the
-    shot change when one falls in that tail (ending before it — no flash of
-    the next shot) or just after it. An end held well past the last word is a
-    choice and stays, moving only onto a cut right next to it.
+    An end inside a word extends to the word's end (or, when it is a rounded
+    copy of the previous word's end, goes back to this word's start:
+    ``_end_in``). An end on the line (within 0.5 s of the last word) is
+    re-cut: ``end_pad`` after the word, or 0.15 s into the pause that follows
+    it, never into the next word, and onto the shot change when one falls in
+    that tail (ending before it — no flash of the next shot) or just after it.
+    An end held well past the last word is a choice and stays, moving only
+    onto a cut right next to it.
     """
     word = words.inside(b)
     if word:
-        b = word[1]
+        b = _end_in(b, word, words)
     last = words.prev(b)
     if last is not None and last[1] <= a:
         last = None

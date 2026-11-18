@@ -39,6 +39,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import datetime as dt
+import errno
 import hashlib
 import importlib
 import json
@@ -88,8 +89,9 @@ DEV_BANNER = "DEV RUN — not the benchmark"
 
 # ---- arm specs ---------------------------------------------------------------
 # Bare override keys an arm may carry, per settings block (§2.1). Anything else
-# must be written as a dotted key, so a typo fails loudly instead of silently
-# running the default under a label that claims otherwise.
+# must be written as a dotted key, and dotted keys are checked against the same
+# lists (``_check_path``), so a typo fails loudly instead of silently running
+# the default under a label that claims otherwise.
 
 _TOP_KEYS = frozenset({
     "drafts", "section_drafts", "keep", "compare_top", "revise_top", "min_seconds",
@@ -116,6 +118,47 @@ _PROVIDER_KEYS = {
 _ROLE_PREFIXES = ("perceiver", "editor", "critic", "judge")
 # Dotted keys starting with one of these live under clip_engine.
 _ENGINE_BLOCKS = ("gemini", "claude", "snap", "bench")
+
+# Keys no single arm can change, and why. The bench freezes taste examples
+# per video when it creates the run (an arm can only drop some of them,
+# through taste_hits/taste_flops), and the Gemini client reads its upload
+# limit from settings.yaml itself.
+_NOT_PER_ARM = {
+    "clip_engine.taste_lookback_days": "taste examples are frozen per video when the run is "
+                                       "created; an arm can only show fewer of them "
+                                       "(taste_hits, taste_flops)",
+    "clip_engine.gemini.inline_request_mb": "the Gemini client reads it from settings.yaml, "
+                                            "not per arm",
+}
+# What the perceiver of each provider reads to log a video. Shot logs are
+# cached, and an arm that changed one of these would silently reuse a log made
+# without it (one its baseline arm, a live run or a try left) unless the cache
+# key covers it. So each is refused unless ``shotlog.cache_path`` is seen to
+# file logs apart by it (``_cached_apart``); a different perceiver_model is
+# always part of the key and is fine.
+_PERCEPTION_PATHS = {
+    "gemini": frozenset({"clip_engine.gemini.perception_fps", "clip_engine.gemini.long_video_fps",
+                         "clip_engine.gemini.media_resolution",
+                         "clip_engine.gemini.perceiver_thinking",
+                         "clip_engine.perception_window_seconds"}),
+    "claude": frozenset({"clip_engine.claude.frame_interval", "clip_engine.claude.max_total_frames",
+                         "clip_engine.claude.frame_width", "clip_engine.claude.max_frames_per_call",
+                         "clip_engine.claude.perceiver_effort"}),
+}
+# Top-level keys only a Gemini model in one role reads; elsewhere they'd
+# change nothing.
+_GEMINI_ROLE_KEYS = {"clip_engine.perception_window_seconds": "perceiver",
+                     "clip_engine.editor_video_max_seconds": "editor"}
+# clips.* keys an arm may change. Both kinds of arm get the two that shape the
+# replay context (the bench applies them per arm, and can only take away);
+# the transcript arm also reads what the transcript suggester reads per pass.
+_CONTEXT_KEYS = frozenset({"learn_from_history", "context_examples"})
+_TRANSCRIPT_CLIPS_KEYS = _CONTEXT_KEYS | {
+    "model", "max_clips", "max_segments", "min_seconds", "max_seconds", "opening_hold_seconds",
+    "opening_vision", "opening_model", "opening_lead_seconds", "opening_frame_interval",
+}
+# Overrides whose values the bench itself reads, so they must be well typed.
+_COUNT_PATHS = ("clip_engine.taste_hits", "clip_engine.taste_flops", "clips.context_examples")
 
 # Settings that change how a run is scheduled or budgeted, not what it
 # produces; left out of the fingerprint so tuning them never blocks a resume.
@@ -312,7 +355,8 @@ def _bench_bucket():
 
 @contextlib.contextmanager
 def _file_lock(path: Path):
-    """Cross-process lock for small read-modify-write files (touched.json)."""
+    """Cross-process lock for small read-modify-write files (touched.json,
+    a run's manifest)."""
     try:
         import fcntl
     except ImportError:  # pragma: no cover - non-POSIX
@@ -321,6 +365,33 @@ def _file_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _run_lock(name: str):
+    """Held for the whole of ``run``: a second process (or thread) running the
+    same run would redo every arm on the same videos, overwrite the first's
+    results, and check the cap against only its own spend. It refuses at once
+    instead. The lock file sits beside the run's directory, not in it, so a
+    run that fails to be created leaves nothing behind."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        yield
+        return
+    path = bench_dir() / f".{name}.run.lock"
+    with open(path, "a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                raise
+            raise BenchError(f"run {name} is already running in another process; let it "
+                             "finish (or stop it) before running it again") from None
         try:
             yield
         finally:
@@ -472,6 +543,80 @@ def _override_path(setup: str, key: str) -> str:
                      f"such as clip_engine.gemini.{key}")
 
 
+def _check_path(setup: str, key: str, path: str) -> None:
+    """Refuse an override this arm wouldn't actually run with: a typo, a
+    setting the setup never reads, or one the bench can't apply per arm.
+    Otherwise the label would claim a configuration that never ran."""
+    parts = path.split(".")
+    if parts[0] == "clips":
+        allowed = _TRANSCRIPT_CLIPS_KEYS if setup == "transcript" else _CONTEXT_KEYS
+        if len(parts) != 2 or parts[1] not in allowed:
+            raise BenchError(f"{key!r} isn't a clips setting the {setup} arm reads (it reads "
+                             f"clips.{', clips.'.join(sorted(allowed))})")
+        return
+    if parts[0] != "clip_engine":
+        raise BenchError(f"{key!r}: an arm can change clip_engine.* and clips.* settings only")
+    if setup == "transcript":
+        raise BenchError(f"{key!r}: the transcript arm reads clips.* settings, not clip_engine.*")
+    block = parts[1] if len(parts) == 3 else ""
+    if block == "bench":
+        raise BenchError(f"{key!r}: clip_engine.bench.* configures the run, not an arm")
+    if not ((len(parts) == 2 and parts[1] in _TOP_KEYS)
+            or (block == "snap" and parts[2] in _SNAP_KEYS)
+            or (block in _PROVIDER_KEYS and parts[2] in _PROVIDER_KEYS[block])):
+        raise BenchError(f"unknown setting {key!r} (as {path}) for the {setup} setup")
+    if path in _NOT_PER_ARM:
+        raise BenchError(f"{key!r} can't change per arm: {_NOT_PER_ARM[path]}")
+    if block in _PROVIDER_KEYS and block not in ROLES[setup].values():
+        raise BenchError(f"{key!r} doesn't apply: no {block} model plays a role in the "
+                         f"{setup} setup")
+    role = _GEMINI_ROLE_KEYS.get(path)
+    if role and ROLES[setup][role] != "gemini":
+        raise BenchError(f"{key!r} doesn't apply: only a Gemini {role} reads it, and "
+                         f"{ROLES[setup][role]} is the {role} in the {setup} setup")
+    perceiver = ROLES[setup]["perceiver"]
+    if path in _PERCEPTION_PATHS[perceiver] and not _cached_apart(perceiver, path):
+        raise BenchError(
+            f"{key!r} shapes the {perceiver} shot log, but shot logs are not cached per "
+            f"{parts[-1]}, so this arm would reuse a log made without it. It can't vary per "
+            "arm until the shot-log cache key covers it (a different perceiver_model is fine).")
+
+
+def _cached_apart(perceiver: str, path: str) -> bool:
+    """Whether ``shotlog.cache_path`` files shot logs made with different
+    values of ``path`` apart, for a short or a long source. False when it
+    can't tell (an older ``cache_path`` takes no settings): refusing the
+    arm is the safe answer."""
+    from . import shotlog
+
+    def where(value, seconds):
+        return shotlog.cache_path("probe", perceiver, "model", seconds=seconds,
+                                  settings=settings_for({"overrides": {path: value}}, {}))
+
+    pairs = ((1, 2), ("LOW", "HIGH"), ("low", "high"),
+             ("MEDIA_RESOLUTION_LOW", "MEDIA_RESOLUTION_MEDIUM"))
+    try:
+        return any(where(a, seconds) != where(b, seconds)
+                   for a, b in pairs for seconds in (None, 3600.0))
+    except Exception:
+        return False
+
+
+def _check_value(key: str, path: str, value) -> None:
+    """Values the bench reads itself (taste counts, the replay context, the
+    per-arm deadline) must be well typed: a bad one would otherwise fall
+    back to the default under a label that claims otherwise."""
+    if path in _COUNT_PATHS:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise BenchError(f"{key} must be a whole number of at least 0, not {value!r}")
+    elif path == "clips.learn_from_history":
+        if not isinstance(value, bool):
+            raise BenchError(f"{key} must be true or false, not {value!r}")
+    elif path == "clip_engine.job_timeout_seconds":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise BenchError(f"{key} must be a number of seconds above 0, not {value!r}")
+
+
 def parse_arm(spec: str) -> dict:
     """``"gemini+editor_thinking=HIGH+critic_media_resolution=MEDIA_RESOLUTION_MEDIUM"``
     -> ``{"label": spec, "setup": "gemini", "overrides": {"clip_engine.gemini.editor_thinking":
@@ -483,6 +628,12 @@ def parse_arm(spec: str) -> dict:
     settings block that has them. Dotted keys are used as-is, except that
     ``gemini.``/``claude.``/``snap.`` are short for ``clip_engine.…``.
     Values are typed (ints, floats, true/false); everything else is a string.
+
+    Every key is checked (``_check_path``): typos, settings the setup never
+    reads, perception settings the shot-log cache isn't keyed by, and keys
+    the bench fixes per run raise ``BenchError``, so a label never claims a
+    configuration that didn't run. ``run`` also refuses asking for more taste
+    examples or context than the run holds (an arm can only take away).
     """
     text = str(spec or "").strip()
     if not text:
@@ -503,7 +654,9 @@ def parse_arm(spec: str) -> dict:
         path = _override_path(setup, key)
         if path in overrides:
             raise BenchError(f"{key} is set twice in arm {text!r}")
+        _check_path(setup, key, path)
         overrides[path] = _scalar(value.strip())
+        _check_value(key, path, overrides[path])
     return {"label": "+".join([setup] + parts[1:]), "setup": setup, "overrides": overrides}
 
 
@@ -1007,31 +1160,80 @@ def select_negatives(session, *, count: int, seed: str = "test", require_words: 
     return [_video_entry(c, [], negative=True) for c in pool[:int(count)]]
 
 
+def _taste_counts(settings) -> dict:
+    """How many taste examples a run freezes per video, and from how far back."""
+    return {"hits": int(opt(settings, "clip_engine.taste_hits", 3)),
+            "flops": int(opt(settings, "clip_engine.taste_flops", 2)),
+            "lookback_days": int(opt(settings, "clip_engine.taste_lookback_days", 180))}
+
+
+def _is_flop(example) -> bool:
+    return isinstance(example, dict) and example.get("label") == "flop"
+
+
+def _late_flops(session, examples: list, as_of: dt.datetime | None) -> set:
+    """``cut_pk``s of the flops among ``examples`` whose "not gripping" label
+    was set (or last changed: a relabel overwrites the row) after ``as_of``,
+    or that can't be dated (None stands for a flop without a cut). A replay
+    must not tell the critic about a verdict the operator hadn't given yet,
+    and ``taste.select_examples`` dates posts, not labels."""
+    from sqlalchemy import select
+
+    from ..models import ContentLabel
+
+    cuts = [e.get("cut_pk") for e in examples if _is_flop(e)]
+    if as_of is None or not cuts:
+        return set()
+    stamps = {}
+    known = [pk for pk in cuts if pk is not None]
+    if known:
+        for cut_pk, created, updated in session.execute(
+                select(ContentLabel.cut_pk, ContentLabel.created_at, ContentLabel.updated_at)
+                .where(ContentLabel.label == ContentLabel.LABEL_GRIPPING,
+                       ContentLabel.cut_pk.in_(known))).all():
+            stamps[cut_pk] = _parse_time(updated) or _parse_time(created)
+    return {pk for pk in cuts if stamps.get(pk) is None or stamps[pk] > as_of}
+
+
 def _freeze_examples(session, videos: list[dict], settings, notes: list[str]) -> None:
     """Resolve each video's taste examples once, at creation, so every arm and
-    every resume shows the critic the same hits and flops."""
+    every resume shows the critic the same hits and flops. Flops whose label
+    came after the video's archive time are left out (see ``_late_flops``)."""
     from . import taste
 
-    hits = int(opt(settings, "clip_engine.taste_hits", 3))
-    flops = int(opt(settings, "clip_engine.taste_flops", 2))
-    lookback = int(opt(settings, "clip_engine.taste_lookback_days", 180))
-    failures = 0
+    counts = _taste_counts(settings)
+    failures = trimmed = 0
     for video in videos:
+        as_of = _parse_time(video["as_of"])
         try:
             with session.begin_nested():
                 examples = taste.select_examples(
-                    session, as_of=_parse_time(video["as_of"]),
-                    exclude_candidate_pk=video["candidate_pk"], hits=hits, flops=flops,
-                    lookback_days=lookback, seed=video["video_id"]) or []
+                    session, as_of=as_of, exclude_candidate_pk=video["candidate_pk"],
+                    hits=counts["hits"], flops=counts["flops"],
+                    lookback_days=counts["lookback_days"], seed=video["video_id"]) or []
         except Exception as exc:
             failures += 1
             _log.warning("Taste examples for %s unavailable: %s", video["video_id"], exc)
             examples = []
+        if any(_is_flop(e) for e in examples):
+            try:
+                with session.begin_nested():
+                    late = _late_flops(session, examples, as_of)
+            except Exception as exc:
+                _log.warning("Couldn't date the flop labels for %s; leaving its flops out: %s",
+                             video["video_id"], exc)
+                late = {e.get("cut_pk") for e in examples if _is_flop(e)}
+            if late:
+                trimmed += 1
+                examples = [e for e in examples if not (_is_flop(e) and e.get("cut_pk") in late)]
         video["taste_examples"] = _jsonable(examples)
         video["taste_post_pks"] = [e.get("post_pk") for e in examples if isinstance(e, dict)]
     if failures:
         notes.append(f"taste examples unavailable for {failures} video(s); "
                      "their critics rank without examples")
+    if trimmed:
+        notes.append(f"taste flops labelled 'not gripping' after the video was archived were "
+                     f"left out on {trimmed} video(s): a replay only sees labels made by then")
 
 
 # ---- run -----------------------------------------------------------------------
@@ -1048,6 +1250,13 @@ def _run_dir(name: str) -> Path:
     return bench_dir() / _validate_name(name)
 
 
+def run_manifest(name: str) -> dict | None:
+    """Run ``name``'s manifest as it is on disk, or None when there's no such
+    run (yet). Raises ``BenchError`` only for an invalid name."""
+    data = util.read_json(_run_dir(name) / "manifest.json", None)
+    return data if isinstance(data, dict) else None
+
+
 def _load_run(name: str) -> tuple[Path, dict, list[dict]]:
     run_dir = _run_dir(name)
     manifest = util.read_json(run_dir / "manifest.json", None)
@@ -1059,7 +1268,37 @@ def _load_run(name: str) -> tuple[Path, dict, list[dict]]:
     return run_dir, manifest, videos
 
 
+_manifest_thread_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _manifest_lock(run_dir: Path):
+    """Held around every read-modify-write of a run's manifest. A run (the
+    CLI), the judging page's reveal (the dashboard) and ``prepare_pairs`` are
+    separate processes: an unlocked whole-file write from one would undo
+    another's, e.g. a run finishing after a reveal would reopen judging.
+    Not re-entrant: never nest it."""
+    with _manifest_thread_lock, _file_lock(run_dir / ".manifest.lock"):
+        yield
+
+
+@contextlib.contextmanager
+def _locked_manifest(run_dir: Path, fallback: dict | None = None):
+    """The manifest as it is on disk now, under ``_manifest_lock``; changes
+    are saved only by ``_write_manifest`` inside the block. ``fallback`` (a
+    copy of it) stands in when the file can't be read."""
+    with _manifest_lock(run_dir):
+        fresh = util.read_json(run_dir / "manifest.json", None)
+        if not isinstance(fresh, dict):
+            if fallback is None:
+                raise BenchError(f"run {run_dir.name} has no readable manifest.json")
+            fresh = copy.deepcopy(fallback)
+        yield fresh
+
+
 def _write_manifest(run_dir: Path, manifest: dict) -> None:
+    """Save the whole manifest. Callers hold ``_manifest_lock`` and write
+    what they read inside it (``_locked_manifest``), never an older copy."""
     manifest["updated_at"] = _now()
     util.atomic_write_json(run_dir / "manifest.json", manifest)
 
@@ -1128,12 +1367,47 @@ def _playbook_provenance(raw: dict, bench: dict, videos: list[dict]) -> tuple[di
     return info, warnings
 
 
-def _resolve_arms(arms, settings) -> list[dict]:
+def _whole(value, default: int) -> int:
+    """A count from settings: a whole number ≥ 0, else ``default``."""
+    if isinstance(value, bool):
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number >= 0 else default
+
+
+def _check_inputs(arm: dict, settings, taste: dict) -> None:
+    """Refuse an arm that asks for more than the run holds. Taste examples
+    are frozen per video and the replay context is built once per video, so
+    an arm can only show fewer of them (``_arm_examples``, ``_arm_context``)."""
+    over = arm.get("overrides") or {}
+    label = arm.get("label", "")
+    for key in ("hits", "flops"):
+        wanted, frozen = over.get(f"clip_engine.taste_{key}"), taste.get(key)
+        if wanted is not None and frozen is not None and wanted > int(frozen):
+            raise BenchError(f"arm {label!r} asks for {wanted} taste {key}, but the run froze "
+                             f"{frozen} per video; an arm can only show fewer")
+    if (over.get("clips.learn_from_history") is True
+            and not settings.get("clips.learn_from_history", True)):
+        raise BenchError(f"arm {label!r} turns clips.learn_from_history on, but the replay "
+                         "context is built with it off; an arm can only drop the context")
+    wanted = over.get("clips.context_examples")
+    base = _whole(settings.get("clips.context_examples", 6), 6)
+    if wanted is not None and wanted > base:
+        raise BenchError(f"arm {label!r} asks for {wanted} shipped examples, but the replay "
+                         f"context holds {base} (clips.context_examples); an arm can only "
+                         "show fewer")
+
+
+def _resolve_arms(arms, settings, taste: dict) -> list[dict]:
     specs = _as_list(arms) or _as_list(opt(settings, "clip_engine.bench.arms",
                                            ["gemini", "transcript"]))
     parsed, seen = [], set()
     for spec in specs:
         arm = parse_arm(spec)
+        _check_inputs(arm, settings, taste)
         if arm["label"] not in seen:
             seen.add(arm["label"])
             parsed.append(arm)
@@ -1142,10 +1416,23 @@ def _resolve_arms(arms, settings) -> list[dict]:
     return parsed
 
 
+def _recheck_arm(label: str, specs: dict, settings, taste: dict) -> None:
+    """An arm already in the run, checked again before it runs more videos:
+    one this version of the bench would refuse must not keep adding results
+    under a label that claims a configuration it doesn't run."""
+    spec = (specs.get(label) or {}).get("spec") or label.split("@", 1)[0]
+    try:
+        _check_inputs(parse_arm(spec), settings, taste)
+    except BenchError as exc:
+        raise BenchError(f"arm {label} can't run as labelled: {exc}. Start a new run "
+                         "without it.") from None
+
+
 def _create_run(run_dir: Path, *, name, arms, limit, max_usd, seed, candidate_ids,
                 require_words, negatives, settings, fp, raw_playbook, bench_playbook,
                 say) -> tuple[dict, list[dict]]:
-    parsed = _resolve_arms(arms, settings)
+    taste = _taste_counts(settings)
+    parsed = _resolve_arms(arms, settings, taste)
     hand_picked = bool(_as_list(candidate_ids))
     limit = int(limit if limit is not None else opt(settings, "clip_engine.bench.limit", 60))
     max_usd = _positive_usd(max_usd if max_usd is not None
@@ -1185,36 +1472,46 @@ def _create_run(run_dir: Path, *, name, arms, limit, max_usd, seed, candidate_id
         "excluded_touched": len(exclude),
         "context": ("replay: account context as of each video's archive time; this "
                     "video's own dismissals and clips left out; calibration omitted"),
+        "taste": taste,
         "playbook": provenance, "warnings": warnings, "notes": notes,
         "stopped": None, "revealed_at": None, "invocations": [], "restored": [],
         "skipped": {},
     }
     util.atomic_write_json(run_dir / "videos.json", videos)
-    _write_manifest(run_dir, manifest)   # last: the run exists only once it's whole
+    with _manifest_lock(run_dir):
+        _write_manifest(run_dir, manifest)   # last: the run exists only once it's whole
     touch_videos([v["video_id"] for v in videos], source=f"bench:{name}", seed=seed)
     say(f"Created bench run {name}: {len(videos)} videos "
         f"({manifest['negatives']} never cut), arms {', '.join(labels)}, seed {seed}.")
     return manifest, videos
 
 
-def _resume_run(run_dir: Path, manifest: dict, *, arms, max_usd, seed, limit, candidate_ids,
-                require_words, negatives, new_version, settings, fp, say) -> list[str]:
+def _resume_run(run_dir: Path, manifest: dict, *, videos, arms, max_usd, seed, limit,
+                candidate_ids, require_words, negatives, new_version, settings, fp,
+                say) -> list[str]:
     """Bring an existing run's manifest up to date; returns the arm labels to
-    run in this invocation."""
+    run in this invocation. ``arms``/``max_usd`` of None keep the run's own."""
     if max_usd is not None:
         manifest["max_usd"] = _positive_usd(max_usd)   # a resume may change the cap, never remove it
     old = manifest.get("fingerprint") or {}
     specs = manifest.setdefault("arm_specs", {})
+    taste = manifest.get("taste") or _taste_counts(settings)
     if old.get("hash") != fp["hash"]:
         changed = ", ".join(_fingerprint_diff(old, fp)) or "unknown"
         if not new_version:
             raise BenchError(
                 f"run {manifest.get('name')} was made with a different version (changed: "
-                f"{changed}). Pass --new-version to continue under new arm labels, or start "
-                "a new run.")
+                f"{changed}). Pass --new-version to start every arm over under new labels "
+                "(the cap counts what the run already spent), or start a new run.")
         tag = "@" + fp["hash"][:8]
-        requested = [a["label"] for a in _resolve_arms(arms, settings)] if _as_list(arms) else \
-            [specs.get(label, {}).get("spec", label.split("@", 1)[0]) for label in manifest.get("arms", [])]
+        requested = ([a["label"] for a in _resolve_arms(arms, settings, taste)] if _as_list(arms)
+                     else [specs.get(label, {}).get("spec", label.split("@", 1)[0])
+                           for label in manifest.get("arms", [])])
+        parsed = []
+        for spec in requested:
+            arm = parse_arm(spec)
+            _check_inputs(arm, settings, taste)
+            parsed.append(arm)
         manifest.setdefault("fingerprint_history", []).append(
             {"fingerprint": old, "until": _now(), "arms": list(manifest.get("arms", []))})
         manifest.setdefault("retired_arms", []).extend(manifest.get("arms", []))
@@ -1222,21 +1519,23 @@ def _resume_run(run_dir: Path, manifest: dict, *, arms, max_usd, seed, limit, ca
         manifest["version_tag"] = tag
         manifest["arms"] = []
         manifest["stopped"] = None
-        for spec in requested:
-            arm = parse_arm(spec)
+        for arm in parsed:
             label = arm["label"] + tag
             manifest["arms"].append(label)
             specs[label] = _arm_entry(arm, label)
         say(f"New version {tag[1:]} (changed: {changed}); arms now {', '.join(manifest['arms'])}.")
+        _warn_new_version(run_dir, manifest, videos, settings, say)
         return list(manifest["arms"])
     if new_version:
         say("Fingerprint unchanged; --new-version has nothing to do.")
     tag = manifest.get("version_tag", "") or ""
     if not _as_list(arms):
         to_run = list(manifest.get("arms", []))
+        for label in to_run:
+            _recheck_arm(label, specs, settings, taste)
     else:
         to_run = []
-        for arm in _resolve_arms(arms, settings):
+        for arm in _resolve_arms(arms, settings, taste):
             label = arm["label"] + tag
             if label not in manifest.setdefault("arms", []):
                 manifest["arms"].append(label)
@@ -1253,6 +1552,28 @@ def _resume_run(run_dir: Path, manifest: dict, *, arms, max_usd, seed, limit, ca
     if negatives and int(negatives) != int(manifest.get("negatives") or 0):
         say("Note: the run's videos are frozen; ignoring --negatives.")
     return to_run
+
+
+def _warn_new_version(run_dir: Path, manifest: dict, videos: list[dict], settings, say) -> None:
+    """A new version starts over: every arm runs again on every frozen video
+    under its new label, judgments of the old labels can't carry over (item
+    ids include the label), and the cap still counts what the run spent on
+    the old version."""
+    spent = _run_spent(run_dir)
+    cap = float(manifest.get("max_usd") or 0.0)
+    estimate = sum(_estimate_video(v, list(manifest.get("arms") or []),
+                                   manifest.get("arm_specs") or {}, settings) for v in videos)
+    say(f"WARNING: a new version re-runs every arm on all {len(videos)} videos, and its pairs "
+        "must be prepared and judged again: judgments of the old version don't carry over.")
+    line = (f"WARNING: the run has already spent ${spent:.2f} of its ${cap:.2f} cap (the cap "
+            f"counts every version); the new version is estimated at about ${estimate:.2f}")
+    if spent >= cap:
+        line += ". Nothing will run until you raise --max-usd."
+    elif spent + estimate > cap:
+        line += f". Raise --max-usd to about ${spent + estimate:.2f} to finish it."
+    else:
+        line += "."
+    say(line)
 
 
 def _positive_usd(value) -> float:
@@ -1354,6 +1675,46 @@ def _frozen_examples(video: dict, fresh) -> list[dict]:
             for pk in wanted if pk in by_pk or pk in frozen]
 
 
+def _arm_examples(examples: list, arm_settings) -> list:
+    """The frozen examples one engine arm's critic sees: the first
+    ``taste_hits`` hits and the first ``taste_flops`` flops (an example not
+    labelled "flop" counts as a hit, as the ranker reads it). An arm can only
+    show fewer than the run froze; ``_check_inputs`` refuses asking for more."""
+    limits = {"hit": _whole(opt(arm_settings, "clip_engine.taste_hits", 3), 3),
+              "flop": _whole(opt(arm_settings, "clip_engine.taste_flops", 2), 2)}
+    seen = {"hit": 0, "flop": 0}
+    out = []
+    for example in examples or []:
+        kind = "flop" if _is_flop(example) else "hit"
+        if seen[kind] < limits[kind]:
+            seen[kind] += 1
+            out.append(example)
+    return out
+
+
+def _arm_context(context: dict, arm_settings) -> dict:
+    """The replay context as ``clip_context.build`` would have built it with
+    this arm's settings: none without ``clips.learn_from_history``, and at most
+    ``clips.context_examples`` shipped examples (best first, as built)."""
+    if not arm_settings.get("clips.learn_from_history", True):
+        return {}
+    out = dict(context or {})
+    shipped = out.get("shipped_examples")
+    if isinstance(shipped, list):
+        limit = _whole(arm_settings.get("clips.context_examples", 6), len(shipped))
+        out["shipped_examples"] = shipped[:limit]
+    return {key: value for key, value in out.items() if value}
+
+
+def _arm_timeout(arm_settings, default: float) -> float:
+    """Seconds an engine arm may take on one video (``job_timeout_seconds``)."""
+    try:
+        seconds = float(opt(arm_settings, "clip_engine.job_timeout_seconds", default))
+    except (TypeError, ValueError):
+        return default
+    return seconds if math.isfinite(seconds) and seconds > 0 else default
+
+
 def _top_items(top) -> list[dict]:
     out = []
     for item in top or []:
@@ -1453,14 +1814,20 @@ def _run_arm(label: str, arm: dict, video: dict, *, inputs: dict, source: Path,
 
     started = time.monotonic()
     arm_settings = settings_for({"overrides": arm.get("overrides") or {}}, settings)
+    # The inputs were read once per video with the run's settings; this arm's
+    # own settings decide how much of them it gets (they can only take away).
+    context = _arm_context(inputs.get("context") or {}, arm_settings)
     if arm["setup"] == "transcript":
+        examples = []   # the transcript suggester takes no taste examples
         with _metered() as meter:
             try:
                 record = legacy_arm(video=video, source=source, settings=arm_settings,
-                                    inputs={**inputs, "transcript": transcript, "words": words})
+                                    inputs={**inputs, "context": context,
+                                            "transcript": transcript, "words": words})
             except Exception as exc:
                 record = _error_record(exc, cost=getattr(meter, "total", 0.0))
     else:
+        examples = _arm_examples(examples, arm_settings)
         meter = engine.CostMeter("bench")
         try:
             result = engine.run(
@@ -1469,10 +1836,10 @@ def _run_arm(label: str, arm: dict, video: dict, *, inputs: dict, source: Path,
                 title=(inputs.get("candidate") or {}).get("title") or video.get("title", ""),
                 description=(inputs.get("candidate") or {}).get("description") or "",
                 duration=duration, source=source, words=words, transcript=transcript,
-                context=inputs.get("context") or {}, rejected=[], examples=examples, used=[],
+                context=context, rejected=[], examples=examples, used=[],
                 window=None, meter=meter,
                 progress=lambda stage: say(f"      {label}: {stage}"),
-                cancel=cancel, deadline=time.monotonic() + timeout)
+                cancel=cancel, deadline=time.monotonic() + _arm_timeout(arm_settings, timeout))
             record = _engine_record(result, meter)
         except Exception as exc:
             record = _error_record(exc, cost=getattr(meter, "total", 0.0),
@@ -1489,7 +1856,7 @@ def _run_arm(label: str, arm: dict, video: dict, *, inputs: dict, source: Path,
         "candidate_pk": video["candidate_pk"], "fingerprint": fp_hash,
         "as_of": video.get("as_of"), "source_seconds": duration,
         "examples": [e.get("post_pk") for e in examples if isinstance(e, dict)],
-        "context_keys": sorted((inputs.get("context") or {}).keys()),
+        "context_keys": sorted(context.keys()),
         "input_notes": [str(n) for n in inputs.get("notes") or []],
         "seconds": round(time.monotonic() - started, 1), "created_at": _now(),
         "attempts": attempts, "prior_cost_usd": round(prior, 6),
@@ -1710,11 +2077,14 @@ def run(name: str, *, arms=None, limit=None, max_usd=None, seed: str = "test",
     video: videos outside, arms inside, so the budget check after each video
     leaves every arm compared on the same videos. Returns a summary.
 
-    ``arms``/``limit``/``max_usd`` default to ``clip_engine.bench.*``. A resume
-    reuses the frozen selection; existing results are kept (errors are retried
-    unless ``keep_errors``); a changed fingerprint refuses unless
-    ``new_version``. Stops starting new videos once the run's results cost
-    ``max_usd`` (failed attempts included), or when the disk gets too full.
+    ``arms``/``limit``/``max_usd`` default to ``clip_engine.bench.*`` for a
+    new run. A resume reuses the frozen selection, and None keeps the run's
+    own arms and cap (given arms are added, a given cap replaces it);
+    existing results are kept (errors are retried unless ``keep_errors``); a
+    changed fingerprint refuses unless ``new_version``. Stops starting new
+    videos once the run's results cost ``max_usd`` (failed attempts
+    included), or when the disk gets too full. One process at a time runs a
+    given run; a second refuses (``_run_lock``).
     """
     from ..config import load_settings
     from . import playbook as playbook_mod
@@ -1726,20 +2096,25 @@ def run(name: str, *, arms=None, limit=None, max_usd=None, seed: str = "test",
         raise BenchError(f"workers must be at least 1, not {workers}")
     settings = settings or load_settings()
     run_dir = bench_dir() / name
-    with _bench_bucket():
+    with _run_lock(name), _bench_bucket():
         raw_playbook = playbook_mod.load()
         bench_playbook = playbook_mod.strip_examples(raw_playbook)
         fp = fingerprint(settings, bench_playbook)
         if (run_dir / "manifest.json").exists():
             run_dir, manifest, videos = _load_run(name)
+            with _locked_manifest(run_dir, manifest) as fresh:
+                labels = _resume_run(run_dir, fresh, videos=videos, arms=arms, max_usd=max_usd,
+                                     seed=seed, limit=limit, candidate_ids=candidate_ids,
+                                     require_words=require_words, negatives=negatives,
+                                     new_version=new_version, settings=settings, fp=fp,
+                                     say=say)
+                _write_manifest(run_dir, fresh)
+            manifest = fresh
             if manifest.get("revealed_at"):
                 say(f"Note: run {name} was revealed at {manifest['revealed_at']}; "
                     "new results won't be judged.")
-            labels = _resume_run(run_dir, manifest, arms=arms, max_usd=max_usd, seed=seed,
-                                 limit=limit, candidate_ids=candidate_ids,
-                                 require_words=require_words, negatives=negatives,
-                                 new_version=new_version, settings=settings, fp=fp, say=say)
-            _write_manifest(run_dir, manifest)
+            say(f"Resuming bench run {name}: arms {', '.join(labels)} · {len(videos)} videos · "
+                f"stops once results pass ${float(manifest.get('max_usd') or 0):.2f}.")
         else:
             manifest, videos = _create_run(
                 run_dir, name=name, arms=arms, limit=limit, max_usd=max_usd, seed=seed,
@@ -1767,8 +2142,8 @@ def _execute(run_dir: Path, manifest: dict, videos: list[dict], labels: list[str
     invocation = {"started_at": _now(), "arms": list(labels),
                   "bucket_before": _bucket_total([started_day])}
     total = len(videos)
-    if manifest.get("stopped"):
-        manifest["stopped"] = None   # a resume clears the banner; it returns if we stop again
+    # Sources this invocation restores and deletes are appended after these.
+    restored_from = len(manifest.setdefault("restored", []))
 
     def stop(reason: str, message: str) -> None:
         if state.stop is None:
@@ -1839,16 +2214,25 @@ def _execute(run_dir: Path, manifest: dict, videos: list[dict], labels: list[str
         with state.lock:
             stop("interrupted", "interrupted; run the same command again to resume")
     finally:
-        _finish(run_dir, manifest, videos, labels, state=state, invocation=invocation,
-                started_day=started_day, settings=settings, say=say)
-    summary = _summary(run_dir, manifest, videos, state)
+        final = _finish(run_dir, manifest, videos, labels, state=state, invocation=invocation,
+                        started_day=started_day, settings=settings, say=say,
+                        manifest_lock=manifest_lock, restored_from=restored_from)
+    summary = _summary(run_dir, final, videos, state)
     if interrupted:
         raise KeyboardInterrupt
     return summary
 
 
 def _finish(run_dir: Path, manifest: dict, videos: list[dict], labels: list[str], *, state,
-            invocation: dict, started_day: str, settings, say) -> None:
+            invocation: dict, started_day: str, settings, say, manifest_lock,
+            restored_from: int) -> dict:
+    """Record the invocation and return the manifest as saved.
+
+    Only what the run owns is written, onto the manifest as it is on disk now
+    (``_locked_manifest``): a reveal from the judging page, or the sources
+    ``prepare_pairs`` restored, may have landed while it ran, and writing
+    back the copy loaded at the start would undo them — reopening judging
+    after the results were seen."""
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     after = _bucket_total(_dates_between(started_day, today))
     before = invocation.pop("bucket_before", None)
@@ -1858,13 +2242,21 @@ def _finish(run_dir: Path, manifest: dict, videos: list[dict], labels: list[str]
                          if after is not None and before is not None else None),
         "videos_run": state.ran,
     })
-    manifest.setdefault("invocations", []).append(invocation)
+    stopped = None   # a resume clears an earlier stop's banner; it returns if this one stopped
     if state.stop is not None:
         done = sum(1 for v in videos if all(
             _load_result(run_dir, l, v["video_id"]) is not None for l in manifest.get("arms", [])))
-        manifest["stopped"] = {**state.stop, "videos_done": done, "videos_total": len(videos)}
-    manifest["finished_at"] = _now()
-    _write_manifest(run_dir, manifest)
+        stopped = {**state.stop, "videos_done": done, "videos_total": len(videos)}
+    with manifest_lock:   # workers still in flight after a Ctrl-C may be adding to these
+        skipped = dict(manifest.get("skipped") or {})
+        restored = list((manifest.get("restored") or [])[restored_from:])
+    with _locked_manifest(run_dir, manifest) as fresh:
+        fresh.setdefault("invocations", []).append(invocation)
+        fresh["stopped"] = stopped
+        fresh["skipped"] = skipped
+        fresh.setdefault("restored", []).extend(restored)
+        fresh["finished_at"] = _now()
+        _write_manifest(run_dir, fresh)
     if state.stop is None or state.stop.get("reason") != "interrupted":
         _write_ledger(run_dir, videos, settings, say)
     try:
@@ -1873,6 +2265,7 @@ def _finish(run_dir: Path, manifest: dict, videos: list[dict], labels: list[str]
         media.prune()
     except Exception as exc:  # pragma: no cover - housekeeping only
         _log.info("media.prune skipped: %s", exc)
+    return fresh
 
 
 def _summary(run_dir: Path, manifest: dict, videos: list[dict], state) -> dict:
@@ -1886,7 +2279,7 @@ def _summary(run_dir: Path, manifest: dict, videos: list[dict], state) -> dict:
             "complete": complete, "errors": errors, "ran": state.ran,
             "skipped": dict(manifest.get("skipped") or {}),
             "cost_usd": round(state.spent, 4), "cost_this_run": round(state.new_cost, 4),
-            "stopped": manifest.get("stopped")}
+            "max_usd": manifest.get("max_usd"), "stopped": manifest.get("stopped")}
 
 
 # ---- evaluate --------------------------------------------------------------------
@@ -2316,19 +2709,25 @@ def prepare_pairs(name: str, *, height: int = 540) -> int:
     kinds: dict[str, int] = {}
     for item in items:
         kinds[item["kind"]] = kinds.get(item["kind"], 0) + 1
-    util.atomic_write_json(run_dir / "pairs.json", {
+    pairs = {
         "name": manifest.get("name", name), "updated_at": _now(), "height": height,
         "items": items, "no_top1": no_top1, "render_failures": failures, "stale_items": stale,
         "judgeable": judgeable, "auto_ties": sum(1 for it in items if it["auto"]),
         "kinds": kinds, "slivers_dropped": sum(s["dropped_slivers"] for it in items
                                                for s in it["sides"].values()),
-    })
-    if restored:
-        # Re-read: a run may have written the manifest since we loaded it.
-        with _judge_lock:
-            fresh = util.read_json(run_dir / "manifest.json", manifest) or manifest
+    }
+    # Under the manifest lock (a run or the judging page may write it from
+    # another process meanwhile), so a reveal lands either before the new
+    # queue — which is then never written — or after all of it.
+    with _judge_lock, _locked_manifest(run_dir, manifest) as fresh:
+        if restored:
             fresh.setdefault("restored", []).extend(restored)
             _write_manifest(run_dir, fresh)
+        if fresh.get("revealed_at"):
+            raise BenchError(f"run {name} was revealed at {fresh['revealed_at']} while its "
+                             "pairs were being prepared; judging is closed, so the judging "
+                             "queue was left as it was.")
+        util.atomic_write_json(run_dir / "pairs.json", pairs)
     return judgeable
 
 
@@ -2529,8 +2928,10 @@ def judge(name: str, item_id: str, choice: str, *, recognised=False, reason: str
     run_dir, manifest, _ = _load_run(name)
     choice = str(choice or "").strip().lower()
     reason = str(reason or "").strip().lower()
-    with _judge_lock:
-        manifest = util.read_json(run_dir / "manifest.json", manifest) or manifest
+    # The manifest lock too: a reveal from another process (`clipbench reveal`
+    # while the page judges) lands either before this check or after the
+    # judgment is on file.
+    with _judge_lock, _locked_manifest(run_dir, manifest) as manifest:
         if manifest.get("revealed_at"):
             raise BenchError(f"results for {name} were revealed at {manifest['revealed_at']}; "
                              "judging is closed")
@@ -2557,10 +2958,10 @@ def judge(name: str, item_id: str, choice: str, *, recognised=False, reason: str
 
 def reveal(name: str) -> dict:
     """Unseal the results. Judging closes for good: answers given after seeing
-    the numbers would no longer be blind."""
+    the numbers would no longer be blind. Every other manifest writer merges
+    into the file under the same lock, so nothing can undo this."""
     run_dir, manifest, _ = _load_run(name)
-    with _judge_lock:
-        manifest = util.read_json(run_dir / "manifest.json", manifest) or manifest
+    with _judge_lock, _locked_manifest(run_dir, manifest) as manifest:
         if not manifest.get("revealed_at"):
             manifest["revealed_at"] = _now()
             _write_manifest(run_dir, manifest)
@@ -2595,14 +2996,15 @@ def sign_test(wins: int, losses: int) -> float:
 
 
 def ceiling_verdict(k: int, n: int, bar: float = CEILING_BAR) -> str:
-    """"pass" when the one-sided 95% lower bound clears ``bar``, "fail" when
-    the one-sided 95% upper bound is below it, "inconclusive" in between."""
+    """"pass" when the one-sided 95% lower bound (the low end of the two-sided
+    90% interval) clears ``bar``; "fail" only when the whole two-sided 95%
+    interval — the one the report prints beside the verdict — lies below it;
+    "inconclusive" otherwise (that interval straddles ``bar``)."""
     if n <= 0:
         return "no data"
-    low, high = wilson(k, n, Z90)
-    if low >= bar:
+    if wilson(k, n, Z90)[0] >= bar:
         return "pass"
-    if high < bar:
+    if wilson(k, n, Z95)[1] < bar:
         return "fail"
     return "inconclusive"
 
@@ -2925,11 +3327,12 @@ def report(name: str) -> str:
                 rows.append([display.get(label, label), variant, s["n"], s["wins"],
                              s["ties"] + s["auto_ties"], s["losses"], s["neither"], s["no_top1"],
                              _pct(s["win_or_tie"]), f"{_pct(s['ci'][0])}–{_pct(s['ci'][1])}",
-                             s["verdict"]])
+                             _pct(s.get("lower_1s")), s["verdict"]])
         lines += _table(["arm", "items", "n", "W", "T", "L", "neither", "no top-1", "win-or-tie",
-                         "95% CI", "verdict"], rows)
+                         "95% CI", "1-sided low", "verdict"], rows)
         lines.append("Win-or-tie = (wins + ties) / (judged + auto-ties + videos with no top pick); "
-                     "pass needs the one-sided 95% lower bound ≥ 40%.")
+                     "pass needs the one-sided 95% lower bound ≥ 40%, fail needs the whole "
+                     "95% CI below 40%; anything between is inconclusive.")
     if res["solo"]:
         lines += ["", "Never-cut videos: would you post the top pick?"]
         lines += _table(["arm", "judged", "yes", "share", "95% CI"],

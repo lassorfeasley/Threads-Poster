@@ -13,12 +13,14 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import hashlib
+import io
 import json
 import math
 import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,7 +31,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app import clip_proposals, offload, spend
-from app.clip_engine import bench, critic, engine, jobs, legacy, media, playbook, taste, util
+from app.clip_engine import (bench, critic, engine, jobs, legacy, media, playbook, shotlog, taste,
+                             util)
 from app.config import Settings
 from app.models import (Base, Candidate, Channel, ClipProposal, ContentLabel, Cut,
                         MetricSnapshot, ThreadsPost)
@@ -229,12 +232,12 @@ class ParseArmTest(unittest.TestCase):
              {"clip_engine.gemini.editor_model": "gemini-4-hydrogen"}),
             ("gemini+judge_thinking=MEDIUM", "gemini", {"clip_engine.gemini.judge_thinking": "MEDIUM"}),
             ("hybrid+editor_effort=high", "hybrid", {"clip_engine.claude.editor_effort": "high"}),
-            ("hybrid+perceiver_thinking=HIGH", "hybrid",
-             {"clip_engine.gemini.perceiver_thinking": "HIGH"}),
             ("hybrid+judge_effort=low", "hybrid", {"clip_engine.claude.judge_effort": "low"}),
             ("hybrid+editor_keyframes=60", "hybrid", {"clip_engine.claude.editor_keyframes": 60}),
-            ("claude+frame_interval=1.5", "claude", {"clip_engine.claude.frame_interval": 1.5}),
-            ("gemini+perception_fps=0.5", "gemini", {"clip_engine.gemini.perception_fps": 0.5}),
+            # Claude reviews (and draws keyframes) at this width in hybrid; Gemini logs.
+            ("hybrid+frame_width=320", "hybrid", {"clip_engine.claude.frame_width": 320}),
+            ("gemini+perceiver_model=gemini-4-carbon", "gemini",
+             {"clip_engine.gemini.perceiver_model": "gemini-4-carbon"}),
             ("gemini+drafts=12+revise_top=0", "gemini",
              {"clip_engine.drafts": 12, "clip_engine.revise_top": 0}),
             ("gemini+word_window=0.8", "gemini", {"clip_engine.snap.word_window": 0.8}),
@@ -242,9 +245,18 @@ class ParseArmTest(unittest.TestCase):
              {"clip_engine.gemini.model": "gemini-4-carbon"}),
             ("gemini+clip_engine.gemini.critic_fps=4", "gemini",
              {"clip_engine.gemini.critic_fps": 4}),
+            ("gemini+taste_hits=0+taste_flops=1+job_timeout_seconds=600", "gemini",
+             {"clip_engine.taste_hits": 0, "clip_engine.taste_flops": 1,
+              "clip_engine.job_timeout_seconds": 600}),
+            ("gemini+editor_video_max_seconds=600", "gemini",
+             {"clip_engine.editor_video_max_seconds": 600}),
             ("transcript+clips.model=claude-sonnet-5", "transcript",
              {"clips.model": "claude-sonnet-5"}),
-            ("gemini+clips.max_clips=2", "gemini", {"clips.max_clips": 2}),
+            ("transcript+clips.max_clips=2+clips.opening_vision=false", "transcript",
+             {"clips.max_clips": 2, "clips.opening_vision": False}),
+            ("gemini+clips.learn_from_history=false", "gemini",
+             {"clips.learn_from_history": False}),
+            ("transcript+clips.context_examples=2", "transcript", {"clips.context_examples": 2}),
         ]
         for spec, setup, overrides in cases:
             with self.subTest(spec):
@@ -271,6 +283,94 @@ class ParseArmTest(unittest.TestCase):
             with self.subTest(spec):
                 with self.assertRaises(bench.BenchError):
                     bench.parse_arm(spec)
+
+    def test_overrides_the_arm_would_not_run_with_are_refused(self):
+        # Each of these used to be accepted and then silently ignored, so the
+        # label claimed a configuration that never ran.
+        cases = [
+            ("gemini+taste_lookback_days=30", "frozen per video"),         # frozen at creation
+            ("gemini+gemini.edtor_thinking=HIGH", "unknown setting"),      # typo, dotted
+            ("gemini+clip_engine.drafs=4", "unknown setting"),             # typo, dotted top key
+            ("gemini+snap.word_windo=1", "unknown setting"),
+            ("transcript+clips.lern_from_history=false", "isn't a clips setting"),
+            ("gemini+clips.max_clips=2", "isn't a clips setting"),         # the engine reads keep
+            ("gemini+bench.limit=5", "configures the run"),
+            ("gemini+clip_engine.setup=claude", "unknown setting"),
+            ("claude+gemini.model=gemini-4-carbon", "no gemini model"),    # no Gemini role
+            ("gemini+claude.editor_effort=high", "no claude model"),
+            ("claude+perception_window_seconds=60", "only a Gemini perceiver"),
+            ("hybrid+editor_video_max_seconds=600", "only a Gemini editor"),
+            ("transcript+gemini.editor_thinking=HIGH", "reads clips.*"),
+            ("gemini+matching.model=x", "clip_engine.* and clips.*"),
+            ("gemini+inline_request_mb=5", "settings.yaml"),               # read globally
+            ("gemini+taste_hits=-1", "whole number"),
+            ("gemini+taste_flops=two", "whole number"),
+            ("gemini+clips.context_examples=1.5", "whole number"),
+            ("gemini+clips.learn_from_history=maybe", "true or false"),
+            ("gemini+job_timeout_seconds=0", "above 0"),
+        ]
+        for spec, why in cases:
+            with self.subTest(spec):
+                with self.assertRaises(bench.BenchError) as ctx:
+                    bench.parse_arm(spec)
+                self.assertIn(why, str(ctx.exception))
+
+    PERCEPTION_ARMS = [
+        "gemini+perception_fps=2.0", "gemini+media_resolution=MEDIA_RESOLUTION_MEDIUM",
+        "gemini+perceiver_thinking=HIGH", "gemini+long_video_fps=1",
+        "gemini+perception_window_seconds=120", "gemini+gemini.perception_fps=2",
+        "hybrid+perceiver_thinking=HIGH", "hybrid+media_resolution=MEDIA_RESOLUTION_MEDIUM",
+        "claude+frame_interval=1.0", "claude+frame_width=320", "claude+perceiver_effort=high",
+        "claude+max_total_frames=100", "claude+max_frames_per_call=50"]
+
+    def test_perception_settings_are_refused_while_shot_logs_are_not_keyed_by_them(self):
+        # Logs cached per (video, perceiver, model) only: an arm changing how
+        # its perceiver logs would reuse a log made without the change.
+        def unkeyed(video_id, perceiver, model, *, part=None):
+            return Path(f"/logs/{video_id}__{perceiver}__{model}.json")
+
+        def ignores_settings(video_id, perceiver, model, *, part=None, settings=None, seconds=None):
+            return unkeyed(video_id, perceiver, model)
+
+        for fake in (unkeyed, ignores_settings):
+            with mock.patch.object(shotlog, "cache_path", fake):
+                for spec in self.PERCEPTION_ARMS:
+                    with self.subTest(fake=fake.__name__, spec=spec):
+                        with self.assertRaises(bench.BenchError) as ctx:
+                            bench.parse_arm(spec)
+                        self.assertIn("not cached per", str(ctx.exception))
+                # A different perceiver model is its own log; Claude reviewing
+                # at another width in hybrid (Gemini logs) isn't perception.
+                bench.parse_arm("gemini+perceiver_model=gemini-4-carbon")
+                bench.parse_arm("hybrid+frame_width=320")
+        # Routing is unchanged: the perceiver's provider owns the key.
+        self.assertEqual(bench._override_path("hybrid", "perceiver_thinking"),
+                         "clip_engine.gemini.perceiver_thinking")
+        self.assertEqual(bench._override_path("claude", "frame_interval"),
+                         "clip_engine.claude.frame_interval")
+
+    def test_perception_settings_run_once_shot_logs_are_keyed_by_them(self):
+        def keyed(video_id, perceiver, model, *, part=None, settings=None, seconds=None):
+            knobs = json.dumps((settings.raw if settings is not None else {}), sort_keys=True)
+            return Path(f"/logs/{video_id}__{perceiver}__{model}__{knobs}.json")
+
+        with mock.patch.object(shotlog, "cache_path", keyed):
+            for spec in self.PERCEPTION_ARMS:
+                with self.subTest(spec):
+                    self.assertTrue(bench.parse_arm(spec)["overrides"])
+        # The real shot log is keyed by every one of them now: each arm runs,
+        # and gets a log of its own rather than its baseline's.
+        for spec in self.PERCEPTION_ARMS:
+            with self.subTest(real=spec):
+                arm = bench.parse_arm(spec)
+                setup = arm["setup"]
+                perceiver = "claude" if setup == "claude" else "gemini"
+                own = bench.settings_for(arm, Settings(raw={}))
+                self.assertTrue(any(
+                    shotlog.cache_path("v", perceiver, "m", settings=own, seconds=seconds)
+                    != shotlog.cache_path("v", perceiver, "m", settings=Settings(raw={}),
+                                          seconds=seconds)
+                    for seconds in (None, 3600.0)))
 
     def test_values_are_typed(self):
         cases = [("12", 12), ("0.75", 0.75), ("true", True), ("False", False),
@@ -656,6 +756,19 @@ class _RunFixture(_DB):
     def manifest(self, name="t1"):
         return json.loads((bench.bench_dir() / name / "manifest.json").read_text())
 
+    def fail_engine_on(self, video_id):
+        """Engine arms error on one video (so a resume has work); returns the
+        engine.run that was in place, to put back."""
+        real = engine.run
+
+        def flaky(**kw):
+            if kw["video_id"] == video_id:
+                raise RuntimeError("quota")
+            return real(**kw)
+
+        self.patch(engine, "run", flaky)
+        return real
+
 
 class RunTest(_RunFixture):
     def test_creates_the_run_and_its_results(self):
@@ -1000,6 +1113,287 @@ class RunTest(_RunFixture):
         manifest = self.manifest()
         self.assertEqual(manifest["playbook"]["source"], "generated")
         self.assertTrue(any("clip_playbook.yaml" in w for w in manifest["warnings"]))
+
+    def test_a_reveal_while_a_resume_runs_stays_revealed(self):
+        real = self.fail_engine_on("v2")
+        self.run_bench()
+
+        def render(source, segments, dest, **kw):
+            Path(dest).write_bytes(b"render")
+            return Path(dest)
+
+        self.patch(media, "render_segments", render)
+        self.assertEqual(bench.prepare_pairs("t1"), 2)
+        item = bench.next_item("t1")
+        revealed = {}
+
+        def reveal_midway(**kw):
+            # The operator presses "Reveal results" on the page (another
+            # process) while the resume retries v2.
+            if not revealed:
+                revealed.update(bench.reveal("t1"))
+            return real(**kw)
+
+        self.patch(engine, "run", reveal_midway)
+        out = self.run_bench()
+        self.assertEqual(out["complete"]["gemini"], 3, "the resume did its work")
+        manifest = self.manifest()
+        self.assertEqual(manifest["revealed_at"], revealed["revealed_at"])
+        self.assertEqual(len(manifest["invocations"]), 2)
+        self.assertIsNone(bench.next_item("t1"))
+        with self.assertRaises(bench.BenchError):
+            bench.judge("t1", item["item_id"], "a")
+        self.assertTrue(bench.results("t1")["revealed"])
+        with self.assertRaises(bench.BenchError):
+            bench.prepare_pairs("t1")
+
+    def test_entries_written_by_others_while_the_run_goes_survive_it(self):
+        real = engine.run
+        entry = {"video_id": "v9", "path": "/elsewhere/v9.mp4",
+                 "removed_at": "2026-11-18T00:00:00Z"}
+
+        def pairs_meanwhile(**kw):
+            # prepare_pairs in another process records a source it restored.
+            if kw["video_id"] == "v1":
+                path = bench.bench_dir() / "t1" / "manifest.json"
+                manifest = json.loads(path.read_text())
+                manifest.setdefault("restored", []).append(entry)
+                util.atomic_write_json(path, manifest)
+            return real(**kw)
+
+        self.patch(engine, "run", pairs_meanwhile)
+        moved = self.vids[1]
+        Path(moved.local_video_path).unlink()
+        with self.fake_db() as s:
+            s.get(Candidate, moved.id).source_object_key = "climate/v2.mp4"
+            s.commit()
+        self.run_bench()
+        restored = self.manifest()["restored"]
+        self.assertIn(entry, restored)
+        self.assertEqual(sorted(r["video_id"] for r in restored), ["v2", "v9"],
+                         "the run's own restored source is recorded too")
+
+    def test_a_second_process_on_the_same_run_refuses_at_once(self):
+        real = engine.run
+        busy, release = threading.Event(), threading.Event()
+
+        def slow(**kw):
+            busy.set()
+            release.wait(2)
+            return real(**kw)
+
+        self.patch(engine, "run", slow)
+        first: dict = {}
+        worker = threading.Thread(target=lambda: first.update(self.run_bench()))
+        worker.start()
+        try:
+            self.assertTrue(busy.wait(10))
+            with self.assertRaises(bench.BenchError) as ctx:
+                self.run_bench()
+            self.assertIn("already running", str(ctx.exception))
+        finally:
+            release.set()
+            worker.join(30)
+        self.assertEqual(first["complete"], {"gemini": 3, "transcript": 3})
+        self.assertEqual(sorted(c["video_id"] for c in self.engine_calls), ["v1", "v2", "v3"])
+        self.assertEqual(len(self.legacy_calls), 3)
+        self.run_bench()   # the lock is released once the run is done
+        self.assertEqual(len(self.engine_calls), 3)
+
+    def test_new_version_warns_that_it_starts_over_against_the_same_cap(self):
+        self.engine_cost = 1.0
+        out = self.run_bench(max_usd=1.5)
+        self.assertEqual(out["stopped"]["reason"], "max_usd")
+        changed = Settings(raw={"clip_engine": {"min_free_gb": 10, "drafts": 12},
+                                "clips": {"model": "claude-sonnet-5"}})
+        self.said.clear()
+        before = len(self.engine_calls)
+        self.run_bench(settings=changed, new_version=True, max_usd=1.5)
+        self.assertEqual(len(self.engine_calls), before, "the old version's spend fills the cap")
+        text = "\n".join(self.said)
+        self.assertIn("re-runs every arm on all 3 videos", text)
+        self.assertIn("judged again", text)
+        self.assertIn("already spent $2.10 of its $1.50 cap", text)
+        self.assertIn("Nothing will run until you raise --max-usd", text)
+        # With room under the cap, it says how much more the new version needs.
+        self.said.clear()
+        changed.raw["clip_engine"]["drafts"] = 14
+        self.run_bench(settings=changed, new_version=True, max_usd=3.0)
+        text = "\n".join(self.said)
+        self.assertIn("estimated at about $1.80", text)   # 3 videos × ($0.50 + $0.10)
+        self.assertIn("Raise --max-usd to about $3.90", text)
+
+
+class ArmInputsTest(_RunFixture):
+    """The inputs are read once per video with the run's settings; each arm's
+    own settings decide how much of them it gets."""
+
+    ARMS = ["gemini", "gemini+taste_hits=1+taste_flops=0+job_timeout_seconds=5",
+            "gemini+clips.context_examples=1", "transcript+clips.learn_from_history=false"]
+
+    def setUp(self):
+        super().setUp()
+        other = self.video("other", status="approved")      # never selected
+        flop_cut = self.cut(other, [S(0, 10)])
+        self.add(ContentLabel(cut_pk=flop_cut.id, label="gripping", value="no",
+                              created_at=ago(90), updated_at=ago(90)))
+        self.commit()
+        examples = [{"post_pk": 11, "label": "hit", "title": "hit one"},
+                    {"post_pk": 13, "label": "hit", "title": "hit two"},
+                    {"post_pk": 12, "label": "flop", "cut_pk": flop_cut.id, "title": "flop"}]
+        self.patch(taste, "select_examples", lambda session, **kw: [dict(e) for e in examples])
+        real_inputs = self.fake_inputs
+        self.context = {"shipped_examples": [{"seconds": 10}, {"seconds": 20}],
+                        "recently_posted": [{"story": "x"}]}
+        self.patch(jobs, "prepare_inputs", lambda cid, **kw: {
+            **real_inputs(cid, **kw), "context": dict(self.context), "examples": []})
+        real_run = engine.run
+        self.left: dict = {}
+
+        def timed(**kw):
+            self.left.setdefault(self.arm_of(kw), kw["deadline"] - time.monotonic())
+            return real_run(**kw)
+
+        self.patch(engine, "run", timed)
+
+    @staticmethod
+    def arm_of(call) -> str:
+        settings = call["settings"]
+        if settings.get("clip_engine.taste_hits") is not None:
+            return ArmInputsTest.ARMS[1]
+        if settings.get("clips.context_examples") is not None:
+            return ArmInputsTest.ARMS[2]
+        return "gemini"
+
+    def test_each_arm_gets_what_its_settings_say(self):
+        self.run_bench(arms=self.ARMS)
+        by_arm: dict = {}
+        for call in self.engine_calls:
+            by_arm.setdefault(self.arm_of(call), []).append(call)
+        self.assertEqual({k: len(v) for k, v in by_arm.items()},
+                         {"gemini": 3, self.ARMS[1]: 3, self.ARMS[2]: 3})
+        for call in by_arm["gemini"]:
+            self.assertEqual([e["post_pk"] for e in call["examples"]], [11, 13, 12])
+            self.assertEqual(call["context"], self.context)
+        for call in by_arm[self.ARMS[1]]:
+            self.assertEqual([e["post_pk"] for e in call["examples"]], [11], "1 hit, no flops")
+            self.assertEqual(call["context"], self.context)
+        for call in by_arm[self.ARMS[2]]:
+            self.assertEqual(call["context"], {"shipped_examples": [{"seconds": 10}],
+                                               "recently_posted": [{"story": "x"}]})
+            self.assertEqual(len(call["examples"]), 3)
+        self.assertLess(self.left[self.ARMS[1]], 10, "its own job_timeout_seconds")
+        self.assertGreater(self.left["gemini"], 1000)
+        self.assertEqual(len(self.legacy_calls), 3)
+        self.assertTrue(all(c["context"] == {} for c in self.legacy_calls),
+                        "learn_from_history=false: no account context")
+        # The records say what each arm was actually given.
+        self.assertEqual(self.result("t1", self.ARMS[1], "v1")["examples"], [11])
+        self.assertEqual(self.result("t1", "gemini", "v1")["context_keys"],
+                         ["recently_posted", "shipped_examples"])
+        transcript = self.result("t1", self.ARMS[3], "v1")
+        self.assertEqual((transcript["examples"], transcript["context_keys"]), ([], []))
+
+    def test_an_arm_cannot_ask_for_more_than_the_run_holds(self):
+        for arms in (["gemini+taste_hits=4"], ["gemini+taste_flops=3"],
+                     ["gemini+clips.context_examples=7"]):
+            with self.subTest(arms=arms):
+                with self.assertRaises(bench.BenchError) as ctx:
+                    self.run_bench("more", arms=arms)
+                self.assertIn("only show fewer", str(ctx.exception))
+        no_history = Settings(raw={**self.settings.raw, "clips": {
+            "model": "claude-sonnet-5", "learn_from_history": False}})
+        with self.assertRaises(bench.BenchError):
+            self.run_bench("more", arms=["transcript+clips.learn_from_history=true"],
+                           settings=no_history)
+        self.assertFalse((bench.bench_dir() / "more" / "manifest.json").exists())
+        self.assertEqual(self.engine_calls, [])
+        # A resume can't add one either: the run froze 3 hits per video.
+        self.run_bench(arms=["gemini"])
+        self.assertEqual(self.manifest()["taste"], {"hits": 3, "flops": 2, "lookback_days": 180})
+        with self.assertRaises(bench.BenchError):
+            self.run_bench(arms=["gemini+taste_hits=5"])
+        self.assertEqual(self.manifest()["arms"], ["gemini"])
+
+    def test_an_arm_the_bench_now_refuses_does_not_keep_running(self):
+        self.run_bench(arms=["gemini"])
+        manifest = self.manifest()    # an arm an earlier bench accepted, then ignored
+        manifest["arms"].append("gemini+taste_lookback_days=30")
+        manifest["arm_specs"]["gemini+taste_lookback_days=30"] = {
+            "spec": "gemini+taste_lookback_days=30", "setup": "gemini",
+            "overrides": {"clip_engine.taste_lookback_days": 30}}
+        util.atomic_write_json(bench.bench_dir() / "t1" / "manifest.json", manifest)
+        with self.assertRaises(bench.BenchError) as ctx:
+            self.run_bench(arms=None)
+        self.assertIn("can't run as labelled", str(ctx.exception))
+        self.assertEqual(len(self.engine_calls), 3)
+
+
+class TasteAsOfTest(_RunFixture):
+    def test_flops_labelled_after_the_archive_time_are_left_out(self):
+        other = self.video("other", status="approved")
+        stamps = {"early": (ago(90), ago(90)), "late": (ago(1), ago(1)),
+                  "relabelled": (ago(90), ago(2))}    # a relabel overwrites the row
+        cuts = {}
+        for i, (name, (created, updated)) in enumerate(stamps.items()):
+            cuts[name] = self.cut(other, [S(i * 10, i * 10 + 5)])
+            self.add(ContentLabel(cut_pk=cuts[name].id, label="gripping", value="no",
+                                  created_at=created, updated_at=updated))
+        self.commit()
+        examples = [{"post_pk": 11, "label": "hit"},
+                    {"post_pk": 21, "label": "flop", "cut_pk": cuts["late"].id},
+                    {"post_pk": 22, "label": "flop", "cut_pk": cuts["early"].id},
+                    {"post_pk": 23, "label": "flop", "cut_pk": cuts["relabelled"].id},
+                    {"post_pk": 24, "label": "flop", "cut_pk": None}]    # can't be dated
+        self.patch(taste, "select_examples", lambda session, **kw: [dict(e) for e in examples])
+        self.run_bench(arms=["gemini"])
+        videos = json.loads((bench.bench_dir() / "t1" / "videos.json").read_text())
+        self.assertEqual([v["taste_post_pks"] for v in videos], [[11, 22]] * 3)
+        self.assertTrue(any("after the video was archived" in n for n in self.manifest()["notes"]))
+        self.assertTrue(all([e["post_pk"] for e in c["examples"]] == [11, 22]
+                            for c in self.engine_calls))
+
+
+class CliResumeTest(_RunFixture):
+    """run.py's `clipbench run` on the real bench.run (engine mocked)."""
+
+    def setUp(self):
+        super().setUp()
+        settings = Settings(raw={**self.settings.raw, "clip_engine": {
+            **self.settings.raw["clip_engine"],
+            "bench": {"arms": ["gemini", "transcript"], "limit": 60, "max_usd": 40}}})
+        for target, value in (("app.config.load_settings", lambda: settings),
+                              ("app.db.init_db", lambda *a, **k: None)):
+            patcher = mock.patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def cli(self, argv) -> str:
+        import run as run_cli
+
+        args = run_cli.build_parser().parse_args(argv)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            args.func(args)
+        return out.getvalue()
+
+    def test_a_bare_resume_keeps_the_runs_own_arms_and_cap(self):
+        real = self.fail_engine_on("v2")
+        self.cli(["clipbench", "run", "--name", "t1", "--arms",
+                  "gemini+editor_thinking=HIGH,transcript", "--max-usd", "10"])
+        self.patch(engine, "run", real)
+        before = len(self.engine_calls)
+        out = self.cli(["clipbench", "run", "--name", "t1"])     # "run the same name again"
+        manifest = self.manifest()
+        self.assertEqual(manifest["arms"], ["gemini+editor_thinking=HIGH", "transcript"])
+        self.assertEqual(manifest["max_usd"], 10.0)
+        resumed = self.engine_calls[before:]
+        self.assertEqual([c["video_id"] for c in resumed], ["v2"], "only the errored video")
+        self.assertTrue(all(c["settings"].get("clip_engine.gemini.editor_thinking") == "HIGH"
+                            for c in resumed))
+        self.assertIn("Resuming bench run 't1'", out)
+        self.assertIn("stops once results pass $10.00", out)
+        self.assertIn("max_usd: 10.0", out)
 
 
 class FrozenExamplesTest(unittest.TestCase):
@@ -1471,10 +1865,24 @@ class StatsTest(unittest.TestCase):
 
     def test_ceiling_verdict(self):
         cases = [(70, 150, "pass"), (69, 150, "inconclusive"), (26, 50, "pass"),
-                 (25, 50, "inconclusive"), (10, 100, "fail"), (0, 0, "no data")]
+                 (25, 50, "inconclusive"), (10, 100, "fail"), (0, 0, "no data"),
+                 # The printed 95% CI (24.5%–40.6%) straddles the bar: not a fail.
+                 (40, 125, "inconclusive"),
+                 # ...and once the whole printed interval is below it (upper 39.8%), fail.
+                 (39, 125, "fail")]
         for k, n, expected in cases:
             with self.subTest(k=k, n=n):
                 self.assertEqual(bench.ceiling_verdict(k, n), expected)
+
+    def test_a_fail_never_sits_beside_a_printed_interval_that_reaches_the_bar(self):
+        for n in range(1, 201):
+            for k in range(n + 1):
+                verdict = bench.ceiling_verdict(k, n)
+                low, high = bench.wilson(k, n)   # the 95% CI the report prints
+                if verdict == "fail":
+                    self.assertLess(high, bench.CEILING_BAR, (k, n))
+                elif verdict == "inconclusive":
+                    self.assertGreaterEqual(high, bench.CEILING_BAR, (k, n))
 
     def test_spearman(self):
         cases = [([1, 2, 3, 4], [10, 20, 30, 40], 1.0), ([1, 2, 3, 4], [4, 3, 2, 1], -1.0),
@@ -1579,7 +1987,8 @@ class ResultsTest(_Env):
     def test_report_after_reveal(self):
         text = bench.report(self.NAME)
         for phrase in ("PRIMARY", "win rate", "Win-or-tie", "Never-cut videos", "Why clips lost",
-                       bench.RUBRIC_NOTE, "Anchored history"):
+                       bench.RUBRIC_NOTE, "Anchored history", "1-sided low",
+                       "fail needs the whole 95% CI below 40%"):
             with self.subTest(phrase):
                 self.assertIn(phrase, text)
 

@@ -82,7 +82,7 @@ class DbCase(TempCase):
 
     def post(self, *, days_ago=3.0, views=100, later_views=None, cand=None, cut=None, title=None,
              repost_of=None, status="published", label=None, local="", key="", caption=None,
-             when=None):
+             when=None, labelled_at=None):
         cand = cand or self.candidate()
         cut = cut or self.cut(cand, title=title if title is not None else f"Clip {self.n}")
         published = when or NOW - dt.timedelta(days=days_ago)
@@ -99,7 +99,11 @@ class DbCase(TempCase):
             self.session.add(MetricSnapshot(post_pk=post.id, views=later_views,
                                             captured_at=published + dt.timedelta(days=20)))
         if label:
-            self.session.add(ContentLabel(cut_pk=cut.id, label="gripping", value=label))
+            # Labelled half a day after posting unless said otherwise: the
+            # label's date matters to a replay (``as_of``), so never "now".
+            stamp = labelled_at or published + dt.timedelta(hours=12)
+            self.session.add(ContentLabel(cut_pk=cut.id, label="gripping", value=label,
+                                          created_at=stamp, updated_at=stamp))
         self.session.flush()
         return post
 
@@ -227,6 +231,30 @@ class SelectExamplesTest(DbCase):
         self.assertEqual([e["post_pk"] for e in flops], [lowest.id, low.id])
         self.assertNotIn(same_source.id, [e["post_pk"] for e in out])
 
+    def test_a_replay_only_sees_labels_given_by_its_date(self):
+        """A replay as of an earlier day picks its flops from what the
+        operator had labelled by then — the next ones by percentile, not
+        fewer — and a relabel counts from when it was made."""
+        self.ladder(20)
+        then = NOW - dt.timedelta(days=1)
+        lowest = self.post(days_ago=3, views=110, label="no",
+                           labelled_at=NOW - dt.timedelta(hours=6))      # after ``then``
+        low = self.post(days_ago=3.1, views=120, label="no",
+                        labelled_at=NOW - dt.timedelta(days=2))
+        lowish = self.post(days_ago=3.2, views=130, label="no",
+                           labelled_at=NOW - dt.timedelta(days=2))
+        flops = lambda **kw: [e["post_pk"] for e in self.select(flops=2, **kw)   # noqa: E731
+                              if e["label"] == "flop"]
+        self.assertEqual(flops(as_of=NOW), [lowest.id, low.id])
+        self.assertEqual(flops(as_of=then), [low.id, lowish.id])
+        with mock.patch.object(taste, "_now", return_value=NOW):
+            self.assertEqual(flops(as_of=None), [lowest.id, low.id])      # live: every label
+        # Relabelled since (the row is overwritten): it counts from the change.
+        row = self.session.query(ContentLabel).filter_by(cut_pk=low.cut_pk).one()
+        row.updated_at = NOW - dt.timedelta(hours=1)
+        self.session.flush()
+        self.assertEqual(flops(as_of=then), [lowish.id])
+
 
 class PerformanceLineTest(unittest.TestCase):
     CASES = [
@@ -303,6 +331,25 @@ class ExampleFileTest(TempCase):
                                             self.settings), path)
         self.assertEqual(len(self.trims), 1)
         self.assertEqual(sorted(p.name for p in self.taste_dir().iterdir()), ["7-360.mp4"])
+
+    def test_reuse_leaves_the_mtime_alone_until_it_needs_keeping(self):
+        """The Gemini upload cache keys on (path, size, mtime): touching the
+        file on every reuse made every ranking run upload each example again.
+        Only a file old enough for the prune to take is refreshed."""
+        local = self.dir / "export.mp4"
+        local.write_bytes(b"x")
+        example = self.example(clip_local_path=str(local))
+        path = taste.example_file(example, self.settings)
+        for age, refreshed in ((3600, False), (3 * 86400, True)):
+            with self.subTest(age=age):
+                then = int((dt.datetime.now().timestamp() - age) * 1e9)
+                os.utime(path, ns=(then, then))
+                self.assertEqual(taste.example_file(example, self.settings), path)
+                self.assertEqual(len(self.trims), 1)                 # never made again
+                if refreshed:
+                    self.assertGreater(path.stat().st_mtime_ns, then)
+                else:
+                    self.assertEqual(path.stat().st_mtime_ns, then)
 
     def test_the_published_copy_loses_its_outro(self):
         path = taste.example_file(self.example(clip_local_path="/gone/export.mp4"), self.settings,

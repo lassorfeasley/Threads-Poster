@@ -11,16 +11,26 @@ picture, and so every judge can be told who is on screen (``credits_for``).
 
 Logging costs a dozen model calls for a long source, so:
 
-- Whole-video logs are cached per (video, perceiver, model, prompt version),
-  and a section pass reuses the whole-video log filtered to its window. A
-  reused log's stored cost is reported as ``perceive_cached`` so the bench
-  sees what a run really cost.
+- Whole-video logs are cached per (video, perceiver, model, prompt version,
+  perception settings), and a section pass reuses the whole-video log
+  filtered to its window. The settings are part of the key so a log made at
+  one frame rate, resolution, window size or effort is never reused for a run
+  that asks for another (a bench arm at 2 fps would otherwise measure the
+  1 fps log). A reused log's stored cost is reported as ``perceive_cached``
+  so the bench sees what a run really cost.
 - Long sources are logged in overlapping windows. Each finished window is
   cached the moment it completes, so a restart, or one window that fails,
   never pays for the others again.
 - A window whose answer runs past the output limit (fast-cut news yields
   hundreds of beats) is split in half and retried, two levels deep, instead
-  of failing the whole run.
+  of failing the whole run — unless the answer is far longer than any real
+  log of that stretch, which is a model repeating itself: splitting would
+  only pay for more of it.
+- The caller's ``check`` (cancel, deadline, the run's cost cap) runs before
+  every window and every split, so a run can't spend far past its cap
+  inside this one stage.
+- A window is complete only when its beats cover it: an answer that stops
+  early is kept for this run but never cached, so the hole isn't permanent.
 - Nothing incomplete or empty is ever cached as the whole-video log; a log
   with a failed window is still returned (flagged ``complete: False``) so one
   bad window doesn't throw the run away.
@@ -33,12 +43,13 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import json
 import logging
 import math
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import claude, engine_dir, gemini, media, model_for, opt, prompts, util
 
@@ -59,11 +70,19 @@ _HASH_BRAND = {"name": "{name}", "topic": "{topic}"}
 _PART_OVERLAP = 10.0            # seconds neighbouring windows share
 _MAX_SPLIT_LEVEL = 2            # a truncated window is halved at most twice...
 _MIN_SPLIT_SECONDS = 20.0       # ...and never into halves shorter than this
+# A real log runs well under 150 output tokens per second of video, even for
+# fast-cut news with thinking on; a truncated answer at twice that is a model
+# repeating itself, and its halves would only loop again.
+_LOOP_TOKENS_PER_SECOND = 300.0
+_MIN_COVERAGE = 0.85            # share of its span a window's beats must cover
 _LONG_SOURCE_SECONDS = 1200.0   # past this Gemini samples at long_video_fps
 _PART_WORKERS = 3               # windows logged at once
 _CUT_LEAD = 0.5                 # a cut this close before a beat starts belongs to it
 _CREDIT_PROMINENCE = ("famous", "public_figure", "expert")
-_STRETCH_CHARS = 12000          # transcript text sent with one frames chunk
+_GEMINI_MAX_OUTPUT = 65536      # output tokens (thinking included) for one window
+_CLAUDE_MAX_TOKENS = 32000      # ...for one frames chunk
+_CHUNK_SECONDS = 300.0          # a frames chunk spans at most this, however sparse
+_STRETCH_CHARS = 16000          # transcript text sent with one frames chunk
 
 _SHOT_ALIASES = {
     "aerial_shot": "aerial", "drone": "aerial", "wide": "wide_scene", "establishing": "wide_scene",
@@ -396,6 +415,48 @@ def _prompt_hash(mode: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
 
 
+def perception_settings(perceiver: str, settings=None, seconds: float | None = None) -> dict:
+    """What decides how a perceiver sees a source and how hard it thinks.
+
+    Gemini: the frame rate it samples (``long_video_fps`` past 1200 s, else
+    ``perception_fps``), the media resolution, the thinking level, the window
+    size and the output cap. Claude: the frame spacing, the frame budget, the
+    frame width, frames per call, the effort and output cap, and the longest
+    chunk and transcript a call gets (the spacing actually used follows from
+    these and the source's length). Shot logs are cached per these values
+    (``cache_path``) and record them. ``settings`` None means the defaults;
+    ``seconds`` is the source's length (unknown counts as short)."""
+    s = settings if settings is not None else {}
+    if perceiver == "gemini":
+        if (_positive(seconds) or 0.0) > _LONG_SOURCE_SECONDS:
+            fps = _float_setting(s, "clip_engine.gemini.long_video_fps", 0.5)
+        else:
+            fps = _float_setting(s, "clip_engine.gemini.perception_fps", 1.0)
+        return {
+            "fps": fps,
+            "media_resolution": str(opt(s, "clip_engine.gemini.media_resolution",
+                                        "MEDIA_RESOLUTION_LOW")).strip(),
+            "thinking": str(opt(s, "clip_engine.gemini.perceiver_thinking", "LOW")).strip(),
+            "window_seconds": _float_setting(s, "clip_engine.perception_window_seconds", 300.0),
+            "max_output_tokens": _GEMINI_MAX_OUTPUT,
+        }
+    return {
+        "frame_interval": max(0.25, _float_setting(s, "clip_engine.claude.frame_interval", 2.0)),
+        "max_total_frames": max(1, _int_setting(s, "clip_engine.claude.max_total_frames", 600)),
+        "frame_width": _int_setting(s, "clip_engine.claude.frame_width", 448),
+        "max_frames_per_call": max(1, _int_setting(s, "clip_engine.claude.max_frames_per_call", 150)),
+        "effort": str(opt(s, "clip_engine.claude.perceiver_effort", "low")).strip().lower(),
+        "max_tokens": _CLAUDE_MAX_TOKENS,
+        "chunk_seconds": _CHUNK_SECONDS,
+        "transcript_chars": _STRETCH_CHARS,
+    }
+
+
+def _settings_tag(knobs: dict) -> str:
+    text = json.dumps(knobs, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:6]
+
+
 def normalize_log(raw, *, duration, perceiver, model, cost, offset=0.0) -> dict:
     """A model's answer as a clean ShotLog (spec §3).
 
@@ -541,17 +602,25 @@ def merge_windows(parts: list[tuple[float, dict]]) -> dict:
 
 
 def filter_to_window(log, window) -> dict:
-    """The log restricted to beats and highlights overlapping ``window``
-    (people kept: who appears is context for any section)."""
+    """The log restricted to beats and highlights overlapping ``window``.
+
+    People stay when a beat inside the window names them, or when no beat
+    anywhere does (where they appear is unknown, so they may be here). Someone
+    named only by beats outside the window is left out: with those beats gone,
+    ``credits_for`` would list them as "on screen at some point" in every clip
+    of the section."""
     bounds = _bounds(window)
     if not log or bounds is None:
         return log
     start, end = bounds
     out = dict(log)
-    out["beats"] = [dict(b) for b in log.get("beats") or [] if b["end"] > start and b["start"] < end]
+    every_beat = log.get("beats") or []
+    out["beats"] = [dict(b) for b in every_beat if b["end"] > start and b["start"] < end]
     out["highlights"] = [dict(h) for h in log.get("highlights") or []
                          if h["end"] > start and h["start"] < end]
-    out["people"] = [dict(p) for p in log.get("people") or []]
+    out["people"] = [dict(p) for p in log.get("people") or []
+                     if any(_names(b, p) for b in out["beats"])
+                     or not any(_names(b, p) for b in every_beat)]
     out["window"] = {"start": start, "end": end}
     return out
 
@@ -712,25 +781,34 @@ def _who(person: dict) -> str:
     return f"{text} ({phrase})" if phrase else text
 
 
+def _word_in(phrase: str, text: str, *, case: bool) -> bool:
+    """``phrase`` as whole words in ``text`` ("Lee" is not in "fleeing" or
+    "Leeds"); ``case`` makes the match case-sensitive."""
+    if not phrase or not text:
+        return False
+    pattern = rf"(?<!\w){re.escape(phrase)}(?!\w)"
+    return re.search(pattern, text, 0 if case else re.IGNORECASE) is not None
+
+
 def _names(beat: dict, person: dict) -> bool:
     """Does this beat's speaker or on-screen description name the person?
-    The speaker field may use the surname alone; on_screen (free description)
-    must use the full name or the capitalised surname, so "a burning bush"
-    never credits a Mr Bush."""
-    name = person.get("name", "").strip()
+
+    Whole words only. The speaker field may use the full name or the surname
+    alone, in any case. on_screen (free description) must use the full name
+    (as capitalised when it is one word) or the capitalised surname, so "a
+    burning bush" never credits a Mr Bush or a "Bush", and "protesting" never
+    credits Sting."""
+    name = " ".join(str(person.get("name") or "").split())
     if not name:
         return False
     tokens = name.split()
     surname = tokens[-1] if len(tokens) > 1 and len(tokens[-1]) >= 3 else ""
-    speaker = beat.get("speaker", "") or ""
-    on_screen = beat.get("on_screen", "") or ""
-    if name.lower() in speaker.lower() or name.lower() in on_screen.lower():
+    speaker = " ".join(str(beat.get("speaker") or "").split())
+    on_screen = " ".join(str(beat.get("on_screen") or "").split())
+    if _word_in(name, speaker, case=False) or _word_in(name, on_screen, case=len(tokens) == 1):
         return True
     if surname:
-        if re.search(rf"\b{re.escape(surname.lower())}\b", speaker.lower()):
-            return True
-        if re.search(rf"\b{re.escape(surname)}\b", on_screen):
-            return True
+        return _word_in(surname, speaker, case=False) or _word_in(surname, on_screen, case=True)
     return False
 
 
@@ -805,13 +883,24 @@ def credits_for(log, segments) -> str:
 
 # ---- caching ------------------------------------------------------------------------------
 
-def cache_path(video_id, perceiver, model, *, part: tuple[float, float] | None = None) -> Path:
-    """engine_dir()/shotlogs/<video_id>__<perceiver>__<model>__v2__<prompt_hash>[__p<start>-<end>].json"""
+def _cache_file(video_id, perceiver, model, knobs: dict, *,
+                part: tuple[float, float] | None = None) -> Path:
     name = (f"{_safe(video_id)}__{_safe(perceiver)}__{_safe(model)}__v{VERSION}__"
-            f"{prompt_hash(_mode(perceiver))}")
+            f"{prompt_hash(_mode(perceiver))}__s{_settings_tag(knobs)}")
     if part is not None:
         name += f"__p{_num_tag(part[0])}-{_num_tag(part[1])}"
     return engine_dir() / "shotlogs" / f"{name}.json"
+
+
+def cache_path(video_id, perceiver, model, *, part: tuple[float, float] | None = None,
+               settings=None, seconds: float | None = None) -> Path:
+    """engine_dir()/shotlogs/<video_id>__<perceiver>__<model>__v2__<prompt_hash>__s<settings>[__p<start>-<end>].json
+
+    ``<settings>`` fingerprints ``perception_settings(perceiver, settings,
+    seconds)``: pass the run's settings and the source's length to find the
+    log a run with them would use (``settings`` None = the defaults)."""
+    return _cache_file(video_id, perceiver, model,
+                       perception_settings(perceiver, settings, seconds), part=part)
 
 
 def _usable(data: Any) -> bool:
@@ -827,9 +916,12 @@ def _read_usable(path: Path) -> dict | None:
     return data
 
 
-def load_cached(video_id, perceiver, model) -> dict | None:
-    """The cached whole-video log, only when it is complete and non-empty."""
-    return _read_usable(cache_path(video_id, perceiver, model))
+def load_cached(video_id, perceiver, model, *, settings=None,
+                seconds: float | None = None) -> dict | None:
+    """The cached whole-video log made with these perception settings (see
+    ``cache_path``), only when it is complete and non-empty."""
+    return _read_usable(cache_path(video_id, perceiver, model, settings=settings,
+                                   seconds=seconds))
 
 
 # ---- building -----------------------------------------------------------------------------
@@ -851,10 +943,17 @@ def _spans(lo: float, hi: float, size: float, overlap: float) -> list[tuple[floa
     return spans
 
 
-def _chunks(lo: float, hi: float, interval: float, per_call: int) -> list[tuple[float, float]]:
-    """Back-to-back stretches of at most ``per_call`` frames at ``interval``."""
+def _chunks(lo: float, hi: float, interval: float, per_call: int,
+            max_seconds: float | None = None) -> list[tuple[float, float]]:
+    """Back-to-back stretches of at most ``per_call`` frames at ``interval``
+    and at most ``max_seconds`` long. Without the length cap a sparsely
+    sampled hour would go in quarters: more speech than one call's transcript
+    holds, and more beats than one answer."""
     frames = max(1, math.ceil((hi - lo) / interval - 1e-9))
     count = math.ceil(frames / per_call)
+    if max_seconds and max_seconds > 0:
+        count = max(count, math.ceil((hi - lo) / max_seconds - 1e-9))
+    count = max(1, min(count, frames))
     length = math.ceil(frames / count) * interval
     spans = []
     for i in range(count):
@@ -893,17 +992,42 @@ def _speech_entries(words, transcript) -> list[dict]:
 
 
 def _stretch(entries: list[dict], start: float, end: float) -> str:
-    lines, used = [], 0
-    for entry in entries:
-        if entry["end"] <= start or entry["start"] >= end:
-            continue
-        line = f"[{entry['start']:.1f}] {entry['text']}"
-        used += len(line) + 1
-        if used > _STRETCH_CHARS:
-            lines.append("[…]")
-            break
-        lines.append(line)
+    """The speech in [start, end] as "[t] text" lines, every line kept: past
+    ``_STRETCH_CHARS`` the longest lines are shortened alike rather than the
+    end of the stretch dropped (a chunk with no words at its end gets beats
+    with no speaker or line, and so no credits)."""
+    lines = [f"[{e['start']:.1f}] {e['text']}" for e in entries
+             if e["end"] > start and e["start"] < end]
+    if sum(len(line) + 1 for line in lines) > _STRETCH_CHARS:
+        share = max(24, _STRETCH_CHARS // len(lines) - 1)
+        lines = [_trim(line, share) for line in lines]
     return "\n".join(lines)
+
+
+def _coverage(beats: list[dict], start: float, stop: float, *, slack: float = 0.0) -> float:
+    """The share of [start, stop] the beats cover (0-1). The last ``slack``
+    seconds needn't be: no frame was sampled after the final one."""
+    need = (stop - start) - min(max(0.0, slack), (stop - start) / 4)
+    if need <= 0:
+        return 1.0
+    covered, reach = 0.0, start
+    for beat in sorted(beats, key=lambda b: b["start"]):
+        lo, hi = max(beat["start"], reach), min(beat["end"], stop)
+        if hi > lo:
+            covered += hi - lo
+            reach = hi
+    return min(1.0, covered / need)
+
+
+def _looping(usage: Any, start: float, end: float) -> bool:
+    """Did an answer that hit the output limit run far past what any real log
+    of [start, end] needs? Then the model was repeating itself, not logging
+    a dense stretch."""
+    try:
+        tokens = float((usage or {}).get("output_tokens") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return tokens >= _LOOP_TOKENS_PER_SECOND * max(1.0, end - start)
 
 
 def _answered_in_source_time(raw: Any, start: float, end: float) -> bool:
@@ -923,18 +1047,20 @@ def _answered_in_source_time(raw: Any, start: float, end: float) -> bool:
 class _Runner:
     """Logs a span part by part: cached parts are reused, finished parts are
     cached at once, truncated parts are split, failed parts become an
-    incomplete placeholder (only media failures and an open quota breaker
-    stop the whole log). Subclasses supply ``spans`` and ``call``."""
+    incomplete placeholder (only media failures, an open quota breaker and
+    the caller's ``check`` stop the whole log). Subclasses supply ``spans``
+    and ``call``."""
 
     perceiver = ""
     split_errors: tuple = ()
     fatal_errors: tuple = ()
 
-    def __init__(self, *, video_id, source, settings, brand, title, description, seconds,
-                 meter, force, model) -> None:
-        self.video_id, self.source, self.settings = video_id, source, settings
+    def __init__(self, *, video_id, source, knobs, brand, title, description, seconds,
+                 meter, force, model, check=None, cancel=None) -> None:
+        self.video_id, self.source, self.knobs = video_id, source, dict(knobs)
         self.brand, self.title, self.description = brand or {}, title or "", description or ""
         self.seconds, self.meter, self.force, self.model = seconds, meter, force, model
+        self.check, self.cancel = check, cancel
         self._lock = threading.Lock()
 
     # -- provider-specific --
@@ -943,6 +1069,10 @@ class _Runner:
 
     def call(self, start: float, end: float, index: int, count: int) -> tuple[dict, dict, float]:
         raise NotImplementedError  # pragma: no cover
+
+    def step(self) -> float:
+        """Seconds between sampled frames: a log may stop this short of a span's end."""
+        return 0.0
 
     def done_with(self, start: float, end: float) -> None:
         """This span's work is finished (cached, or split into halves)."""
@@ -957,7 +1087,7 @@ class _Runner:
         try:
             results = util.parallel_map(
                 lambda job: self.part(job[1][0], job[1][1], index=job[0] + 1, count=count, level=0),
-                list(enumerate(spans)), workers=min(_PART_WORKERS, count),
+                list(enumerate(spans)), workers=min(_PART_WORKERS, count), cancel=self.cancel,
                 name="clip-engine-perceive")
         finally:
             self.finish()
@@ -979,7 +1109,8 @@ class _Runner:
                 "highlights": [], "span": [start, end], "error": error[:300]}
 
     def _path(self, start: float, end: float) -> Path:
-        return cache_path(self.video_id, self.perceiver, self.model, part=(start, end))
+        return _cache_file(self.video_id, self.perceiver, self.model, self.knobs,
+                           part=(start, end))
 
     def _was_split(self, start: float, end: float) -> bool:
         return any(self._path(*half).is_file() for half in _halves(start, end))
@@ -991,6 +1122,12 @@ class _Runner:
         return out
 
     def part(self, start: float, end: float, *, index: int, count: int, level: int):
+        # Before anything is spent on this span — a window, or a half of one
+        # that was split: a cancelled run, a passed deadline or a run past its
+        # cost cap stops here. Raised outside the try below, so it ends the
+        # log instead of becoming a failed placeholder.
+        if self.check is not None:
+            self.check()
         path = self._path(start, end)
         if not self.force:
             cached = _read_usable(path)
@@ -1006,7 +1143,13 @@ class _Runner:
         except self.fatal_errors:
             raise
         except self.split_errors as exc:
-            _add_usage(self.meter, "perceive", getattr(exc, "usage", None))
+            spent = getattr(exc, "usage", None)
+            _add_usage(self.meter, "perceive", spent)
+            if _looping(spent, start, end):
+                log.warning("shot log %s %.1f-%.1fs: %s output tokens for %.0f s of video; the "
+                            "model is repeating itself, so it isn't split", self.video_id, start,
+                            end, (spent or {}).get("output_tokens"), end - start)
+                return [(start, self._failed(start, end, f"answer too long (looping): {exc}"))]
             if level < _MAX_SPLIT_LEVEL and end - start >= 2 * _MIN_SPLIT_SECONDS:
                 log.info("shot log %s %.1f-%.1fs ran past the output limit; splitting it",
                          self.video_id, start, end)
@@ -1024,10 +1167,21 @@ class _Runner:
                              model=self.model, cost=(usage or {}).get("cost_usd", 0.0),
                              offset=offset)
         part["span"] = [start, end]
+        part["perceiver_settings"] = dict(self.knobs)
+        if part["complete"]:
+            # An answer that stops early (finishReason STOP after a few
+            # minutes) is used for this run but not cached: cached, the hole
+            # would be reused by every later run, unflagged.
+            stop = min(end, self.seconds)
+            covered = _coverage(part["beats"], start, stop, slack=self.step())
+            if covered < _MIN_COVERAGE:
+                part["complete"] = False
+                part["error"] = f"the model logged only {covered:.0%} of {start:g}-{stop:g}s"
+                log.warning("shot log %s: %s; not caching it", self.video_id, part["error"])
         if part["complete"]:
             util.atomic_write_json(path, part)
             self.done_with(start, end)
-        else:
+        elif not part.get("error"):
             part["error"] = "the model logged no beats"
         return [(start, part)]
 
@@ -1039,20 +1193,19 @@ class _GeminiRunner(_Runner):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        s = self.settings
-        if self.seconds > _LONG_SOURCE_SECONDS:
-            self.fps = _float_setting(s, "clip_engine.gemini.long_video_fps", 0.5)
-        else:
-            self.fps = _float_setting(s, "clip_engine.gemini.perception_fps", 1.0)
-        self.thinking = opt(s, "clip_engine.gemini.perceiver_thinking", "LOW")
-        self.media_resolution = opt(s, "clip_engine.gemini.media_resolution", "MEDIA_RESOLUTION_LOW")
-        self.window = _float_setting(s, "clip_engine.perception_window_seconds", 300.0)
+        k = self.knobs      # perception_settings("gemini", ...): the fps for this length
+        self.fps, self.thinking = k["fps"], k["thinking"]
+        self.media_resolution, self.window = k["media_resolution"], k["window_seconds"]
+        self.max_output_tokens = k["max_output_tokens"]
         self.system = prompts.perceiver_system(self.brand, mode="video")
         self._window_uploads: dict[tuple[float, float], tuple[list[str], Path]] = {}
         self._finished: list[tuple[list[str], Path]] = []
 
     def spans(self, lo, hi):
         return _spans(lo, hi, self.window, _PART_OVERLAP)
+
+    def step(self):
+        return 1.0 / self.fps if self.fps > 0 else 0.0
 
     def _whole(self, start: float, end: float) -> bool:
         return start <= 0.05 and end >= self.seconds - 0.05
@@ -1075,8 +1228,8 @@ class _GeminiRunner(_Runner):
         data, usage = gemini.generate_json(
             self.model, system=self.system, parts=list(video) + [gemini.text_part(user)],
             schema=SCHEMA, thinking=self.thinking, media_resolution=self.media_resolution,
-            max_output_tokens=65536, label=f"perceive {self.video_id} {start:g}-{end:g}s",
-            bucket=_bucket(self.meter))
+            max_output_tokens=self.max_output_tokens,
+            label=f"perceive {self.video_id} {start:g}-{end:g}s", bucket=_bucket(self.meter))
         offset = 0.0 if whole else start
         if not whole and _answered_in_source_time(data, start, end):
             log.warning("shot log %s %.1f-%.1fs came back in source time; not offsetting it",
@@ -1116,21 +1269,23 @@ class _ClaudeRunner(_Runner):
 
     def __init__(self, *, words, transcript, **kwargs) -> None:
         super().__init__(**kwargs)
-        s = self.settings
-        self.frame_interval = max(0.25, _float_setting(s, "clip_engine.claude.frame_interval", 2.0))
-        self.max_total = max(1, _int_setting(s, "clip_engine.claude.max_total_frames", 600))
-        self.width = _int_setting(s, "clip_engine.claude.frame_width", 448)
-        self.per_call = max(1, _int_setting(s, "clip_engine.claude.max_frames_per_call", 150))
-        self.effort = opt(s, "clip_engine.claude.perceiver_effort", "low")
+        k = self.knobs      # perception_settings("claude", ...)
+        self.frame_interval, self.max_total = k["frame_interval"], k["max_total_frames"]
+        self.width, self.per_call = k["frame_width"], k["max_frames_per_call"]
+        self.effort, self.max_tokens = k["effort"], k["max_tokens"]
         self.entries = _speech_entries(words, transcript)
         self.interval = self.frame_interval
         self.system = prompts.perceiver_system(self.brand, mode="frames", frame_interval=self.interval)
 
     def spans(self, lo, hi):
-        # Long sources are sampled more sparsely to stay under max_total_frames.
+        # Long sources are sampled more sparsely to stay under max_total_frames,
+        # but still go in chunks of at most chunk_seconds.
         self.interval = max(self.frame_interval, (hi - lo) / self.max_total)
         self.system = prompts.perceiver_system(self.brand, mode="frames", frame_interval=self.interval)
-        return _chunks(lo, hi, self.interval, self.per_call)
+        return _chunks(lo, hi, self.interval, self.per_call, self.knobs["chunk_seconds"])
+
+    def step(self):
+        return self.interval
 
     def call(self, start, end, index, count):
         frames = media.sample_frames(self.source, start=start, end=end, interval=self.interval,
@@ -1145,7 +1300,7 @@ class _ClaudeRunner(_Runner):
         content = [claude.text_block(text)] + list(claude.frames_blocks(frames))
         data, usage = claude.json_call(
             self.model, system=self.system, content=content, schema=SCHEMA, effort=self.effort,
-            max_tokens=32000, label=f"perceive {self.video_id} {start:g}-{end:g}s",
+            max_tokens=self.max_tokens, label=f"perceive {self.video_id} {start:g}-{end:g}s",
             bucket=_bucket(self.meter))
         return data, usage, 0.0   # frame labels are already on the source clock
 
@@ -1160,41 +1315,51 @@ def _source_seconds(duration, source) -> float:
 
 
 def build(*, video_id, source, perceiver, settings, brand, title, description, duration,
-          words, transcript, window=None, meter=None, force=False) -> dict:
+          words, transcript, window=None, meter=None, force=False,
+          check: Callable[[], None] | None = None,
+          cancel: threading.Event | None = None) -> dict:
     """The shot log for ``source`` (or just ``window`` of it).
 
-    A cached whole-video log is reused (filtered to ``window`` when given) and
-    its stored cost reported as ``perceive_cached``. Otherwise the span is
-    logged part by part; a window-only log is built only when no whole-video
-    log exists, and only a complete whole-video log is cached. Raises
-    ``ShotLogError`` (or a media / quota error) when nothing could be logged."""
+    A cached whole-video log made with the same perception settings is
+    reused (filtered to ``window`` when given) and its stored cost reported
+    as ``perceive_cached``. Otherwise the span is logged part by part; a
+    window-only log is built only when no whole-video log exists, and only a
+    complete whole-video log is cached. ``check`` runs before every part and
+    every split (the engine's cancel / deadline / cost-cap checkpoint): what it
+    raises ends the log and propagates. ``cancel`` stops parts not yet
+    started. Raises ``ShotLogError`` (or a media / quota error) when nothing
+    could be logged."""
     if perceiver not in ("gemini", "claude"):
         raise ShotLogError(f"unknown perceiver {perceiver!r}")
     model = model_for(settings, perceiver, "perceiver")
     bounds = _bounds(window)
+    seconds = _source_seconds(duration, source)
+    knobs = perception_settings(perceiver, settings, seconds)
+    whole_path = _cache_file(video_id, perceiver, model, knobs)
     if not force:
-        whole = load_cached(video_id, perceiver, model)
+        whole = _read_usable(whole_path)
         if whole is not None:
             _add_cached(meter, whole)
             log.info("shot log for %s: reusing the %s/%s log (%d beats)", video_id, perceiver,
                      model, len(whole["beats"]))
             return filter_to_window(whole, window) if bounds else whole
-    seconds = _source_seconds(duration, source)
     lo, hi = (0.0, seconds) if bounds is None else (max(0.0, bounds[0]), min(seconds, bounds[1]))
     if hi - lo < 1.0:
         raise ShotLogError(f"nothing to log between {lo:g}s and {hi:g}s")
-    common = dict(video_id=video_id, source=source, settings=settings, brand=brand, title=title,
-                  description=description, seconds=seconds, meter=meter, force=force, model=model)
+    common = dict(video_id=video_id, source=source, knobs=knobs, brand=brand, title=title,
+                  description=description, seconds=seconds, meter=meter, force=force, model=model,
+                  check=check, cancel=cancel)
     if perceiver == "gemini":
         runner: _Runner = _GeminiRunner(**common)
     else:
         runner = _ClaudeRunner(words=words, transcript=transcript, **common)
     merged = merge_windows(runner.run(lo, hi))
     merged["source_seconds"] = round(seconds, 2)
+    merged["perceiver_settings"] = dict(knobs)
     if bounds is not None:
         merged["window"] = {"start": lo, "end": hi}
     elif merged["complete"] and merged["beats"]:
-        util.atomic_write_json(cache_path(video_id, perceiver, model), merged)
+        util.atomic_write_json(whole_path, merged)
     else:
         log.warning("shot log for %s is incomplete; the whole-video log is not cached", video_id)
     log.info("shot log for %s (%s/%s): %d beats, %d people, complete=%s", video_id, perceiver,

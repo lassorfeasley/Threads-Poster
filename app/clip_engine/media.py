@@ -16,9 +16,11 @@ different and its failure modes are worse:
 - Proxies, renders and shot maps are cached by the source file's identity
   (path, size, mtime). The dashboard and a ``run.py clipbench`` process share
   these directories, so every write goes to a tmp name unique to the process
-  and thread and is renamed into place, cache hits refresh the mtime (``prune``
-  is age-based), and an error or an empty result is never cached — a cached
-  failure would quietly disable snapping for that video forever.
+  and thread and is renamed into place, a cache hit refreshes the mtime once
+  it is two days old (``prune`` is age-based; Gemini's upload cache is keyed
+  on the mtime, so it can't move on every hit), and an error or an empty
+  result is never cached — a cached failure would quietly disable snapping
+  for that video forever.
 - Shot maps are the engine's exact clock: scdet scene-change scores for every
   frame, and 50 ms RMS windows for pauses. A pause is measured RELATIVE to the
   source's own median loudness, because broadcast audio has no fixed silence
@@ -67,6 +69,11 @@ _QUIET_MIN_SECONDS = 0.15
 # No engine run holds a source pin (or writes a tmp file) for a day; anything
 # older is a leftover of a crash.
 _STALE_SECONDS = 86400.0
+# A cache hit refreshes the file's mtime (``prune`` goes by age, 14 days by
+# default) only once it is this old. ``gemini.upload_file`` keys its upload
+# cache on the mtime and reuses an upload for 46 h: a refresh on every hit
+# sent the same proxy, render or taste clip to Gemini again on every run.
+_REFRESH_AFTER_SECONDS = 2 * 86400.0
 
 _ENCODE_VIDEO = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
 _FASTSTART = ["-movflags", "+faststart"]
@@ -207,16 +214,21 @@ def _tmp_for(dest: Path) -> Path:
     return dest.with_name(f".{dest.stem}.{os.getpid()}.{threading.get_ident()}.tmp{dest.suffix}")
 
 
-def _reuse(dest: Path) -> bool:
-    """A cached file is reusable when it exists and isn't empty; reuse refreshes
-    its mtime so ``prune`` keeps what's still being used."""
+def reuse_cached(path) -> bool:
+    """Whether a cached file under ``engine_dir()`` can be reused: it exists
+    and isn't empty. Reuse keeps it from ``prune`` by refreshing its mtime,
+    but only once that is two days old — the mtime is part of the key of
+    Gemini's upload cache, so refreshing it on every hit would upload the
+    same file again every run."""
     try:
-        if dest.stat().st_size > 0:
-            util.touch(dest)
-            return True
+        st = Path(path).stat()
     except OSError:
-        pass
-    return False
+        return False
+    if st.st_size <= 0:
+        return False
+    if time.time() - st.st_mtime > _REFRESH_AFTER_SECONDS:
+        util.touch(path)
+    return True
 
 
 def _encode(args: list[str], dest: Path, *, timeout: float, what: str) -> Path:
@@ -301,7 +313,7 @@ def perception_proxy(source, *, height: int = 360, fps: int = 10,
             f"{'end' if hi is None else _num(hi, 2)}-v{VERSION}.mp4")
     dest = engine_dir() / "proxies" / name
     with _lock_for(dest):
-        if _reuse(dest):
+        if reuse_cached(dest):
             return dest
         span = (hi - lo) if hi is not None else probe_duration(src)
         seek = ["-ss", f"{lo:.3f}"] if lo > 0 else []
@@ -411,7 +423,7 @@ def render_cached(source, segments, *, height: int = 360, kind: str = "draft") -
     digest = util.sha1(file_key(src), json.dumps(segs), h, VERSION, n=20)
     dest = engine_dir() / "renders" / f"{_safe_name(kind, 'draft')}-{digest}.mp4"
     with _lock_for(dest):
-        if _reuse(dest):
+        if reuse_cached(dest):
             return dest
         render_segments(src, segs, dest, height=h)
     return dest
@@ -877,6 +889,26 @@ def release_inflight(path) -> None:
         log.warning("Couldn't release %s: %s", path, exc)
 
 
+# ``_tmp_for`` names: .<stem>.<pid>.<thread id>.tmp<ext>
+_TMP_MAKER = re.compile(r"\.(\d+)\.\d+\.tmp(?:\.[^.]*)?$")
+
+
+def _abandoned_tmp(path: Path, now: float) -> bool:
+    """Whether a tmp file in the inflight directory is a crash's leftover.
+
+    ``link_inflight`` makes its tmp OUTSIDE the lock, as a hard link or a
+    ``copy2`` copy of the source, so the tmp carries the source's mtime —
+    often weeks old — and a prune landing before the rename would take it
+    for an old leftover. So age goes by the later of mtime and ctime (making
+    a link, writing a copy and copy2's utime all set ctime), and a tmp whose
+    maker, the pid in its name, is still running stays regardless."""
+    st = path.stat()
+    if now - max(st.st_mtime, st.st_ctime) <= _STALE_SECONDS:
+        return False
+    match = _TMP_MAKER.search(path.name)
+    return match is None or not _pid_alive(int(match.group(1)))
+
+
 def _prune_inflight(now: float) -> int:
     removed = 0
     directory = _inflight_dir()
@@ -896,7 +928,7 @@ def _prune_inflight(now: float) -> int:
                 continue
         for leftover in directory.glob(".*.tmp*"):
             with contextlib.suppress(OSError):
-                if now - leftover.stat().st_mtime > _STALE_SECONDS:
+                if _abandoned_tmp(leftover, now):
                     leftover.unlink()
                     removed += 1
         # Markers whose pin is already gone (a crash between unlinks).
@@ -933,10 +965,11 @@ def drop(paths) -> None:
 
 
 def prune(max_age_days: int = 14) -> int:
-    """Delete cached proxies, renders, shot maps and taste clips not used in
-    ``max_age_days`` (reuse refreshes a file's mtime), abandoned tmp files,
-    and in-flight pins no live run holds that are over a day old. Returns how
-    many files went. Never raises."""
+    """Delete cached proxies, renders, shot maps and taste clips whose mtime
+    is over ``max_age_days`` old (reuse refreshes it only once it is two days
+    old, so a file unused for ``max_age_days`` - 2 days may go), abandoned
+    tmp files, and in-flight pins no live run holds that are over a day old.
+    Returns how many files went. Never raises."""
     now = time.time()
     try:
         days = max(0.0, float(max_age_days))

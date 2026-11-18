@@ -159,7 +159,10 @@
     </div>
 
     {% if not item.solo %}
-    <label class="cb-recognised"><input type="checkbox" id="cb-recognised"> I recognised one of these as mine <kbd>M</kbd></label>
+    {# autocomplete="off": saving reloads the page for the next item, and a
+       browser that restores form state across a reload (Firefox) would carry
+       this tick onto it. #}
+    <label class="cb-recognised"><input type="checkbox" id="cb-recognised" autocomplete="off"> I recognised one of these as mine <kbd>M</kbd></label>
     {% endif %}
     <p class="meta cb-keys">Choose with the buttons or keys, then save — a reason is optional and saves on its own.</p>
   </section>
@@ -193,6 +196,9 @@
     const reasonQ = document.getElementById('cb-reason-q');
     const confirmRow = document.getElementById('cb-confirm');
     const recognised = document.getElementById('cb-recognised');
+    // Every item starts unticked, whatever the browser restored: a tick left
+    // over from the last item would be saved as this one's.
+    if (recognised) recognised.checked = false;
     const choiceKeys = solo ? ['yes', 'no'] : ['a', 'b', 'tie', 'neither'];
     const reasonKeys = Array.from(box.querySelectorAll('.cb-reason-pill')).map(b => b.dataset.reason);
     // Choices with no losing clip: nothing to give a reason for.

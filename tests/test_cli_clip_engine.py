@@ -486,8 +486,8 @@ class ShotlogCommandTest(CliTestCase):
         self.start(mock.patch.object(clip_engine, "brand", return_value={}))
         self.load_cached = self.start(mock.patch.object(shotlog, "load_cached", return_value=None))
         self.build = self.start(mock.patch.object(shotlog, "build", return_value=dict(self.LOG)))
-        self.start(mock.patch.object(shotlog, "cache_path",
-                                     return_value=self.engine_dir / "shotlogs" / "x.json"))
+        self.shotlog_path = self.start(mock.patch.object(
+            shotlog, "cache_path", return_value=self.engine_dir / "shotlogs" / "x.json"))
         self.ensure = self.start(mock.patch("app.offload.ensure_local",
                                             side_effect=lambda local, key: Path(local)))
         self.start(mock.patch.object(media, "link_inflight", side_effect=lambda src, key: src))
@@ -517,6 +517,26 @@ class ShotlogCommandTest(CliTestCase):
         self.assertEqual(kw["words"], [{"word": "planet", "start": 0.4, "end": 0.9}])
         self.release.assert_called_once()
         self.assertIn("Shot log vidShot0001", out)
+
+    def test_the_cache_is_looked_up_with_this_runs_perception_settings(self):
+        """Shot logs are keyed by perception settings, which depend on the
+        source's length too: looked up without them, a long source's log is
+        missed (the provider key demanded for nothing) and the wrong path printed."""
+        self.load_cached.return_value = dict(self.LOG)
+        self.cli(["clip-engine", "shotlog", str(self.pk)])
+        kw = self.load_cached.call_args.kwargs
+        self.assertIs(kw["settings"], self.settings)
+        self.assertEqual(kw["seconds"], 456.0)
+        self.assertEqual(self.shotlog_path.call_args.kwargs,
+                         {"settings": self.settings, "seconds": 456.0})
+        # After a build, the path printed is the one build() wrote: with the
+        # length it logged (probed when the row has none).
+        self.load_cached.return_value = None
+        self.shotlog_path.reset_mock()
+        self.cli(["clip-engine", "shotlog", str(self.pk), "--force"])
+        self.assertEqual(self.build.call_args.kwargs["duration"], 456.0)
+        self.assertEqual(self.shotlog_path.call_args.kwargs,
+                         {"settings": self.settings, "seconds": 60.0})
 
     def test_force_skips_the_cache(self):
         self.load_cached.return_value = dict(self.LOG)
@@ -616,15 +636,39 @@ class BenchCommandTest(CliTestCase):
         self.assertLess(names.index("set_bucket"), names.index("run"))
         args, kw = self.bench_run.call_args
         self.assertEqual(args, ("t1",))
-        self.assertEqual(kw, dict(arms=["gemini", "transcript"], limit=7, max_usd=12.5,
+        # Flags left out go through as None: bench.run applies clip_engine.bench.*
+        # to a new run and keeps a resumed run's own arms and cap.
+        self.assertEqual(kw, dict(arms=None, limit=None, max_usd=None,
                                   seed="test", workers=1, candidate_ids=None, require_words=True,
                                   negatives=0, new_version=False, keep_errors=False,
                                   settings=self.settings, log=run._say))
         self.assertEqual([c.args for c in self.parse_arm.call_args_list],
                          [("gemini",), ("transcript",)])
         self.init_db.assert_called_once()
+        self.assertIn("arms gemini, transcript · up to 7 videos · seed test · "
+                      "stops once results pass $12.50", out)
         self.assertIn("videos: 7", out)
         self.assertIn("clipbench pairs --name t1", out)
+
+    def test_a_resume_leaves_the_runs_arms_and_cap_to_the_run(self):
+        self.settings = Settings(raw={"clip_engine": {"bench": {
+            "arms": ["gemini", "transcript"], "limit": 7, "max_usd": 40}}})
+        run_dir = self.bench_dir / "t1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.json").write_text(json.dumps(
+            {"name": "t1", "arms": ["gemini+editor_thinking=HIGH", "transcript"], "max_usd": 10.0}))
+        out, code = self.cli(["clipbench", "run", "--name", "t1"])
+        self.assertIsNone(code)
+        kw = self.bench_run.call_args.kwargs
+        self.assertEqual((kw["arms"], kw["limit"], kw["max_usd"]), (None, None, None))
+        self.parse_arm.assert_not_called()   # the settings' arms aren't this run's
+        self.assertIn("Resuming bench run 't1'", out)
+        self.assertNotIn("$40.00", out)
+        # Flags given on a resume still go through, checked first.
+        self.cli(["clipbench", "run", "--name", "t1", "--arms", "claude", "--max-usd", "15"])
+        kw = self.bench_run.call_args.kwargs
+        self.assertEqual((kw["arms"], kw["max_usd"]), (["claude"], 15.0))
+        self.assertEqual([c.args for c in self.parse_arm.call_args_list], [("claude",)])
 
     def test_run_flags_override_and_candidates_resolve_to_pks(self):
         a = self.add_candidate("vidAAAAAAAA")

@@ -9,6 +9,7 @@ Run with:  DATABASE_URL="sqlite://" python -m unittest tests.test_clip_engine_sn
 from __future__ import annotations
 
 import copy
+import random
 import unittest
 
 from app.clip_engine import snap
@@ -123,6 +124,45 @@ CASES = [
     dict(name="touching words: start on the first word itself",
          segments=[S(10.0, 20)], words=W((9.0, 10.0), (10.0, 10.4)), cuts=[],
          expected=[(10.0, 20.0)]),
+
+    # ---- times rounded to a tenth of a second ---------------------------------
+    # Transcript entries and the shot log show times to 0.1 s, so an edge the
+    # editor copies arrives up to 0.05 s off, often inside the next word over.
+    # Words below are from a real Whisper stream (A7MqyQ1TLXw).
+    dict(name="rounded start: 'While' (226.64) copied as 226.6 doesn't open on 'fuels.'",
+         # 226.6 is inside fuels. (225.98-226.64) but 0.62 s from its start and
+         # 0.04 s from While's: While was meant; the words touch, so 226.64
+         segments=[S(226.6, 230)],
+         words=W((225.5, 225.98), (225.98, 226.64), (226.64, 227.16), (227.16, 227.5)),
+         cuts=[], expected=[(226.64, 230.0)]),
+    dict(name="rounded start mid-sentence: 'precedent' (6.05) as 6.0 doesn't open on 'a'",
+         segments=[S(6.0, 20)], words=W((5.4, 5.87), (5.87, 6.05), (6.05, 6.61)),
+         cuts=[], expected=[(6.05, 20.0)]),
+    dict(name="rounded start with a short gap: opens in the gap, not on the word before",
+         # 9.9 is inside (9.5, 9.93), 0.04 s from 9.94: min(max(9.86, 9.95), 9.94)
+         segments=[S(9.9, 20)], words=W((9.5, 9.93), (9.94, 10.4)), cuts=[],
+         expected=[(9.94, 20.0)]),
+    dict(name="rounded end: 'temperatures.' (147.65) copied as 147.7 doesn't run into 'It's'",
+         # 147.7 is inside It's (147.65-148.09), 0.05 s past where temperatures. ends:
+         # the end goes back to 147.65 and the next-word cap makes it 147.63
+         segments=[S(140, 147.7)],
+         words=W((146.5, 147.07), (147.07, 147.65), (147.65, 148.09), (148.09, 148.5)),
+         cuts=[], expected=[(140.0, 147.63)]),
+    dict(name="rounded end mid-sentence: 'climate' (10.59) as 10.6 doesn't run into 'change.'",
+         segments=[S(0, 10.6)], words=W((9.9, 10.31), (10.31, 10.59), (10.59, 11.03)),
+         cuts=[], expected=[(0.0, 10.57)]),
+    dict(name="a start in the first 0.05 s of a short word keeps that word",
+         # 5.95 is 0.05 s from both edges of (5.9, 5.98): either could be meant,
+         # and dropping a word is worse than keeping a short one
+         segments=[S(5.95, 20)], words=W((5.0, 5.9), (5.9, 5.98), (5.98, 6.5)), cuts=[],
+         expected=[(5.9, 20.0)]),
+    dict(name="a start late in a word with a pause after it still backs up to it",
+         segments=[S(10.57, 20)], words=W((10.0, 10.6), (11.0, 11.4)), cuts=[],
+         expected=[(9.92, 20.0)]),
+    dict(name="an end in the last 0.05 s of a short word keeps that word",
+         # 5.55 is 0.05 s from 5.5 but also 0.03 s from 5.58: the word stays
+         segments=[S(0, 5.55)], words=W((5.0, 5.5), (5.5, 5.58), (5.7, 6.5)), cuts=[],
+         expected=[(0.0, 5.68)]),
 
     # ---- head flash guard -----------------------------------------------------
     dict(name="a flash shot at the head is skipped",
@@ -277,6 +317,59 @@ class SnapContractTest(unittest.TestCase):
         out = snap.snap_segments([S(10.0, 20)], words=words, cuts=[], quiet=[[5, "y"], None],
                                  floor=0, horizon=100)
         self.assertEqual((out[0]["start"], out[0]["end"]), (10.42, 20.0))
+
+
+class RoundedTimesTest(unittest.TestCase):
+    """The editor copies its times off transcript entries and the shot log,
+    which show them to a tenth of a second. Whisper's words mostly touch, so
+    an edge rounded by up to 0.05 s often lands inside the neighbouring word.
+    Snapping must still put each boundary on the edge that was meant: never
+    a word from outside the stretch the times stand for, never one of its
+    own words dropped."""
+
+    def stream(self, seed: int, count: int = 800) -> list[dict]:
+        """Whisper-like words (2 dp, each longer than 0.1 s, so a rounded
+        edge can only have meant one of its neighbours): mostly touching,
+        some short gaps, some pauses."""
+        rng = random.Random(seed)
+        words, t = [], 1.0
+        for i in range(count):
+            start = round(t + rng.choice([0.0, 0.0, 0.0, 0.0, 0.01, 0.03, 0.2, 0.9]), 2)
+            end = round(start + rng.uniform(0.12, 0.7), 2)
+            words.append({"word": f"w{i}", "start": start, "end": end})
+            t = end
+        return words
+
+    def test_rounded_entry_times_snap_to_the_edges_they_stand_for(self):
+        for seed in (1, 2, 3):
+            words = self.stream(seed)
+            rng = random.Random(seed)
+            # Clause-sized entries (1-12 words), as the editor is shown them.
+            bounds, i = [], 0
+            while i < len(words):
+                n = rng.randint(1, 12)
+                bounds.append((i, min(i + n, len(words)) - 1))
+                i += n
+            # Every stretch of two neighbouring entries, cut at their shown
+            # times (the ones too short to keep are skipped).
+            for (first, _), (_, last) in zip(bounds, bounds[1:]):
+                a = round(words[first]["start"], 1)
+                b = round(words[last]["end"], 1)
+                if b - a < 1.5:
+                    continue
+                with self.subTest(seed=seed, start=a, end=b):
+                    out = snap.snap_segments([S(a, b)], words=words, cuts=[], quiet=[],
+                                             floor=0.0, horizon=None)
+                    self.assertEqual(len(out), 1)
+                    start, end = out[0]["start"], out[0]["end"]
+                    if first > 0:   # nothing of the word before
+                        self.assertGreaterEqual(start, words[first - 1]["end"])
+                    self.assertLessEqual(start, words[first]["start"])
+                    if last + 1 < len(words):   # nothing of the word after
+                        self.assertLessEqual(end, words[last + 1]["start"])
+                    # At most the 0.02 s clearance off a last word that touches
+                    # the next one.
+                    self.assertGreaterEqual(end, round(words[last]["end"] - 0.02, 2))
 
 
 class WordLookupTest(unittest.TestCase):

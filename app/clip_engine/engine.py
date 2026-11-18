@@ -55,11 +55,14 @@ class EngineError(RuntimeError):
     """The run can't produce proposals worth trusting (the perceiver or the
     editor failed, nothing could be rendered, the hard cost cap was hit). The
     caller falls back to the transcript suggester. ``notes`` carries what the
-    run had noted before it stopped, so the fallback can say why."""
+    run had noted before it stopped, so the fallback can say why; ``renders``
+    the draft renders it had made (paths), which nobody will be shown."""
 
-    def __init__(self, message: str = "", *, notes: list[str] | None = None) -> None:
+    def __init__(self, message: str = "", *, notes: list[str] | None = None,
+                 renders: list[str] | None = None) -> None:
         super().__init__(message)
         self.notes = list(notes or [])
+        self.renders = [str(p) for p in renders or []]
 
 
 # ---- accounting -----------------------------------------------------------------
@@ -828,6 +831,10 @@ class _Run:
     def live(self) -> list[dict]:
         return [d for d in self.drafts if not d["dropped_reason"]]
 
+    def rendered(self) -> list[str]:
+        """Every render this run made so far (drafts and revisions)."""
+        return [str(d["render"]) for d in self.drafts if d.get("render")]
+
     def fits(self, seconds: float) -> bool:
         return seconds > 0 and 0.8 * self.cfg.min_s <= seconds <= 1.3 * self.cfg.max_s
 
@@ -910,7 +917,15 @@ class _Run:
 
     def perceive(self) -> None:
         """The shot log (cached per video by ``shotlog``) while ffmpeg maps
-        the shot changes and pauses on a daemon thread alongside it."""
+        the shot changes and pauses on a daemon thread alongside it.
+
+        Logging a long source is a dozen or more window calls, the costliest
+        stretch of a run and the one that grows with the source's length, so
+        the checkpoint runs inside it too — before every window and every
+        split (``check``) — not only once the whole log is back: a four-hour
+        hearing stops at the hard cap or the deadline instead of paying for
+        every window first. Windows logged before the stop stay cached, so a
+        later run picks up where this one stopped."""
         source = self.source
         wait_map = util.run_in_thread(lambda: media.shot_map(source),
                                       name="clip-engine-shotmap")
@@ -921,8 +936,11 @@ class _Run:
                 video_id=self.video_id, source=source, perceiver=perceiver,
                 settings=self.settings, brand=self.brand, title=self.title,
                 description=self.description, duration=self.duration, words=self.words,
-                transcript=self.transcript, window=self.window, meter=self.meter)
-        except util.Cancelled:
+                transcript=self.transcript, window=self.window, meter=self.meter,
+                check=self.checkpoint, cancel=self.cancel)
+        except (util.Cancelled, EngineError):
+            # Cancelled, out of time, or past the hard cap (the checkpoint's
+            # own errors): not a perceiver failure, so not reworded as one.
             raise
         except Exception as exc:
             self.meter_failure("perceive", exc, before)
@@ -1091,6 +1109,11 @@ class _Run:
         results = util.parallel_map(
             lambda d: media.render_cached(source, plain_segments(d["segments"]), height=height),
             drafts, workers=3, cancel=self.cancel, name="clip-engine-render")
+        for d, out in zip(drafts, results):
+            if out and not isinstance(out, BaseException):
+                # Noted before the check below, so a run stopped here still
+                # hands its renders back for cleaning up (``run``).
+                d["render"] = str(out)
         util.check(self.cancel, self.deadline)
         failed = []
         for d, out in zip(drafts, results):
@@ -1098,8 +1121,6 @@ class _Run:
                 d["dropped_reason"] = DROPPED_RENDER
                 d["render_error"] = _brief(out) if out else "no file"
                 failed.append(d)
-            else:
-                d["render"] = str(out)
         if failed:
             log.warning("%s: %d of %d renders failed: %s", self.video_id, len(failed),
                         len(drafts), failed[0]["render_error"])
@@ -1388,10 +1409,14 @@ def run(*, setup: str, settings, brand: dict, playbook: dict | None = None, vide
     (``clips.section_max_clips`` for a section). Pass ``meter`` to keep a
     partial cost when the run raises. ``progress(label)`` hears each stage;
     ``cancel`` / ``deadline`` (monotonic) and the hard cost cap are checked
-    between stages and provider batches.
+    between stages and provider batches, and inside perception before every
+    window the shot log pays for.
 
-    Raises ``EngineError`` (with ``notes``) for anything the caller should
-    answer with the transcript suggester, and ``util.Cancelled`` when stopped.
+    Raises ``EngineError`` for anything the caller should answer with the
+    transcript suggester, and ``util.Cancelled`` when stopped. Either carries
+    what the run had when it stopped: ``notes`` (the best clue to why) and
+    ``renders``, the draft renders it made — files nobody will be shown, for
+    the caller to delete or keep (a retry reuses them from the render cache).
     An empty result (``outcome`` "empty_drafts" or "empty_topic") is an
     answer, not an error.
     """
@@ -1405,8 +1430,10 @@ def run(*, setup: str, settings, brand: dict, playbook: dict | None = None, vide
                cancel=cancel, deadline=deadline)
     try:
         return job.execute()
-    except EngineError as exc:
-        if not exc.notes:
+    except (EngineError, util.Cancelled) as exc:
+        if not getattr(exc, "notes", None):
             exc.notes = list(job.notes)
-        log.warning("%s [%s]: engine stopped: %s", video_id, setup, exc)
+        exc.renders = job.rendered()
+        if isinstance(exc, EngineError):
+            log.warning("%s [%s]: engine stopped: %s", video_id, setup, exc)
         raise

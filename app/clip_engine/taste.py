@@ -216,17 +216,25 @@ def _one_per_candidate(posts: list[dict]) -> list[dict]:
     return out
 
 
-def _gripping_no(session, cut_pks: list[int]) -> set[int]:
+def _gripping_no(session, cut_pks: list[int], as_of: dt.datetime | None = None) -> set[int]:
+    """The cuts among ``cut_pks`` labelled not gripping — with ``as_of``,
+    only labels given (or last changed: a relabel overwrites the row) by
+    then, so a replay of an earlier day never learns from a verdict the
+    operator hadn't given yet."""
     from sqlalchemy import select
 
     from ..models import ContentLabel
 
     if not cut_pks:
         return set()
-    return set(session.execute(
-        select(ContentLabel.cut_pk).where(ContentLabel.label == ContentLabel.LABEL_GRIPPING,
-                                          ContentLabel.value == "no",
-                                          ContentLabel.cut_pk.in_(cut_pks))).scalars().all())
+    query = select(ContentLabel.cut_pk).where(ContentLabel.label == ContentLabel.LABEL_GRIPPING,
+                                              ContentLabel.value == "no",
+                                              ContentLabel.cut_pk.in_(cut_pks))
+    if as_of is not None:
+        # UTC: the label times are written as UTC, and SQLite compares the
+        # wall-clock digits, whatever zone the bound value says it is in.
+        query = query.where(ContentLabel.updated_at <= _aware(as_of).astimezone(dt.timezone.utc))
+    return set(session.execute(query).scalars().all())
 
 
 def select_examples(session, *, as_of=None, exclude_candidate_pk=None, hits=3, flops=2,
@@ -236,8 +244,10 @@ def select_examples(session, *, as_of=None, exclude_candidate_pk=None, hits=3, f
     Hits: one per source, from the top decile by local percentile, chosen by
     a shuffle seeded with ``seed`` (callers pass the video id). Flops: posts
     whose cut is labelled gripping = "no", one per source, lowest percentile
-    first (none when nothing is labelled). [] when fewer than 10 posts are
+    first (none when nothing is labelled) — with an explicit ``as_of`` (a
+    replay), only labels given by then. [] when fewer than 10 posts are
     eligible."""
+    labels_as_of = _aware(as_of)        # None: every label there is now
     as_of = _aware(as_of) or _now()
     pool = scored_first_airings(
         session, as_of=as_of, lookback_days=lookback_days, min_age_hours=min_age_hours,
@@ -252,7 +262,7 @@ def select_examples(session, *, as_of=None, exclude_candidate_pk=None, hits=3, f
         chosen = sorted(shuffled[:int(hits)], key=lambda p: (-p["percentile"], -p["views"]))
         picked += [{**p, "label": "hit"} for p in chosen]
     if flops > 0:
-        labelled = _gripping_no(session, [p["cut_pk"] for p in pool])
+        labelled = _gripping_no(session, [p["cut_pk"] for p in pool], as_of=labels_as_of)
         used = {p["candidate_pk"] for p in picked}
         worst = sorted((p for p in pool if p["cut_pk"] in labelled and p["candidate_pk"] not in used),
                        key=lambda p: (p["percentile"], p["views"], p["post_pk"]))
@@ -304,12 +314,15 @@ def example_file(example, settings, *, height=360) -> Path | None:
 
     From the local pre-outro export when it still exists (nothing to trim),
     else from the published copy in the bucket with the outro trimmed by
-    ``outro_trim``. None on any failure (no copy, download or ffmpeg error)."""
+    ``outro_trim``. None on any failure (no copy, download or ffmpeg error).
+    A cached file is reused through ``media.reuse_cached``, which leaves its
+    mtime alone unless it is old enough to need keeping from the prune: the
+    mtime is part of the Gemini upload cache's key, so refreshing it on every
+    reuse uploaded the same example again on every ranking run."""
     try:
         post_pk = int(example["post_pk"])
         dest = engine_dir() / "taste" / f"{post_pk}-{int(height)}.mp4"
-        if dest.is_file() and dest.stat().st_size > 0:
-            util.touch(dest)
+        if media.reuse_cached(dest):
             return dest
         dest.parent.mkdir(parents=True, exist_ok=True)
         local = str(example.get("clip_local_path") or "").strip()

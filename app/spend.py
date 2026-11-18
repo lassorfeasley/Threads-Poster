@@ -227,9 +227,10 @@ def _ledger_lock() -> Iterator[None]:
 
 def _read() -> dict:
     """The ledger for reading; {} when missing or unreadable (writes are
-    atomic, so a reader never sees a half-written file)."""
+    atomic, so a reader never sees a half-written file). Read as bytes, as
+    ``_read_for_update`` does, so both agree on what is readable."""
     try:
-        data = json.loads(_LEDGER.read_text())
+        data = json.loads(_LEDGER.read_bytes())
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -237,14 +238,17 @@ def _read() -> dict:
 
 def _read_for_update() -> dict:
     """The ledger for a read-modify-write (caller holds the lock). A corrupt
-    file is moved aside rather than silently replaced by today's tally."""
+    file (bad JSON, or bytes that aren't text at all) is moved aside rather
+    than silently replaced by today's tally, or left to fail every write."""
     ledger = _LEDGER
     try:
-        text = ledger.read_text()
+        raw = ledger.read_bytes()
     except FileNotFoundError:
         return {}
     try:
-        data = json.loads(text)
+        # From bytes, json works out the encoding (a BOM included) itself, and
+        # bytes that aren't valid text raise UnicodeDecodeError: a ValueError.
+        data = json.loads(raw)
         if isinstance(data, dict):
             return data
     except ValueError:

@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -459,6 +460,33 @@ class PageTest(RouteTestBase):
         self.status.return_value = job_status("done", new=[self.pid])
         self.assertIn("let engineJob = null", self.get(f"/cut/{self.cut_id}"))
 
+    @unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
+    def test_a_suggestion_the_server_trimmed_loses_its_verdict_on_both_pages(self):
+        # Another clip already holds the proposal's last five seconds.
+        self.add_cut(self.cid, [{"start": 25.0, "end": 30.0}])
+        html = self.get(f"/cut/{self.cut_id}")
+
+        def page_value(pattern: str):
+            return json.loads(re.search(pattern, html).group(1))
+
+        clip = page_value(r"let suggestedClips = (\[.*?\]);\n")[0]
+        self.assertEqual((clip["trimmed"], clip["preview"]), (True, ""))
+        self.assertEqual(clip["segments"], [{"start": 10.0, "end": 25.0}])
+        self.assertTrue(clip["engine"]["reviewed"])
+        card = run_proposal_cards([clip], page_value(r"const otherSegments = (\[.*?\]);\n"),
+                                  page_value(r"let segments = (\[.*?\]);\n"))[0]
+        # The page loaded with the claim already taken out, so the browser's
+        # own pass over the same claims finds nothing to trim...
+        self.assertFalse(card["shown"]["trimmed"])
+        # ...and the card still knows the verdict was about the longer render.
+        self.assertNotIn("proposal-critic", card["html"])
+        self.assertNotIn("Gets slow at", card["html"])
+        self.assertIn("Shortened around footage your other clips already use.", card["html"])
+        self.assertFalse(card["video"])
+        video_page = self.get(f"/video/{self.cid}")
+        self.assertNotIn("Stops the scroll", video_page)
+        self.assertIn("Shortened around footage your other clips already use.", video_page)
+
     def test_cut_page_renders(self):
         html = self.get(f"/cut/{self.cut_id}")
         self.assertIn("let suggestedClips = ", html)
@@ -481,6 +509,109 @@ class PageTest(RouteTestBase):
                     result = subprocess.run(["node", "--check", str(path)],
                                             capture_output=True, text=True, timeout=60)
                     self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+
+
+# cut.html's own card functions, run in node with just enough of a DOM: for
+# each suggestion, what the browser offers (visibleProposal) and the card it
+# draws (proposalCard), against the page's claims.
+CARD_HARNESS = """
+let otherSegments = [], segments = [], suggestedClips = [], chapters = [], view = null;
+let hoveredProposal = null;
+const proposalVideos = new Map();
+function chapterAt() { return null; }
+function element(tag) {
+  return { tag, innerHTML: '', attrs: {}, classList: { add() {}, remove() {} },
+           setAttribute(k, v) { this.attrs[k] = v; }, getAttribute(k) { return this.attrs[k]; },
+           addEventListener() {}, appendChild(child) { return child; },
+           querySelector: () => element('div'), querySelectorAll: () => [] };
+}
+const document = { createElement: element };
+%s
+const [clips, other, mine] = JSON.parse(process.argv[2]);
+otherSegments = other; segments = mine; suggestedClips = clips;
+process.stdout.write(JSON.stringify(clips.map(clip => {
+  const shown = visibleProposal(clip);
+  const card = proposalCard(clip, shown);
+  return { shown, html: card.innerHTML, video: proposalVideos.has(clip.id) };
+})));
+"""
+
+
+def run_proposal_cards(clips: list[dict], other_segments: list[dict],
+                       segments: list[dict]) -> list[dict]:
+    template = (Path(__file__).resolve().parents[1] / "app" / "web" / "templates"
+                / "cut.html").read_text()
+
+    def piece(start: str, end: str) -> str:
+        return template[template.index(start):template.index(end)]
+
+    script = "\n".join([
+        piece("function txFmt", "function currentTxIndex"),
+        piece("function escapeHtml", "function highlightQuery"),
+        piece("const PROPOSAL_MIN_FRAGMENT", "// The suggestions worth showing right now."),
+        piece("// Its own <video>, reused across re-renders",
+              "// Nothing waiting and nothing cut yet"),
+    ])
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "cards.js"
+        path.write_text(CARD_HARNESS % script)
+        result = subprocess.run(["node", str(path), json.dumps([clips, other_segments, segments])],
+                                capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise AssertionError(result.stderr[-2000:])
+    return json.loads(result.stdout)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
+class ProposalCardJsTest(unittest.TestCase):
+    """The critic's verdict is about the clip as rendered: a card that offers
+    less (trimmed here as you edit, or already by the server) drops it and says
+    it was shortened, and plays in the editor instead of its own player."""
+
+    ENGINE = {"setup": "gemini", "archetype": "voice", "reviewed": True, "stops_scroll": True,
+              "stop_reason": "Nye pulls his glasses off in the first second", "bored_at": 75.5,
+              "about": "A scientist losing patience", "fix": "End on the stare"}
+
+    def clip(self, cid: int, segments: list[dict], *, trimmed: bool, preview: bool,
+             **engine) -> dict:
+        return {"id": cid, "story": "Glasses off", "why": "", "segments": segments,
+                "seconds": sum(s["end"] - s["start"] for s in segments), "trimmed": trimmed,
+                "preview": f"/clip-proposal/{cid}/preview" if preview else "",
+                "thumb": "", "flag": "", "opening": "", "closing": "",
+                "engine": dict(self.ENGINE, **engine)}
+
+    def test_cards(self):
+        whole = [{"start": 10, "end": 30}]
+        cases = [
+            # (label, clip, other clips' segments, this clip's segments,
+            #  verdict shown, shortened note, own player)
+            ("as rendered", self.clip(1, whole, trimmed=False, preview=True), [], [],
+             True, False, True),
+            ("trimmed by the server before the page loaded",
+             self.clip(2, [{"start": 10, "end": 25}], trimmed=True, preview=False),
+             [{"start": 25, "end": 30}], [], False, True, False),
+            ("the server's trim came from this clip's own saved segments",
+             self.clip(3, [{"start": 10, "end": 25}], trimmed=True, preview=False),
+             [], [{"start": 25, "end": 30}], False, True, False),
+            ("trimmed here, by a segment just marked",
+             self.clip(4, whole, trimmed=False, preview=True), [], [{"start": 25, "end": 30}],
+             False, True, False),
+        ]
+        for label, clip, other, mine, verdict, note, player in cases:
+            with self.subTest(label):
+                card = run_proposal_cards([clip], other, mine)[0]
+                self.assertEqual("Stops the scroll: Nye pulls his glasses off" in card["html"],
+                                 verdict)
+                self.assertEqual("Gets slow at 1:15" in card["html"], verdict)
+                self.assertEqual("Shortened around footage" in card["html"], note)
+                self.assertEqual(card["video"], player)
+
+    def test_a_card_nobody_reviewed_says_so_even_when_trimmed(self):
+        clip = self.clip(5, [{"start": 10, "end": 25}], trimmed=True, preview=False,
+                         reviewed=False)
+        card = run_proposal_cards([clip], [{"start": 25, "end": 30}], [])[0]
+        self.assertIn("Not reviewed (critic unavailable)", card["html"])
+        self.assertNotIn("Stops the scroll", card["html"])
 
 
 @unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
@@ -659,6 +790,226 @@ process.stdout.write(JSON.stringify(out));
                 self.assertEqual(got["undo"], clips)
 
 
+@unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
+class VideoPollingJsTest(unittest.TestCase):
+    """video.html's end of a suggestion run, run in node. Its alert() is
+    dialogs.js's <dialog>, which does NOT block: the reason a run brought
+    nothing must stay on screen, so only fresh suggestions may reload the page
+    (an empty run replaced nothing, so there is nothing to reload for)."""
+
+    HARNESS = """
+let engineJob = null, engineBoot = null, enginePollTimer = null;
+const suggestions = [{ id: 1 }];
+let calls, respond, line, btn;
+function scheduleEnginePoll() { calls.poll++; }
+function element() {
+  const classes = new Set();
+  return { hidden: false, disabled: false, textContent: '',
+           classList: { add: c => classes.add(c), remove: c => classes.delete(c),
+                        toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)),
+                        contains: c => classes.has(c) } };
+}
+const document = {
+  getElementById: id => ({ 'suggest-status': line, 'suggest-video-btn': btn }[id] || null),
+};
+// As dialogs.js does it: alert() opens the styled <dialog> and returns at
+// once. Nobody answers it here, so it is still up when the test looks.
+const window = {
+  alertDialog: m => { calls.dialogs.push(m); return new Promise(() => {}); },
+};
+function alert(m) { window.alertDialog(String(m)); }
+const location = {
+  reload() { calls.left.push('reload'); },
+  set href(url) { calls.left.push(url); },
+};
+async function fetch() {
+  const [status, body] = respond;
+  return { status, ok: status < 400, json: async () => body };
+}
+%s
+(async () => {
+  const out = [];
+  for (const c of JSON.parse(process.argv[2])) {
+    calls = { poll: 0, dialogs: [], left: [] };
+    line = element(); btn = element();
+    engineJob = c.before_job; engineBoot = c.boot;
+    if (c.post) { respond = c.post; await suggestVideoClips(btn); }
+    else handleEngineStatus(c.d);
+    await new Promise(resolve => setTimeout(resolve, 20));   // anything deferred runs now
+    out.push({ polling: calls.poll > 0, dialogs: calls.dialogs, left: calls.left,
+               ready: !btn.disabled && !btn.classList.contains('is-busy')
+                      && btn.textContent === 'Re-suggest' && line.hidden,
+               button: { disabled: btn.disabled, busy: btn.classList.contains('is-busy'),
+                         text: btn.textContent } });
+  }
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+    def run_cases(self, cases):
+        template = (Path(__file__).resolve().parents[1] / "app" / "web" / "templates"
+                    / "video.html").read_text()
+        # The Suggest button, the status line and the end of a run; not the
+        # real poll timer.
+        pieces = [template[template.index("async function suggestVideoClips"):
+                           template.index("function scheduleEnginePoll")],
+                  template[template.index("function handleEngineStatus"):
+                           template.index("if (engineJob && (engineJob.state === 'queued'")]]
+        script = "\n".join(pieces).replace("{{ c.id }}", "42")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "video_poll.js"
+            path.write_text(self.HARNESS % script)
+            result = subprocess.run(["node", str(path), json.dumps(cases)],
+                                    capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        return json.loads(result.stdout)
+
+    def test_a_run_that_brings_nothing_keeps_its_dialog_on_screen(self):
+        running = {"state": "running", "boot_id": "b1", "stage": "Ranking", "new": []}
+        interrupted = "The suggestion run was interrupted — press Suggest again."
+        off_topic = "The video model watched every draft and found nothing on topic."
+        stood_in = ("The transcript suggester stood in and found nothing (Gemini prepaid credits "
+                    "are depleted — add credit at https://ai.studio/projects).")
+
+        def ended(state="done", **fields):
+            return {"job": dict({"state": state, "boot_id": "b1", "new": [], "message": ""},
+                                **fields), "clips": [{"id": 1}]}
+
+        cases = [
+            # (label, status answer or POST answer, dialogs, where the page went, polling)
+            ("still running", {"d": {"job": running}}, [], [], True),
+            ("off topic", {"d": ended(outcome="empty_topic", message=off_topic)},
+             [off_topic], [], False),
+            ("failed", {"d": ended("failed", outcome="failed",
+                                   message="Suggestion failed: 402 credits depleted")},
+             ["Suggestion failed: 402 credits depleted"], [], False),
+            ("over budget", {"d": ended("skipped", outcome="budget",
+                                        message="No suggestions: daily cap reached.")},
+             ["No suggestions: daily cap reached."], [], False),
+            ("interrupted record", {"d": ended("interrupted", boot_id="b0", message=interrupted)},
+             [interrupted], [], False),
+            ("record gone", {"d": ended("idle")}, [interrupted], [], False),
+            ("restart, run resumed under the new boot",
+             {"d": {"job": dict(running, boot_id="b2")}}, [interrupted], [], False),
+            ("the transcript suggester stood in and found nothing",
+             {"d": ended(outcome="legacy", message=stood_in)}, [stood_in], [], False),
+            ("found nothing", {"d": ended(outcome="empty")},
+             ["The model found nothing worth clipping here."], [], False),
+            ("found nothing in a stretch", {"d": ended(window={"start": 60, "end": 120})},
+             ["Nothing worth clipping in this stretch."], [], False),
+            # Fresh suggestions reload the page; their note rides along as its toast.
+            ("picks", {"d": ended(new=[5, 6])}, [], ["reload"], False),
+            ("picks with a note",
+             {"d": ended(outcome="legacy", new=[7],
+                         message="These came from the transcript suggester.")},
+             [], ["/video/42?msg=These%20came%20from%20the%20transcript%20suggester."], False),
+            ("picks from before a restart are still a result",
+             {"d": ended(boot_id="b0", new=[5])}, [], ["reload"], False),
+            # Through the Suggest button.
+            ("transcript pass found nothing",
+             {"post": [200, {"clips": [{"id": 1}], "new": 0, "multi_clip": False}]},
+             ["The model found nothing worth clipping here."], [], False),
+            ("transcript pass found clips",
+             {"post": [200, {"clips": [{"id": 3}], "new": 1, "multi_clip": False}]},
+             [], ["reload"], False),
+            ("refused while the server shuts down",
+             {"post": [202, {"started": False, "job": ended("interrupted", boot_id="b9",
+                                                             message=interrupted)["job"]}]},
+             [interrupted], [], False),
+            ("queued", {"post": [202, {"started": True, "job": dict(running, state="queued")}]},
+             [], [], True),
+            ("busy with another stretch",
+             {"post": [409, {"error": "Already suggesting clips for this video", "job": running}]},
+             ["Already suggesting clips for this video"], [], True),
+        ]
+        payload = [dict(case, before_job=None if "post" in case else running,
+                        boot=None if "post" in case else "b1")
+                   for _label, case, *_ in cases]
+        for (label, _case, dialogs, left, polling), got in zip(cases, self.run_cases(payload)):
+            with self.subTest(label):
+                self.assertEqual(got["dialogs"], dialogs)
+                self.assertEqual(got["left"], left)
+                self.assertEqual(got["polling"], polling)
+                if not left and not polling:
+                    # The page stays, ready for another go.
+                    self.assertTrue(got["ready"])
+
+
+    def test_suggest_stays_live_while_an_unattended_run_waits(self):
+        """An archive run (or one a restart re-queued) still waiting behind
+        other videos: the button stays pressable, since pressing it moves the
+        run to the front as the operator's (jobs._promote). Once it is the
+        operator's, or running, the button waits like any run."""
+        waiting = {"state": "queued", "boot_id": "b1", "stage": "Queued", "new": [],
+                   "reason": "archive", "queue_position": 3}
+        cases = [
+            # (label, case, button disabled, button text, polling)
+            ("an archive run waiting", {"d": {"job": waiting}}, False, "Suggest now", True),
+            ("a resumed run waiting", {"d": {"job": dict(waiting, reason="resume")}},
+             False, "Suggest now", True),
+            ("pressed: moved up as the operator's",
+             {"post": [202, {"started": False, "job": dict(waiting, reason="reroll",
+                                                           queue_position=1)}]},
+             True, "Suggesting…", True),
+            ("the archive run under way",
+             {"d": {"job": dict(waiting, state="running", stage="Ranking")}},
+             True, "Suggesting…", True),
+            ("a section pass waiting", {"d": {"job": dict(waiting, reason="section")}},
+             True, "Suggesting…", True),
+        ]
+        payload = [dict(case, before_job=None if "post" in case else waiting,
+                        boot=None if "post" in case else "b1")
+                   for _label, case, *_ in cases]
+        for (label, _case, disabled, text, polling), got in zip(cases, self.run_cases(payload)):
+            with self.subTest(label):
+                self.assertEqual(got["dialogs"], [])
+                self.assertEqual(got["polling"], polling)
+                self.assertEqual(got["button"], {"disabled": disabled, "busy": disabled,
+                                                 "text": text})
+
+
+@unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
+class CutSuggestButtonJsTest(unittest.TestCase):
+    """cut.html's Suggest button while a run is queued or running."""
+
+    HARNESS = """
+let engineJob = null;
+const btn = { disabled: false, cls: new Set(),
+              classList: { toggle(c, on) { on ? btn.cls.add(c) : btn.cls.delete(c); } } };
+const document = { getElementById: id => (id === 'suggest-here' ? btn : null) };
+%s
+process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).map(job => {
+  engineJob = job;
+  syncSuggestButton();
+  return { disabled: btn.disabled, busy: btn.cls.has('is-busy') };
+})));
+"""
+
+    def test_a_waiting_unattended_run_leaves_suggest_pressable(self):
+        template = (Path(__file__).resolve().parents[1] / "app" / "web" / "templates"
+                    / "cut.html").read_text()
+        script = template[template.index("function engineActive"):
+                          template.index("function scheduleEnginePoll")]
+        cases = [
+            (None, False),
+            ({"state": "queued", "reason": "archive"}, False),
+            ({"state": "queued", "reason": "resume"}, False),
+            ({"state": "running", "reason": "archive"}, True),
+            ({"state": "queued", "reason": "reroll"}, True),
+            ({"state": "queued", "reason": "section"}, True),
+            ({"state": "done", "reason": "archive"}, False),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "button.js"
+            path.write_text(self.HARNESS % script)
+            result = subprocess.run(["node", str(path), json.dumps([c for c, _ in cases])],
+                                    capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        for (job, busy), got in zip(cases, json.loads(result.stdout)):
+            with self.subTest(job=job):
+                self.assertEqual(got, {"disabled": busy, "busy": busy})
+
+
 # ---- the archive hand-off and process wiring --------------------------------------------------
 
 class ArchiveThreadTest(RouteTestBase):
@@ -777,6 +1128,38 @@ class WiringTest(RouteTestBase):
         resume.assert_called_once_with(on_done=self.main.pagecache.invalidate)
         with mock.patch.object(self.jobs, "resume_recent", side_effect=RuntimeError("x")):
             self.main._resume_clip_engine_runs()       # never raises
+
+    def test_background_work_starts_with_the_server_not_on_import(self):
+        """Scripts import main for its loaders, smoke_pages.py against the
+        live database: importing must not queue paid engine runs or restart
+        downloads in a process about to exit. The server's startup does."""
+        from fastapi.testclient import TestClient
+
+        self.assertIn(self.main._start_background_work, self.main.app.router.on_startup)
+        names = ("_resume_stalled_scrapes", "_resume_clip_engine_runs",
+                 "_retrain_triage_model_in_background")
+        with contextlib.ExitStack() as stack:
+            work = {n: stack.enter_context(mock.patch.object(self.main, n)) for n in names}
+            stack.enter_context(mock.patch.object(self.jobs, "shutdown"))
+            work["_resume_stalled_scrapes"].side_effect = RuntimeError("database away")
+            with self.assertLogs("web", "ERROR"), TestClient(self.main.app):
+                pass
+            for name, fn in work.items():
+                fn.assert_called_once_with()           # one failing step stops no other
+        # A fresh interpreter importing the module starts none of it.
+        probe = ("from unittest import mock\n"
+                 "from app.clip_engine import jobs\n"
+                 "with mock.patch.object(jobs, 'resume_recent') as resume:\n"
+                 "    import app.web.main\n"
+                 "print('resumed' if resume.called else 'quiet')\n")
+        env = dict(os.environ, DATABASE_URL="sqlite://", SCHEDULER_EMBEDDED="false",
+                   GEMINI_API_KEY="", ANTHROPIC_API_KEY="", SUPABASE_SERVICE_KEY="",
+                   CLIP_ENGINE_DIR=str(self.dir / "engine"), CLIPBENCH_DIR=str(self.dir / "bench"))
+        root = Path(__file__).resolve().parents[1]
+        done = subprocess.run([sys.executable, "-c", probe], cwd=root, env=env,
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr[-3000:])
+        self.assertEqual(done.stdout.strip().splitlines()[-1], "quiet")
 
     def test_templates_are_shared_with_routers_and_write_scopes_are_real(self):
         self.assertIs(self.main.app.state.templates, self.main.templates)

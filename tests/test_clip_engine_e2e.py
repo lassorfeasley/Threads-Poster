@@ -315,6 +315,7 @@ class FakeGemini:
         self.renders: dict[str, str] = {}      # sha1(bytes) -> label
         self.render_paths: dict[str, Path] = {}
         self.revised = False
+        self.drafts_answer = DRAFTS_ANSWER     # what the Gemini editor answers
 
     # -- the render spy --
     def spy(self, real):
@@ -360,7 +361,7 @@ class FakeGemini:
         if kind == "perceive":
             data = shot_log_answer(on_topic=self.on_topic)
         elif kind == "draft":
-            data = copy.deepcopy(DRAFTS_ANSWER)
+            data = copy.deepcopy(self.drafts_answer)
         elif kind == "revise":
             with self.lock:
                 self.revised = True
@@ -926,6 +927,60 @@ class JobsEndToEndTest(_EndToEnd):
             if d.get("render"):
                 self.assertFalse(Path(d["render"]).exists(), d["id"])
         llm.suggest_clips.assert_not_called()
+
+    def test_a_run_stopped_after_rendering_deletes_its_renders(self):
+        """The hard cap trips once the drafts are rendered and watched
+        ($0.04 + $0.06, then four critiques at $0.005): the transcript
+        suggester stands in, the job keeps what the engine noted, the failed
+        pass is on disk, and the renders nobody will see are gone."""
+        self.settings.raw["clip_engine"]["hard_cap_usd"] = 0.11
+        llm.suggest_clips.side_effect = None
+        llm.suggest_clips.return_value = [{"segments": [{"start": 2.0, "end": 17.6}],
+                                           "story": "Nye: the planet is on fire"}]
+        llm.pick_opening_frame.side_effect = None
+        llm.pick_opening_frame.return_value = {"index": None, "why": "the start is strongest"}
+
+        status = self.run_job(reason="reroll")
+        self.assertEqual((status["state"], status["outcome"]), ("done", "legacy"), status)
+        self.assertIn("past the hard cap", status["fallback"])
+        self.assertIn("d5 duplicates d1.", status["notes"])       # what the engine noted
+        self.assertEqual(len(self.fake.of("cold")), 4)
+        self.assertEqual(self.fake.of("rank"), [])
+        renders = list(self.fake.render_paths.values())
+        self.assertEqual(len(renders), 4)
+        for path in renders:
+            self.assertFalse(path.exists(), path.name)
+        [saved] = Path(os.environ["CLIP_ENGINE_DIR"], "runs").glob(f"{self.cid}-*-error.json")
+        failed = json.loads(saved.read_text())
+        self.assertIn("past the hard cap", failed["error"])
+        self.assertAlmostEqual(failed["cost_usd"], 0.12)
+        self.assertEqual(len(status["new"]), 1)
+
+    def test_an_archive_run_whose_drafts_all_clean_away_still_gets_suggestions(self):
+        """The editor answers with drafts and its own cleaning drops every one
+        (here: all shorter than 0.8 x min_seconds). A mechanical loss, not
+        "nothing worth drafting": the archived video still gets suggestions —
+        the transcript suggester's — and the job says why, instead of ending
+        done/empty with nothing, never to be retried."""
+        self.fake.drafts_answer = {
+            "moments": DRAFTS_ANSWER["moments"],
+            "drafts": [_draft(f"d{i}", "m1", "voice", "person", f"short-{i}",
+                              [(1.0 + 6 * i, 3.0 + 6 * i, "word")]) for i in range(3)]}
+        llm.suggest_clips.side_effect = None
+        llm.suggest_clips.return_value = [{"segments": [{"start": 2.0, "end": 17.6}],
+                                           "story": "Nye: the planet is on fire"}]
+        llm.pick_opening_frame.side_effect = None
+        llm.pick_opening_frame.return_value = {"index": None, "why": "the start is strongest"}
+
+        status = self.run_job(reason="archive")
+        self.assertEqual((status["state"], status["outcome"]), ("done", "legacy"), status)
+        self.assertIn("every one of the editor's 3 drafts was dropped (3 too short)",
+                      status["fallback"])
+        self.assertIn("transcript suggester", status["message"])
+        self.assertEqual(len(status["new"]), 1)
+        self.assertEqual([r.model for r in self.rows()], ["claude-haiku-4-5"])
+        self.assertEqual(len(self.fake.of("draft")), 1)
+        self.assertEqual(self.fake.of("cold"), [])           # nothing rendered or watched
 
     def test_an_engine_error_falls_back_to_the_transcript_suggester(self):
         """Gemini answers the upload with 402 (credits depleted): the perceiver

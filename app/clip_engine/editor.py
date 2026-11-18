@@ -11,8 +11,9 @@ exact shot changes inside every beat so a picture-led segment can start on a
 cut), word-accurate transcript entries, the account's history and the ranges
 other clips already use. A Gemini editor also watches the WHOLE source proxy
 when it is short enough (never a window proxy: its clock would start at 0 and
-every time would land in the wrong place); a Claude editor gets keyframes of
-the strongest shots instead. The payload is always the last part of a Gemini
+every time would land in the wrong place), or drafts from the shot log alone
+when the video can't be attached; a Claude editor gets keyframes of the
+strongest shots instead. The payload is always the last part of a Gemini
 request — after the video, as Google recommends, and never dropped.
 
 Segments come back in PLAY order (a cold open plays a later moment first) and
@@ -113,6 +114,18 @@ REVISE_SCHEMA: dict = {
     },
     "required": ["change", "archetype", "segments"],
 }
+
+
+class DraftsDropped(RuntimeError):
+    """The editor answered with drafts but cleaning dropped every one (bad
+    times, clamped out of the section, inside used footage, or outside the
+    length bounds once that came out). A mechanical loss, not "nothing worth
+    drafting": the run fails and the caller falls back to the transcript
+    suggester. ``reasons`` counts the drops by cause."""
+
+    def __init__(self, message: str = "", *, reasons: dict[str, int] | None = None) -> None:
+        super().__init__(message)
+        self.reasons = dict(reasons or {})
 
 
 # ---- small helpers ------------------------------------------------------------------------
@@ -245,12 +258,15 @@ def entries_for(words, transcript) -> tuple[list[dict], bool]:
     """The transcript the editor cuts against, and whether it is word-accurate.
 
     With a Whisper word stream: clause-sized entries that start and end on
-    word boundaries (coarsened, never truncated, to 600). Without one:
-    the transcript's own entries (rolling captions, approximate times)."""
+    word boundaries at 2 dp (coarsened, never truncated, to 600). The editor
+    copies these times into its cuts, and at 1 dp a copied edge can sit just
+    inside the next word (226.64 s shown as 226.6), where snapping can't
+    always tell which word was meant. Without a stream: the transcript's own
+    entries (rolling captions, approximate times)."""
     from .. import llm
 
     if words:
-        clauses = llm._words_to_clauses(list(words))
+        clauses = llm._words_to_clauses(list(words), ndigits=2)
         if clauses:
             return llm._fit_entries(clauses, _MAX_ENTRIES), True
     entries = []
@@ -323,8 +339,9 @@ def keyframes(source, shotlog, shot_map, *, settings, limit) -> list[tuple[float
 
 # ---- cleaning -----------------------------------------------------------------------------
 
-def _clean_segments(raw, *, floor: float, horizon: float | None, used, max_segments: int) -> list[dict]:
-    """Model segments -> clean play-order segments with a lead."""
+def _bounded_segments(raw, *, floor: float, horizon: float | None) -> list[dict]:
+    """Model segments -> play-order segments with a lead, clamped to [floor,
+    horizon] and de-overlapped (nothing subtracted yet)."""
     from .. import clip_proposals
 
     segments = []
@@ -336,8 +353,15 @@ def _clean_segments(raw, *, floor: float, horizon: float | None, used, max_segme
             continue
         lead = str(item.get("lead") or "").strip().lower()
         segments.append({"start": start, "end": end, "lead": lead if lead in LEADS else "word"})
-    segments = clip_proposals.clean_play_order(segments, min_len=_MIN_SEGMENT, floor=floor,
-                                               horizon=horizon)
+    return clip_proposals.clean_play_order(segments, min_len=_MIN_SEGMENT, floor=floor,
+                                           horizon=horizon)
+
+
+def _unused_segments(segments: list[dict], *, used, max_segments: int) -> list[dict]:
+    """``_bounded_segments`` output with used footage taken out, rounded, at
+    most ``max_segments``."""
+    from .. import clip_proposals
+
     segments = clip_proposals.subtract_play_order(segments, list(used or []))
     out = [{"start": round(float(s["start"]), 2), "end": round(float(s["end"]), 2),
             "lead": s.get("lead") if s.get("lead") in LEADS else "word"} for s in segments]
@@ -347,6 +371,12 @@ def _clean_segments(raw, *, floor: float, horizon: float | None, used, max_segme
         # middle is what a tighter cut gives up first.
         out = out[:cap - 1] + out[-1:] if cap > 1 else out[:1]
     return out
+
+
+def _clean_segments(raw, *, floor: float, horizon: float | None, used, max_segments: int) -> list[dict]:
+    """Model segments -> clean play-order segments with a lead."""
+    return _unused_segments(_bounded_segments(raw, floor=floor, horizon=horizon), used=used,
+                            max_segments=max_segments)
 
 
 def _within_length(segments: list[dict], min_s: float, max_s: float) -> bool:
@@ -363,14 +393,45 @@ def clean_drafts(raw, *, floor, horizon, min_s, max_s, max_segments, used, arche
     0.8·min_s..1.3·max_s are dropped. Ids are d1, d2, ... and ``editor_rank``
     is the position. Unknown archetypes become "other", unknown lenses
     "line"."""
+    return _clean_drafts(raw, floor=floor, horizon=horizon, min_s=min_s, max_s=max_s,
+                         max_segments=max_segments, used=used, archetypes=archetypes)[0]
+
+
+def _drop_reason(segments: list[dict], *, min_s: float, max_s: float) -> str:
+    seconds = _seconds(segments)
+    if seconds < 0.8 * float(min_s) - 1e-6:
+        return "too short"
+    if seconds > 1.3 * float(max_s) + 1e-6:
+        return "too long"
+    return ""
+
+
+def _clean_drafts(raw, *, floor, horizon, min_s, max_s, max_segments, used,
+                  archetypes) -> tuple[list[dict], dict[str, int]]:
+    """``clean_drafts`` plus how many drafts were dropped, by cause."""
     allowed = {str(a).strip().lower() for a in archetypes or [] if str(a).strip()}
     out: list[dict] = []
+    dropped: dict[str, int] = {}
+
+    def drop(reason: str) -> None:
+        dropped[reason] = dropped.get(reason, 0) + 1
+
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
+            drop("unreadable")
             continue
-        segments = _clean_segments(item.get("segments"), floor=float(floor or 0.0),
-                                   horizon=horizon, used=used, max_segments=max_segments)
-        if not segments or not _within_length(segments, min_s, max_s):
+        bounded = _bounded_segments(item.get("segments"), floor=float(floor or 0.0),
+                                    horizon=horizon)
+        if not bounded:
+            drop("no usable segments")    # bad times, or none inside the video / section
+            continue
+        segments = _unused_segments(bounded, used=used, max_segments=max_segments)
+        if not segments:
+            drop("inside used footage")
+            continue
+        reason = _drop_reason(segments, min_s=min_s, max_s=max_s)
+        if reason:
+            drop(reason)
             continue
         rank = len(out)
         archetype = str(item.get("archetype") or "").strip().lower()
@@ -395,7 +456,7 @@ def clean_drafts(raw, *, floor, horizon, min_s, max_s, max_segments, used, arche
             "editor_rank": rank,
         }
         out.append(draft)
-    return out
+    return out, dropped
 
 
 def _clean_moments(raw, *, floor: float, horizon: float | None) -> list[dict]:
@@ -485,13 +546,35 @@ def _gemini_parts(source_video, fps: float, payload_text: str) -> list[dict]:
     return list(video) + [gemini.text_part(payload_text)]
 
 
+def _parts_or_payload(source_video, fps: float, payload_text: str, *,
+                      label: str) -> tuple[list[dict], bool]:
+    """``(parts, sees_video)``. A video that can't be attached (the upload
+    timed out, Google couldn't process it) leaves the payload alone rather
+    than failing the run: the shot log already describes the picture, and the
+    perception it came from is paid for. An exhausted quota or open breaker
+    (``GeminiQuota``) still raises: the call itself would fail too."""
+    if not source_video:
+        return [gemini.text_part(payload_text)], False
+    try:
+        return _gemini_parts(source_video, fps, payload_text), True
+    except gemini.GeminiQuota:
+        raise
+    except gemini.GeminiError as exc:
+        log.warning("%s: couldn't attach the video (%s); working from the shot log alone",
+                    label, exc)
+        return [gemini.text_part(payload_text)], False
+
+
 def draft(*, role, settings, brand, playbook_text, rules, title, description, duration,
           shotlog, shot_map, entries, has_words, context, used, window, section_topic, n,
           min_s, max_s, max_segments, source_video, keyframe_frames, meter) -> tuple[list[dict], list[dict]]:
     """Draft ``n`` candidate clips. Returns ``(drafts, moments)``.
 
     ``role`` is the editor's provider ("gemini" or "claude"). Provider errors
-    propagate (with their usage charged to ``meter`` under "draft")."""
+    propagate (with their usage charged to ``meter`` under "draft"); a video
+    that can't be attached is left out and the editor drafts from the shot
+    log. An answer with no drafts returns ``([], moments)``; an answer whose
+    every draft was dropped by cleaning raises ``DraftsDropped``."""
     if role not in ("gemini", "claude"):
         raise ValueError(f"unknown editor role {role!r}")
     section = _window(window)
@@ -506,9 +589,10 @@ def draft(*, role, settings, brand, playbook_text, rules, title, description, du
                   section=section, section_topic=section_topic or "", has_words=bool(has_words))
     label = f"draft {(title or '')[:40]}"
     if role == "gemini":
+        parts, sees_video = _parts_or_payload(source_video, _gemini_fps(settings, duration),
+                                              payload_text, label=label)
         system = prompts.editor_system(brand or {}, playbook_text or "", rules or "",
-                                       sees_video=bool(source_video), **common)
-        parts = _gemini_parts(source_video, _gemini_fps(settings, duration), payload_text)
+                                       sees_video=sees_video, **common)
         data = _metered(meter, "draft", lambda: gemini.generate_json(
             model_for(settings, "gemini", "editor"), system=system, parts=parts, schema=schema,
             thinking=opt(settings, "clip_engine.gemini.editor_thinking", "HIGH"),
@@ -526,12 +610,20 @@ def draft(*, role, settings, brand, playbook_text, rules, title, description, du
             model_for(settings, "claude", "editor"), system=system, content=content, schema=schema,
             effort=opt(settings, "clip_engine.claude.editor_effort", "high"), max_tokens=32000,
             label=label, bucket=_bucket(meter)))
-    drafts = clean_drafts(data.get("drafts"), floor=floor, horizon=horizon, min_s=min_s,
-                          max_s=max_s, max_segments=max_segments, used=used, archetypes=archetypes)
+    drafts, dropped = _clean_drafts(data.get("drafts"), floor=floor, horizon=horizon,
+                                    min_s=min_s, max_s=max_s, max_segments=max_segments,
+                                    used=used, archetypes=archetypes)
     moments = _clean_moments(data.get("moments"), floor=floor, horizon=horizon)
     raw_count = len(data.get("drafts") or []) if isinstance(data.get("drafts"), list) else 0
-    log.info("editor (%s) drafted %d clips (%d kept) from %d moments", role, raw_count,
-             len(drafts), len(moments))
+    why = ", ".join(f"{count} {reason}" for reason, count in dropped.items())
+    log.info("editor (%s) drafted %d clips (%d kept%s) from %d moments", role, raw_count,
+             len(drafts), f"; dropped: {why}" if why else "", len(moments))
+    if raw_count and not drafts:
+        # Drafts existed and were all lost to cleaning: a mechanical empty,
+        # which falls back like any failure. Only an editor that found
+        # nothing (no drafts at all) is the answer "nothing worth drafting".
+        raise DraftsDropped(f"every one of the editor's {raw_count} drafts was dropped ({why})",
+                            reasons=dropped)
     return drafts, moments
 
 
@@ -563,7 +655,8 @@ def revise(*, role, settings, brand, playbook_text, rules, draft, critique, shot
     Returns a new Draft (id ``<id>r``, origin "revision", parent = the
     original's id, archetype from the answer or the parent) or None when the
     answer leaves the cut unchanged or isn't a valid clip. Provider errors
-    propagate (usage charged to ``meter`` under "revise")."""
+    propagate (usage charged to ``meter`` under "revise"); a video that can't
+    be attached is left out, as in ``draft``."""
     if role not in ("gemini", "claude"):
         raise ValueError(f"unknown editor role {role!r}")
     original = [dict(s) for s in draft.get("segments") or []]
@@ -595,10 +688,11 @@ def revise(*, role, settings, brand, playbook_text, rules, draft, critique, shot
     common = dict(min_s=min_s, max_s=max_s, max_segments=int(max_segments),
                   has_words=bool(has_words))
     if role == "gemini":
-        system = prompts.revise_system(brand or {}, playbook_text or "", rules or "",
-                                       sees_video=bool(source_video), **common)
         # The WHOLE source proxy only (source clock), never a window proxy.
-        parts = _gemini_parts(source_video, _gemini_fps(settings, duration), payload_text)
+        parts, sees_video = _parts_or_payload(source_video, _gemini_fps(settings, duration),
+                                              payload_text, label=label)
+        system = prompts.revise_system(brand or {}, playbook_text or "", rules or "",
+                                       sees_video=sees_video, **common)
         data = _metered(meter, "revise", lambda: gemini.generate_json(
             model_for(settings, "gemini", "editor"), system=system, parts=parts, schema=schema,
             thinking=opt(settings, "clip_engine.gemini.editor_thinking", "HIGH"),

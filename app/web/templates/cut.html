@@ -1974,6 +1974,14 @@ function forgetProposalVideos() {
   }
 }
 
+// Whether the card offers less than the proposal as made: trimmed here as you
+// edit, or already by the server. The page loads with every cut's material
+// taken out (this one's saved segments too), so the browser's own pass over
+// the same claims finds nothing left to take and can't tell by itself.
+function proposalTrimmed(clip, shown) {
+  return !!(shown.trimmed || clip.trimmed);
+}
+
 // What the clip engine's critic made of the clip, on one line — written about
 // the clip as rendered, so it goes once the card offers less than that.
 function proposalCritic(clip, shown) {
@@ -1982,7 +1990,7 @@ function proposalCritic(clip, shown) {
   if (!e.reviewed) {
     return '<div class="proposal-critic is-unreviewed">Not reviewed (critic unavailable)</div>';
   }
-  if (shown.trimmed) return '';
+  if (proposalTrimmed(clip, shown)) return '';
   const reason = e.stop_reason ? `: ${escapeHtml(e.stop_reason)}` : '';
   let line = (e.stops_scroll ? 'Stops the scroll' : 'Wouldn’t stop the scroll') + reason;
   if (typeof e.bored_at === 'number') line += ` · Gets slow at ${txFmt(e.bored_at)}`;
@@ -1997,9 +2005,10 @@ function proposalCritic(clip, shown) {
 // first and reading two timestamps is no way to judge one.
 function proposalCard(clip, shown) {
   const e = clip.engine || {};
+  const trimmed = proposalTrimmed(clip, shown);
   // The engine's own render plays in the card — but only while the card offers
   // exactly what was rendered; a trimmed suggestion previews in the editor.
-  const playable = !!clip.preview && !shown.trimmed;
+  const playable = !!clip.preview && !trimmed;
   const archetype = e.archetype && e.archetype !== 'other'
     ? `<span class="proposal-archetype">${escapeHtml(e.archetype)}</span>` : '';
   const row = document.createElement('div');
@@ -2030,7 +2039,7 @@ function proposalCard(clip, shown) {
     ${clip.opening ? `<div class="proposal-line"><span class="proposal-line-k">Opens</span>“${escapeHtml(clip.opening)}”</div>` : ''}
     ${clip.closing ? `<div class="proposal-line"><span class="proposal-line-k">Ends</span>“${escapeHtml(clip.closing)}”</div>` : ''}
     ${clip.why ? `<div class="proposal-why meta">${escapeHtml(clip.why)}</div>` : ''}
-    ${shown.trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
+    ${trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
     <div class="proposal-actions">
       <button type="button" class="sm ${segments.length ? '' : 'approve'}" data-act="use"
               title="Load these segments into the editor, replacing what's there">Use this clip</button>
@@ -2169,11 +2178,23 @@ function engineActive() {
   return !!engineJob && (engineJob.state === 'queued' || engineJob.state === 'running');
 }
 
+// A run nobody pressed for (after archiving, or re-queued by a restart) that
+// is still waiting its turn. Suggest stays live for it: pressing it moves the
+// run to the front as yours (jobs._promote) instead of leaving it queued
+// behind other videos and then held to the engine's daily budget. Only the
+// whole-video press can; zoomed in, the server answers that the video is
+// already being worked on.
+function engineWaiting() {
+  return !!engineJob && engineJob.state === 'queued'
+    && (engineJob.reason === 'archive' || engineJob.reason === 'resume');
+}
+
 function syncSuggestButton() {
   const btn = document.getElementById('suggest-here');
   if (!btn) return;
-  btn.disabled = engineActive();
-  btn.classList.toggle('is-busy', engineActive());
+  const busy = engineActive() && !engineWaiting();
+  btn.disabled = busy;
+  btn.classList.toggle('is-busy', busy);
 }
 
 function scheduleEnginePoll() {
