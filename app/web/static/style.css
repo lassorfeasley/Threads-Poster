@@ -434,6 +434,8 @@ a.nav.nav-create.active {
 }
 .sidebar .foot a { color: var(--text-dim); text-decoration: none; }
 .sidebar .foot a:hover { color: var(--text); text-decoration: underline; }
+.sidebar .foot .linklike { background: none; border: 0; padding: 0; font: inherit; color: var(--text-dim); cursor: pointer; }
+.sidebar .foot .linklike:hover { color: var(--text); text-decoration: underline; }
 
 /* Expand as overlay — body padding stays on the rail width. */
 aside.sidebar:hover,

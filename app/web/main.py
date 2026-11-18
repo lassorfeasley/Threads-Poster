@@ -16,6 +16,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -147,7 +148,7 @@ from ..vision import (
 )
 from ..voice import voice_context
 from ..youtube import YouTubeAPIError, parse_video_url
-from . import pagecache
+from . import auth, pagecache
 
 log = logging.getLogger("web")
 
@@ -564,6 +565,79 @@ async def _restore_archived_clips(request: Request, call_next):
         except Exception:
             log.exception("Restoring archived clips for %s %s failed", kind, m.group(2))
     return await call_next(request)
+
+
+# Registered last, so it runs first: nothing above (cache invalidation, clip
+# restores from storage) happens for a request that isn't signed in.
+@app.middleware("http")
+async def _require_login(request: Request, call_next):
+    if not auth.enabled() or auth.is_public(request.url.path):
+        return await call_next(request)
+    email = auth.read_session(request.cookies.get(auth.COOKIE_NAME))
+    if email is None:
+        if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+            target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=303)
+        return JSONResponse({"error": "not signed in"}, status_code=401)
+    request.state.user = email
+    return await call_next(request)
+
+
+def _client_ip(request: Request) -> str:
+    # Fly's proxy names the real client; locally there is no proxy.
+    return request.headers.get("fly-client-ip") or (request.client.host if request.client else "?")
+
+
+def _is_https(request: Request) -> bool:
+    return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+
+
+@app.get("/healthz")
+def healthz():
+    return JSONResponse({"ok": True})
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(request: Request, next: str = "/", error: str = ""):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    if auth.read_session(request.cookies.get(auth.COOKIE_NAME)):
+        return RedirectResponse(auth.safe_next(next), status_code=303)
+    return templates.TemplateResponse(request, "login.html", {
+        "next": auth.safe_next(next), "error": error})
+
+
+@app.post("/login")
+async def login_submit(request: Request, email: str = Form(""), password: str = Form(""),
+                       next: str = Form("/")):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    target = auth.safe_next(next)
+    keys = (f"ip:{_client_ip(request)}", f"email:{email.strip().lower()}")
+    if any(auth.throttled(k) for k in keys):
+        return RedirectResponse(
+            f"/login?next={quote(target, safe='')}&error=throttled", status_code=303)
+    user = await run_in_threadpool(auth.authenticate, email, password)
+    if user is None:
+        for k in keys:
+            auth.record_failure(k)
+        log.warning("Failed dashboard login for %r from %s", email, _client_ip(request))
+        return RedirectResponse(
+            f"/login?next={quote(target, safe='')}&error=invalid", status_code=303)
+    for k in keys:
+        auth.clear_failures(k)
+    log.info("Dashboard login: %s", user)
+    response = RedirectResponse(target, status_code=303)
+    response.set_cookie(auth.COOKIE_NAME, auth.make_session(user), max_age=auth.SESSION_SECONDS,
+                        httponly=True, samesite="lax", secure=_is_https(request), path="/")
+    return response
+
+
+@app.post("/logout")
+def logout():
+    response = RedirectResponse("/login" if auth.enabled() else "/", status_code=303)
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return response
 
 
 def _flash(url: str, msg: str) -> RedirectResponse:

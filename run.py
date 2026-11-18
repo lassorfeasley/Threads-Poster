@@ -10,6 +10,8 @@ Usage:
   python run.py dashboard          # supervisor: one dashboard per enabled workspace
   python run.py dashboard --workspace climate   # a single workspace's dashboard
   python run.py workspace list     # show the workspace registry
+  python run.py user hash <email>  # make a DASHBOARD_USERS login entry (prompts for the password)
+  python run.py user secret        # make an AUTH_SECRET for the login cookie
   python run.py workspace create <slug>         # scaffold a new workspace
   python run.py monitor            # one discovery pass over all channels
   python run.py monitor --loop     # poll forever at the configured interval
@@ -100,21 +102,51 @@ def cmd_dashboard(args) -> None:
         _run_supervisor(args)
 
 
+def cmd_user(args) -> None:
+    import getpass
+    import secrets
+
+    from app.web import auth
+
+    if args.user_command == "secret":
+        print(secrets.token_urlsafe(48))
+        return
+    password = getpass.getpass("Password (12+ characters): ")
+    if len(password) < 12:
+        raise SystemExit("Use at least 12 characters.")
+    if getpass.getpass("Again: ") != password:
+        raise SystemExit("Passwords didn't match.")
+    print(f"{args.email.strip().lower()}:{auth.hash_password(password)}")
+
+
 def _run_single_dashboard(args) -> None:
     import uvicorn
 
     from app.config import ROOT, WORKSPACE, current_workspace
 
     port = args.port or current_workspace()["port"]
-    log.info("Dashboard for workspace %r on http://127.0.0.1:%d", WORKSPACE, port)
+    host = args.host
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        # Reachable from the network: refuse to come up without a login.
+        from app.web import auth
+
+        problem = auth.config_problem()
+        if problem:
+            raise SystemExit(f"Refusing to serve on {host}: {problem}. "
+                             "See `python run.py user --help`.")
+    log.info("Dashboard for workspace %r on http://%s:%d", WORKSPACE, host, port)
     # reload watches only ``app/`` so newly added routes/templates are picked
     # up without a manual restart — never ``data/`` (multi-GB downloads) or
     # ``.venv``. Disable with --no-reload for a stable run.
     uvicorn.run(
         "app.web.main:app",
-        host="127.0.0.1",
+        host=host,
         port=port,
         log_level="info",
+        # Behind Fly's proxy: trust X-Forwarded-Proto so the session cookie is
+        # marked Secure on https.
+        proxy_headers=True,
+        forwarded_allow_ips="*" if host not in ("127.0.0.1", "localhost", "::1") else None,
         reload=args.reload,
         reload_dirs=[str(ROOT / "app")] if args.reload else None,
     )
@@ -2149,7 +2181,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="override the workspace's registry port (single-workspace mode only)")
     p.add_argument("--no-reload", dest="reload", action="store_false",
                    help="disable auto-reload on source changes")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="interface to listen on (single-workspace mode). Anything but "
+                        "loopback requires DASHBOARD_USERS and AUTH_SECRET")
     p.set_defaults(func=cmd_dashboard, reload=True)
+
+    p = sub.add_parser("user", help="dashboard logins (DASHBOARD_USERS / AUTH_SECRET)")
+    usub = p.add_subparsers(dest="user_command", required=True)
+    up = usub.add_parser("hash", help="prompt for a password; print the DASHBOARD_USERS entry")
+    up.add_argument("email")
+    up = usub.add_parser("secret", help="print a fresh AUTH_SECRET value")
+    p.set_defaults(func=cmd_user)
 
     p = sub.add_parser("workspace", help="manage the workspace registry")
     wsub = p.add_subparsers(dest="ws_command", required=True)
@@ -2256,7 +2298,7 @@ def main() -> None:
     # The registry commands and the supervisor must work without any existing
     # workspace (fresh clone), so they never import app.*; everything else gets
     # the workspace's file logging.
-    if args.command == "workspace" or (
+    if args.command in ("workspace", "user") or (
         args.command == "dashboard" and not getattr(args, "workspace", None)
     ):
         logging.basicConfig(level=logging.INFO,
