@@ -10,6 +10,7 @@ Usage:
   python run.py dashboard          # supervisor: one dashboard per enabled workspace
   python run.py dashboard --workspace climate   # a single workspace's dashboard
   python run.py workspace list     # show the workspace registry
+  python run.py config status       # shared workspace documents: database vs this machine
   python run.py datasync push --dry-run  # files the hosted dashboard needs, not yet in Storage
   python run.py user hash <email>  # make a DASHBOARD_USERS login entry (prompts for the password)
   python run.py user secret        # make an AUTH_SECRET for the login cookie
@@ -101,6 +102,25 @@ def cmd_dashboard(args) -> None:
         _run_single_dashboard(args)
     else:
         _run_supervisor(args)
+
+
+def cmd_config(args) -> None:
+    from app import shared_docs
+
+    if args.config_command == "status":
+        print(f"SHARED_WORKSPACE is {'on' if shared_docs.enabled() else 'off'} on this machine.")
+        for row in shared_docs.status():
+            where = "database" if row["in_db"] else ("file" if row["on_disk"] else "missing")
+            note = "" if row["same"] else "   <- this machine's file differs from the database"
+            print(f"  {row['key']:10} {where:9}{note}")
+        return
+    docs = args.docs or list(shared_docs.DOC_FILES)
+    unknown = [d for d in docs if d not in shared_docs.DOC_FILES]
+    if unknown:
+        raise SystemExit(f"Unknown document(s): {', '.join(unknown)}")
+    fn = shared_docs.push if args.config_command == "push" else shared_docs.pull
+    for d in docs:
+        print(f"  {d:10} {'done' if fn(d) else 'nothing to ' + args.config_command}")
 
 
 def cmd_datasync(args) -> None:
@@ -2204,6 +2224,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="interface to listen on (single-workspace mode). Anything but "
                         "loopback requires DASHBOARD_USERS and AUTH_SECRET")
     p.set_defaults(func=cmd_dashboard, reload=True)
+
+    p = sub.add_parser("config", parents=[common],
+                       help="workspace documents shared through the database (SHARED_WORKSPACE)")
+    csub = p.add_subparsers(dest="config_command", required=True)
+    csub.add_parser("status", parents=[common], help="compare this machine's files with the database")
+    for verb, text in (("push", "send this machine's files to the database (overwrites the shared copy)"),
+                       ("pull", "overwrite this machine's files with the database copy")):
+        cp = csub.add_parser(verb, parents=[common], help=text)
+        cp.add_argument("docs", nargs="*", help="which (default: all): brand keywords captions "
+                                                 "handbook playbook notes proposals")
+    p.set_defaults(func=cmd_config)
 
     p = sub.add_parser("datasync", parents=[common],
                        help="share working files (transcripts, clips, thumbnails) via Storage")

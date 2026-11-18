@@ -19,7 +19,7 @@ class DataSyncTestBase(unittest.TestCase):
         for patch in (mock.patch.object(datasync, "DATA_DIR", self.data),
                       mock.patch.object(datasync, "WORKSPACE", "ws"),
                       mock.patch.object(datasync, "_bucket", return_value="bucket"),
-                      mock.patch.dict(os.environ, {"DATA_MIRROR": "1"})):
+                      mock.patch.dict(os.environ, {"SHARED_WORKSPACE": "1"})):
             patch.start()
             self.addCleanup(patch.stop)
         datasync._misses.clear()
@@ -80,8 +80,8 @@ class PullTests(DataSyncTestBase):
         with mock.patch("app.offload.remote_size", side_effect=RuntimeError("down")):
             self.assertFalse(datasync.ensure_file(self.data / "thumbs/9.jpg"))
 
-    def test_off_without_data_mirror(self):
-        with mock.patch.dict(os.environ, {"DATA_MIRROR": ""}), \
+    def test_off_without_shared_workspace(self):
+        with mock.patch.dict(os.environ, {"SHARED_WORKSPACE": ""}), \
                 mock.patch("app.offload.remote_size") as remote:
             self.assertFalse(datasync.ensure_file(self.data / "thumbs/9.jpg"))
         remote.assert_not_called()

@@ -18,8 +18,9 @@ videos are not mirrored (they have their own keys and restore path, see
 offload.py), and nor are caches any machine can rebuild (waveforms, frames,
 outro renders, clip-engine proxies).
 
-Off unless DATA_MIRROR is set (``1``/``true``/``on``), so a machine that
-doesn't share its disk behaves exactly as before.
+Off unless SHARED_WORKSPACE is on (``1``/``true``/``on``): the same switch that
+moves the workspace's documents into the database (app/shared_docs.py). A
+machine that doesn't share its workspace behaves exactly as before.
 """
 from __future__ import annotations
 
@@ -50,7 +51,9 @@ _MANIFEST = ".datasync.json"
 
 
 def enabled() -> bool:
-    return env("DATA_MIRROR").strip().lower() in ("1", "true", "on", "yes")
+    from .shared_docs import enabled as shared
+
+    return shared()
 
 
 def _bucket() -> str:
@@ -280,7 +283,7 @@ def run_push_once(**kwargs) -> PushResult | None:
 
 def start_mirror_thread(interval: float = 60.0) -> None:
     """Background push for a long-running process. Idempotent; a no-op unless
-    DATA_MIRROR is on."""
+    SHARED_WORKSPACE is on."""
     global _thread
     if not enabled() or (_thread and _thread.is_alive()):
         return

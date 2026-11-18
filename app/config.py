@@ -48,6 +48,23 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _load_doc(key: str) -> dict[str, Any]:
+    """A workspace document shared across machines (app/shared_docs.py)."""
+    from .shared_docs import read_text
+
+    text = read_text(key)
+    if not text:
+        return {}
+    data = yaml.safe_load(text)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_doc(key: str, text: str) -> None:
+    from .shared_docs import write_text
+
+    write_text(key, text)
+
+
 @dataclass
 class Settings:
     raw: dict[str, Any] = field(default_factory=dict)
@@ -97,7 +114,7 @@ def scheduler_timezone() -> ZoneInfo:
 
 
 def load_keywords() -> list[str]:
-    data = _load_yaml(CONFIG_DIR / "keywords.yaml")
+    data = _load_doc("keywords")
     return [str(k).strip() for k in data.get("keywords", []) if str(k).strip()]
 
 
@@ -116,7 +133,7 @@ KEYWORDS_HEADER = """\
 def save_keywords(keywords: list[str]) -> None:
     cleaned = sorted({k.strip().lower() for k in keywords if k.strip()})
     body = yaml.safe_dump({"keywords": cleaned}, default_flow_style=False, allow_unicode=True)
-    (CONFIG_DIR / "keywords.yaml").write_text(KEYWORDS_HEADER + body)
+    _save_doc("keywords", KEYWORDS_HEADER + body)
 
 
 FIRST_REPLY_HEADER = """\
@@ -273,14 +290,14 @@ _BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "voice_notes",
 
 def load_brand() -> dict[str, str]:
     """Brand & audience config as ``{field: str}`` with every field present."""
-    data = _load_yaml(CONFIG_DIR / "brand.yaml")
+    data = _load_doc("brand")
     return {f: str(data.get(f) or "").strip() for f in _BRAND_TEXT_FIELDS}
 
 
 def _write_brand(fields: dict[str, str], rules: list[dict[str, Any]]) -> None:
     body = yaml.safe_dump({**fields, "rules": rules}, default_flow_style=False,
                           allow_unicode=True, width=88, sort_keys=False)
-    (CONFIG_DIR / "brand.yaml").write_text(BRAND_HEADER + body)
+    _save_doc("brand", BRAND_HEADER + body)
 
 
 def save_brand(values: dict[str, str]) -> None:
@@ -360,7 +377,7 @@ def _rule_key(text: str) -> str:
 
 
 def load_brand_rules() -> list[dict[str, Any]]:
-    raw = _load_yaml(CONFIG_DIR / "brand.yaml").get("rules") or []
+    raw = _load_doc("brand").get("rules") or []
     return [r for r in (_coerce_brand_rule(i) for i in raw) if r]
 
 
@@ -441,7 +458,7 @@ def _coerce_rule(item: Any) -> dict[str, Any] | None:
 def load_caption_rules() -> list[dict[str, Any]]:
     """The operator's caption style rules, in order. Back-compatible with the
     original single ``text:`` blob (split into one rule per line)."""
-    data = _load_yaml(CONFIG_DIR / "caption_style.yaml")
+    data = _load_doc("captions")
     raw = data.get("rules")
     if raw is None:
         text = data.get("text")
@@ -456,7 +473,7 @@ def save_caption_rules(rules: list[dict[str, Any]]) -> None:
     cleaned = [r for r in (_coerce_rule(item) for item in (rules or [])) if r]
     body = yaml.safe_dump({"rules": cleaned}, default_flow_style=False,
                           allow_unicode=True, width=88, sort_keys=False)
-    (CONFIG_DIR / "caption_style.yaml").write_text(CAPTION_STYLE_HEADER + body)
+    _save_doc("captions", CAPTION_STYLE_HEADER + body)
 
 
 def render_caption_guide() -> str:

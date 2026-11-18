@@ -184,10 +184,13 @@ def path() -> Path:
 def load() -> dict:
     """The operator's playbook file when it is valid, else the default (a copy
     either way, so callers may annotate it)."""
+    from ..shared_docs import read_text
+
     file = path()
-    if file.is_file():
+    text = read_text("playbook", file)
+    if text is not None:
         try:
-            return validate(yaml.safe_load(file.read_text()) or {})
+            return validate(yaml.safe_load(text) or {})
         except Exception as exc:  # noqa: BLE001 - a broken file must not stop a run
             log.warning("%s is not a usable playbook (%s); using the built-in one", file, exc)
     return copy.deepcopy(DEFAULT_PLAYBOOK)
@@ -349,7 +352,9 @@ def save(playbook) -> Path:
         "# The clip engine's editor, critic and ranker all read this file. Edit it by hand\n"
         "# as you like; delete it to go back to the built-in default.\n")
     body = yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
+    from ..shared_docs import write_text
+
     target = path()
-    util.atomic_write_text(target, header + body)
+    write_text("playbook", header + body, target)
     log.info("playbook saved to %s", target)
     return target
