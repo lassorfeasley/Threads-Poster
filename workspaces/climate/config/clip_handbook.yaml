@@ -1,0 +1,374 @@
+# Clip handbook report — what your past edits have in common, generated 2026-11-18.
+# A report, not a rule store: its candidate rules wait with your other suggested
+# rules on the Brand & audience page, and only the ones you add there reach the
+# clip engine. Rebuild with: python run.py clip-engine handbook build
+version: 1
+generated_at: '2026-11-18T19:59:32Z'
+model: claude-opus-5-5
+examples_used: 323
+holdout: 78
+holdout_videos: 70
+failed: 0
+cost_usd: 48.1493
+stopped: ''
+summary: 'He extracts one tight, self-contained beat, usually 20–60 seconds, from long sources and throws
+  away all framing: anchor desks, tosses, sign-offs, logos, title cards and applause. Speeches and interviews
+  open directly on the famous speaker''s strongest line, with interviewer questions removed, and every
+  clip ends on a completed sentence. News packages are often rebuilt from English narration over b-roll
+  with soundbites and standups stripped out, and subtitled-only foreign speech is dropped. He sometimes
+  reorders footage to cold-open on the late punchline or the most dramatic shot.'
+proposed: 16
+validation: null
+candidates:
+- id: end-on-full-sentence
+  text: End on a completed sentence or a finished action; never cut out mid-sentence.
+  when: Always
+  why: 270 of your 279 past edits did this
+  support: 270
+  exceptions: 9
+  examples:
+  - 100
+  - 161
+  - 77
+  - 170
+  - 404
+  strength: rule
+  formatted: '**Rule:** End on a completed sentence or a finished action, never mid-sentence.
+
+    **When:** Always
+
+    **Why:** 270 of the editor''s 279 past edits did this.'
+  rule_text: End on a completed sentence or a finished action, never mid-sentence.
+  proposed: true
+- id: length
+  text: Cut to between 20 and 60 seconds.
+  when: Always
+  why: 220 of your 280 past edits did this
+  support: 220
+  exceptions: 60
+  examples:
+  - 327
+  - 307
+  - 141
+  - 292
+  - 281
+  strength: rule
+  formatted: '**Rule:** Cut the clip to between 20 and 60 seconds.
+
+    **When:** Always
+
+    **Why:** 220 of 280 past edits did this.'
+  rule_text: Cut the clip to between 20 and 60 seconds.
+  proposed: true
+- id: cut-anchor-framing
+  text: Cut the studio anchor intro, the toss to the reporter and the desk wrap-up; start inside the field
+    package.
+  when: TV news packages with a studio anchor
+  why: 80 of your 92 past edits where this applied did this
+  support: 80
+  exceptions: 12
+  examples:
+  - 281
+  - 289
+  - 51
+  - 219
+  - 145
+  strength: rule
+  formatted: '**Rule:** Cut the studio anchor intro, the toss to the reporter and the desk wrap-up, and
+    start inside the field package.
+
+    **When:** The video is a TV news package with a studio anchor
+
+    **Why:** 80 of 92 past edits where this applied did this.'
+  rule_text: 'When the video is a TV news package with a studio anchor: Cut the studio anchor intro, the
+    toss to the reporter and the desk wrap-up, and start inside the field package.'
+  proposed: true
+- id: cut-branding
+  text: Cut title cards, network logos, show bumpers, chapter slates, end screens and subscribe cards.
+  when: Always
+  why: 70 of your 73 past edits did this
+  support: 70
+  exceptions: 3
+  examples:
+  - 318
+  - 411
+  - 179
+  - 213
+  - 358
+  strength: rule
+  formatted: '**Rule:** Cut title cards, network logos, show bumpers, chapter slates, end screens and
+    subscribe cards.
+
+    **When:** Always
+
+    **Why:** 70 of 73 past edits did this.'
+  rule_text: Cut title cards, network logos, show bumpers, chapter slates, end screens and subscribe cards.
+  proposed: true
+- id: cut-signoffs
+  text: Cut the reporter's 'Name, Network, City' sign-off and the closing anchor thanks; end on the last
+    content sentence before it.
+  when: News packages that end in a sign-off
+  why: 60 of your 62 past edits where this applied did this
+  support: 60
+  exceptions: 2
+  examples:
+  - 473
+  - 237
+  - 249
+  - 400
+  - 499
+  strength: rule
+  formatted: '**Rule:** Cut the reporter''s ''Name, Network, City'' sign-off and the closing anchor thanks,
+    and end on the last content sentence before them.
+
+    **When:** The video is a news package that ends in a sign-off
+
+    **Why:** 60 of 62 past edits where this applied did this.'
+  rule_text: 'When the video is a news package that ends in a sign-off: Cut the reporter''s ''Name, Network,
+    City'' sign-off and the closing anchor thanks, and end on the last content sentence before them.'
+  proposed: true
+- id: open-on-celebrity-line
+  text: Open on the famous person already delivering their strongest line, skipping their introduction,
+    greetings and biographical setup.
+  when: A source featuring a famous person or well-known speaker
+  why: 60 of your 66 past edits where this applied did this
+  support: 60
+  exceptions: 6
+  examples:
+  - 294
+  - 100
+  - 327
+  - 138
+  - 404
+  strength: rule
+  formatted: '**Rule:** Open on the famous person already delivering their strongest line, skipping their
+    introduction, greetings and biographical setup.
+
+    **When:** The source features a famous person or well-known speaker
+
+    **Why:** 60 of 66 past edits where this applied did this.'
+  rule_text: 'When the source features a famous person or well-known speaker: Open on the famous person
+    already delivering their strongest line, skipping their introduction, greetings and biographical setup.'
+  proposed: true
+- id: one-storyline
+  text: Lift one self-contained storyline or bit and cut every parallel storyline, co-host segment, other
+    comedian and unrelated story around it.
+  when: Multi-story broadcasts, documentary episodes, compilation reels and panel shows
+  why: 40 of your 43 past edits where this applied did this
+  support: 40
+  exceptions: 3
+  examples:
+  - 292
+  - 416
+  - 482
+  - 93
+  - 42
+  strength: rule
+  formatted: '**Rule:** Lift one self-contained storyline or bit and cut every parallel storyline, co-host
+    segment, other comedian and unrelated story around it.
+
+    **When:** The video is a multi-story broadcast, documentary episode, compilation reel or panel show
+
+    **Why:** You did this in 40 of your 43 past edits where this applied.'
+  rule_text: 'When the video is a multi-story broadcast, documentary episode, compilation reel or panel
+    show: Lift one self-contained storyline or bit and cut every parallel storyline, co-host segment,
+    other comedian and unrelated story around it.'
+  proposed: true
+- id: cut-questions
+  text: Cut the interviewer's questions and follow-ups; keep only the guest's answers.
+  when: Sit-down interviews, podcasts and press Q&As
+  why: 15 of your 19 past edits where this applied did this
+  support: 15
+  exceptions: 4
+  examples:
+  - 20
+  - 165
+  - 180
+  - 386
+  - 72
+  strength: rule
+  formatted: '**Rule:** Cut the interviewer''s questions and follow-ups, and keep only the guest''s answers.
+
+    **When:** The video is a sit-down interview, podcast or press Q&A
+
+    **Why:** 15 of 19 past edits where this applied did this.'
+  rule_text: 'When the video is a sit-down interview, podcast or press Q&A: Cut the interviewer''s questions
+    and follow-ups, and keep only the guest''s answers.'
+  proposed: true
+- id: non-english-subtitled
+  text: Drop non-English speech carried only by subtitles or left untranslated; keep foreign speech only
+    when an English voiceover covers it.
+  when: A source with non-English speech
+  why: 15 of your 19 past edits where this applied did this
+  support: 15
+  exceptions: 4
+  examples:
+  - 251
+  - 102
+  - 196
+  - 528
+  - 322
+  strength: rule
+  formatted: '**Rule:** Drop non-English speech that is only subtitled or left untranslated; keep foreign
+    speech only when an English voiceover covers it.
+
+    **When:** A source contains non-English speech
+
+    **Why:** 15 of your 19 past edits where this applied did this.'
+  rule_text: 'When a source contains non-English speech: Drop non-English speech that is only subtitled
+    or left untranslated; keep foreign speech only when an English voiceover covers it.'
+  proposed: true
+- id: cut-applause
+  text: Cut applause, laughter breaks and standing ovations between lines so the speech runs continuously.
+  when: Speeches, TED talks and hearings
+  why: 9 of your 11 past edits where this applied did this
+  support: 9
+  exceptions: 2
+  examples:
+  - 404
+  - 184
+  - 411
+  - 402
+  - 161
+  strength: rule
+  formatted: '**Rule:** Cut applause, laughter breaks and standing ovations between lines so the speech
+    runs continuously.
+
+    **When:** The video is a speech, TED talk or hearing
+
+    **Why:** The editor did this in 9 of 11 past edits where it applied.'
+  rule_text: 'When the video is a speech, TED talk or hearing: Cut applause, laughter breaks and standing
+    ovations between lines so the speech runs continuously.'
+  proposed: true
+- id: rhetoric-over-policy
+  text: Keep the vivid, quotable lines and drop budgets, legislative details, targets and technical breakdowns.
+  when: Political speeches and addresses
+  why: 7 of your 9 past edits where this applied did this
+  support: 7
+  exceptions: 2
+  examples:
+  - 161
+  - 162
+  - 160
+  - 83
+  - 404
+  strength: rule
+  formatted: '**Rule:** Keep the vivid, quotable lines and drop budgets, legislative details, targets
+    and technical breakdowns.
+
+    **When:** Political speeches and addresses
+
+    **Why:** 7 of your 9 past edits where this applied did this.'
+  rule_text: 'When political speeches and addresses: Keep the vivid, quotable lines and drop budgets,
+    legislative details, targets and technical breakdowns.'
+  proposed: true
+- id: keep-short-pieces-whole
+  text: Keep the piece whole, trimming only head logos and end cards.
+  when: Ads, PSAs, trailers and short cartoons
+  why: 6 of your 7 past edits where this applied did this
+  support: 6
+  exceptions: 1
+  examples:
+  - 65
+  - 64
+  - 191
+  - 121
+  - 200
+  strength: rule
+  formatted: '**Rule:** Keep the piece whole, trimming only head logos and end cards.
+
+    **When:** The video is an ad, PSA, trailer or short cartoon
+
+    **Why:** 6 of your 7 past edits where this applied did this.'
+  rule_text: 'When the video is an ad, PSA, trailer or short cartoon: Keep the piece whole, trimming only
+    head logos and end cards.'
+  proposed: true
+- id: cold-open-reorder
+  text: Pull the most dramatic visual or sharpest line from later in the source to the front, then cut
+    back to the setup.
+  when: Multi-segment cuts
+  why: 55 of your 150 past edits where this applied did this
+  support: 55
+  exceptions: 95
+  examples:
+  - 134
+  - 144
+  - 292
+  - 37
+  - 58
+  strength: tendency
+  formatted: '**Rule:** Usually pull the most dramatic visual or sharpest line from later in the source
+    to the front, then cut back to the setup.
+
+    **When:** The cut has multiple segments
+
+    **Why:** In 55 of 150 past edits where this applied, the editor did this.'
+  rule_text: 'When the cut has multiple segments: Usually pull the most dramatic visual or sharpest line
+    from later in the source to the front, then cut back to the setup.'
+  proposed: true
+- id: vo-over-soundbites
+  text: Build the cut from narrator or reporter voiceover over b-roll and aerials; drop most expert, official
+    and witness talking heads.
+  when: News field packages
+  why: 35 of your 65 past edits where this applied did this
+  support: 35
+  exceptions: 30
+  examples:
+  - 281
+  - 241
+  - 217
+  - 69
+  - 526
+  strength: tendency
+  formatted: '**Rule:** Usually build the cut from narrator or reporter voiceover over b-roll and aerials,
+    and drop most expert, official and witness talking heads.
+
+    **When:** The video is a news field package
+
+    **Why:** 35 of 65 past edits where this applied did this.'
+  rule_text: 'When the video is a news field package: Usually build the cut from narrator or reporter
+    voiceover over b-roll and aerials, and drop most expert, official and witness talking heads.'
+  proposed: true
+- id: drop-standups
+  text: Drop the reporter's on-camera standups and keep their voiceover lines.
+  when: News field packages with reporter standups
+  why: 28 of your 43 past edits where this applied did this
+  support: 28
+  exceptions: 15
+  examples:
+  - 237
+  - 256
+  - 455
+  - 463
+  - 481
+  strength: tendency
+  formatted: '**Rule:** Usually drop the reporter''s on-camera standups and keep their voiceover lines.
+
+    **When:** The video is a news field package with reporter standups
+
+    **Why:** 28 of 43 past edits where this applied did this.'
+  rule_text: 'When the video is a news field package with reporter standups: Usually drop the reporter''s
+    on-camera standups and keep their voiceover lines.'
+  proposed: true
+- id: single-answer
+  text: Lift one uninterrupted answer rather than stitching several answers together.
+  when: Long-form interviews and podcasts
+  why: 18 of your 30 past edits where this applied did this
+  support: 18
+  exceptions: 12
+  examples:
+  - 77
+  - 53
+  - 339
+  - 340
+  - 341
+  strength: tendency
+  formatted: '**Rule:** Lift one uninterrupted answer rather than stitching several answers together,
+    in most cases.
+
+    **When:** The video is a long-form interview or podcast
+
+    **Why:** 18 of 30 past edits where this applied did this.'
+  rule_text: 'When the video is a long-form interview or podcast: Lift one uninterrupted answer rather
+    than stitching several answers together, in most cases.'
+  proposed: true

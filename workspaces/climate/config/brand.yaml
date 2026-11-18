@@ -23,3 +23,311 @@ weak_openings: an anchor or reporter reading at a studio desk, a studio toss ('X
   X?'), a sign-off ('back to you'), a greeting or headline read, station graphics, charts,
   maps, slates, walls of lower-third text — the weakest frames in any newscast
 clip_guidance: ''
+rules:
+- text: End on a completed sentence or a finished action, never mid-sentence.
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: 270 of your 279 past edits did this
+  added_at: '2026-11-18T20:02:15Z'
+  rule: End on a completed sentence or a finished action, never mid-sentence.
+  when: Always
+  why: 270 of the editor's 279 past edits did this.
+  original: End on a completed sentence or a finished action; never cut out mid-sentence.
+  markdown: '**Rule:** End on a completed sentence or a finished action, never mid-sentence.
+
+    **When:** Always
+
+    **Why:** 270 of the editor''s 279 past edits did this.'
+- text: Cut the clip to between 20 and 60 seconds.
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: 220 of your 280 past edits did this
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Cut the clip to between 20 and 60 seconds.
+  when: Always
+  why: 220 of 280 past edits did this.
+  original: Cut to between 20 and 60 seconds.
+  markdown: '**Rule:** Cut the clip to between 20 and 60 seconds.
+
+    **When:** Always
+
+    **Why:** 220 of 280 past edits did this.'
+- text: 'When the video is a TV news package with a studio anchor: Cut the studio anchor intro,
+    the toss to the reporter and the desk wrap-up, and start inside the field package.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '80 of your 92 past edits where this applied did this (when: The video is a TV
+    news package with a studio anchor)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Cut the studio anchor intro, the toss to the reporter and the desk wrap-up, and start
+    inside the field package.
+  when: The video is a TV news package with a studio anchor
+  why: 80 of 92 past edits where this applied did this.
+  original: Cut the studio anchor intro, the toss to the reporter and the desk wrap-up; start
+    inside the field package.
+  markdown: '**Rule:** Cut the studio anchor intro, the toss to the reporter and the desk
+    wrap-up, and start inside the field package.
+
+    **When:** The video is a TV news package with a studio anchor
+
+    **Why:** 80 of 92 past edits where this applied did this.'
+- text: Cut title cards, network logos, show bumpers, chapter slates, end screens and subscribe
+    cards.
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: 70 of your 73 past edits did this
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Cut title cards, network logos, show bumpers, chapter slates, end screens and subscribe
+    cards.
+  when: Always
+  why: 70 of 73 past edits did this.
+  original: Cut title cards, network logos, show bumpers, chapter slates, end screens and
+    subscribe cards.
+  markdown: '**Rule:** Cut title cards, network logos, show bumpers, chapter slates, end screens
+    and subscribe cards.
+
+    **When:** Always
+
+    **Why:** 70 of 73 past edits did this.'
+- text: 'When the video is a news package that ends in a sign-off: Cut the reporter''s ''Name,
+    Network, City'' sign-off and the closing anchor thanks, and end on the last content sentence
+    before them.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '60 of your 62 past edits where this applied did this (when: The video is a news
+    package that ends in a sign-off)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Cut the reporter's 'Name, Network, City' sign-off and the closing anchor thanks, and
+    end on the last content sentence before them.
+  when: The video is a news package that ends in a sign-off
+  why: 60 of 62 past edits where this applied did this.
+  original: Cut the reporter's 'Name, Network, City' sign-off and the closing anchor thanks;
+    end on the last content sentence before it.
+  markdown: '**Rule:** Cut the reporter''s ''Name, Network, City'' sign-off and the closing
+    anchor thanks, and end on the last content sentence before them.
+
+    **When:** The video is a news package that ends in a sign-off
+
+    **Why:** 60 of 62 past edits where this applied did this.'
+- text: 'When the source features a famous person or well-known speaker: Open on the famous
+    person already delivering their strongest line, skipping their introduction, greetings
+    and biographical setup.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '60 of your 66 past edits where this applied did this (when: The source features
+    a famous person or well-known speaker)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Open on the famous person already delivering their strongest line, skipping their
+    introduction, greetings and biographical setup.
+  when: The source features a famous person or well-known speaker
+  why: 60 of 66 past edits where this applied did this.
+  original: Open on the famous person already delivering their strongest line, skipping their
+    introduction, greetings and biographical setup.
+  markdown: '**Rule:** Open on the famous person already delivering their strongest line,
+    skipping their introduction, greetings and biographical setup.
+
+    **When:** The source features a famous person or well-known speaker
+
+    **Why:** 60 of 66 past edits where this applied did this.'
+- text: 'When the video is a multi-story broadcast, documentary episode, compilation reel
+    or panel show: Lift one self-contained storyline or bit and cut every parallel storyline,
+    co-host segment, other comedian and unrelated story around it.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '40 of your 43 past edits where this applied did this (when: The video is a multi-story
+    broadcast, documentary episode, compilation reel or panel show)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Lift one self-contained storyline or bit and cut every parallel storyline, co-host
+    segment, other comedian and unrelated story around it.
+  when: The video is a multi-story broadcast, documentary episode, compilation reel or panel
+    show
+  why: You did this in 40 of your 43 past edits where this applied.
+  original: Lift one self-contained storyline or bit and cut every parallel storyline, co-host
+    segment, other comedian and unrelated story around it.
+  markdown: '**Rule:** Lift one self-contained storyline or bit and cut every parallel storyline,
+    co-host segment, other comedian and unrelated story around it.
+
+    **When:** The video is a multi-story broadcast, documentary episode, compilation reel
+    or panel show
+
+    **Why:** You did this in 40 of your 43 past edits where this applied.'
+- text: 'When the video is a sit-down interview, podcast or press Q&A: Cut the interviewer''s
+    questions and follow-ups, and keep only the guest''s answers.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '15 of your 19 past edits where this applied did this (when: The video is a sit-down
+    interview, podcast or press Q&A)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Cut the interviewer's questions and follow-ups, and keep only the guest's answers.
+  when: The video is a sit-down interview, podcast or press Q&A
+  why: 15 of 19 past edits where this applied did this.
+  original: Cut the interviewer's questions and follow-ups; keep only the guest's answers.
+  markdown: '**Rule:** Cut the interviewer''s questions and follow-ups, and keep only the
+    guest''s answers.
+
+    **When:** The video is a sit-down interview, podcast or press Q&A
+
+    **Why:** 15 of 19 past edits where this applied did this.'
+- text: 'When a source contains non-English speech: Drop non-English speech that is only subtitled
+    or left untranslated; keep foreign speech only when an English voiceover covers it.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '15 of your 19 past edits where this applied did this (when: A source contains
+    non-English speech)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Drop non-English speech that is only subtitled or left untranslated; keep foreign
+    speech only when an English voiceover covers it.
+  when: A source contains non-English speech
+  why: 15 of your 19 past edits where this applied did this.
+  original: Drop non-English speech carried only by subtitles or left untranslated; keep foreign
+    speech only when an English voiceover covers it.
+  markdown: '**Rule:** Drop non-English speech that is only subtitled or left untranslated;
+    keep foreign speech only when an English voiceover covers it.
+
+    **When:** A source contains non-English speech
+
+    **Why:** 15 of your 19 past edits where this applied did this.'
+- text: 'When the video is a speech, TED talk or hearing: Cut applause, laughter breaks and
+    standing ovations between lines so the speech runs continuously.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '9 of your 11 past edits where this applied did this (when: The video is a speech,
+    TED talk or hearing)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Cut applause, laughter breaks and standing ovations between lines so the speech runs
+    continuously.
+  when: The video is a speech, TED talk or hearing
+  why: The editor did this in 9 of 11 past edits where it applied.
+  original: Cut applause, laughter breaks and standing ovations between lines so the speech
+    runs continuously.
+  markdown: '**Rule:** Cut applause, laughter breaks and standing ovations between lines so
+    the speech runs continuously.
+
+    **When:** The video is a speech, TED talk or hearing
+
+    **Why:** The editor did this in 9 of 11 past edits where it applied.'
+- text: 'When the video is a political speech or address: Keep the vivid, quotable lines and
+    drop budgets, legislative details, targets and technical breakdowns.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '7 of your 9 past edits where this applied did this (when: The video is a political
+    speech or address)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Keep the vivid, quotable lines and drop budgets, legislative details, targets and
+    technical breakdowns.
+  when: The video is a political speech or address
+  why: 7 of your 9 past edits where this applied did this.
+  original: Keep the vivid, quotable lines and drop budgets, legislative details, targets
+    and technical breakdowns.
+  markdown: '**Rule:** Keep the vivid, quotable lines and drop budgets, legislative details,
+    targets and technical breakdowns.
+
+    **When:** The video is a political speech or address
+
+    **Why:** 7 of your 9 past edits where this applied did this.'
+- text: 'When the video is an ad, PSA, trailer or short cartoon: Keep the piece whole, trimming
+    only head logos and end cards.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '6 of your 7 past edits where this applied did this (when: The video is an ad,
+    PSA, trailer or short cartoon)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Keep the piece whole, trimming only head logos and end cards.
+  when: The video is an ad, PSA, trailer or short cartoon
+  why: 6 of your 7 past edits where this applied did this.
+  original: Keep the piece whole, trimming only head logos and end cards.
+  markdown: '**Rule:** Keep the piece whole, trimming only head logos and end cards.
+
+    **When:** The video is an ad, PSA, trailer or short cartoon
+
+    **Why:** 6 of your 7 past edits where this applied did this.'
+- text: 'When the cut has multiple segments: Usually pull the most dramatic visual or sharpest
+    line from later in the source to the front, then cut back to the setup.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '55 of your 150 past edits where this applied did this (when: The cut has multiple
+    segments)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Usually pull the most dramatic visual or sharpest line from later in the source to
+    the front, then cut back to the setup.
+  when: The cut has multiple segments
+  why: In 55 of 150 past edits where this applied, the editor did this.
+  original: Usually pull the most dramatic visual or sharpest line from later in the source
+    to the front, then cut back to the setup.
+  markdown: '**Rule:** Usually pull the most dramatic visual or sharpest line from later in
+    the source to the front, then cut back to the setup.
+
+    **When:** The cut has multiple segments
+
+    **Why:** In 55 of 150 past edits where this applied, the editor did this.'
+- text: 'When the video is a news field package: Usually build the cut from narrator or reporter
+    voiceover over b-roll and aerials, and drop most expert, official and witness talking
+    heads.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '35 of your 65 past edits where this applied did this (when: The video is a news
+    field package)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Usually build the cut from narrator or reporter voiceover over b-roll and aerials,
+    and drop most expert, official and witness talking heads.
+  when: The video is a news field package
+  why: 35 of 65 past edits where this applied did this.
+  original: Usually build the cut from narrator or reporter voiceover over b-roll and aerials;
+    drop most expert, official and witness talking heads.
+  markdown: '**Rule:** Usually build the cut from narrator or reporter voiceover over b-roll
+    and aerials, and drop most expert, official and witness talking heads.
+
+    **When:** The video is a news field package
+
+    **Why:** 35 of 65 past edits where this applied did this.'
+- text: 'When the video is a news field package with reporter standups: Usually drop the reporter''s
+    on-camera standups and keep their voiceover lines.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '28 of your 43 past edits where this applied did this (when: The video is a news
+    field package with reporter standups)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Usually drop the reporter's on-camera standups and keep their voiceover lines.
+  when: The video is a news field package with reporter standups
+  why: 28 of 43 past edits where this applied did this.
+  original: Usually drop the reporter's on-camera standups and keep their voiceover lines.
+  markdown: '**Rule:** Usually drop the reporter''s on-camera standups and keep their voiceover
+    lines.
+
+    **When:** The video is a news field package with reporter standups
+
+    **Why:** 28 of 43 past edits where this applied did this.'
+- text: 'When the video is a long-form interview or podcast: Lift one uninterrupted answer
+    rather than stitching several answers together, in most cases.'
+  applies_to: clips
+  enabled: true
+  source: handbook
+  evidence: '18 of your 30 past edits where this applied did this (when: The video is a long-form
+    interview or podcast)'
+  added_at: '2026-11-18T20:02:15Z'
+  rule: Lift one uninterrupted answer rather than stitching several answers together, in most
+    cases.
+  when: The video is a long-form interview or podcast
+  why: 18 of 30 past edits where this applied did this.
+  original: Usually lift one uninterrupted answer rather than stitching several answers together.
+  markdown: '**Rule:** Lift one uninterrupted answer rather than stitching several answers
+    together, in most cases.
+
+    **When:** The video is a long-form interview or podcast
+
+    **Why:** 18 of 30 past edits where this applied did this.'
