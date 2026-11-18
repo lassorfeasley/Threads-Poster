@@ -16,7 +16,7 @@
 app = "throughline-climate"
 # Next to the database (Supabase, AWS us-west-2): pages make dozens of
 # queries, and a cross-country round trip on each added seconds.
-primary_region = "sea"
+primary_region = "sjc"
 
 [build]
   dockerfile = "Dockerfile.dashboard"
