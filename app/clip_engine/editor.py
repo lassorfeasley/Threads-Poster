@@ -19,6 +19,11 @@ request — after the video, as Google recommends, and never dropped.
 Segments come back in PLAY order (a cold open plays a later moment first) and
 are kept that way: ``clean_drafts`` clamps and de-overlaps without sorting and
 removes used footage piece by piece.
+
+``advice`` is the operator's plain-words steer for one pass ("open on the
+disaster footage; no interviews"). It goes into the system prompt above the
+playbook rather than the payload, so the editor reads it as an instruction,
+not as data about the video.
 """
 from __future__ import annotations
 
@@ -211,9 +216,12 @@ _ARCHETYPE_LINE = re.compile(r"^- ([a-z0-9_]+) — ", re.MULTILINE)
 
 def _archetype_keys(playbook_text: str) -> list[str]:
     """The archetype keys in a rendered playbook (``playbook.render`` lists
-    each as "- <key> — <name>: ..." before the flops section). Falls back to
-    the playbook on disk."""
+    each as "- <key> — <name>: ..." before the flops section, with no blank
+    line inside the list). Anything after the first blank line (flops, notes,
+    house rules the engine appends) is never read as an archetype. Falls back
+    to the playbook on disk."""
     archetype_section = (playbook_text or "").split("\nWHAT FLOPS HERE:", 1)[0]
+    archetype_section = archetype_section.strip("\n").split("\n\n", 1)[0]
     keys = list(dict.fromkeys(_ARCHETYPE_LINE.findall(archetype_section)))
     if keys:
         return keys
@@ -567,10 +575,12 @@ def _parts_or_payload(source_video, fps: float, payload_text: str, *,
 
 def draft(*, role, settings, brand, playbook_text, rules, title, description, duration,
           shotlog, shot_map, entries, has_words, context, used, window, section_topic, n,
-          min_s, max_s, max_segments, source_video, keyframe_frames, meter) -> tuple[list[dict], list[dict]]:
+          min_s, max_s, max_segments, source_video, keyframe_frames, meter,
+          advice: str = "") -> tuple[list[dict], list[dict]]:
     """Draft ``n`` candidate clips. Returns ``(drafts, moments)``.
 
-    ``role`` is the editor's provider ("gemini" or "claude"). Provider errors
+    ``role`` is the editor's provider ("gemini" or "claude"). ``advice`` (the
+    operator's steer for this pass) goes into the system prompt. Provider errors
     propagate (with their usage charged to ``meter`` under "draft"); a video
     that can't be attached is left out and the editor drafts from the shot
     log. An answer with no drafts returns ``([], moments)``; an answer whose
@@ -586,7 +596,8 @@ def draft(*, role, settings, brand, playbook_text, rules, title, description, du
                                    settings=settings))
     schema = _schema_for(DRAFT_SCHEMA, archetypes, max_drafts=n)
     common = dict(n=int(n), min_s=min_s, max_s=max_s, max_segments=int(max_segments),
-                  section=section, section_topic=section_topic or "", has_words=bool(has_words))
+                  section=section, section_topic=section_topic or "", has_words=bool(has_words),
+                  advice=prompts.clean_advice(advice))
     label = f"draft {(title or '')[:40]}"
     if role == "gemini":
         parts, sees_video = _parts_or_payload(source_video, _gemini_fps(settings, duration),
@@ -649,8 +660,9 @@ def _critique_for_prompt(critique: Any) -> dict:
 
 def revise(*, role, settings, brand, playbook_text, rules, draft, critique, shotlog,
            shot_map, entries, has_words, used, window, min_s, max_s, max_segments,
-           source_video, meter) -> dict | None:
-    """One revision of ``draft`` from the critic's notes.
+           source_video, meter, advice: str = "") -> dict | None:
+    """One revision of ``draft`` from the critic's notes (and the operator's
+    ``advice`` for this pass, in the system prompt).
 
     Returns a new Draft (id ``<id>r``, origin "revision", parent = the
     original's id, archetype from the answer or the parent) or None when the
@@ -686,7 +698,7 @@ def revise(*, role, settings, brand, playbook_text, rules, draft, critique, shot
     schema = _schema_for(REVISE_SCHEMA, archetypes)
     label = f"revise {draft.get('id', '')}"
     common = dict(min_s=min_s, max_s=max_s, max_segments=int(max_segments),
-                  has_words=bool(has_words))
+                  has_words=bool(has_words), advice=prompts.clean_advice(advice))
     if role == "gemini":
         # The WHOLE source proxy only (source clock), never a window proxy.
         parts, sees_video = _parts_or_payload(source_video, _gemini_fps(settings, duration),

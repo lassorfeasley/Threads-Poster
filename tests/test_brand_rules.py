@@ -54,6 +54,71 @@ class StorageTest(TempConfig):
         self.assertEqual(config.load_brand()["relevance_rules"], "it covers climate")
 
 
+class ClipScopeAndMetadataTest(TempConfig):
+    """One rule store for every source: a "clips" scope that reaches the
+    content prompts but never captions, and provenance/formatter metadata
+    that rides along without changing rules that have none."""
+
+    def test_clips_rules_reach_content_but_not_captions(self):
+        config.save_brand_rules([
+            {"text": "Stance rule", "applies_to": "everything"},
+            {"text": "Caption rule", "applies_to": "captions"},
+            {"text": "Clip rule", "applies_to": "clips"},
+            {"text": "Paused clip rule", "applies_to": "clips", "enabled": False},
+        ])
+        self.assertEqual(config.render_brand_rules("content"), "- Stance rule\n- Clip rule")
+        self.assertEqual(config.render_brand_rules("captions"),
+                         "- Stance rule\n- Caption rule")
+        # Relevance scoring judges whole videos: clip-selection rules stay out.
+        self.assertEqual(config.render_brand_rules("screening"), "- Stance rule")
+        self.assertEqual(config.load_brand_rules()[2]["applies_to"], "clips")
+
+    def test_rules_without_metadata_load_unchanged(self):
+        (self.dir / "brand.yaml").write_text(
+            "topic: climate\nrules:\n- text: Old rule\n  applies_to: captions\n  enabled: true\n"
+            "- Bare string rule\n")
+        self.assertEqual(config.load_brand_rules(), [
+            {"text": "Old rule", "applies_to": "captions", "enabled": True},
+            {"text": "Bare string rule", "applies_to": "everything", "enabled": True}])
+
+    def test_metadata_is_kept_and_round_trips(self):
+        rule = config.add_brand_rule(
+            "When the video is b-roll: Open on the footage.", "clips", source="notes",
+            evidence="From 4 of your notes on 3 videos", rule="Open on the footage.",
+            when="The video is b-roll", why="", markdown="**Rule:** Open on the footage.\n"
+            "**When:** The video is b-roll", original="open on teh footage",
+            bogus="dropped")
+        self.assertEqual(rule["source"], "notes")
+        self.assertEqual(rule["evidence"], "From 4 of your notes on 3 videos")
+        self.assertTrue(rule["added_at"].endswith("Z"))
+        self.assertNotIn("bogus", rule)
+        self.assertNotIn("why", rule)                    # empty fields aren't stored
+        loaded = config.load_brand_rules()[0]
+        self.assertEqual(loaded, rule)
+        self.assertEqual(loaded["markdown"].splitlines(),
+                         ["**Rule:** Open on the footage.", "**When:** The video is b-roll"])
+        # Saving the page's list (which sends the rule back whole) keeps it all.
+        config.save_brand_rules(config.load_brand_rules())
+        self.assertEqual(config.load_brand_rules()[0], rule)
+
+    def test_sources(self):
+        manual = config.add_brand_rule("Typed by hand", "everything")
+        self.assertNotIn("source", manual)              # manual is the default, unstored
+        self.assertNotIn("added_at", manual)
+        handbook = config.add_brand_rule("Learned", "clips", source="handbook")
+        self.assertEqual(handbook["source"], "handbook")
+        odd = config.add_brand_rule("Odd source", "clips", source="martians")
+        self.assertNotIn("source", odd)
+
+    def test_duplicates_ignore_case_spacing_and_a_closing_full_stop(self):
+        self.assertIsNotNone(config.add_brand_rule("No emojis", "captions"))
+        self.assertIsNone(config.add_brand_rule("no  EMOJIS.", "captions"))
+
+    def test_backward_compatible_signature(self):
+        self.assertEqual(config.add_brand_rule("Positional", "captions")["applies_to"], "captions")
+        self.assertEqual(config.add_brand_rule("Default scope")["applies_to"], "everything")
+
+
 class PromptTest(TempConfig):
     def capture(self, fn, **kw):
         seen = {}
@@ -137,7 +202,11 @@ class BrandFormTest(TempConfig):
         }, follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(config.load_brand()["relevance_rules"], "it covers climate")
-        self.assertEqual(config.load_brand_rules()[0]["text"], "Write as we")
+        # Through the house formatter: with no Claude key, the plain tidy.
+        rule = config.load_brand_rules()[0]
+        self.assertEqual(rule["text"], "Write as we.")
+        self.assertEqual(rule["original"], "Write as we")
+        self.assertEqual(rule["markdown"], "**Rule:** Write as we.\n**When:** Always")
 
     def test_add_rule_endpoint(self):
         r = self.client.post("/brand/rules/add", data={"text": "No emojis"})

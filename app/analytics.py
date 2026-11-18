@@ -80,8 +80,17 @@ def refresh_metrics_for(session, posts: list[ThreadsPost],
     return taken
 
 
-def snapshot_metrics(session) -> int:
-    """Re-pull Threads insights for published posts that are due for a snapshot."""
+def snapshot_metrics(session, *, limit: int | None = None) -> int:
+    """Re-pull Threads insights for published posts that are due for a snapshot.
+
+    Due: every ``analytics.snapshot_interval_hours`` (12) until
+    ``analytics.max_post_age_days`` (60), then every
+    ``analytics.long_tail_interval_days`` (7) until
+    ``analytics.long_tail_max_age_days`` (365). Posts go most-overdue first
+    (never-sampled ones before all others), and ``limit`` caps the API calls
+    one run makes — the scheduler runs this unattended, and the rest are
+    simply due next time. A post whose fetch fails is logged and skipped.
+    Returns the number of snapshots taken."""
     settings = load_settings()
     interval = dt.timedelta(hours=settings.get("analytics.snapshot_interval_hours", 12))
     max_age = dt.timedelta(days=settings.get("analytics.max_post_age_days", 60))
@@ -98,27 +107,37 @@ def snapshot_metrics(session) -> int:
     tail_interval = dt.timedelta(days=settings.get("analytics.long_tail_interval_days", 7))
     tail_max_age = dt.timedelta(days=settings.get("analytics.long_tail_max_age_days", 365))
 
-    taken = 0
+    never = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    due: list[tuple[dt.datetime, int, ThreadsPost]] = []
     for post in posts:
-        published = post.published_at
-        if published and published.tzinfo is None:
-            published = published.replace(tzinfo=dt.timezone.utc)
+        if not (post.threads_media_id or "").strip():
+            continue   # nothing to ask Threads about
+        published = _aware(post.published_at)
         due_every = interval
         if published and now - published > max_age:
             if now - published > tail_max_age:
                 continue
             due_every = tail_interval
-        last = last_by_post.get(post.id)
-        if last is not None:
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=dt.timezone.utc)
-            if now - last < due_every:
-                continue
+        last = _aware(last_by_post.get(post.id))
+        if last is not None and now - last < due_every:
+            continue
+        due.append((last + due_every if last is not None else never, post.id, post))
+    due.sort(key=lambda item: (item[0], item[1]))
 
-        if _add_snapshot(session, post):
-            taken += 1
+    taken = calls = failed = 0
+    for _due_at, _pid, post in due:
+        if limit is not None and calls >= limit:
+            break
+        calls += 1
+        try:
+            if _add_snapshot(session, post):
+                taken += 1
+        except Exception as exc:
+            failed += 1
+            log.warning("Metric snapshot failed for post %s: %s", post.id, exc)
     session.flush()
-    log.info("Metric snapshots taken: %d", taken)
+    log.info("Metric snapshots taken: %d (%d due, %d API calls, %d failed, %d left for later)",
+             taken, len(due), calls, failed, max(0, len(due) - calls))
     return taken
 
 

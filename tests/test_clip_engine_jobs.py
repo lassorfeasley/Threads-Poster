@@ -1451,5 +1451,158 @@ class ArchiveHandOffTest(JobsTestBase):
             self.assertFalse(scrape._clip_engine_suggests(make_settings()))
 
 
+
+# ---- operator advice (round 2) ----------------------------------------------------------------
+
+class AdviceTest(JobsTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        from app.clip_engine import notes
+
+        self.tidy = self.patch(mock.patch.object(
+            notes, "tidy_advice", side_effect=lambda text, **kw: "Tidied: " + text))
+
+    def test_advice_is_kept_and_reaches_the_engine_tidied_with_the_original(self):
+        cid = self.add_candidate()
+        self.run_engine.return_value = make_result([make_draft(1, [{"start": 2.0, "end": 20.0}])])
+        st = self.run_job(cid, advice="  open on teh floods;\n no interviews ")
+        self.assertEqual(st["advice"], "open on teh floods; no interviews")
+        self.assertEqual(jobs._read_record(cid)["advice"], "open on teh floods; no interviews")
+        self.assertEqual(self.run_engine.call_args.kwargs["advice"],
+                         "Tidied: open on teh floods; no interviews\n"
+                         "(Operator's words: open on teh floods; no interviews)")
+        self.tidy.assert_called_once()
+        self.assertEqual(st["outcome"], "proposals")
+        saved = json.loads(Path(st["result_path"]).read_text())
+        self.assertEqual(saved["job"]["advice"], "open on teh floods; no interviews")
+        self.assertEqual(saved["job"]["advice_tidied"], "Tidied: open on teh floods; no interviews")
+
+    def test_no_advice_no_tidy(self):
+        cid = self.add_candidate()
+        self.run_engine.return_value = make_result([make_draft(1, [{"start": 2.0, "end": 20.0}])])
+        st = self.run_job(cid)
+        self.assertEqual(st["advice"], "")
+        self.assertEqual(self.run_engine.call_args.kwargs["advice"], "")
+        self.tidy.assert_not_called()
+
+    def test_a_tidy_that_breaks_still_passes_the_words(self):
+        cid = self.add_candidate()
+        self.tidy.side_effect = RuntimeError("boom")
+        self.run_engine.return_value = make_result([make_draft(1, [{"start": 2.0, "end": 20.0}])])
+        self.run_job(cid, advice="no interviews")
+        self.assertEqual(self.run_engine.call_args.kwargs["advice"], "no interviews")
+
+    def test_advice_is_capped(self):
+        with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+            st = jobs.enqueue(1, advice="x" * 5000)
+        self.assertEqual(len(st["advice"]), jobs.MAX_ADVICE)
+
+    def test_the_transcript_suggester_says_it_ignored_the_advice(self):
+        cid = self.add_candidate()
+        self.setup_answer = ("transcript", "GEMINI_API_KEY is not set")
+        self.legacy_returns(ids=[5])
+        st = self.run_job(cid, advice="no interviews")
+        self.assertEqual(st["outcome"], "legacy")
+        self.assertIn(jobs.ADVICE_IGNORED_NOTE, st["notes"])
+        self.assertTrue(st["message"].endswith("Your advice wasn't used."), st["message"])
+        self.run_engine.assert_not_called()
+        # Nothing found: still said.
+        self.legacy_returns(clips=[], ids=[])
+        st = self.run_job(cid, advice="no interviews")
+        self.assertIn("Your advice wasn't used.", st["message"])
+        # A fallback without advice says nothing about it.
+        self.legacy_returns(ids=[6])
+        st = self.run_job(cid)
+        self.assertNotIn(jobs.ADVICE_IGNORED_NOTE, st["notes"])
+        self.assertNotIn("advice", st["message"])
+
+    def test_an_engine_failure_falls_back_and_notes_the_advice_too(self):
+        cid = self.add_candidate()
+        self.run_engine.side_effect = RuntimeError("Gemini 500")
+        self.legacy_returns(ids=[5])
+        st = self.run_job(cid, advice="no interviews")
+        self.assertEqual(st["outcome"], "legacy")
+        self.assertIn(jobs.ADVICE_IGNORED_NOTE, st["notes"])
+
+    def test_different_advice_conflicts_like_a_different_window(self):
+        cases = [
+            # (first reason, first advice, second advice, conflict, advice afterwards)
+            ("reroll", "", "no interviews", True, ""),
+            ("reroll", "no interviews", "open on fire", True, "no interviews"),
+            ("reroll", "no interviews", "  no   interviews ", False, "no interviews"),
+            ("reroll", "no interviews", "", False, "no interviews"),   # no advice joins
+            ("reroll", "", "", False, ""),
+        ]
+        for i, (reason, first, second, conflict, after) in enumerate(cases):
+            with self.subTest(first=first, second=second):
+                cid = 100 + i
+                with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+                    a = jobs.enqueue(cid, reason=reason, advice=first)
+                    b = jobs.enqueue(cid, reason="reroll", advice=second)
+                self.assertTrue(a["started"])
+                self.assertFalse(b["started"])
+                self.assertEqual(b["conflict"], conflict)
+                self.assertEqual(b["job_id"], a["job_id"])
+                self.assertEqual(jobs.status(cid)["advice"], after)
+
+    def test_a_waiting_unattended_run_takes_the_operators_advice(self):
+        cid = self.add_candidate()
+        with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+            archived = jobs.enqueue(cid, reason="archive")
+            pressed = jobs.enqueue(cid, reason="reroll", advice="no interviews")
+        self.assertEqual((pressed["started"], pressed["conflict"]), (False, False))
+        self.assertNotEqual(pressed["job_id"], archived["job_id"])
+        self.assertEqual((pressed["reason"], pressed["advice"]), ("reroll", "no interviews"))
+        self.assertEqual(jobs._read_record(cid)["advice"], "no interviews")
+        self.run_engine.return_value = make_result([make_draft(1, [{"start": 2.0, "end": 20.0}])])
+        while not jobs._queue.empty():
+            _p, _s, job = jobs._queue.get_nowait()
+            jobs._run(job)
+        self.run_engine.assert_called_once()
+        self.assertIn("(Operator's words: no interviews)",
+                      self.run_engine.call_args.kwargs["advice"])
+
+    def test_a_running_unattended_run_with_advice_is_a_conflict(self):
+        started, release = threading.Event(), threading.Event()
+
+        def fake_execute(job):
+            started.set()
+            release.wait(5)
+            return {"state": "done", "outcome": "proposals", "new": []}
+
+        with mock.patch.object(jobs, "_execute", side_effect=fake_execute):
+            first = jobs.enqueue(1, reason="archive")
+            self.assertTrue(started.wait(5))
+            pressed = jobs.enqueue(1, reason="reroll", advice="no interviews")
+            release.set()
+            deadline = time.monotonic() + 5
+            while jobs.status(1)["state"] != "done" and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertTrue(pressed["conflict"])
+        self.assertEqual(pressed["job_id"], first["job_id"])
+
+    def test_unattended_advice_never_outranks(self):
+        """An archive run asked again (unattended) with advice can't promote
+        itself: only an operator's press can."""
+        with mock.patch.object(jobs, "_ensure_workers", lambda: None):
+            jobs.enqueue(5, reason="archive")
+            again = jobs.enqueue(5, reason="archive", advice="x")
+        self.assertTrue(again["conflict"])
+
+    def test_sidecar_records_the_window_and_language_doubt(self):
+        cid = self.add_candidate(duration=300)
+        draft = make_draft(1, [{"start": 2.0, "end": 20.0}], language_doubt="mostly Hindi")
+        self.run_engine.return_value = make_result([draft])
+        self.run_job(cid, window={"start": 0, "end": 200}, reason="section")
+        meta = self.save_sidecar.call_args.kwargs["meta"]
+        self.assertEqual(meta["window"], {"start": 0.0, "end": 200.0})
+        self.assertEqual(meta["language_doubt"], "mostly Hindi")
+        self.run_engine.return_value = make_result([make_draft(2, [{"start": 2.0, "end": 20.0}])])
+        self.run_job(cid)
+        meta = self.save_sidecar.call_args.kwargs["meta"]
+        self.assertIsNone(meta["window"])
+        self.assertEqual(meta["language_doubt"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

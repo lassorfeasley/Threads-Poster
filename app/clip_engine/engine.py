@@ -20,12 +20,26 @@ The selection rules encode what the design review found:
   critic AND the shot log both say its material is off topic; one
   low-effort boolean would delete the account's second-biggest kind of post
   (an allegory that never names the topic).
+- The language gate works the same way: a draft goes when the critic
+  couldn't understand its speech AND the shot log says most of its material
+  is speech in another language with no English voiceover. This audience
+  never gets those clips (burned-in subtitles aren't enough). But it never
+  empties a run on its own: if every draft left would go, they all stay,
+  scored down, and the operator decides.
 - Only the best cut of each story reaches the head-to-head ranking, so five
   variants of one moment can't crowd out a second story.
 - A revision replaces its original only when it breaks nothing the original
   got right, the cold critic scores it at least as high, and the judge
   prefers it in BOTH presentation orders. Pairwise judges are close to a coin
   flip on near-identical cuts, so the original keeps the tie.
+- The operator's ``advice`` for a pass reaches every call that chooses
+  (draft, revise, cold watch, rank, prefer) and is recorded in the notes.
+  Rules learned from the operator's past edits become ordinary brand rules
+  (read with the rest through ``llm._operator_rules``); anything
+  ``handbook.render_active`` still returns is appended to the playbook text.
+  ``clip_engine.extra_rules`` (a list of strings) adds rules to the
+  operator's rules block for one run, so the handbook's validation can
+  replay a run with candidate rules before the operator adopts them.
 - Mechanical failures (nothing could be rendered, nothing survived snapping)
   raise ``EngineError`` and the caller falls back to the transcript
   suggester. An editorial "nothing here" (no drafts, or only off-topic ones)
@@ -45,7 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .. import clip_proposals, llm
-from . import ROLES, critic, editor, legacy, media, model_for, opt, shotlog, snap, taste, util
+from . import ROLES, critic, editor, legacy, media, model_for, opt, prompts, shotlog, snap, taste, util
 from . import playbook as playbooks
 
 log = logging.getLogger("clip_engine.engine")
@@ -360,6 +374,53 @@ def material_topic(shot_log: dict | None, segments: list[dict]) -> float | None:
     return round(weighted / covered, 3) if covered > 0 else None
 
 
+LANGUAGE_SHARE = 0.5   # "mostly": at least half the clip's material
+
+
+def foreign_speech_share(shot_log: dict | None, segments: list[dict]) -> float | None:
+    """How much of a clip's material (0-1, overlap-weighted) the shot log
+    marks as speech in another language with no English voiceover. None
+    when no beat it overlaps says what language it is in (an older log, or
+    no log): no opinion, so never a reason to drop."""
+    foreign = covered = 0.0
+    for beat in (shot_log or {}).get("beats") or []:
+        language = beat.get("speech_language") if isinstance(beat, dict) else None
+        if language not in ("english", "other", "none"):
+            continue
+        try:
+            b_start, b_end = float(beat["start"]), float(beat["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        unheard = language == "other" and not beat.get("english_voiceover")
+        for s in segments or []:
+            try:
+                overlap = min(b_end, float(s["end"])) - max(b_start, float(s["start"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if overlap > 0:
+                covered += overlap
+                if unheard:
+                    foreign += overlap
+    return round(foreign / covered, 3) if covered > 0 else None
+
+
+def language_verdict(critique: dict | None, share: float | None) -> tuple[str, str]:
+    """The language gate for one reviewed draft: ``("keep" | "drop", why)``.
+
+    Two witnesses, like the topic gate: the critic says the speech isn't
+    understood AND the shot log puts at least half the material on speech in
+    another language without an English voiceover. A critique that errored,
+    or a log with no language data, never drops anything."""
+    if not critique or critique.get("error"):
+        return "keep", ""
+    if critique.get("speech_understood", True) is not False:
+        return "keep", ""
+    if share is None or share < LANGUAGE_SHARE:
+        return "keep", ""
+    return "drop", (f"critic: speech not understood; shot log: {share:.0%} in another "
+                    "language with no English voiceover")
+
+
 def topic_verdict(critique: dict | None, material: float | None) -> tuple[str, str]:
     """The topic gate for one reviewed draft: ``("keep" | "doubt" | "drop",
     why)``.
@@ -447,15 +508,22 @@ def merge_ranking(ranked_ids: list, group: list[dict], others: list[dict]) -> li
     return out
 
 
-_HOLDS = (("makes_sense", "no longer makes sense"), ("ends_well", "no longer ends well"))
+_HOLDS = (("makes_sense", "no longer makes sense"), ("ends_well", "no longer ends well"),
+          ("premise_clear", "lost the premise"),
+          ("speech_understood", "has speech the audience can't follow"),
+          ("follows_advice", "no longer follows your advice"))
 
 
 def new_failure(before: dict, after: dict) -> str:
     """What a revision broke that the original got right ("" if nothing):
-    following with no context, ending on the payoff, staying on topic."""
+    following with no context, ending on the payoff, the premise, speech the
+    audience understands, not being a monologue, the operator's advice,
+    staying on topic. A test a critique doesn't answer counts as passed."""
     for key, broke in _HOLDS:
         if before.get(key, True) and not after.get(key, True):
             return broke
+    if not before.get("monologue", False) and after.get("monologue", False):
+        return "became a reporter monologue"
     was = str(before.get("topic") or "central").lower()
     now = str(after.get("topic") or "central").lower()
     if was in ON_TOPIC and now not in ON_TOPIC:
@@ -543,7 +611,8 @@ def failed_critique(error: BaseException | str) -> dict:
     failed call's usage when the error carries it."""
     out = {"first_impression": "", "stops_scroll_muted": False, "muted_reason": "",
            "stops_scroll": False, "stop_reason": "", "person_at_start": False,
-           "about": "", "makes_sense": False, "dangling": "", "bored_at": None,
+           "about": "", "makes_sense": False, "dangling": "", "premise_clear": False,
+           "speech_understood": False, "monologue": False, "bored_at": None,
            "dead_air": [], "ends_well": False, "topic": "central", "topic_note": "",
            "person": "", "visual": 0, "audio": 0, "score": 0, "fix": "",
            "error": _brief(error) or "the critic failed"}
@@ -625,6 +694,50 @@ def _number(settings, key: str, default, *, cast: Callable = float, low=None):
     return value
 
 
+# Mirrors the "content" block ``llm._operator_rules`` writes, for runs whose
+# only rules come from ``clip_engine.extra_rules``.
+_RULES_PREAMBLE = ("\n\nTHE OPERATOR'S RULES — hard constraints that outrank everything "
+                   "else here:\n")
+_RULES_CODA = ("Material that challenges these rules or the account's premise is "
+               "never credible. It can still be worth using — as something to "
+               "respond to — so judge that on its merits rather than discarding it.")
+_EXTRA_RULE_CHARS = 300
+
+
+def extra_rules(settings) -> list[str]:
+    """``clip_engine.extra_rules``: extra rule texts for this run (a list of
+    strings, or one string), tidied; [] when unset or unusable."""
+    raw = opt(settings, "clip_engine.extra_rules", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in raw:
+        text = " ".join(str(item or "").split())[:_EXTRA_RULE_CHARS].strip()
+        text = text.lstrip("-• ").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def with_extra_rules(rules: str, extra: list[str]) -> str:
+    """The operator's rules block with ``extra`` added as more bullets: after
+    the existing bullets (before the block's closing note) when there is a
+    block, else a new block with the same preamble ``llm._operator_rules``
+    uses."""
+    bullets = "\n".join(f"- {text}" for text in extra or [])
+    if not bullets:
+        return rules or ""
+    if not (rules or "").strip():
+        return _RULES_PREAMBLE + bullets + "\n" + _RULES_CODA
+    marker = "\nMaterial that challenges"
+    at = rules.rfind(marker)
+    if at >= 0:
+        return rules[:at].rstrip("\n") + "\n" + bullets + rules[at:]
+    return rules.rstrip("\n") + "\n" + bullets
+
+
 def _policy_number(value: float):
     """Whole numbers hash as ints, the way the YAML writes them, so the
     policy fingerprint doesn't change with how a value was parsed."""
@@ -685,6 +798,7 @@ DROPPED_DUPLICATE = "duplicate"
 DROPPED_REJECTED = "rejected before"
 DROPPED_RENDER = "render failed"
 DROPPED_OFF_TOPIC = "off topic"
+DROPPED_LANGUAGE = "language"              # speech the audience can't follow
 DROPPED_REVISED = "revised"                # replaced in place by its adopted revision
 DROPPED_REVISION = "revision not used"     # a revision that lost to its original
 
@@ -692,7 +806,8 @@ DROPPED_REVISION = "revision not used"     # a revision that lost to its origina
 def _bookkeeping(segments: list[dict]) -> dict:
     return {"segments": segments, "editor_segments": [dict(s) for s in segments],
             "dropped_reason": "", "critique": None, "score": None, "render": "",
-            "credits": "", "seconds": seconds_of(segments), "topic_doubt": ""}
+            "credits": "", "seconds": seconds_of(segments), "topic_doubt": "",
+            "language_doubt": ""}
 
 
 def adopt_drafts(raw: list) -> list[dict]:
@@ -740,7 +855,8 @@ class _Run:
 
     def __init__(self, *, setup, settings, brand, playbook, video_id, title, description,
                  duration, source, words, transcript, context, rejected, examples, used,
-                 window, section_topic, keep, meter, progress, cancel, deadline) -> None:
+                 window, section_topic, keep, meter, progress, cancel, deadline,
+                 advice="") -> None:
         self.setup = setup
         self.roles = ROLES[setup]
         self.settings = settings
@@ -760,6 +876,7 @@ class _Run:
         self.used = list(used or [])
         self.window = window
         self.section_topic = section_topic or ""
+        self.advice = prompts.clean_advice(advice)
         self.keep = keep
         self.meter = meter if meter is not None else CostMeter("engine")
         self.progress = progress
@@ -860,6 +977,7 @@ class _Run:
         with self.stage("watch", "Watching the drafts"):
             self.watch_all()
             self.topic_gate()
+            self.language_gate()
         if not self.live():
             return self.result("empty_topic", started)
         with self.stage("rank", "Ranking"):
@@ -900,10 +1018,22 @@ class _Run:
         if self.keep is None:
             self.keep = self.cfg.section_keep if self.window else self.cfg.keep
         self.keep = max(1, int(self.keep))
+        if self.advice:
+            self.note(f"advice: {self.advice}")
         if self.playbook is None:
             self.playbook = playbooks.load()
         self.playbook_text = playbooks.render(self.playbook)
+        house = self.house_rules()
+        if house:
+            # After a blank line: editor._archetype_keys reads archetypes only
+            # up to the first one, so a house rule is never taken for one.
+            self.playbook_text = self.playbook_text.rstrip() + "\n\n" + house
+            self.note("Used the house rules learned from your past edits.")
         self.rules = llm._operator_rules("content")
+        extra = extra_rules(self.settings)
+        if extra:
+            self.rules = with_extra_rules(self.rules, extra)
+            self.note(f"Extra rules for this run: {len(extra)}.")
         self.model = f"engine:{self.setup}:{models_for(self.setup, self.settings)['editor']}"[:60]
         self.policy = clip_proposals.policy_version(
             model=self.model, max_clips=self.keep,
@@ -912,6 +1042,20 @@ class _Run:
             max_seconds=_policy_number(self.cfg.max_s),
             scope="section" if self.window else "video",
             prompt=f"{clip_proposals.ENGINE_PROMPT_VERSION}:{self.setup}")
+
+    def house_rules(self) -> str:
+        """Whatever ``handbook.render_active`` returns (approved house rules
+        from the operator's past edits), or "" when there are none or the
+        handbook can't be read — a broken handbook must never stop a run."""
+        try:
+            from . import handbook
+
+            text = handbook.render_active()
+        except Exception as exc:  # noqa: BLE001 - optional extra; the run goes on
+            log.warning("%s: the handbook couldn't be read (%s); running without it",
+                        self.video_id, exc)
+            return ""
+        return str(text or "").strip()
 
     # 1. perceive ---------------------------------------------------------------------
 
@@ -980,7 +1124,7 @@ class _Run:
                 n=self.cfg.section_drafts if self.window else self.cfg.drafts,
                 min_s=self.cfg.min_s, max_s=self.cfg.max_s,
                 max_segments=self.cfg.max_segments, source_video=self.source_video,
-                keyframe_frames=keyframe_frames, meter=self.meter)
+                keyframe_frames=keyframe_frames, meter=self.meter, advice=self.advice)
         except util.Cancelled:
             raise
         except Exception as exc:
@@ -1155,7 +1299,8 @@ class _Run:
         return critic.cold_watch(
             role=self.roles["critic"], settings=self.settings, brand=self.brand,
             render=Path(d["render"]), clip_seconds=d["seconds"],
-            clip_words=d["clip_words"], credits=d["credits"], meter=self.meter)
+            clip_words=d["clip_words"], credits=d["credits"], meter=self.meter,
+            advice=self.advice)
 
     def cold_score(self, d: dict) -> float:
         critique = d["critique"]
@@ -1201,6 +1346,29 @@ class _Run:
                 d["topic_doubt"] = why
         if dropped:
             self.note("Off topic: " + "; ".join(f"{d['id']} ({d['topic_doubt']})" for d in dropped))
+
+    def language_gate(self) -> None:
+        """Drop drafts whose speech the audience can't follow (critic and
+        shot log agree; see ``language_verdict``) — unless that would drop
+        every draft left, in which case they all stay with their cold-score
+        penalty and a note, so a run never comes back empty on this alone."""
+        live = self.live()
+        flagged = []
+        for d in live:
+            verdict, why = language_verdict(d["critique"],
+                                            foreign_speech_share(self.log, d["segments"]))
+            if verdict == "drop":
+                d["language_doubt"] = why
+                flagged.append(d)
+        if flagged and len(flagged) == len(live):
+            self.note("Every draft left has speech the audience can't follow (not English, no "
+                      "English voiceover); kept them, scored down: "
+                      + ", ".join(d["id"] for d in flagged) + ".")
+        elif flagged:
+            for d in flagged:
+                d["dropped_reason"] = DROPPED_LANGUAGE
+            self.note("Not understood (another language, no English voiceover): "
+                      + "; ".join(f"{d['id']} ({d['language_doubt']})" for d in flagged))
         self.orders["cold"] = [d["id"] for d in sorted(self.live(), key=order_key)]
 
     # 8. rank -----------------------------------------------------------------------------
@@ -1243,7 +1411,8 @@ class _Run:
                     renders={d["id"]: Path(d["render"]) for d in group},
                     credits={d["id"]: d["credits"] for d in group},
                     scores={d["id"]: d["score"] for d in group},
-                    examples=examples, example_files=files, meter=self.meter) or [])
+                    examples=examples, example_files=files, meter=self.meter,
+                    advice=self.advice) or [])
             except util.Cancelled:
                 raise
             except Exception as exc:
@@ -1294,7 +1463,7 @@ class _Run:
                 entries=self.entries, has_words=self.has_words, used=self.used,
                 window=self.window, min_s=self.cfg.min_s, max_s=self.cfg.max_s,
                 max_segments=self.cfg.max_segments, source_video=self.source_video,
-                meter=self.meter)
+                meter=self.meter, advice=self.advice)
         except Exception as exc:
             self.meter_failure("revise", exc, before)
             raise
@@ -1355,7 +1524,7 @@ class _Run:
                 # One credits line per version (critic.prefer takes {"a","b"}):
                 # the two cuts can put the same person at different clip times.
                 credits={"a": original.get("credits", ""), "b": revision.get("credits", "")},
-                intent=self.intent(original), meter=self.meter)
+                intent=self.intent(original), meter=self.meter, advice=self.advice)
         except util.Cancelled:
             raise
         except Exception as exc:
@@ -1396,7 +1565,8 @@ def run(*, setup: str, settings, brand: dict, playbook: dict | None = None, vide
         used: list[dict], window: dict | None = None, section_topic: str = "",
         keep: int | None = None, meter: CostMeter | None = None,
         progress: Callable[[str], Any] | None = None,
-        cancel: threading.Event | None = None, deadline: float | None = None) -> EngineResult:
+        cancel: threading.Event | None = None, deadline: float | None = None,
+        advice: str = "") -> EngineResult:
     """Suggest clips for one video (or one section of it) by watching it.
 
     Pure: no database. ``source`` must be a local file for the whole run (jobs
@@ -1410,7 +1580,10 @@ def run(*, setup: str, settings, brand: dict, playbook: dict | None = None, vide
     partial cost when the run raises. ``progress(label)`` hears each stage;
     ``cancel`` / ``deadline`` (monotonic) and the hard cost cap are checked
     between stages and provider batches, and inside perception before every
-    window the shot log pays for.
+    window the shot log pays for. ``advice`` is the operator's plain-words
+    steer for this pass: every choosing call reads it (above the playbook),
+    the cold critic checks each draft against it, and it is recorded in
+    ``notes`` as "advice: …". Rejected proposals still filter as usual.
 
     Raises ``EngineError`` for anything the caller should answer with the
     transcript suggester, and ``util.Cancelled`` when stopped. Either carries
@@ -1427,7 +1600,7 @@ def run(*, setup: str, settings, brand: dict, playbook: dict | None = None, vide
                source=source, words=words, transcript=transcript, context=context,
                rejected=rejected, examples=examples, used=used, window=window,
                section_topic=section_topic, keep=keep, meter=meter, progress=progress,
-               cancel=cancel, deadline=deadline)
+               cancel=cancel, deadline=deadline, advice=advice)
     try:
         return job.execute()
     except (EngineError, util.Cancelled) as exc:

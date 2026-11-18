@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{#
+  Clip handbook (app/web/clip_handbook.py): the REPORT of what the operator's
+  past edits have in common. Its candidate rules are decided on the Brand &
+  audience page, in the same queue as rules drawn from his notes — nothing
+  here writes. Model text is escaped (Jinja autoescape); never mark it safe.
+#}
+{% set hb_crumbs %}
+<nav class="crumbs" aria-label="Clip handbook">
+  <a class="crumb" href="/analytics">Analytics</a>
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  <span class="crumb crumb-current">Clip handbook</span>
+</nav>
+{% endset %}
+{% set hb_actions %}<a class="btn primary" href="/brand#rule-proposals">Review suggested rules{% if report and report.pending %} ({{ report.pending }}){% endif %}</a>{% endset %}
+{% set hb_sub %}What your past edits have in common, written as rules the clip engine could follow. Each one waits with your other suggested rules on the Brand &amp; audience page; only the ones you add there change what the engine does.{% endset %}
+{{ ui.pagebar("Clip handbook", crumbs=hb_crumbs, sub=hb_sub, actions=hb_actions) }}
+
+<style>
+  .hb-error { color: var(--danger); border-color: var(--danger-border); }
+  .hb-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0 0 12px; }
+  .hb-summary { margin: 0 0 18px; line-height: 1.5; }
+  .hb-section { margin: 22px 0 8px; font-size: 15px; }
+  .hb-table td { vertical-align: top; }
+  .hb-rule { font-weight: 600; }
+  .hb-why { display: block; margin-top: 2px; }
+  .hb-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+</style>
+
+<div class="canvas canvas-wide">
+{% if error %}
+  <div class="card tight hb-error" role="alert">{{ error }}</div>
+{% elif not report %}
+  <div class="empty">
+    <strong>No handbook yet</strong>
+    Build one from the terminal. It studies the clips you've exported, proposes the patterns it
+    finds as rules (they appear on the Brand &amp; audience page for you to add or dismiss), and
+    writes this report:<br>
+    <code>python run.py clip-engine handbook build</code><br>
+    <code>python run.py clip-engine handbook validate</code>
+  </div>
+{% else %}
+  <p class="meta hb-meta">
+    <span>Built {{ report.generated_at }}{% if report.model %} with {{ report.model }}{% endif %}</span>
+    <span>{{ report.examples_used }} edits studied</span>
+    <span>{{ report.holdout }} edits on {{ report.holdout_videos }} videos held back for validation</span>
+    {% if report.failed %}<span>{{ report.failed }} couldn't be studied</span>{% endif %}
+    {% if report.cost is not none %}<span>cost ${{ '%.2f'|format(report.cost) }}</span>{% endif %}
+    {% if report.stopped %}<span>{{ report.stopped }}</span>{% endif %}
+  </p>
+  {% if report.summary %}<p class="hb-summary">{{ report.summary }}</p>{% endif %}
+
+  {% for title, rows in [("Rules", report.rules), ("Tendencies", report.tendencies)] %}
+  {% if rows %}
+  <h2 class="hb-section">{{ title }}
+    <span class="meta">{% if title == "Rules" %}seen in at least 5 edits and holding at least 70% of the time{% else %}weaker patterns, proposed with "usually"{% endif %}</span></h2>
+  <div class="table-wrap">
+    <table class="hb-table">
+      <thead>
+        <tr><th>Rule</th><th>When</th><th>Support</th><th>Exceptions</th><th>Holds</th><th>Examples</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td><span class="hb-rule">{{ r.text }}</span>{% if r.why %}<span class="meta hb-why">{{ r.why }}</span>{% endif %}</td>
+          <td>{{ r.when }}</td>
+          <td class="hb-num">{{ r.support }}</td>
+          <td class="hb-num">{{ r.exceptions }}</td>
+          <td class="hb-num">{{ r.share }}</td>
+          <td class="hb-num" title="{% for e in r.examples %}cut {{ e }}{% if not loop.last %}, {% endif %}{% endfor %}">{{ r.examples_count }}</td>
+          <td><span class="{{ r.status_badge }}">{{ r.status_label }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% endfor %}
+  {% if not report.rules and not report.tendencies %}
+  <div class="empty"><strong>No candidate rules</strong> The last build found nothing that held across your edits.</div>
+  {% endif %}
+
+  <h2 class="hb-section">Validation</h2>
+  {% if report.validation %}
+  {% set v = report.validation %}
+  <p class="meta">Replayed {{ v.videos }} held-out videos{% if v.setup %} ({{ v.setup }}){% endif %} on {{ v.at }}, testing {{ v.rules_tested }} candidate rules on top of your current ones.
+    A "moment hit" means a suggestion covered at least half of a clip you actually cut from that video.{% if v.stopped %} {{ v.stopped }}.{% endif %}</p>
+  <div class="table-wrap">
+    <table class="hb-table">
+      <thead>
+        <tr><th>Rules</th><th>Videos</th><th>Moment hit @1</th><th>Moment hit @3</th><th>Exact hit @1</th><th>Exact hit @3</th><th>Errors</th><th>Empty</th></tr>
+      </thead>
+      <tbody>
+      {% for label, a in v.arms %}
+        <tr><td>{{ label }}</td><td class="hb-num">{{ a.n }}</td><td class="hb-num">{{ a.moment1 }}</td><td class="hb-num">{{ a.moment3 }}</td>
+            <td class="hb-num">{{ a.hit1 }}</td><td class="hb-num">{{ a.hit3 }}</td><td class="hb-num">{{ a.errors }}</td><td class="hb-num">{{ a.empty }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="meta">Fifteen videos is a small sample: read a gap of a video or two as noise.</p>
+  {% else %}
+  <div class="empty"><strong>Not validated yet</strong>
+    <code>python run.py clip-engine handbook validate</code> replays held-out videos with and without the candidates (about $1.50 a video).</div>
+  {% endif %}
+{% endif %}
+</div>
+{% endblock %}

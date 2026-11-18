@@ -24,6 +24,20 @@ judge is handed "credits" (who is on screen, from names shown, said, or in
 the title) — otherwise Bill Nye reads as "a man talks to camera". And the
 topic test admits allegory: the account's second-biggest post is a scene from
 a film about a comet that never says "climate".
+
+Three tests came from the first live run (an India artisans video whose
+picks were two non-English interviews and a reporter monologue, none of
+which told a stranger what was going on): every word heard must be
+understood (English, or carried by an English voiceover — burned-in
+subtitles don't count, since this audience never uses those clips), the
+first five seconds must give the premise (what is happening, and where),
+and a reporter or anchor talking to camera is never the clip. The shot log
+records each beat's speech language and whether an English voiceover is
+heard, so the editor can see the first one coming.
+
+The operator can also steer one pass in plain words (``advice``). It goes
+into every prompt that chooses (draft, revise, rank, prefer) above the
+playbook, and the cold critic checks the clip against it.
 """
 from __future__ import annotations
 
@@ -48,6 +62,34 @@ SHOT_TYPES = (
 LENSES = ("person", "picture", "line", "sound")
 
 PROMINENCE = ("famous", "public_figure", "expert", "local", "unknown")
+
+# What language the words in a beat are in. "none" = nobody speaks.
+SPEECH_LANGUAGES = ("english", "other", "none")
+
+ADVICE_HEADER = "THE OPERATOR'S ADVICE FOR THIS VIDEO — follow it; it outranks the playbook:"
+_ADVICE_CHARS = 1500
+
+
+def clean_advice(advice) -> str:
+    """The operator's advice as one tidy line (whitespace collapsed, capped)."""
+    text = " ".join(str(advice or "").split())
+    return text[:_ADVICE_CHARS].rstrip()
+
+
+def advice_block(advice) -> str:
+    """The advice section for a system prompt, or "" when there is none."""
+    text = clean_advice(advice)
+    return f"{ADVICE_HEADER}\n{text}\n" if text else ""
+
+
+# The three tests every judge applies (the critic as fields, the ranking and
+# revision judges in their instructions).
+THREE_TESTS = (
+    "whether within about five seconds a stranger knows what is happening and "
+    "where; whether every word heard is English or carried by an English "
+    "voiceover (burned-in subtitles don't count); whether it is mostly one "
+    "reporter or anchor talking to camera (those rank low)"
+)
 
 
 # ---- shared blocks ------------------------------------------------------------
@@ -144,6 +186,15 @@ def perceiver_system(brand: dict, *, mode: str, frame_interval: float = 2.0) -> 
         sound = ("- sound: what you hear besides speech: natural sound, crowd, "
                  "sirens, music, laughter, applause, shouting, silence; \"\" if "
                  "only speech.\n")
+        language = (
+            "- speech_language: the language of the words spoken in the beat: "
+            "english, other (any other language), or none (nobody speaks). "
+            "Narration and voiceover count as speech.\n"
+            "- english_voiceover: true when an English voiceover, narration or "
+            "interpreter is heard over this beat (for example a translator over a "
+            "non-English interview, or a narrator over footage); false otherwise. "
+            "Burned-in subtitles or on-screen translation are NOT a voiceover.\n"
+        )
     else:
         intro = (
             f"You are the assistant editor for {_name(brand)}, a social account "
@@ -158,6 +209,15 @@ def perceiver_system(brand: dict, *, mode: str, frame_interval: float = 2.0) -> 
                  "labels and the transcript use the same clock), e.g. \"75.5\".")
         sound = ("- sound: you can't hear the audio; fill this only from transcript "
                  "marks such as [music] or [applause], else \"\".\n")
+        language = (
+            "- speech_language: the language of the words spoken in the beat, "
+            "judged from the transcript lines for its stretch: english, other (the "
+            "words are in another language), or none (no speech in the beat).\n"
+            "- english_voiceover: true when the transcript shows English narration "
+            "or an interpreter speaking over someone whose own words are in another "
+            "language, or a narrator over footage; false otherwise. Subtitles or "
+            "translated captions visible in the frames are NOT a voiceover.\n"
+        )
     return (
         intro
         + "Log it as BEATS, in order, covering the video from start to end. Start "
@@ -178,6 +238,7 @@ def perceiver_system(brand: dict, *, mode: str, frame_interval: float = 2.0) -> 
         "- line: the most important words spoken in the beat, close to verbatim, "
         "at most 25 words; \"\" if none.\n"
         + sound
+        + language
         + "- energy 1-5: how much is happening and how charged the delivery is. "
         "1 = a static reading; 5 = shouting, tears, chaos, or a punchline "
         "landing.\n"
@@ -233,9 +294,10 @@ def editor_system(brand: dict, playbook_text: str, rules: str, *, n: int,
                   min_s: float, max_s: float, max_segments: int,
                   sees_video: bool, section: dict | None = None,
                   section_topic: str = "", has_words: bool = True,
-                  has_keyframes: bool = False) -> str:
+                  has_keyframes: bool = False, advice: str = "") -> str:
     """The editor that drafts candidate clips from the shot log + transcript
-    (and the video itself when ``sees_video``)."""
+    (and the video itself when ``sees_video``). ``advice`` is the operator's
+    steer for this pass; it outranks the playbook."""
     topic = _topic(brand)
     if sees_video:
         eyes = (
@@ -266,6 +328,7 @@ def editor_system(brand: dict, playbook_text: str, rules: str, *, n: int,
         "WHAT WORKS FOR THIS ACCOUNT\n"
         + playbook_text.strip() + "\n"
         + (rules.strip() + "\n" if rules.strip() else "")
+        + ("\n" + advice_block(advice) if clean_advice(advice) else "")
         + "\nYOUR JOB\n"
         f"Draft {n} candidate clips from this source. A critic will watch a render "
         "of every draft cold, the way a stranger scrolling past meets it, and the "
@@ -296,16 +359,29 @@ def editor_system(brand: dict, playbook_text: str, rules: str, *, n: int,
         "famous host, a forecaster breaking script, a punchline), open on them.\n"
         "2. Hooks within two seconds, both with the sound off and with it on.\n"
         "3. Has no drone: at most one short context beat, directly before the "
-        "payoff it sets up. Cut preamble, restatement, a reporter re-explaining "
-        "what a witness just said, sign-offs (\"back to you\", \"bye\"), and the "
-        "next story's lead-in.\n"
+        "payoff it sets up. When the viewer needs the premise (rule 8), the "
+        "premise beat IS that one context beat. Cut preamble, restatement, a "
+        "reporter re-explaining what a witness just said, sign-offs (\"back to "
+        "you\", \"bye\"), and the next story's lead-in.\n"
         "4. Reads as one line of thought: no dangling \"he\", \"that\" or \"this\" "
         "whose referent was cut.\n"
         "5. Ends on the payoff: the consequence, the punchline, the quote.\n"
         f"6. Is about {topic} on its own terms: someone who sees only the clip "
         f"knows it is about {topic}, or it is a recognized {topic} allegory or "
         "culture moment whose link a one-line caption makes obvious. If "
-        f"{topic} is incidental to a moment, it is not a clip for this account.\n\n"
+        f"{topic} is incidental to a moment, it is not a clip for this account.\n"
+        "7. LANGUAGE: the audience must understand every word heard. Speech in "
+        "another language is usable only when an English voiceover carries it; "
+        "burned-in subtitles are not enough. Check the shot log: a beat whose "
+        "speech_language is \"other\" goes in only when its english_voiceover is "
+        "true. Natural sound with no words is fine.\n"
+        "8. PREMISE: within the first ~5 seconds a stranger knows what is "
+        "happening and where: a picture plus a line that names the place or the "
+        "stakes. A hook that leaves the viewer lost is not a hook.\n"
+        "9. MONOLOGUE: a reporter or anchor speaking to camera is never the "
+        "opening and never the clip; at most one short context beat (the "
+        "premise beat, when one is needed). A famous presenter who IS the hook "
+        "is the exception in rule 1.\n\n"
         + cutting_rules(min_s=min_s, max_s=max_s, max_segments=max_segments,
                         has_words=has_words)
         + section_line
@@ -331,8 +407,9 @@ def editor_system(brand: dict, playbook_text: str, rules: str, *, n: int,
 
 def revise_system(brand: dict, playbook_text: str, rules: str, *, min_s: float,
                   max_s: float, max_segments: int, sees_video: bool,
-                  has_words: bool = True) -> str:
-    """One revision of one draft, from the critic's notes."""
+                  has_words: bool = True, advice: str = "") -> str:
+    """One revision of one draft, from the critic's notes (and the
+    operator's ``advice`` for this pass, which outranks the playbook)."""
     eyes = (
         "The whole source video is attached (source clock); watch the stretch "
         "around the draft.\n"
@@ -350,6 +427,15 @@ def revise_system(brand: dict, playbook_text: str, rules: str, *, min_s: float,
         "time, so you can translate.\n\n"
         "WHAT WORKS FOR THIS ACCOUNT\n" + playbook_text.strip() + "\n"
         + (rules.strip() + "\n" if rules.strip() else "")
+        + ("\n" + advice_block(advice) if clean_advice(advice) else "")
+        + "\nTHE REVISED CUT MUST ALSO PASS THREE TESTS\n"
+        "- Every word heard is understood: English, or carried by an English "
+        "voiceover (burned-in subtitles are not enough; see each beat's "
+        "speech_language and english_voiceover).\n"
+        "- Within the first ~5 seconds a stranger knows what is happening and "
+        "where.\n"
+        "- It is not a reporter or anchor talking to camera; at most one short "
+        "context beat of that.\n"
         + "\n" + cutting_rules(min_s=min_s, max_s=max_s, max_segments=max_segments,
                                has_words=has_words)
         + "\nIf the notes are wrong, or nothing you can cut from this footage "
@@ -369,10 +455,21 @@ CREDITS_NOTE = (
 TOPIC_LABELS = ("central", "allegory", "incidental", "none")
 
 
-def cold_system(brand: dict, *, mode: str, frame_interval: float = 1.0) -> str:
+def cold_system(brand: dict, *, mode: str, frame_interval: float = 1.0,
+                advice: str = "") -> str:
     """A stranger meeting one rendered draft in a feed. Deliberately knows
-    nothing about the account beyond who is on screen: this is the cold read."""
+    nothing about the account beyond who is on screen: this is the cold read.
+    With ``advice`` (the operator's steer for this pass) it also checks the
+    clip against it (``follows_advice`` / ``advice_note``)."""
     topic = _topic(brand)
+    advice_text = clean_advice(advice)
+    advice_test = ""
+    if advice_text:
+        advice_test = (
+            "- follows_advice: the account's operator asked for this pass: "
+            f"\"{advice_text}\". Does the clip follow that? advice_note: one line "
+            "on how it does or doesn't.\n"
+        )
     if mode == "video":
         how = ""
     else:
@@ -398,7 +495,16 @@ def cold_system(brand: dict, *, mode: str, frame_interval: float = 1.0) -> str:
         "- about: what the clip is about, in one line, from the clip alone.\n"
         "- makes_sense: could you follow it with no context? dangling: any "
         "reference you couldn't resolve (\"\" if none).\n"
-        "- bored_at: the second, counted from the start of the clip, at which "
+        "- premise_clear: within about the first five seconds, do you know what "
+        "is happening and where?\n"
+        "- speech_understood: is every spoken word either in English or carried "
+        "by an English voiceover? Speech in another language with only "
+        "burned-in subtitles or captions does NOT count as understood. True "
+        "when nobody speaks.\n"
+        "- monologue: is the clip mostly one reporter or anchor talking to the "
+        "camera?\n"
+        + advice_test
+        + "- bored_at: the second, counted from the start of the clip, at which "
         "you'd have swiped away; null if you'd watch to the end.\n"
         "- dead_air: stretches where nothing new happens, as start and end "
         "seconds from the clip's start.\n"
@@ -422,8 +528,9 @@ def cold_system(brand: dict, *, mode: str, frame_interval: float = 1.0) -> str:
 
 
 def rank_system(brand: dict, playbook_text: str, *, k: int, has_examples: bool,
-                mode: str, frame_interval: float = 2.0) -> str:
-    """Head-to-head: which of these drafts would this account post first."""
+                mode: str, frame_interval: float = 2.0, advice: str = "") -> str:
+    """Head-to-head: which of these drafts would this account post first
+    (the operator's ``advice`` for this pass outranks the playbook)."""
     topic = _topic(brand)
     if has_examples:
         examples = (
@@ -450,18 +557,20 @@ def rank_system(brand: dict, playbook_text: str, *, k: int, has_examples: bool,
         "last. Judge each the way a stranger scrolling past meets it: the first "
         "two seconds (muted, then with sound); whether it holds to the end; "
         "whether it makes sense with no context; whether it ends on a payoff; "
-        f"whether {topic} is central to it. Then weigh whether it is the kind of "
-        f"clip that does well HERE: {examples}.\n\n"
+        f"whether {topic} is central to it; {THREE_TESTS}. Then weigh whether "
+        f"it is the kind of clip that does well HERE: {examples}.\n\n"
         "WHAT WORKS FOR THIS ACCOUNT\n" + playbook_text.strip() + "\n\n"
-        "Write a one-line note for every draft first, then the ranking (every "
+        + (advice_block(advice) + "\n" if clean_advice(advice) else "")
+        + "Write a one-line note for every draft first, then the ranking (every "
         "draft letter, best first), then best_reason: what makes your first "
         "choice beat your second."
     )
 
 
 def prefer_system(brand: dict, *, mode: str, frame_interval: float = 1.0,
-                  intent: str = "") -> str:
-    """Two cuts of the same clip: which one, or "same"."""
+                  intent: str = "", advice: str = "") -> str:
+    """Two cuts of the same clip: which one, or "same" (the operator's
+    ``advice`` for this pass counts first)."""
     how = "" if mode == "video" else (
         f"You can't play them: each comes as frames every {frame_interval:g} s and "
         "the words heard.\n"
@@ -470,12 +579,13 @@ def prefer_system(brand: dict, *, mode: str, frame_interval: float = 1.0,
         f"Two cuts of the same clip for {_name(brand)}, Version 1 and Version 2.\n"
         + how
         + (f"What the clip is going for: {intent}\n" if intent else "")
+        + advice_block(advice)
         + CREDITS_NOTE + "\n"
         "Which would you post? Judge them the way a stranger scrolling past "
         "meets them: the first two seconds (muted, then with sound), whether it "
         "holds to the end, whether it makes sense with no context, whether it "
-        "ends on a payoff. Answer choice \"1\" or \"2\", or \"same\" when "
-        "neither is clearly better, with a one-line reason."
+        f"ends on a payoff; {THREE_TESTS}. Answer choice \"1\" or \"2\", or "
+        "\"same\" when neither is clearly better, with a one-line reason."
     )
 
 

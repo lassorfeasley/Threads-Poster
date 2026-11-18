@@ -34,6 +34,9 @@ Clip engine (docs/clip-engine.md):
   python run.py clip-engine try <id> --log  # ...and save its top picks as suggestions
   python run.py clip-engine shotlog <id>    # build (or show the cached) shot log of a video
   python run.py clip-engine playbook        # print the clip playbook (--refresh rebuilds it from your posts)
+  python run.py clip-engine handbook build  # learn house rules from your past edits (suggested on /brand)
+  python run.py clip-engine handbook validate  # replay held-out videos with/without those rules
+  python run.py clip-engine handbook show   # the handbook report and where each rule stands
   python run.py clipbench run --name N      # replay past videos through each setup (resumable)
   python run.py clipbench pairs --name N    # render the blind A/B pairs for Analytics -> Clip bench
   python run.py clipbench report --name N   # a run's report (results only after the reveal)
@@ -1522,6 +1525,117 @@ def cmd_clip_engine_playbook(args) -> None:
     print(playbook.render(pb))
 
 
+def _format_validation(v: dict | None) -> list[str]:
+    if not isinstance(v, dict) or not v:
+        return ["Not validated yet (python run.py clip-engine handbook validate)."]
+
+    def pct(x) -> str:
+        return "  –" if x is None else f"{float(x) * 100:3.0f}%"
+
+    lines = [f"Validation {str(v.get('at') or '')[:16]}: {v.get('videos', 0)} held-out videos, "
+             f"{v.get('rules_tested', 0)} candidate rules, ${float(v.get('cost_usd') or 0):.2f}"
+             + (f" ({v['stopped']})" if v.get("stopped") else ""),
+             f"  {'':22} {'moment@1':>8} {'moment@3':>8} {'hit@1':>6} {'hit@3':>6} {'errors':>6}"]
+    for key, label in (("current", "current rules"), ("candidates", "current + candidates")):
+        a = v.get(key) or {}
+        lines.append(f"  {label:22} {pct(a.get('moment_hit1')):>8} {pct(a.get('moment_hit3')):>8} "
+                     f"{pct(a.get('hit1')):>6} {pct(a.get('hit3')):>6} {a.get('errors', 0):>6}")
+    return lines
+
+
+def cmd_clip_engine_handbook_show(_args) -> None:
+    """Print the handbook report: its candidates, where each stands in the
+    shared rule queue, and the validation."""
+    from app.clip_engine import handbook
+
+    report = handbook.load()
+    if report is None:
+        raise SystemExit("No handbook yet: python run.py clip-engine handbook build")
+    print(f"Handbook report: {handbook.path()}")
+    print(f"Built {report.get('generated_at') or '?'} from {report.get('examples_used', 0)} edits "
+          f"({report.get('holdout', 0)} held out on {report.get('holdout_videos', 0)} videos)")
+    if report.get("summary"):
+        print(f"\n{report['summary']}")
+    print()
+    for c in handbook.statuses(report):
+        print(f"[{c['status']:>12}] {handbook.proposal_text(c)}"
+              + ("" if c.get("when") in ("", "Always") else f"  (when: {c['when']})"))
+        print(f"{'':15}{handbook.evidence_for(c)} · {c.get('strength')}")
+    print()
+    print("\n".join(_format_validation(report.get("validation"))))
+    print("\nAdd or dismiss the suggestions on the Brand & audience page (/brand).")
+
+
+def cmd_clip_engine_handbook_build(args) -> None:
+    """Study the exported cuts (Gemini, one call per cut; shot logs reused),
+    write the candidate rules (one Claude call), queue them as suggested rules
+    and save the report. Spend goes to the "bench" bucket."""
+    from app import clip_engine, spend
+    from app.clip_engine import engine, handbook
+    from app.config import load_settings
+    from app.db import init_db
+
+    _require_provider("gemini")
+    _require_provider("claude")
+    init_db()
+    spend.set_bucket("bench")
+    settings = load_settings()
+    max_usd = args.max_usd if args.max_usd is not None else float(
+        clip_engine.opt(settings, "clip_engine.bench.max_usd", 40))
+    meter = engine.CostMeter("bench")
+    print(f"Building the clip handbook (cap ${max_usd:g}; analyses already cached are free)…",
+          flush=True)
+    try:
+        report = handbook.build(settings, limit=args.limit, max_usd=max_usd, meter=meter,
+                                say=_say)
+    except KeyboardInterrupt:
+        print(f"\nInterrupted after ${meter.total:.2f}; finished analyses are cached, so "
+              "running it again picks up where it stopped.")
+        raise SystemExit(130) from None
+    except Exception as exc:
+        raise SystemExit(f"Handbook build failed ({type(exc).__name__}: {exc}); the previous "
+                         f"report is unchanged. Spent ${meter.total:.2f}.") from None
+    queued = handbook.propose(report, settings=settings)
+    backup = handbook.backup()
+    path = handbook.save(report)
+    print(f"\nSaved {path} ({len(report['candidates'])} candidates, ${meter.total:.2f}).")
+    if backup:
+        print(f"The previous report is at {backup}.")
+    print(f"Queued {len(queued)} new suggested rule(s) on the Brand & audience page (/brand); "
+          "nothing changes until you add them there.\n")
+    print(handbook.render(report))
+
+
+def cmd_clip_engine_handbook_validate(args) -> None:
+    """Replay held-out videos with the current rules and with the candidates
+    added, and store moment-hit@1/@3 for both in the report."""
+    from app import clip_engine, spend
+    from app.clip_engine import handbook
+    from app.config import load_settings
+    from app.db import init_db
+
+    report = handbook.load()
+    if report is None:
+        raise SystemExit("No handbook yet: python run.py clip-engine handbook build")
+    settings = load_settings()
+    setup = _engine_setup(settings, args.setup or "gemini")
+    init_db()
+    spend.set_bucket("bench")
+    max_usd = args.max_usd if args.max_usd is not None else float(
+        clip_engine.opt(settings, "clip_engine.bench.max_usd", 40))
+    try:
+        summary = handbook.validate(report, settings, limit=args.limit, max_usd=max_usd,
+                                    setup=setup, say=_say)
+    except KeyboardInterrupt:
+        print("\nInterrupted; finished replays are cached, so running it again continues.")
+        raise SystemExit(130) from None
+    except Exception as exc:
+        raise SystemExit(f"Validation failed: {type(exc).__name__}: {exc}") from None
+    handbook.set_validation(summary)
+    print()
+    print("\n".join(_format_validation(summary)))
+
+
 def _bench():
     """bench.py, with this process's spend booked to the "bench" bucket — kept
     out of the dashboard's daily budget and the engine's own cap."""
@@ -1913,6 +2027,30 @@ def _add_clip_engine_parsers(sub, common) -> None:
     ep.add_argument("--model", default=None, metavar="M",
                     help="model for --refresh (default: the Claude editor model)")
     ep.set_defaults(func=cmd_clip_engine_playbook)
+
+    ep = esub.add_parser("handbook",
+                         help="learn house rules from your past edits; review them on /brand")
+    hsub = ep.add_subparsers(dest="handbook_command", required=True)
+    hp = hsub.add_parser("build", parents=[common],
+                         help="study your exported cuts, queue the rules they share as "
+                              "suggestions, write the report")
+    hp.add_argument("--limit", type=_int_at_least(1), default=None, metavar="N",
+                    help="study at most N cuts (best evidence first; default: all)")
+    hp.add_argument("--max-usd", type=_positive_float, default=None, metavar="USD",
+                    help="stop studying cuts past this spend (default: clip_engine.bench.max_usd)")
+    hp.set_defaults(func=cmd_clip_engine_handbook_build)
+    hp = hsub.add_parser("validate", parents=[common],
+                         help="replay held-out videos with and without the candidate rules")
+    hp.add_argument("--limit", type=_int_at_least(1), default=15, metavar="N",
+                    help="held-out videos to replay (default 15)")
+    hp.add_argument("--max-usd", type=_positive_float, default=None, metavar="USD",
+                    help="stop past this spend (default: clip_engine.bench.max_usd)")
+    hp.add_argument("--setup", choices=_ENGINE_SETUPS, default=None,
+                    help="engine setup to replay with (default: gemini)")
+    hp.set_defaults(func=cmd_clip_engine_handbook_validate)
+    hp = hsub.add_parser("show", parents=[common],
+                         help="print the handbook report and where each candidate stands")
+    hp.set_defaults(func=cmd_clip_engine_handbook_show)
 
     p = sub.add_parser("clipbench", help="replay benchmark for the clip engine (docs/clip-engine.md)")
     bsub = p.add_subparsers(dest="bench_command", required=True)

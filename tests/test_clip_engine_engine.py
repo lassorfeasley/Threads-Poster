@@ -136,6 +136,7 @@ class Harness:
         self.draft_error = None
         self.example_files: dict = {}
         self.probe = 600.0
+        self.handbook = ""          # what handbook.render_active returns (or raises)
         self._start()
 
     def _start(self) -> None:
@@ -160,12 +161,19 @@ class Harness:
             mock.patch.object(playbook_mod, "render", new=lambda pb: "PLAYBOOK TEXT"),
             mock.patch.object(playbook_mod, "open_rule", new=lambda pb, key: f"{key}: open on it"),
             mock.patch.object(llm, "_operator_rules", new=lambda scope: "OPERATOR RULES"),
+            mock.patch("app.clip_engine.handbook.render_active", new=self.render_handbook),
         ]
         for p in patches:
             p.start()
             self.test.addCleanup(p.stop)
 
     # -- the fakes ---------------------------------------------------------------
+
+    def render_handbook(self):
+        self.events.append("handbook")
+        if isinstance(self.handbook, BaseException):
+            raise self.handbook
+        return self.handbook
 
     def build(self, **kw):
         self.events.append("perceive")
@@ -1725,6 +1733,291 @@ class PerceptionLimitsTest(_SpendSafe):
         result = h.run(duration=self.HOUR, meter=engine.CostMeter())
         self.assertEqual(result.outcome, "proposals")
         self.assertEqual(len(self.calls), 13 - first)
+
+
+# ---- round 2: language gate, advice, handbook, extra rules ------------------------------
+
+def lang_beat(start, end, language, voiceover=False, topic=2):
+    return {"start": float(start), "end": float(end), "topic": topic, "shot": "interview",
+            "speech_language": language, "english_voiceover": voiceover}
+
+
+LANG_LOG = {"version": 3, "perceiver": "gemini", "complete": True, "cost_usd": 0.05,
+            "people": [],
+            "beats": [lang_beat(0, 100, "other"), lang_beat(100, 200, "other", True),
+                      lang_beat(200, 300, "english"), lang_beat(300, 400, "none"),
+                      lang_beat(400, 600, "other")]}
+
+
+class LanguageRulesTest(unittest.TestCase):
+    def test_foreign_speech_share_is_overlap_weighted(self):
+        cases = [
+            ([seg(10, 30)], 1.0),                    # non-English, no voiceover
+            ([seg(110, 130)], 0.0),                  # carried by an English voiceover
+            ([seg(210, 230)], 0.0),                  # English
+            ([seg(310, 330)], 0.0),                  # nobody speaks
+            ([seg(90, 110)], 0.5),
+            ([seg(80, 110)], 0.667),
+            ([seg(95, 120)], 0.2),
+            ([seg(210, 220), seg(10, 30)], 0.667),   # cold open: play order doesn't matter
+        ]
+        for segments, expected in cases:
+            with self.subTest(segments=segments):
+                self.assertAlmostEqual(engine.foreign_speech_share(LANG_LOG, segments), expected,
+                                       places=3)
+
+    def test_no_language_data_is_no_opinion(self):
+        old = {"beats": [{"start": 0, "end": 100, "topic": 2}]}
+        self.assertIsNone(engine.foreign_speech_share(old, [seg(10, 30)]))
+        self.assertIsNone(engine.foreign_speech_share(None, [seg(10, 30)]))
+        self.assertIsNone(engine.foreign_speech_share(LANG_LOG, [seg(700, 720)]))
+        odd = {"beats": [{"start": 0, "end": 100, "speech_language": "klingon"}, "junk",
+                         {"start": "x", "end": 5, "speech_language": "other"}]}
+        self.assertIsNone(engine.foreign_speech_share(odd, [seg(10, 30)]))
+
+    def test_language_verdict_needs_two_witnesses(self):
+        lost = crit(6, speech_understood=False)
+        cases = [
+            (lost, 1.0, "drop"),
+            (lost, 0.5, "drop"),
+            (lost, 0.49, "keep"),
+            (lost, None, "keep"),                        # the log has no opinion
+            (crit(6, speech_understood=True), 1.0, "keep"),
+            (crit(6), 1.0, "keep"),                      # an older critique: no answer
+            (crit(0, speech_understood=False, error="quota"), 1.0, "keep"),
+            (None, 1.0, "keep"),
+        ]
+        for critique, share, expected in cases:
+            with self.subTest(critique=critique, share=share):
+                verdict, why = engine.language_verdict(critique, share)
+                self.assertEqual(verdict, expected)
+                self.assertEqual(bool(why), expected == "drop")
+        self.assertIn("100%", engine.language_verdict(lost, 1.0)[1])
+
+    def test_revisions_may_not_break_the_new_tests(self):
+        original = {"score": 7.0, "critique": crit(7, premise_clear=True,
+                                                   speech_understood=True, monologue=False)}
+        cases = [
+            (crit(8, premise_clear=False), "lost the premise"),
+            (crit(8, speech_understood=False), "can't follow"),
+            (crit(8, monologue=True), "monologue"),
+            (crit(8, follows_advice=False), "advice"),
+            (crit(8), ""),                                # unanswered tests count as passed
+        ]
+        for critique, expected in cases:
+            with self.subTest(critique=critique):
+                blocker = engine.revision_blocker(original, {"score": 8.0, "critique": critique})
+                if expected:
+                    self.assertIn(expected, blocker)
+                else:
+                    self.assertEqual(blocker, "")
+        # A failure the original already had is not new.
+        weak = {"score": 4.0, "critique": crit(4, monologue=True, premise_clear=False)}
+        self.assertEqual(engine.revision_blocker(
+            weak, {"score": 5.0, "critique": crit(5, monologue=True, premise_clear=False)}), "")
+
+    def test_failed_critique_answers_the_tests_false(self):
+        out = engine.failed_critique("timed out")
+        self.assertEqual((out["premise_clear"], out["speech_understood"], out["monologue"]),
+                         (False, False, False))
+
+
+class ExtraRulesTest(unittest.TestCase):
+    def test_extra_rules_setting(self):
+        cases = [
+            ({}, []),
+            ({"clip_engine.extra_rules": []}, []),
+            ({"clip_engine.extra_rules": None}, []),
+            ({"clip_engine.extra_rules": ""}, []),
+            ({"clip_engine.extra_rules": "Open on the action"}, ["Open on the action"]),
+            ({"clip_engine.extra_rules": [" - Open  on the\naction ", "", None, "Open on the action",
+                                          "No interviews"]},
+             ["Open on the action", "No interviews"]),
+            ({"clip_engine.extra_rules": {"a": 1}}, []),
+            ({"clip_engine.extra_rules": ["x" * 400]}, ["x" * 300]),
+        ]
+        for dotted, expected in cases:
+            with self.subTest(dotted=dotted):
+                self.assertEqual(engine.extra_rules(make_settings(dotted)), expected)
+
+    def test_bullets_join_the_existing_block_before_its_closing_note(self):
+        with mock.patch("app.config.render_brand_rules", return_value="- Never fake a quote."):
+            block = llm._operator_rules("content")
+        out = engine.with_extra_rules(block, ["Open on the action", "No interviews"])
+        self.assertIn("- Never fake a quote.\n- Open on the action\n- No interviews\n"
+                      "Material that challenges", out)
+        self.assertTrue(out.startswith(block.split("- Never")[0]))
+        self.assertEqual(out.count("THE OPERATOR'S RULES"), 1)
+
+    def test_an_empty_block_is_created_like_the_operators(self):
+        out = engine.with_extra_rules("", ["Open on the action"])
+        with mock.patch("app.config.render_brand_rules", return_value="- Open on the action"):
+            self.assertEqual(out, llm._operator_rules("content"))
+
+    def test_no_extra_rules_changes_nothing(self):
+        self.assertEqual(engine.with_extra_rules("BLOCK", []), "BLOCK")
+        self.assertEqual(engine.with_extra_rules("", []), "")
+        self.assertEqual(engine.with_extra_rules("BLOCK", ["x"]), "BLOCK\n- x")
+
+
+class RunLanguageGateTest(_SpendSafe):
+    def test_dropped_only_when_critic_and_log_agree(self):
+        h = self.harness(
+            [make_draft("d1", (10, 30)), make_draft("d2", (110, 130)),
+             make_draft("d3", (210, 230)), make_draft("d4", (20, 40), story_key="d1"),
+             make_draft("d5", (410, 430))],
+            {"d1": crit(9, speech_understood=False),       # foreign, critic lost: dropped
+             "d2": crit(8, speech_understood=False),       # voiced over per the log: kept
+             "d3": crit(7),
+             "d4": crit(6, speech_understood=True),        # critic understood it: kept
+             "d5": crit(0, speech_understood=False, error="quota")},   # not reviewed: kept
+            shotlog=copy.deepcopy(LANG_LOG))
+        result = h.run()
+        drafts = {d["id"]: d for d in result.drafts}
+        self.assertEqual(drafts["d1"]["dropped_reason"], "language")
+        self.assertIn("another language", drafts["d1"]["language_doubt"])
+        for did in ("d2", "d3", "d4", "d5"):
+            with self.subTest(did):
+                self.assertEqual(drafts[did]["dropped_reason"], "")
+                self.assertEqual(drafts[did]["language_doubt"], "")
+        self.assertNotIn("d1", result.orders["cold"])
+        self.assertNotIn("d1", [d["id"] for d in h.calls["rank"][0]["drafts"]])
+        self.assertTrue(any(n.startswith("Not understood") and "d1" in n for n in result.notes))
+        self.assertEqual(result.outcome, "proposals")
+
+    def test_never_empties_the_result_on_its_own(self):
+        h = self.harness(
+            [make_draft("d1", (10, 30)), make_draft("d2", (410, 430))],
+            {"d1": crit(7, speech_understood=False), "d2": crit(8, speech_understood=False)},
+            shotlog=copy.deepcopy(LANG_LOG))
+        result = h.run()
+        self.assertEqual(result.outcome, "proposals")
+        self.assertEqual([d["id"] for d in result.top], ["d2", "d1"])
+        for d in result.drafts:
+            self.assertEqual(d["dropped_reason"], "")
+            self.assertIn("another language", d["language_doubt"])
+        self.assertTrue(any("kept them, scored down" in n for n in result.notes))
+        self.assertEqual(result.orders["cold"], ["d2", "d1"])
+
+    def test_counts_only_drafts_the_topic_gate_left(self):
+        log = copy.deepcopy(LANG_LOG)
+        log["beats"][2]["topic"] = 0                          # 200-300: off topic
+        h = self.harness(
+            [make_draft("d1", (10, 30)), make_draft("d2", (210, 230))],
+            {"d1": crit(7, speech_understood=False), "d2": crit(8, topic="none")},
+            shotlog=log)
+        result = h.run()
+        drafts = {d["id"]: d for d in result.drafts}
+        self.assertEqual(drafts["d2"]["dropped_reason"], "off topic")
+        # d1 is the only draft left: kept (scored down), not dropped.
+        self.assertEqual(drafts["d1"]["dropped_reason"], "")
+        self.assertTrue(drafts["d1"]["language_doubt"])
+        self.assertEqual([d["id"] for d in result.top], ["d1"])
+
+    def test_an_older_log_without_languages_drops_nothing(self):
+        h = self.harness([make_draft("d1", (10, 30)), make_draft("d2", (110, 130))],
+                         {"d1": crit(7, speech_understood=False), "d2": crit(8)})
+        result = h.run()
+        self.assertEqual([d["dropped_reason"] for d in result.drafts], ["", ""])
+
+
+ADVICE = "Open on the disaster footage; no interviews."
+
+
+class RunAdviceTest(_SpendSafe):
+    def pool(self) -> Harness:
+        h = self.harness([make_draft("d1", (10, 30)), make_draft("d2", (100, 120))],
+                         {"d1": crit(8), "d2": crit(6), "d1r": crit(9)})
+        h.revisions = {"d1": {"id": "d1r", "segments": [seg(9, 29)], "change": "x"}}
+        return h
+
+    def test_advice_reaches_every_choosing_call_and_the_notes(self):
+        h = self.pool()
+        result = h.run(advice="  Open on the disaster footage;\n  no interviews.  ")
+        self.assertEqual(h.calls["draft"][0]["advice"], ADVICE)
+        self.assertEqual({c["advice"] for c in h.calls["watch"]}, {ADVICE})
+        self.assertEqual(h.calls["rank"][0]["advice"], ADVICE)
+        self.assertEqual(h.calls["revise"][0]["advice"], ADVICE)
+        self.assertEqual(h.calls["prefer"][0]["advice"], ADVICE)
+        self.assertIn(f"advice: {ADVICE}", result.notes)
+        self.assertEqual(result.notes[0], f"advice: {ADVICE}")
+        self.assertFalse(hasattr(result, "advice"))        # EngineResult gains nothing else
+
+    def test_no_advice(self):
+        h = self.pool()
+        result = h.run()
+        for name in ("draft", "watch", "rank", "revise", "prefer"):
+            with self.subTest(name):
+                self.assertEqual(h.calls[name][0]["advice"], "")
+        self.assertFalse(any(n.startswith("advice:") for n in result.notes))
+        self.assertEqual(engine.run.__kwdefaults__["advice"], "")
+
+    def test_advice_still_respects_dismissals(self):
+        h = self.harness([make_draft("d1", (10, 30)), make_draft("d2", (100, 120))],
+                         {"d1": crit(8), "d2": crit(6)})
+        result = h.run(advice=ADVICE,
+                       rejected=[{"segments": [seg(10, 30)], "reason": "not_clipworthy"}])
+        drafts = {d["id"]: d for d in result.drafts}
+        self.assertEqual(drafts["d1"]["dropped_reason"], "rejected before")
+        self.assertEqual([d["id"] for d in result.top], ["d2"])
+
+
+class RunHandbookAndRulesTest(_SpendSafe):
+    def test_house_rules_are_appended_to_every_playbook_prompt(self):
+        h = self.harness([make_draft("d1", (10, 30)), make_draft("d2", (100, 120))],
+                         {"d1": crit(8), "d2": crit(6), "d1r": crit(9)})
+        h.revisions = {"d1": {"id": "d1r", "segments": [seg(9, 29)], "change": "x"}}
+        h.handbook = "HOUSE RULES LEARNED FROM YOUR PAST EDITS:\n- Open wide.\n"
+        result = h.run()
+        expected = "PLAYBOOK TEXT\n\nHOUSE RULES LEARNED FROM YOUR PAST EDITS:\n- Open wide."
+        self.assertEqual(h.calls["draft"][0]["playbook_text"], expected)
+        self.assertEqual(h.calls["rank"][0]["playbook_text"], expected)
+        self.assertEqual(h.calls["revise"][0]["playbook_text"], expected)
+        self.assertTrue(any("house rules" in n for n in result.notes))
+        self.assertLess(h.events.index("handbook"), h.first("perceive"))
+
+    def test_an_empty_handbook_changes_nothing(self):
+        h = self.three()
+        result = h.run()
+        self.assertIn("handbook", h.events)
+        self.assertEqual(h.calls["draft"][0]["playbook_text"], "PLAYBOOK TEXT")
+        self.assertFalse(any("house rules" in n for n in result.notes))
+
+    def test_a_broken_handbook_never_stops_a_run(self):
+        for error in (RuntimeError("bad yaml"), ImportError("gone")):
+            with self.subTest(error=error):
+                h = self.three()
+                h.handbook = error
+                with self.assertLogs("clip_engine.engine", level="WARNING"):
+                    result = h.run()
+                self.assertEqual(result.outcome, "proposals")
+                self.assertEqual(h.calls["draft"][0]["playbook_text"], "PLAYBOOK TEXT")
+
+    def test_extra_rules_join_the_operator_rules(self):
+        h = self.harness([make_draft("d1", (10, 30)), make_draft("d2", (100, 120))],
+                         {"d1": crit(8), "d2": crit(6), "d1r": crit(9)})
+        h.revisions = {"d1": {"id": "d1r", "segments": [seg(9, 29)], "change": "x"}}
+        h.settings = {"clip_engine.extra_rules": ["Never open on an interview", "No subtitles"]}
+        result = h.run()
+        expected = "OPERATOR RULES\n- Never open on an interview\n- No subtitles"
+        self.assertEqual(h.calls["draft"][0]["rules"], expected)
+        self.assertEqual(h.calls["revise"][0]["rules"], expected)
+        self.assertTrue(any("Extra rules for this run: 2" in n for n in result.notes))
+
+    def test_extra_rules_create_a_block_when_there_is_none(self):
+        h = self.three()
+        h.settings = {"clip_engine.extra_rules": ["Never open on an interview"]}
+        with mock.patch.object(llm, "_operator_rules", new=lambda scope: ""):
+            h.run()
+        rules = h.calls["draft"][0]["rules"]
+        self.assertIn("THE OPERATOR'S RULES", rules)
+        self.assertIn("- Never open on an interview", rules)
+
+    def test_no_extra_rules_leaves_the_operator_rules_alone(self):
+        h = self.three()
+        result = h.run()
+        self.assertEqual(h.calls["draft"][0]["rules"], "OPERATOR RULES")
+        self.assertFalse(any("Extra rules" in n for n in result.notes))
 
 
 if __name__ == "__main__":

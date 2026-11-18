@@ -1,6 +1,7 @@
 """Config loading: .env secrets + YAML settings/keywords/channels/first-reply."""
 from __future__ import annotations
 
+import datetime as _dt
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -298,8 +299,31 @@ def save_brand(values: dict[str, str]) -> None:
 #
 # ``applies_to`` scopes a rule: "everything" reaches the decisions about
 # content too (relevance scoring, clip selection), "captions" only the text
-# written about it (captions, hooks, re-air captions, the caption gut check).
-RULE_SCOPES = ("everything", "captions")
+# written about it (captions, hooks, re-air captions, the caption gut check),
+# "clips" only the decisions about material (clip selection — through the
+# "content" block, which relevance scoring shares) and never the words.
+#
+# One store for every rule, whoever wrote it: a rule the operator typed, one
+# he added from his notes on clip suggestions, and one learned from his past
+# edits (the handbook) are the same kind of rule and live in the same list.
+# Optional metadata says where it came from — ``source`` ("manual", the
+# default, "notes" or "handbook"), ``evidence`` (a short line: what it was
+# drawn from) and ``added_at`` — and what the house formatter made of it
+# (clip_engine.notes.format_rule): ``rule`` (the sentence), ``when``, ``why``,
+# ``markdown`` (the page's rendering) and ``original`` (the words as first
+# written). ``text`` stays what every prompt reads. Metadata is kept only
+# when set, so a rule without it loads exactly as it always has.
+RULE_SCOPES = ("everything", "captions", "clips")
+RULE_SOURCES = ("manual", "notes", "handbook")
+# Formatter metadata kept on a rule, with its length cap.
+_RULE_META = {"evidence": 300, "added_at": 40, "rule": 400, "when": 160, "why": 300,
+              "original": 1000}
+# Which scopes each prompt kind takes. "content" is a decision about
+# material; "captions" is text, and every stance ("everything") binds it.
+# "screening" is relevance scoring of whole videos: clip-selection rules
+# ("never use an interview in another language") must not lower a video's score.
+_SCOPES_FOR = {"content": ("everything", "clips"), "screening": ("everything",),
+               "captions": ("everything", "captions")}
 
 
 def _coerce_brand_rule(item: Any) -> dict[str, Any] | None:
@@ -311,9 +335,28 @@ def _coerce_brand_rule(item: Any) -> dict[str, Any] | None:
     if not text:
         return None
     scope = str(item.get("applies_to") or "everything").lower()
-    return {"text": text[:400],
-            "applies_to": scope if scope in RULE_SCOPES else "everything",
-            "enabled": bool(item.get("enabled", True))}
+    rule: dict[str, Any] = {"text": text[:400],
+                            "applies_to": scope if scope in RULE_SCOPES else "everything",
+                            "enabled": bool(item.get("enabled", True))}
+    source = str(item.get("source") or "").strip().lower()
+    if source in RULE_SOURCES and source != "manual":
+        rule["source"] = source
+    for key, cap in _RULE_META.items():
+        value = " ".join(str(item.get(key) or "").split())
+        if value:
+            rule[key] = value[:cap]
+    # Markdown keeps its line breaks (one field per line).
+    markdown = "\n".join(" ".join(line.split()) for line in str(item.get("markdown") or "")
+                         .splitlines() if line.strip())
+    if markdown:
+        rule["markdown"] = markdown[:1200]
+    return rule
+
+
+def _rule_key(text: str) -> str:
+    """Two rules are the same rule regardless of case, spacing or a closing
+    full stop (the formatter adds one)."""
+    return " ".join(str(text or "").lower().split()).rstrip(".")
 
 
 def load_brand_rules() -> list[dict[str, Any]]:
@@ -327,14 +370,24 @@ def save_brand_rules(rules: list[Any]) -> list[dict[str, Any]]:
     return cleaned
 
 
-def add_brand_rule(text: str, applies_to: str = "everything") -> dict[str, Any] | None:
-    """Append one rule (from the caption editor, say). Returns it, or None when
-    it's empty or already there."""
-    rule = _coerce_brand_rule({"text": text, "applies_to": applies_to})
+def add_brand_rule(text: str, applies_to: str = "everything", *, source: str = "manual",
+                   evidence: str = "", **meta: Any) -> dict[str, Any] | None:
+    """Append one rule (from the caption editor, a note-drawn suggestion or
+    the handbook). Returns it, or None when it's empty or already there.
+    ``source``/``evidence`` record where it came from; a rule from anywhere
+    but the operator's own hand is stamped with when it was added. ``meta``
+    carries the formatter's fields (rule, when, why, markdown, original)."""
+    item: dict[str, Any] = {k: v for k, v in meta.items()
+                            if k in ("rule", "when", "why", "markdown", "original")}
+    item.update(text=text, applies_to=applies_to, source=source, evidence=evidence)
+    if str(source or "manual").strip().lower() != "manual":
+        item["added_at"] = (_dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
+                            .isoformat().replace("+00:00", "Z"))
+    rule = _coerce_brand_rule(item)
     if rule is None:
         return None
     rules = load_brand_rules()
-    if any(r["text"].lower() == rule["text"].lower() for r in rules):
+    if any(_rule_key(r["text"]) == _rule_key(rule["text"]) for r in rules):
         return None
     save_brand_rules(rules + [rule])
     return rule
@@ -343,12 +396,13 @@ def add_brand_rule(text: str, applies_to: str = "everything") -> dict[str, Any] 
 def render_brand_rules(scope: str) -> str:
     """Enabled rules that reach ``scope`` as a bullet list, or "".
 
-    ``scope="content"`` is a decision about material — only rules that apply
-    to everything. ``scope="captions"`` is text — every enabled rule, since a
-    rule about the account's stance binds what it writes too.
+    ``scope="content"`` is a decision about material — rules that apply to
+    everything, and the clip-selection ("clips") rules. ``scope="captions"``
+    is text — every enabled rule but the clip-selection ones, since a rule
+    about the account's stance binds what it writes too.
     """
-    rules = [r for r in load_brand_rules() if r["enabled"]
-             and (scope == "captions" or r["applies_to"] == "everything")]
+    scopes = _SCOPES_FOR.get(scope, ("everything",))
+    rules = [r for r in load_brand_rules() if r["enabled"] and r["applies_to"] in scopes]
     return "\n".join(f"- {r['text']}" for r in rules)
 
 

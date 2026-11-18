@@ -90,7 +90,7 @@ INTERRUPTED_ERROR = "interrupted — press Suggest again"
 
 # Every key a job record (and so a status) carries. Spec §3.
 _FIELDS = ("candidate_id", "job_id", "boot_id", "reason", "setup", "window", "topic",
-           "state", "stage", "outcome", "error", "fallback", "attempts", "new",
+           "advice", "state", "stage", "outcome", "error", "fallback", "attempts", "new",
            "cost_usd", "notes", "queued_at", "started_at", "finished_at", "result_path")
 
 _POLL_SECONDS = 1.0          # how often an idle worker re-checks for shutdown
@@ -98,6 +98,8 @@ _RETRY_DELAY = 2.0           # before the one retry of a failed DB write
 _PRUNE_EVERY = 24 * 3600.0   # at most one cache prune per day
 _RUN_FILES_MAX_AGE_DAYS = 45
 _MAX_NOTES = 20
+MAX_ADVICE = 1200
+ADVICE_IGNORED_NOTE = "your advice wasn't used: the transcript suggester can't take advice"
 
 
 @dataclasses.dataclass
@@ -111,6 +113,8 @@ class _Job:
     on_done: Callable[[], Any] | None
     priority: int
     seq: int
+    advice: str = ""           # the operator's advice for this pass, as given
+    advice_tidied: str = ""    # ... and tidied (notes.tidy_advice), set when the run starts
 
 
 class _Interrupted(Exception):
@@ -146,7 +150,7 @@ _BOOT_LOCK_PRUNE_AGE = 3600.0
 
 def enqueue(candidate_id: int, *, window: dict | None = None, topic: str = "",
             reason: str = "reroll", setup: str | None = None,
-            on_done: Callable[[], Any] | None = None) -> dict:
+            on_done: Callable[[], Any] | None = None, advice: str = "") -> dict:
     """Queue an engine run for one video. Returns ``{"started", "conflict", **status}``.
 
     One run per video at a time. Asking again for the same scope while one is
@@ -156,20 +160,34 @@ def enqueue(candidate_id: int, *, window: dict | None = None, topic: str = "",
     request. Joining a run that is still waiting for a reason that outranks
     its own (Suggest on a video whose archive run is queued) moves it up
     first; see ``_promote``.
+
+    ``advice`` is the operator's word on this pass ("open on the disaster
+    footage; no interviews"), passed to ``engine.run``. Asking with advice the
+    queued or running run doesn't carry is a ``conflict`` too — joining would
+    quietly drop it — except when that run is unattended and still waiting:
+    then it moves up as the operator's, and takes the advice. Asking with no
+    advice joins whatever is under way, advised or not.
     """
     candidate_id = int(candidate_id)
     if reason not in PRIORITY:
         raise ValueError(f"unknown clip engine job reason {reason!r}")
     window = _clean_window(window)
+    advice = _clean_advice(advice)
     with _lock:
         current = _status.get(candidate_id)
         if current is not None and current.get("state") in ACTIVE_STATES:
             same = _same_window(current.get("window"), window)
+            if same and advice and advice != _clean_advice(current.get("advice")):
+                promoted = _promote(current, reason, on_done, advice=advice)
+                if promoted is None:
+                    return {"started": False, "conflict": True, **_public(current)}
+                return {"started": False, "conflict": False, **_public(promoted)}
             if same:
                 current = _promote(current, reason, on_done) or current
             return {"started": False, "conflict": not same, **_public(current)}
         if _stopping:
-            entry = _new_entry(candidate_id, "", reason, window, topic, attempts=0)
+            entry = _new_entry(candidate_id, "", reason, window, topic, attempts=0,
+                               advice=advice)
             entry.update(state="interrupted", error=INTERRUPTED_ERROR)
             return {"started": False, "conflict": False, **_public(entry)}
         attempts = 0
@@ -179,20 +197,23 @@ def enqueue(candidate_id: int, *, window: dict | None = None, topic: str = "",
             attempts = _as_int(prior.get("attempts")) if prior else 0
         job = _Job(candidate_id=candidate_id, job_id=uuid.uuid4().hex[:12], reason=reason,
                    window=window, topic=str(topic or "")[:500], setup=setup,
-                   on_done=on_done, priority=PRIORITY[reason], seq=next(_seq))
-        entry = _new_entry(candidate_id, job.job_id, reason, window, job.topic, attempts=attempts)
+                   on_done=on_done, priority=PRIORITY[reason], seq=next(_seq), advice=advice)
+        entry = _new_entry(candidate_id, job.job_id, reason, window, job.topic, attempts=attempts,
+                           advice=advice)
         _status[candidate_id] = entry
         _queued[job.job_id] = job
         _write_record(entry)
         _ensure_workers()
         _queue.put((job.priority, job.seq, job))
         out = {"started": True, "conflict": False, **_public(entry)}
-    log.info("Queued clip engine job %s for candidate %s (%s%s)", job.job_id, candidate_id,
-             reason, f", {window['start']:.0f}-{window['end']:.0f}s" if window else "")
+    log.info("Queued clip engine job %s for candidate %s (%s%s%s)", job.job_id, candidate_id,
+             reason, f", {window['start']:.0f}-{window['end']:.0f}s" if window else "",
+             ", with advice" if advice else "")
     return out
 
 
-def _promote(entry: dict, reason: str, on_done: Callable[[], Any] | None) -> dict | None:
+def _promote(entry: dict, reason: str, on_done: Callable[[], Any] | None, *,
+             advice: str | None = None) -> dict | None:
     """Move a job that is still waiting up to ``reason``'s place in the queue,
     as a run for ``reason``; returns its new entry. None when it has already
     left the queue (running, or about to: ``_run`` takes it out of
@@ -206,14 +227,19 @@ def _promote(entry: dict, reason: str, on_done: Callable[[], Any] | None) -> dic
     pressing Suggest never should. The run is re-queued as a new job (new id,
     new place, the new reason) that keeps the old one's scope, setup,
     attempts and callback; ``_run`` skips the old queue slot as superseded.
+    ``advice`` (when given) replaces the old run's: an unattended run had
+    nobody's advice, and the operator pressing Suggest is now its owner.
     """
     old = _queued.get(str(entry.get("job_id") or ""))
     if old is None or PRIORITY[reason] >= old.priority:
         return None
+    if advice is not None and old.reason not in UNATTENDED:
+        return None   # someone asked for that run as it is; their advice stands
     job = dataclasses.replace(old, job_id=uuid.uuid4().hex[:12], reason=reason,
                               priority=PRIORITY[reason], seq=next(_seq),
-                              on_done=old.on_done or on_done)
-    promoted = dict(entry, job_id=job.job_id, reason=reason)
+                              on_done=old.on_done or on_done,
+                              advice=old.advice if advice is None else advice)
+    promoted = dict(entry, job_id=job.job_id, reason=reason, advice=job.advice)
     _status[job.candidate_id] = promoted
     del _queued[old.job_id]
     _queued[job.job_id] = job
@@ -429,7 +455,7 @@ def write_result(candidate_id: int, result, *, window: dict | None = None) -> li
     written = _db_write(write)
     for pid, idx in written:
         if isinstance(idx, int) and 0 <= idx < len(top):
-            _save_sidecar(pid, top[idx], result)
+            _save_sidecar(pid, top[idx], result, window=window)
     return [pid for pid, _ in written]
 
 
@@ -591,6 +617,21 @@ def _execute(job: _Job) -> dict:
         if refusal:
             return _over_budget(job, settings, inputs, notes, refusal)
 
+    # The operator's advice, spelling and grammar fixed (a cheap Claude call,
+    # here rather than in the request so Suggest answers at once). The engine
+    # gets both the tidied text and the words as typed.
+    advice_for_engine = ""
+    if job.advice:
+        _update(job, stage="Reading your advice")
+        try:
+            from . import notes as notes_store   # ``notes`` here is the run's note list
+
+            job.advice_tidied = notes_store.tidy_advice(job.advice, settings=settings)
+            advice_for_engine = notes_store.engine_advice(job.advice, job.advice_tidied)
+        except Exception as exc:
+            log.warning("Couldn't tidy the advice for candidate %s: %s", job.candidate_id, exc)
+            advice_for_engine = job.advice
+
     min_free = _number_setting(settings, "clip_engine.min_free_gb", 10)
     try:
         free = float(media.disk_free_gb(engine_dir()))
@@ -645,7 +686,7 @@ def _execute(job: _Job) -> dict:
             examples=inputs.get("examples") or [], used=inputs.get("used") or [],
             window=job.window, section_topic=job.topic, keep=None, meter=meter,
             progress=lambda label: _update(job, stage=str(label or "")[:80]),
-            cancel=_cancel, deadline=time.monotonic() + timeout)
+            cancel=_cancel, deadline=time.monotonic() + timeout, advice=advice_for_engine)
     except util.Cancelled as exc:
         if _cancel.is_set():
             raise _Interrupted() from exc
@@ -714,7 +755,8 @@ def _engine_failed(job: _Job, settings, inputs: dict, notes: list[str], *, failu
     cost = _meter_total(meter)
     saved = _save_result(job, {
         "kind": "engine-error", "candidate_id": job.candidate_id, "job_id": job.job_id,
-        "boot_id": BOOT_ID, "reason": job.reason, "window": job.window, "error": failure,
+        "boot_id": BOOT_ID, "reason": job.reason, "window": job.window, "advice": job.advice,
+        "error": failure,
         "notes": engine_notes, "cost_usd": round(cost, 6),
         "by_stage": dict(getattr(meter, "by_stage", None) or {}),
         "tokens": dict(getattr(meter, "tokens", None) or {}),
@@ -739,6 +781,8 @@ def _legacy(job: _Job, settings, inputs: dict, notes: list[str], *, fallback: st
                 "notes": notes, "result_path": result_path}
     log.info("Clip engine job %s for candidate %s: using the transcript suggester (%s)",
              job.job_id, job.candidate_id, fallback)
+    if job.advice and ADVICE_IGNORED_NOTE not in notes:
+        notes.append(ADVICE_IGNORED_NOTE)
     _update(job, stage="Reading the transcript instead", fallback=fallback)
     context = _legacy_context(job.candidate_id, settings, inputs.get("context") or {})
     try:
@@ -752,6 +796,7 @@ def _legacy(job: _Job, settings, inputs: dict, notes: list[str], *, fallback: st
     cost = engine_cost + (_finite(res.get("cost_usd")) or 0.0)
     saved = _save_result(job, {"kind": "legacy", "candidate_id": job.candidate_id,
                                "job_id": job.job_id, "fallback": fallback,
+                               "advice_ignored": bool(job.advice),
                                "saved_at": util.utcnow_iso(), **res}, suffix="-legacy")
     ids: list[int] = []
     if clips:
@@ -945,7 +990,7 @@ def _topic_doubt(item: dict) -> str:
     return ""
 
 
-def _save_sidecar(proposal_id: int, item: dict, result) -> None:
+def _save_sidecar(proposal_id: int, item: dict, result, *, window: dict | None = None) -> None:
     from . import sidecars
 
     critique = item.get("critique") if isinstance(item.get("critique"), dict) else {}
@@ -968,8 +1013,14 @@ def _save_sidecar(proposal_id: int, item: dict, result) -> None:
         "notes": [str(n)[:300] for n in (getattr(result, "notes", None) or [])][:_MAX_NOTES],
         "story_key": str(item.get("story_key") or ""),
         "topic_doubt": _topic_doubt(item),
+        # The engine kept it although its speech may not be understood (every
+        # draft had the problem); the card says so.
+        "language_doubt": str(item.get("language_doubt") or "").strip()[:300],
         "draft_id": str(item.get("id") or ""),
         "origin": str(item.get("origin") or ""),
+        # The pass's scope: "What's wrong?" on this card re-suggests the same
+        # stretch (None = the whole video).
+        "window": window,
         "created_at": util.utcnow_iso(),
     }
     try:
@@ -1015,6 +1066,7 @@ def _engine_payload(result, job: _Job) -> dict:
         data = {"repr": repr(result)[:2000]}
     data["job"] = {"candidate_id": job.candidate_id, "job_id": job.job_id, "boot_id": BOOT_ID,
                    "reason": job.reason, "window": job.window, "topic": job.topic,
+                   "advice": job.advice, "advice_tidied": job.advice_tidied,
                    "saved_at": util.utcnow_iso()}
     return data
 
@@ -1145,16 +1197,16 @@ def _update(job: _Job, **fields) -> None:
 
 
 def _new_entry(candidate_id: int, job_id: str, reason: str, window: dict | None, topic: str,
-               *, attempts: int) -> dict:
+               *, attempts: int, advice: str = "") -> dict:
     entry = _idle(candidate_id)
-    entry.update(job_id=job_id, reason=reason, window=window, topic=topic, state="queued",
-                 stage="Queued", attempts=attempts, queued_at=util.utcnow_iso())
+    entry.update(job_id=job_id, reason=reason, window=window, topic=topic, advice=advice,
+                 state="queued", stage="Queued", attempts=attempts, queued_at=util.utcnow_iso())
     return entry
 
 
 def _idle(candidate_id: int) -> dict:
     return {"candidate_id": int(candidate_id), "job_id": "", "boot_id": BOOT_ID, "reason": "",
-            "setup": "", "window": None, "topic": "", "state": "idle", "stage": "",
+            "setup": "", "window": None, "topic": "", "advice": "", "state": "idle", "stage": "",
             "outcome": "", "error": "", "fallback": "", "attempts": 0, "new": [],
             "cost_usd": 0.0, "notes": [], "queued_at": None, "started_at": None,
             "finished_at": None, "result_path": ""}
@@ -1164,6 +1216,7 @@ def _public(entry: dict) -> dict:
     out = {k: entry.get(k) for k in _FIELDS}
     out["new"] = list(out.get("new") or [])
     out["notes"] = list(out.get("notes") or [])
+    out["advice"] = str(out.get("advice") or "")
     out["cost_usd"] = round(float(out.get("cost_usd") or 0.0), 4)
     out["queue_position"] = _queue_position(entry)
     out["message"] = _message(out)
@@ -1199,13 +1252,18 @@ def _message(s: dict) -> str:
         return f"No suggestions: {error}."
     if outcome == "legacy":
         why = _short(s.get("fallback") or "", 160)
+        # The transcript suggester takes no advice; say so, or the operator
+        # reads its picks as the answer to what they asked for.
+        unheard = " Your advice wasn't used." if s.get("advice") else ""
         if s.get("new"):
             return ("These came from the transcript suggester"
-                    + (f" ({why})." if why else "."))
+                    + (f" ({why})." if why else ".") + unheard)
         if why:
             # Otherwise the page says only "found nothing", and a cause the
             # operator must act on (e.g. Gemini credit ran out) goes unseen.
-            return f"The transcript suggester stood in and found nothing ({why})."
+            return f"The transcript suggester stood in and found nothing ({why}).{unheard}"
+        if unheard:
+            return unheard.strip()
     return ""
 
 
@@ -1351,6 +1409,11 @@ def _clean_window(window) -> dict | None:
     if end <= start:
         raise ValueError(f"bad window {window!r}")
     return {"start": round(start, 2), "end": round(end, 2)}
+
+
+def _clean_advice(advice) -> str:
+    """One paragraph of the operator's words, whitespace collapsed, capped."""
+    return " ".join(str(advice or "").split())[:MAX_ADVICE]
 
 
 def _same_window(a: dict | None, b: dict | None) -> bool:

@@ -38,6 +38,14 @@ Logging costs a dozen model calls for a long source, so:
 Times in a log are float seconds on the SOURCE clock, whatever clock the model
 answered in: MM:SS positions within a window proxy (whose clock starts at 0),
 or seconds from the frame labels.
+
+Every beat also says what language its words are in (``speech_language``:
+english / other / none) and whether an English voiceover is heard over it
+(``english_voiceover``). This audience only follows English speech — a
+non-English interview with burned-in subtitles is a clip the operator never
+posts — so the editor needs to see it coming and the engine can drop a draft
+the critic couldn't follow when the log agrees its speech is foreign
+(version 3; older logs are rebuilt because the version is in the cache key).
 """
 from __future__ import annotations
 
@@ -55,7 +63,7 @@ from . import claude, engine_dir, gemini, media, model_for, opt, prompts, util
 
 log = logging.getLogger("clip_engine.shotlog")
 
-VERSION = 2
+VERSION = 3
 
 FACES = ("none", "small", "close")
 HIGHLIGHT_KINDS = ("visual", "line", "sound", "person")
@@ -94,6 +102,10 @@ _SHOT_ALIASES = {
     "animation": "graphic", "archive": "archival", "slate": "text_card", "title_card": "text_card",
     "logo": "text_card",
 }
+_LANGUAGE_ALIASES = {"en": "english", "eng": "english", "english_language": "english",
+                     "no_speech": "none", "silence": "none", "silent": "none", "n/a": "none",
+                     "na": "none", "no": "none", "nobody": "none", "music": "none",
+                     "natural_sound": "none"}
 _KIND_ALIASES = {"image": "visual", "picture": "visual", "shot": "visual", "quote": "line",
                  "speech": "line", "audio": "sound", "people": "person", "face": "person"}
 
@@ -134,13 +146,21 @@ SCHEMA: dict = {
                     "speaker": {"type": "string"},
                     "line": {"type": "string"},
                     "sound": {"type": "string"},
+                    "speech_language": {"type": "string", "enum": list(prompts.SPEECH_LANGUAGES),
+                                        "description": "english, other (any other language), "
+                                                       "or none (nobody speaks)"},
+                    "english_voiceover": {"type": "boolean",
+                                          "description": "an English voiceover or narration is "
+                                                         "heard over this beat (subtitles don't "
+                                                         "count)"},
                     "energy": {"type": "integer", "minimum": 1, "maximum": 5},
                     "visual": {"type": "integer", "minimum": 1, "maximum": 5},
                     "topic": {"type": "integer", "minimum": 0, "maximum": 2},
                     "note": {"type": "string"},
                 },
                 "required": ["start", "end", "shot", "on_screen", "face", "speaker", "line",
-                             "sound", "energy", "visual", "topic", "note"],
+                             "sound", "speech_language", "english_voiceover", "energy",
+                             "visual", "topic", "note"],
             },
         },
         "highlights": {
@@ -226,6 +246,31 @@ def _evidence(value: Any) -> str:
     if any(w in key for w in ("said", "spoke", "aloud", "introduc", "named")):
         return "said"
     return "none"
+
+
+def _language(value: Any, *, line: str = "") -> str:
+    """A beat's speech language: "english", "other" or "none". A named
+    language other than English ("Hindi", "mixed") is "other". A missing
+    answer is never read as "other" (that drops drafts): "english" when the
+    beat has a line, else "none"."""
+    key = _key(value)
+    if key in prompts.SPEECH_LANGUAGES:
+        return key
+    if key in _LANGUAGE_ALIASES:
+        return _LANGUAGE_ALIASES[key]
+    if not key or key in ("unknown", "null"):
+        return "english" if line else "none"
+    if key.startswith("english") or key.startswith("en_"):
+        return "english"
+    return "other"
+
+
+def _flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in ("true", "yes", "y", "1")
 
 
 def _positive(value: Any) -> float | None:
@@ -479,14 +524,17 @@ def normalize_log(raw, *, duration, perceiver, model, cost, offset=0.0) -> dict:
         on_screen = _text(item.get("on_screen"), 1000)
         if clock:
             on_screen = _absolute_shot_times(on_screen, offset)
+        line = _text(item.get("line"), 500)
         beats.append({
             "start": span[0], "end": span[1],
             "shot": _choice(item.get("shot"), prompts.SHOT_TYPES, "other", _SHOT_ALIASES),
             "on_screen": on_screen,
             "face": _choice(item.get("face"), FACES, "none"),
             "speaker": _text(item.get("speaker"), 120),
-            "line": _text(item.get("line"), 500),
+            "line": line,
             "sound": _text(item.get("sound"), 200),
+            "speech_language": _language(item.get("speech_language"), line=line),
+            "english_voiceover": _flag(item.get("english_voiceover")),
             "energy": _int(item.get("energy"), 1, 5, 3),
             "visual": _int(item.get("visual"), 1, 5, 3),
             "topic": _int(item.get("topic"), 0, 2, 1),
@@ -650,6 +698,25 @@ def _join(a: str, b: str, sep: str) -> str:
     return f"{a}{sep}{b}"
 
 
+_LANGUAGE_RANK = {"other": 2, "english": 1, "none": 0}
+
+
+def _merged_language(a: dict, b: dict) -> tuple[str | None, bool | None]:
+    """Speech language and voiceover for two merged beats (None when neither
+    beat says). Foreign speech wins (it is the thing the editor must see),
+    and it counts as voiced over only when every foreign part was."""
+    parts = [x for x in (a, b) if x.get("speech_language")]
+    if not parts:
+        return None, None
+    language = max((x["speech_language"] for x in parts), key=lambda v: _LANGUAGE_RANK.get(v, 0))
+    if language == "other":
+        voiceover = all(bool(x.get("english_voiceover")) for x in parts
+                        if x["speech_language"] == "other")
+    else:
+        voiceover = any(bool(x.get("english_voiceover")) for x in parts)
+    return language, voiceover
+
+
 def _merge_beats(a: dict, b: dict) -> dict:
     dur_a, dur_b = a["end"] - a["start"], b["end"] - b["start"]
     if a["shot"] == b["shot"]:
@@ -657,7 +724,8 @@ def _merge_beats(a: dict, b: dict) -> dict:
     else:
         shot = a["shot"] if (a["visual"], dur_a) >= (b["visual"], dur_b) else b["shot"]
     speaker = a["speaker"] if a["speaker"] == b["speaker"] else _join(a["speaker"], b["speaker"], " / ")
-    return {
+    language, voiceover = _merged_language(a, b)
+    merged = {
         "start": a["start"], "end": max(a["end"], b["end"]), "shot": shot,
         "on_screen": _join(a["on_screen"], b["on_screen"], "; "),
         "face": max(a["face"], b["face"], key=FACES.index),
@@ -670,6 +738,10 @@ def _merge_beats(a: dict, b: dict) -> dict:
         "note": _join(a["note"], b["note"], "; "),
         "cuts": sorted(set(a["cuts"]) | set(b["cuts"])),
     }
+    if language is not None:
+        merged["speech_language"] = language
+        merged["english_voiceover"] = voiceover
+    return merged
 
 
 def _fit_beats(beats: list[dict], cap: int) -> list[dict]:
@@ -711,7 +783,11 @@ def compact_for_prompt(log, *, window=None, max_beats=400, cuts=None, min_shot_s
     (on_screen 240, line 200, sound 80, note 60), and each beat's exact shot
     changes from the shot map (``cuts``: times with score >= min_shot_score)
     so a picture-led segment can start exactly on a cut. More than
-    ``max_beats`` beats are merged with their neighbours."""
+    ``max_beats`` beats are merged with their neighbours.
+
+    ``speech_language`` is kept on every beat that has one;
+    ``english_voiceover`` only where it matters (foreign speech, or a
+    voiceover that is there), which saves tokens on long logs."""
     log = log or {}
     bounds = _bounds(window)
     times = _cut_times(cuts, float(min_shot_score))
@@ -731,6 +807,9 @@ def compact_for_prompt(log, *, window=None, max_beats=400, cuts=None, min_shot_s
             "note": _trim(b.get("note"), 60),
             "cuts": [round(t, 2) for t in times if b["start"] - _CUT_LEAD <= t < b["end"]],
         })
+        if b.get("speech_language") in prompts.SPEECH_LANGUAGES:
+            beats[-1]["speech_language"] = b["speech_language"]
+            beats[-1]["english_voiceover"] = bool(b.get("english_voiceover"))
     fitted = _fit_beats(beats, int(max_beats))
     for beat in fitted:
         beat["on_screen"] = _trim(beat["on_screen"], 240)
@@ -740,6 +819,9 @@ def compact_for_prompt(log, *, window=None, max_beats=400, cuts=None, min_shot_s
         for key in ("line", "sound", "note", "cuts"):
             if not beat[key]:
                 del beat[key]   # absent = nothing there; saves tokens on long logs
+        if ("english_voiceover" in beat and not beat["english_voiceover"]
+                and beat.get("speech_language") != "other"):
+            del beat["english_voiceover"]
     highlights = [
         {"start": round(h["start"], 1), "end": round(h["end"], 1), "kind": h.get("kind", "visual"),
          "what": _trim(h.get("what"), 200)}

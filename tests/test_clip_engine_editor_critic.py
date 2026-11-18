@@ -262,6 +262,10 @@ MODEL_ANSWER = {
 }
 
 
+ADVICE = "Open on the disaster footage; no interviews."
+HEADER = prompts.ADVICE_HEADER
+
+
 class EditorCase(TempCase):
     """Provider mocks shared by the drafting and revising tests."""
 
@@ -460,6 +464,41 @@ class DraftTest(EditorCase):
             self.run_draft(role="gpt")
 
 
+    def test_advice_goes_into_the_system_prompt_for_both_roles(self):
+        self.run_draft(advice="  Open on the disaster footage;\n no interviews. ")
+        system = self.calls[-1]["system"]
+        self.assertIn(HEADER + "\n" + ADVICE, system)
+        self.assertEqual(system, prompts.editor_system(
+            BRAND, PLAYBOOK_TEXT, "Never fake a quote.", n=10, min_s=12, max_s=45, max_segments=6,
+            sees_video=True, section=None, section_topic="", has_words=True, advice=ADVICE))
+        # Above the job, after the playbook it outranks.
+        self.assertLess(system.index("WHAT WORKS FOR THIS ACCOUNT"), system.index(HEADER))
+        self.assertLess(system.index(HEADER), system.index("YOUR JOB"))
+        self.assertNotIn(ADVICE, self.calls[-1]["parts"][-1]["text"])   # not in the payload
+        self.run_draft(role="claude", advice=ADVICE)
+        self.assertIn(HEADER + "\n" + ADVICE, self.calls[-1]["system"])
+
+    def test_no_advice_no_block(self):
+        self.run_draft()
+        self.assertNotIn(HEADER, self.calls[-1]["system"])
+        self.run_draft(advice="   ")
+        self.assertNotIn(HEADER, self.calls[-1]["system"])
+
+    def test_the_payload_shot_log_carries_speech_language(self):
+        log = shot_log()
+        log["beats"][2].update(speech_language="other", english_voiceover=False)
+        self.run_draft(shotlog=log)
+        beats = self.payload()["shot_log"]["beats"]
+        self.assertEqual((beats[2]["speech_language"], beats[2]["english_voiceover"]),
+                         ("other", False))
+
+    def test_appended_house_rules_never_become_archetypes(self):
+        text = PLAYBOOK_TEXT + "\n\nHOUSE RULES LEARNED FROM YOUR PAST EDITS:\n- always — open wide"
+        self.assertEqual(editor._archetype_keys(text), ARCHETYPES)
+        no_flops = "ARCHETYPES (x):\n- voice — V: v\n\n- extra — E: not an archetype"
+        self.assertEqual(editor._archetype_keys(no_flops), ["voice"])
+
+
 class DraftsDroppedInTheRunTest(TempCase):
     """The real editor inside ``engine.run`` (perception, the shot map and the
     model faked): drafts that cleaning drops to the last one stop the run with
@@ -600,6 +639,21 @@ class ReviseTest(EditorCase):
         self.assertEqual(out["segments"], [{"start": 90.0, "end": 120.0, "lead": "word"}])
 
 
+    def test_advice_reaches_the_reviser(self):
+        answer = {"change": "x", "archetype": "voice",
+                  "segments": [{"start": 102, "end": 125, "lead": "picture"}]}
+        self.run_revise(answer, advice=ADVICE)
+        system = self.calls[-1]["system"]
+        self.assertIn(HEADER + "\n" + ADVICE, system)
+        self.assertEqual(system, prompts.revise_system(
+            BRAND, PLAYBOOK_TEXT, "", min_s=12, max_s=45, max_segments=6, sees_video=True,
+            has_words=True, advice=ADVICE))
+        self.run_revise(answer, role="claude", advice=ADVICE)
+        self.assertIn(HEADER + "\n" + ADVICE, self.calls[-1]["system"])
+        self.run_revise(answer)
+        self.assertNotIn(HEADER, self.calls[-1]["system"])
+
+
 class KeyframesTest(TempCase):
     def test_strongest_shots_then_highlights(self):
         grabbed = []
@@ -688,6 +742,32 @@ class ColdScoreTest(unittest.TestCase):
                 critique = {**BASE_CRITIQUE, **change}
                 self.assertAlmostEqual(critic.cold_score(critique, clip_seconds=seconds,
                                                          archetype=archetype), expected)
+
+
+    TESTS = [
+        ({"speech_understood": False}, 4.0),
+        ({"premise_clear": False}, 5.0),
+        ({"monologue": True}, 5.0),
+        ({"follows_advice": False}, 4.0),
+        ({"speech_understood": True, "premise_clear": True, "monologue": False,
+          "follows_advice": True}, 7.0),
+        ({"speech_understood": False, "premise_clear": False, "monologue": True,
+          "follows_advice": False}, -3.0),
+        ({"speech_understood": "false"}, 4.0),          # coerced like any boolean
+        ({"speech_understood": None, "follows_advice": None}, 7.0),   # unanswered: no charge
+    ]
+
+    def test_three_tests_and_advice(self):
+        for change, expected in self.TESTS:
+            with self.subTest(change=change):
+                critique = {**BASE_CRITIQUE, **change}
+                self.assertAlmostEqual(critic.cold_score(critique, clip_seconds=20), expected)
+        self.assertEqual((critic.PENALTY_SPEECH, critic.PENALTY_PREMISE,
+                          critic.PENALTY_MONOLOGUE, critic.PENALTY_ADVICE), (3, 2, 2, 3))
+
+    def test_an_older_critique_without_the_tests_scores_as_before(self):
+        self.assertNotIn("speech_understood", BASE_CRITIQUE)
+        self.assertAlmostEqual(critic.cold_score(dict(BASE_CRITIQUE), clip_seconds=20), 7.0)
 
 
 GOOD_ANSWER = {
@@ -820,6 +900,75 @@ class ColdWatchTest(TempCase):
         self.clip_frames.return_value = []
         self.assertTrue(self.watch(role="claude")["error"])
         self.assertEqual(self.calls, [])
+
+
+    def test_schema_has_the_three_tests_before_the_verdict(self):
+        props = list(critic.CRITIQUE_SCHEMA["properties"])
+        for key in ("premise_clear", "speech_understood", "monologue"):
+            with self.subTest(key=key):
+                self.assertEqual(critic.CRITIQUE_SCHEMA["properties"][key]["type"], "boolean")
+                self.assertIn(key, critic.CRITIQUE_SCHEMA["required"])
+                self.assertLess(props.index(key), props.index("score"))
+        self.assertNotIn("follows_advice", props)
+        with_advice = critic.critique_schema(advice=True)
+        keys = list(with_advice["properties"])
+        self.assertEqual(keys[keys.index("monologue") + 1:keys.index("monologue") + 3],
+                         ["follows_advice", "advice_note"])
+        self.assertEqual(with_advice["required"], keys)
+        self.assertEqual(with_advice["properties"]["follows_advice"]["type"], "boolean")
+        self.assertNotIn("follows_advice", critic.CRITIQUE_SCHEMA["properties"])  # untouched
+        self.assertIs(critic.critique_schema(), critic.CRITIQUE_SCHEMA)
+
+    def test_cold_prompt_asks_the_three_tests(self):
+        for mode in ("video", "frames"):
+            with self.subTest(mode=mode):
+                text = prompts.cold_system(BRAND, mode=mode)
+                for key in ("- premise_clear:", "- speech_understood:", "- monologue:"):
+                    self.assertIn(key, text)
+                self.assertIn("burned-in subtitles", text)
+                self.assertNotIn("follows_advice", text)
+        text = prompts.cold_system(BRAND, mode="video", advice=ADVICE)
+        self.assertIn("- follows_advice:", text)
+        self.assertIn(ADVICE, text)
+        self.assertIn("advice_note", text)
+
+    def test_the_tests_are_read_and_default_to_no_charge(self):
+        self.answer = {**GOOD_ANSWER, "premise_clear": False, "speech_understood": "no",
+                       "monologue": True}
+        out = self.watch()
+        self.assertEqual((out["premise_clear"], out["speech_understood"], out["monologue"]),
+                         (False, False, True))
+        self.assertNotIn("follows_advice", out)
+        self.answer = GOOD_ANSWER                      # an answer that leaves them out
+        out = self.watch()
+        self.assertEqual((out["premise_clear"], out["speech_understood"], out["monologue"]),
+                         (True, True, False))
+
+    def test_advice_adds_the_advice_test(self):
+        self.answer = {**GOOD_ANSWER, "follows_advice": False, "advice_note": "n" * 400}
+        out = self.watch(advice=ADVICE)
+        call = self.calls[-1]
+        self.assertEqual(call["system"], prompts.cold_system(BRAND, mode="video", advice=ADVICE))
+        self.assertEqual(call["schema"], critic.critique_schema(advice=True))
+        self.assertIs(out["follows_advice"], False)
+        self.assertEqual(len(out["advice_note"]), 300)
+        self.assertEqual(list(out), list(critic.critique_schema(advice=True)["properties"])
+                         + ["error"])
+        self.assertLess(critic.cold_score(out, clip_seconds=32),
+                        critic.cold_score({**out, "follows_advice": True}, clip_seconds=32))
+        self.answer = GOOD_ANSWER                      # unanswered: not a "no"
+        self.assertIs(self.watch(advice=ADVICE)["follows_advice"], True)
+        self.watch(role="claude", advice=ADVICE)
+        call = self.calls[-1]
+        self.assertIn(ADVICE, call["system"])
+        self.assertEqual(call["schema"], critic.critique_schema(advice=True))
+
+    def test_failure_critique_answers_every_test_false(self):
+        self.answer = RuntimeError("down")
+        out = self.watch(advice=ADVICE)
+        self.assertEqual((out["premise_clear"], out["speech_understood"], out["monologue"]),
+                         (False, False, False))
+        self.assertEqual(critic.cold_score(out, clip_seconds=32), -1e9)
 
 
 class RankTest(TempCase):
@@ -1014,6 +1163,23 @@ class RankTest(TempCase):
         self.assertEqual(self.calls, [])
 
 
+    def test_rank_prompt_names_the_three_tests_and_takes_advice(self):
+        self.answers = {"1": ["A", "B", "C"], "2": ["A", "B", "C"]}
+        self.rank(advice=ADVICE)
+        system = self.call_for(1)["system"]
+        self.assertEqual(system, prompts.rank_system(BRAND, PLAYBOOK_TEXT, k=3, has_examples=True,
+                                                     mode="video", advice=ADVICE))
+        self.assertIn(HEADER + "\n" + ADVICE, system)
+        self.assertIn(prompts.THREE_TESTS, system)
+        self.assertLess(system.index("WHAT WORKS FOR THIS ACCOUNT"), system.index(HEADER))
+        self.rank(role="claude", advice=ADVICE)
+        self.assertIn(HEADER + "\n" + ADVICE, self.calls[-1]["system"])
+        self.calls.clear()
+        self.rank()
+        self.assertNotIn(HEADER, self.call_for(1)["system"])
+        self.assertIn(prompts.THREE_TESTS, self.call_for(1)["system"])
+
+
 class PreferTest(TempCase):
     def setUp(self):
         super().setUp()
@@ -1105,6 +1271,62 @@ class PreferTest(TempCase):
         self.assertEqual(self.prefer(role="martian"), "a")
         with mock.patch.object(gemini, "video_parts", side_effect=gemini.GeminiError("upload")):
             self.assertEqual(self.prefer(), "a")
+
+    def test_prefer_prompt_names_the_three_tests_and_takes_advice(self):
+        self.prefer(advice=ADVICE)
+        system = self.calls[-1]["system"]
+        self.assertEqual(system, prompts.prefer_system(
+            BRAND, mode="video", intent="The Voice: On the person", advice=ADVICE))
+        self.assertIn(HEADER + "\n" + ADVICE, system)
+        self.assertIn(prompts.THREE_TESTS, system)
+        self.calls.clear()
+        self.prefer(role="claude", advice=ADVICE)
+        self.assertIn(HEADER + "\n" + ADVICE, self.calls[-1]["system"])
+        self.calls.clear()
+        self.prefer()
+        self.assertNotIn(HEADER, self.calls[-1]["system"])
+
+
+class EditorRulesPromptTest(unittest.TestCase):
+    """The round-2 rules in the editor's EVERY DRAFT list."""
+
+    def system(self, **kw):
+        args = dict(n=10, min_s=12, max_s=45, max_segments=6, sees_video=True)
+        args.update(kw)
+        return prompts.editor_system(BRAND, PLAYBOOK_TEXT, "", **args)
+
+    def test_language_premise_and_monologue_rules(self):
+        every = self.system().split("EVERY DRAFT", 1)[1].split("CUTTING", 1)[0]
+        self.assertIn("7. LANGUAGE: the audience must understand every word heard.", every)
+        self.assertIn("burned-in subtitles are not enough", every)
+        self.assertIn("speech_language", every)
+        self.assertIn("english_voiceover", every)
+        self.assertIn("8. PREMISE: within the first ~5 seconds a stranger knows what is "
+                      "happening and where", every)
+        self.assertIn("A hook that leaves the viewer lost is not a hook.", every)
+        self.assertIn("9. MONOLOGUE: a reporter or anchor speaking to camera is never the "
+                      "opening and never the clip", every)
+        self.assertIn("exception in rule 1", every)
+
+    def test_the_one_context_beat_is_the_premise_beat(self):
+        rule3 = self.system().split("3. Has no drone", 1)[1].split("4. ", 1)[0]
+        self.assertIn("at most one short context beat", rule3)
+        self.assertIn("the premise beat IS that one context beat", rule3)
+
+    def test_revise_prompt_carries_the_three_tests(self):
+        text = prompts.revise_system(BRAND, PLAYBOOK_TEXT, "", min_s=12, max_s=45,
+                                     max_segments=6, sees_video=False)
+        self.assertIn("THREE TESTS", text)
+        self.assertIn("English voiceover", text)
+        self.assertIn("first ~5 seconds", text)
+        self.assertIn("reporter or anchor", text)
+
+    def test_advice_is_cleaned_and_capped(self):
+        self.assertEqual(prompts.clean_advice("  a\n\n b  "), "a b")
+        self.assertEqual(prompts.clean_advice(None), "")
+        self.assertEqual(len(prompts.clean_advice("x" * 5000)), 1500)
+        self.assertEqual(prompts.advice_block(""), "")
+        self.assertEqual(prompts.advice_block(" go "), HEADER + "\ngo\n")
 
 
 if __name__ == "__main__":

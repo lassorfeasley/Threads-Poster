@@ -370,6 +370,21 @@ templates.env.globals["default_app_name"] = DEFAULT_APP_NAME
 templates.env.globals["ws_current"] = _ws_current
 templates.env.globals["workspace_options"] = _workspace_options
 
+
+def _clip_note_tags() -> list[list[str]]:
+    """``[[slug, label]]`` for the "What's wrong?" chips on suggestion cards.
+    Never raises: a page must render even if the notes module can't load."""
+    try:
+        from ..clip_engine import notes
+
+        return [[slug, label] for slug, label in notes.tag_labels()]
+    except Exception:
+        log.exception("Clip note tags unavailable")
+        return []
+
+
+templates.env.globals["clip_note_tags"] = _clip_note_tags
+
 init_db()
 with session_scope() as _s:
     sync_channels_from_config(_s)
@@ -456,6 +471,24 @@ else:
     for _route in clip_bench_router.routes:
         if "POST" in (getattr(_route, "methods", None) or ()):
             _WRITE_SCOPE[_route.path_format] = ()
+
+# The house-rules handbook report (app/web/clip_handbook.py): the same pattern
+# and the same guard. It is read-only; its candidate rules are approved on the
+# Brand page like every other suggested rule.
+try:
+    from .clip_handbook import router as clip_handbook_router
+except Exception:
+    log.exception("Clip handbook page unavailable")
+else:
+    app.include_router(clip_handbook_router)
+    for _route in clip_handbook_router.routes:
+        if "POST" in (getattr(_route, "methods", None) or ()):
+            _WRITE_SCOPE[_route.path_format] = ()
+
+# Rule proposals live in a file under the engine directory; adding one writes
+# brand.yaml. Neither is part of any cached page.
+_WRITE_SCOPE["/clip-engine/rule-proposals/{idx}/add"] = ()
+_WRITE_SCOPE["/clip-engine/rule-proposals/{idx}/dismiss"] = ()
 
 
 @app.middleware("http")
@@ -1635,6 +1668,9 @@ def _engine_card(proposal_id: int, offered: list[dict]) -> tuple[dict, str]:
         def text(value, limit: int = 300) -> str:
             return str(value or "").strip()[:limit]
 
+        def flag(value) -> bool | None:
+            return value if isinstance(value, bool) else None
+
         engine = {
             "setup": text(meta.get("setup"), 20),
             "archetype": text(meta.get("archetype"), 40),
@@ -1652,7 +1688,18 @@ def _engine_card(proposal_id: int, offered: list[dict]) -> tuple[dict, str]:
             # "nobody watched it", not "it doesn't stop the scroll".
             "reviewed": bool(critique) and not critique.get("error"),
             "topic_doubt": text(meta.get("topic_doubt")),
+            # Round 2's tests, None when the critic didn't answer them (an
+            # older sidecar, or an outage): a card warns only on a real "no".
+            "language_doubt": text(meta.get("language_doubt")),
+            "premise_clear": flag(critique.get("premise_clear")),
+            "speech_understood": flag(critique.get("speech_understood")),
+            "monologue": flag(critique.get("monologue")),
+            "follows_advice": flag(critique.get("follows_advice")),
+            "advice_note": text(critique.get("advice_note")),
         }
+        if critique.get("error"):
+            for key in ("premise_clear", "speech_understood", "monologue", "follows_advice"):
+                engine[key] = None
         preview = ""
         path = sidecars.preview_path(proposal_id)
         if (path is not None and Path(path).is_file()
@@ -1704,7 +1751,9 @@ def _pending_proposals(session, candidate_pk: int) -> list[dict]:
 
 @app.post("/video/{candidate_id}/suggest-clips")
 def video_suggest_clips(candidate_id: int, start: float | None = None,
-                        end: float | None = None):
+                        end: float | None = None,
+                        advice_query: str = Query("", alias="advice"),
+                        advice: str = Form("")):
     """Re-run the clip suggester for one video (operator-initiated).
 
     Deliberately ungated, matching the other on-demand suggest routes: the
@@ -1724,14 +1773,22 @@ def video_suggest_clips(candidate_id: int, start: float | None = None,
     this only validates and queues it: 202 ``{"started", "job", "engine"}``,
     then the page polls ``/video/{id}/suggest-status``. A run already working
     on a DIFFERENT stretch of the video answers 409 with its status.
+
+    ``advice`` (query or form) is the operator's word on this pass ("open on
+    the disaster footage; no interviews"). It is kept as a "steer" note — what
+    the operator keeps asking for is what the rule proposals learn from — and
+    handed to the engine run. The transcript suggester can't take advice; on
+    that path it is only noted, and the answer says so.
     """
     settings = load_settings()
     window, topic = None, ""
     if start is not None and end is not None and end > start:
         window = {"start": max(0.0, start), "end": end}
+    advice = " ".join(str(advice or advice_query or "").split())[:1200]
     setup = _clip_engine_setup(settings)
     if setup != "transcript":
-        return _suggest_in_background(candidate_id, window, setup)
+        return _suggest_in_background(candidate_id, window, setup, advice=advice,
+                                      steer=bool(advice))
     # Opening-shot refinement samples frames from the file.
     if (err := _source_ready(candidate_id)) is not None:
         return err
@@ -1754,41 +1811,198 @@ def video_suggest_clips(candidate_id: int, start: float | None = None,
             return JSONResponse({"error": str(exc)}, status_code=500)
         clips = _pending_proposals(session, candidate_id)
         multi_clip = bool(c.multi_clip_potential)
-    return JSONResponse({"clips": clips, "multi_clip": multi_clip,
-                         "new": len(ids)})
+        video_id = c.video_id or ""
+    body = {"clips": clips, "multi_clip": multi_clip, "new": len(ids)}
+    if advice:
+        _save_clip_note(candidate_id, video_id, kind="steer", text=advice)
+        body["advice_ignored"] = True
+    return JSONResponse(body)
 
 
-def _suggest_in_background(candidate_id: int, window: dict | None, setup: str) -> JSONResponse:
+def _suggest_in_background(candidate_id: int, window: dict | None, setup: str, *,
+                           advice: str = "", steer: bool = False,
+                           extra: dict | None = None) -> JSONResponse:
     """Queue a clip engine run for the Suggest button (see video_suggest_clips).
 
     The source isn't restored here: the run brings it back itself, so the
-    request returns at once even for an offloaded video.
+    request returns at once even for an offloaded video. ``steer`` saves
+    ``advice`` as a note once the video checks out; ``extra`` rides along in
+    every answer (the feedback route says which note it saved).
     """
+    extra = dict(extra or {})
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c is None:
-            return JSONResponse({"error": "Video not found"}, status_code=404)
+            return JSONResponse({"error": "Video not found", **extra}, status_code=404)
         if not clip_proposals.load_transcript(c):
             return JSONResponse(
                 {"error": "No transcript for this video — clip suggestions are "
-                          "drafted from what is said in it."},
+                          "drafted from what is said in it.", **extra},
                 status_code=409)
         topic = _topic_for_window(c, window) if window else ""
+        video_id = c.video_id or ""
+    if steer and advice:
+        _save_clip_note(candidate_id, video_id, kind="steer", text=advice)
     try:
         from ..clip_engine import jobs
 
         result = jobs.enqueue(candidate_id, window=window, topic=topic,
                               reason="section" if window else "reroll",
-                              on_done=pagecache.invalidate)
+                              on_done=pagecache.invalidate, advice=advice)
     except Exception as exc:
         log.exception("Couldn't queue clip suggestions for candidate %s", candidate_id)
-        return JSONResponse({"error": f"Couldn't start the clip engine: {exc}"}, status_code=500)
+        return JSONResponse({"error": f"Couldn't start the clip engine: {exc}", **extra},
+                            status_code=500)
     job = {k: v for k, v in result.items() if k not in ("started", "conflict")}
     if result.get("conflict"):
-        return JSONResponse({"error": "Already suggesting clips for this video", "job": job},
-                            status_code=409)
-    return JSONResponse({"started": bool(result.get("started")), "job": job, "engine": setup},
-                        status_code=202)
+        error = "Already suggesting clips for this video"
+        if advice:
+            error += " — your advice will fit the next pass, once this one ends"
+        return JSONResponse({"error": error, "job": job, **extra}, status_code=409)
+    return JSONResponse({"started": bool(result.get("started")), "job": job, "engine": setup,
+                         **extra}, status_code=202)
+
+
+def _save_clip_note(candidate_id: int, video_id: str, *, kind: str, tags=(), text: str = "",
+                    proposal_id: int | None = None) -> dict | None:
+    """Keep one operator note (notes.add never raises; the import might), then
+    let the rule proposals look at the pile on a daemon thread."""
+    try:
+        from ..clip_engine import notes
+
+        note = notes.add(candidate_id, video_id=video_id, proposal_id=proposal_id, kind=kind,
+                         tags=tags, text=text)
+        if note is not None:
+            notes.propose_rules_soon()
+        return note
+    except Exception:
+        log.exception("Couldn't save a clip note for candidate %s", candidate_id)
+        return None
+
+
+def _proposal_window(proposal_id: int) -> dict | None:
+    """The stretch the pass that made this proposal looked at, when its
+    sidecar says (engine runs since round 2); None = the whole video."""
+    try:
+        from ..clip_engine import sidecars
+
+        meta = sidecars.load(proposal_id)
+        window = meta.get("window") if isinstance(meta, dict) else None
+        if isinstance(window, dict):
+            start, end = float(window["start"]), float(window["end"])
+            if end > start >= 0:
+                return {"start": start, "end": end}
+    except Exception:
+        log.debug("No window for proposal %s", proposal_id, exc_info=True)
+    return None
+
+
+@app.post("/clip-proposal/{proposal_id}/feedback")
+def clip_proposal_feedback(proposal_id: int, tags: str = Form(""), text: str = Form(""),
+                           resuggest: str = Form("1")):
+    """"What's wrong?" on a suggestion card: keep the operator's note, dismiss
+    the card, and (unless ``resuggest`` is "0", "Just dismiss") re-suggest
+    with that note as advice.
+
+    The note is the point: a dismissal reason says a card was bad, the note
+    says what to do instead, the re-suggest acts on it at once, and the notes
+    together are what rule proposals are drawn from. The re-suggest covers
+    the stretch the card's own pass covered (the whole video when unknown)
+    and answers like Suggest (202 + polling, 409 when a run is already busy).
+    """
+    clean = []
+    try:
+        from ..clip_engine import notes
+
+        clean = notes.clean_tags(tags)
+        reason = notes.dismiss_reason_for(clean)
+        advice = notes.advice_from(clean, text)
+    except Exception as exc:
+        log.exception("Clip notes unavailable")
+        return JSONResponse({"error": f"Notes unavailable: {exc}"}, status_code=500)
+    text = " ".join(str(text or "").split())[:500]
+    if not clean and not text:
+        return JSONResponse({"error": "Pick what's wrong, or say it in a line."},
+                            status_code=400)
+    with session_scope() as session:
+        row = session.get(ClipProposal, proposal_id)
+        if row is None:
+            return JSONResponse({"error": "Suggestion not found"}, status_code=404)
+        if row.verdict == ClipProposal.VERDICT_ACCEPTED:
+            return JSONResponse({"error": "That suggestion is already in a clip"},
+                                status_code=409)
+        if row.verdict == ClipProposal.VERDICT_PENDING:
+            clip_proposals.dismiss(session, proposal_id)
+        if reason:
+            clip_proposals.set_dismiss_reason(session, proposal_id, reason)
+        candidate_id = row.candidate_pk
+        c = session.get(Candidate, candidate_id)
+        video_id = (c.video_id or "") if c is not None else ""
+    note = _save_clip_note(candidate_id, video_id, kind="card", tags=clean, text=text,
+                           proposal_id=proposal_id)
+    extra = {"noted": (note or {}).get("id", ""), "dismissed": proposal_id}
+    if str(resuggest).strip().lower() in ("0", "false", "no", ""):
+        return JSONResponse({"ok": True, **extra})
+    window = _proposal_window(proposal_id)
+    # Always through the job runner, whatever the setup: the answer is the
+    # same 202 + polling either way, and a transcript-suggester run says in
+    # its status that it couldn't use the advice.
+    setup = _clip_engine_setup(load_settings())
+    return _suggest_in_background(candidate_id, window, setup, advice=advice, extra=extra)
+
+
+@app.get("/clip-engine/rule-proposals")
+def clip_rule_proposals(status: str = "pending"):
+    """Rules the operator's notes add up to (see clip_engine.notes), each
+    with its ``idx`` for the add/dismiss routes. ``status=all`` lists every one."""
+    try:
+        from ..clip_engine import notes
+
+        items = notes.proposals(None if status == "all" else status)
+    except Exception as exc:
+        log.exception("Rule proposals unavailable")
+        return JSONResponse({"error": str(exc), "proposals": []}, status_code=500)
+    return JSONResponse({"proposals": items}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/clip-engine/rule-proposals/{idx}/add")
+def clip_rule_proposal_add(idx: int, text: str = Form("")):
+    """Make a proposal a brand rule — an ordinary one, in the one rule store,
+    scoped to clip selection (``applies_to: clips``) and remembering its
+    source and evidence. ``text`` lets the operator reword it first (the
+    rewording goes through the house formatter like any rule). A rule already
+    there still marks the proposal added; ``rule`` is then null."""
+    from ..clip_engine import notes
+
+    pending = {p["idx"]: p for p in notes.pending_proposals()}
+    proposal = pending.get(idx)
+    if proposal is None:
+        return JSONResponse({"error": "No such suggested rule"}, status_code=404)
+    reworded = " ".join(str(text or "").split())
+    if reworded and reworded != proposal.get("text"):
+        formatted = notes.format_rule(reworded, why=proposal.get("why") or "",
+                                      source=proposal.get("source") or "notes")
+    else:
+        formatted = {k: proposal.get(k, "") for k in ("rule", "when", "why", "markdown",
+                                                       "original")}
+        if not formatted["rule"]:   # queued before rules were formatted
+            formatted = notes.format_rule(proposal.get("text") or "",
+                                          source=proposal.get("source") or "notes")
+    wording = notes.rule_text(formatted) or proposal.get("text") or ""
+    rule = add_brand_rule(wording, "clips", source=proposal.get("source") or "notes",
+                          evidence=notes.evidence_line(proposal),
+                          **notes.brand_rule_fields(formatted))
+    notes.set_status(idx, "added")
+    return JSONResponse({"ok": True, "rule": rule})
+
+
+@app.post("/clip-engine/rule-proposals/{idx}/dismiss")
+def clip_rule_proposal_dismiss(idx: int):
+    from ..clip_engine import notes
+
+    if notes.set_status(idx, "dismissed") is None:
+        return JSONResponse({"error": "No such suggested rule"}, status_code=404)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/video/{candidate_id}/suggest-status")
@@ -6132,12 +6346,24 @@ _ALLOWED_LOGO_EXTS = (".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif")
 
 @app.get("/brand", response_class=HTMLResponse)
 def brand_page(request: Request, msg: str = ""):
-    """What the account covers and the rules it never breaks (Configure area)."""
+    """What the account covers and the rules it never breaks (Configure area),
+    plus rules the operator's notes on clip suggestions keep pointing at."""
     return templates.TemplateResponse(
         request, "brand.html",
         {"brand": load_brand(), "rules": load_brand_rules(),
+         "rule_proposals": _pending_rule_proposals(),
          "msg": msg, "active": "brand"},
     )
+
+
+def _pending_rule_proposals() -> list[dict]:
+    try:
+        from ..clip_engine import notes
+
+        return notes.pending_proposals()
+    except Exception:
+        log.exception("Rule proposals unavailable")
+        return []
 
 
 # Fields the Brand & audience form may send. A field the form doesn't post is
@@ -6163,14 +6389,64 @@ async def brand_save(request: Request):
             rules = json.loads(str(form["rules_json"]) or "[]")
         except ValueError:
             return _flash("/brand", "Couldn't read the rules — nothing saved for them")
-        save_brand_rules(rules if isinstance(rules, list) else [])
+        rules = rules if isinstance(rules, list) else []
+        # New and edited rules go through the house formatter (a model call
+        # each, so off the event loop); the operator sees the result at once
+        # on the reloaded page and can edit it again.
+        rules = await run_in_threadpool(_format_brand_rules, rules)
+        save_brand_rules(rules)
     return _flash("/brand", "Brand & audience saved")
+
+
+def _format_brand_rules(rules: list) -> list:
+    """Run ``notes.format_rule`` over every rule that is new or was edited
+    since it was last formatted; the rest pass through untouched. Never
+    raises: a formatter that can't load leaves the rules as typed."""
+    try:
+        from ..clip_engine import notes, util as engine_util
+    except Exception:
+        log.exception("Rule formatter unavailable; saving rules as typed")
+        return rules
+    todo = []
+    for i, r in enumerate(rules):
+        if not isinstance(r, dict):
+            continue
+        text = " ".join(str(r.get("text") or "").split())
+        if not text:
+            continue
+        current = notes.rule_text({"rule": r.get("rule") or "", "when": r.get("when") or ""})
+        if r.get("markdown") and current and current == text:
+            continue   # formatted, and untouched since
+        todo.append(i)
+    if not todo:
+        return rules
+    out = [dict(r) if isinstance(r, dict) else r for r in rules]
+    done = engine_util.parallel_map(
+        lambda i: notes.format_rule(out[i]["text"], source=out[i].get("source") or "manual"),
+        todo, workers=4, name="brand-rule-format")
+    for i, formatted in zip(todo, done):
+        if isinstance(formatted, dict):
+            out[i].update(notes.brand_rule_fields(formatted))
+            out[i]["text"] = notes.rule_text(formatted) or out[i]["text"]
+    return out
 
 
 @app.post("/brand/rules/add")
 def brand_rule_add(text: str = Form(""), applies_to: str = Form("captions")):
-    """Add one rule without leaving the page you're on (the caption editor)."""
-    rule = add_brand_rule(text, applies_to)
+    """Add one rule without leaving the page you're on (the caption editor),
+    through the house formatter like every rule."""
+    fields: dict = {}
+    wording = text
+    if " ".join(str(text or "").split()):
+        try:
+            from ..clip_engine import notes
+
+            formatted = notes.format_rule(text)
+            wording = notes.rule_text(formatted) or text
+            fields = notes.brand_rule_fields(formatted)
+        except Exception:
+            log.exception("Rule formatter unavailable; adding the rule as typed")
+    rule = add_brand_rule(wording, applies_to, **fields)
     if rule is None:
         return JSONResponse({"error": "That rule is empty or already exists"},
                             status_code=409)

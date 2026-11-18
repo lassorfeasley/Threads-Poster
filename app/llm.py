@@ -166,7 +166,7 @@ def score_relevance(model: str, title: str, description: str, matched_keywords: 
     optional ``rationale`` key for old cached responses.
     """
     b = _brand()
-    rules = _operator_rules("content")
+    rules = _operator_rules("screening")
     system = (
         f"You score {b['source_kind']} videos for genuine relevance to "
         f"{b['topic']}. "

@@ -184,7 +184,7 @@ class NormalizeLogTest(unittest.TestCase):
 
 def part_log(start, end, beats, *, people=(), highlights=(), complete=True, structure="",
              summary="", cost=0.01):
-    return {"version": 2, "perceiver": "gemini", "model": "m", "prompt_hash": "h",
+    return {"version": shotlog.VERSION, "perceiver": "gemini", "model": "m", "prompt_hash": "h",
             "source_seconds": 456.0, "created_at": "x", "cost_usd": cost, "complete": complete,
             "summary": summary, "format": "news" if summary else "", "structure": structure,
             "people": list(people),
@@ -249,7 +249,7 @@ class FilterAndCompactTest(unittest.TestCase):
              "face": "close", "speaker": "farmer", "line": "It never rained", "sound": "",
              "energy": 3, "visual": 3, "topic": 2, "note": ""},
         ]
-        return {"version": 2, "complete": True, "summary": "s", "format": "news package",
+        return {"version": shotlog.VERSION, "complete": True, "summary": "s", "format": "news package",
                 "structure": "0s-10s intro", "beats": beats,
                 "people": [{"name": "Ann Lee", "role": "farmer", "prominence": "local",
                             "evidence": "on_screen"}],
@@ -454,7 +454,7 @@ class CachePathTest(EngineDirCase):
     def test_layout(self):
         path = shotlog.cache_path("abc_123", "gemini", "gemini-3.8-flash")
         self.assertEqual(path.parent, self.dir / "engine" / "shotlogs")
-        self.assertRegex(path.name, rf"^abc_123__gemini__gemini-3\.8-flash__v2__"
+        self.assertRegex(path.name, rf"^abc_123__gemini__gemini-3\.8-flash__v{shotlog.VERSION}__"
                                     rf"{shotlog.prompt_hash('video')}__s[0-9a-f]{{6}}\.json$")
         part = shotlog.cache_path("abc_123", "gemini", "gemini-3.8-flash", part=(290.0, 590.5))
         self.assertTrue(part.name.endswith("__p290-590.5.json"))
@@ -1038,6 +1038,134 @@ class ClaudeBuildTest(EngineDirCase):
         self.assertEqual(len(self.calls), 2)
         self.assertTrue(log["complete"])
         self.assertIn(("perceive", usage(0.3, "claude-opus-5-5")), meter.added)
+
+
+# ---- round 2: speech language ------------------------------------------------------------
+
+class SpeechLanguageTest(EngineDirCase):
+    """Beats say what language their words are in and whether an English
+    voiceover carries them (the operator never posts non-English speech
+    with only subtitles)."""
+
+    def norm(self, beats, **kw):
+        args = dict(duration=400.0, perceiver="gemini", model="gemini-3.8-flash", cost=0.05)
+        args.update(kw)
+        return shotlog.normalize_log({"beats": beats}, **args)["beats"]
+
+    def test_schema_requires_both_fields(self):
+        item = shotlog.SCHEMA["properties"]["beats"]["items"]
+        self.assertEqual(item["properties"]["speech_language"]["enum"],
+                         ["english", "other", "none"])
+        self.assertEqual(item["properties"]["english_voiceover"]["type"], "boolean")
+        self.assertIn("speech_language", item["required"])
+        self.assertIn("english_voiceover", item["required"])
+        self.assertEqual(prompts.SPEECH_LANGUAGES, ("english", "other", "none"))
+
+    def test_perceiver_prompt_says_how_to_fill_them(self):
+        for mode in ("video", "frames"):
+            with self.subTest(mode=mode):
+                text = prompts.perceiver_system(BRAND, mode=mode)
+                self.assertIn("- speech_language:", text)
+                self.assertIn("- english_voiceover:", text)
+                self.assertIn("english, other", text)
+                self.assertRegex(text, r"(?i)subtitles[^.]*NOT a voiceover")
+        self.assertIn("transcript", prompts.perceiver_system(BRAND, mode="frames").split(
+            "- speech_language:")[1].split("\n")[0])
+
+    def test_version_bumped_and_prompt_hash_follows_the_prompt(self):
+        self.assertEqual(shotlog.VERSION, 3)
+        shotlog._prompt_hash.cache_clear()
+        before = shotlog.prompt_hash("video")
+        with mock.patch.object(prompts, "perceiver_system", return_value="different"):
+            shotlog._prompt_hash.cache_clear()
+            changed = shotlog.prompt_hash("video")
+        shotlog._prompt_hash.cache_clear()
+        self.assertNotEqual(before, changed)
+        self.assertEqual(shotlog.prompt_hash("video"), before)
+        self.assertIn(f"__v{shotlog.VERSION}__", shotlog.cache_path("v", "gemini", "m").name)
+
+    def test_an_older_cached_log_is_not_reused(self):
+        path = shotlog.cache_path("v", "gemini", "m")
+        old = part_log(0, 10, [(0, 10)])
+        old["version"] = 2
+        util.atomic_write_json(path, old)
+        self.assertIsNone(shotlog.load_cached("v", "gemini", "m"))
+        old["version"] = shotlog.VERSION
+        util.atomic_write_json(path, old)
+        self.assertIsNotNone(shotlog.load_cached("v", "gemini", "m"))
+
+    def test_normalize_coerces_language_and_voiceover(self):
+        beats = self.norm([
+            raw_beat(0, 5, speech_language="English", english_voiceover=False, line="hi"),
+            raw_beat(5, 10, speech_language="Hindi", english_voiceover="true", line="namaste"),
+            raw_beat(10, 15, speech_language="none", english_voiceover=None),
+            raw_beat(15, 20, speech_language="other", english_voiceover=1, line="x"),
+            raw_beat(20, 25, speech_language="no speech", english_voiceover="no"),
+            raw_beat(25, 30, speech_language="en", line="hello"),
+            raw_beat(30, 35, speech_language="mixed", line="x"),
+        ])
+        self.assertEqual([b["speech_language"] for b in beats],
+                         ["english", "other", "none", "other", "none", "english", "other"])
+        self.assertEqual([b["english_voiceover"] for b in beats],
+                         [False, True, False, True, False, False, False])
+
+    def test_a_missing_answer_is_never_read_as_foreign(self):
+        beats = self.norm([raw_beat(0, 5, line="We lost everything"), raw_beat(5, 10, line=""),
+                           raw_beat(10, 15, speech_language="", line="x"),
+                           raw_beat(15, 20, speech_language="unknown")])
+        self.assertEqual([b["speech_language"] for b in beats],
+                         ["english", "none", "english", "none"])
+        self.assertFalse(any(b["english_voiceover"] for b in beats))
+
+    def test_compact_keeps_language_and_voiceover_where_it_matters(self):
+        log = {"complete": True, "beats": [
+            {"start": 0.0, "end": 5.0, "shot": "interview", "on_screen": "a", "face": "close",
+             "speaker": "weaver", "line": "x", "sound": "", "energy": 3, "visual": 3,
+             "topic": 2, "note": "", "speech_language": "other", "english_voiceover": False},
+            {"start": 5.0, "end": 10.0, "shot": "b_roll", "on_screen": "b", "face": "none",
+             "speaker": "narrator", "line": "y", "sound": "", "energy": 3, "visual": 3,
+             "topic": 2, "note": "", "speech_language": "english", "english_voiceover": False},
+            {"start": 10.0, "end": 15.0, "shot": "interview", "on_screen": "c", "face": "close",
+             "speaker": "farmer", "line": "z", "sound": "", "energy": 3, "visual": 3,
+             "topic": 2, "note": "", "speech_language": "other", "english_voiceover": True},
+            {"start": 15.0, "end": 20.0, "shot": "aerial", "on_screen": "d", "face": "none",
+             "speaker": "none", "line": "", "sound": "", "energy": 3, "visual": 3,
+             "topic": 2, "note": ""},                       # an older beat: no language
+        ]}
+        a, b, c, d = shotlog.compact_for_prompt(log)["beats"]
+        self.assertEqual((a["speech_language"], a["english_voiceover"]), ("other", False))
+        self.assertEqual(b["speech_language"], "english")
+        self.assertNotIn("english_voiceover", b)          # false and not foreign: left out
+        self.assertEqual((c["speech_language"], c["english_voiceover"]), ("other", True))
+        self.assertNotIn("speech_language", d)
+        self.assertNotIn("english_voiceover", d)
+
+    def test_merged_beats_keep_foreign_speech_visible(self):
+        def beat(i, language, voiceover, shot="interview"):
+            return {"start": i * 10.0, "end": i * 10.0 + 10, "shot": shot, "on_screen": f"s{i}",
+                    "face": "none", "speaker": "x", "line": f"l{i}", "sound": "", "energy": 3,
+                    "visual": 3, "topic": 2, "note": "", "speech_language": language,
+                    "english_voiceover": voiceover}
+        cases = [
+            (("english", False), ("other", False), ("other", False)),
+            (("other", True), ("english", False), ("other", True)),
+            (("other", True), ("other", False), ("other", False)),
+            (("none", False), ("english", True), ("english", True)),
+            (("none", False), ("none", False), ("none", False)),
+        ]
+        for first, second, expected in cases:
+            with self.subTest(first=first, second=second):
+                log = {"complete": True, "beats": [beat(0, *first), beat(1, *second)]}
+                (merged,) = shotlog.compact_for_prompt(log, max_beats=1)["beats"]
+                self.assertEqual(merged["speech_language"], expected[0])
+                self.assertEqual(merged.get("english_voiceover", False), expected[1])
+
+    def test_merge_windows_keeps_the_fields(self):
+        a = part_log(0, 300, [(0, 300)])
+        a["beats"][0].update(speech_language="other", english_voiceover=True)
+        out = shotlog.merge_windows([(0, a)])
+        self.assertEqual(out["beats"][0]["speech_language"], "other")
+        self.assertTrue(out["beats"][0]["english_voiceover"])
 
 
 if __name__ == "__main__":

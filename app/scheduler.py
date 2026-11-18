@@ -38,11 +38,12 @@ from sqlalchemy import func, not_, or_, select, update
 from sqlalchemy.orm import defer, selectinload
 
 from . import threads_api
-from .analytics import poll_recent_metrics, snapshot_account
+from .analytics import poll_recent_metrics, snapshot_account, snapshot_metrics
 from .categories import category_by_slug, default_shelf_life, is_first_party
 from .config import load_settings, scheduler_timezone
 from .db import session_scope
 from .models import (
+    AppToken,
     Candidate,
     Channel,
     Cut,
@@ -2556,6 +2557,68 @@ def run_metrics_poll() -> int:
     return n
 
 
+# The long-tail metrics snapshot (analytics.snapshot_metrics: every published
+# post on its 12 h / weekly cadence for a year) used to run only when someone
+# pressed "Pull latest metrics". Unattended, the views of posts past their
+# first six hours went unrecorded for weeks at a time — and those are the
+# numbers later self-healing (taste examples, the playbook, the handbook) is
+# measured on. So the tick runs it, at most every 6 hours and at most ~200
+# Threads calls a run (most overdue first; the rest are due next time).
+METRICS_SNAPSHOT_TOKEN = "metrics_snapshot_at"
+
+
+def _snapshot_due(session, now: dt.datetime, every: dt.timedelta) -> bool:
+    """Claim this run when the last one is ``every`` old (or there was none):
+    the AppToken row is read and stamped in one short session, so a run that
+    then fails waits its turn instead of retrying every tick."""
+    query = select(AppToken).where(AppToken.name == METRICS_SNAPSHOT_TOKEN)
+    if session.get_bind().dialect.name == "postgresql":
+        query = query.with_for_update()   # two schedulers can't both claim it
+    row = session.execute(query).scalar_one_or_none()
+    last = None
+    if row is not None and row.value:
+        try:
+            last = dt.datetime.fromisoformat(row.value.replace("Z", "+00:00"))
+        except ValueError:
+            last = None
+        if last is not None and last.tzinfo is None:
+            last = last.replace(tzinfo=dt.timezone.utc)
+    if last is not None and now - last < every:
+        return False
+    if row is None:
+        row = AppToken(name=METRICS_SNAPSHOT_TOKEN)
+        session.add(row)
+    row.value = now.isoformat()
+    row.updated_at = now
+    return True
+
+
+def run_metrics_snapshot(now: dt.datetime | None = None) -> int:
+    """The long-tail metrics snapshot, from the tick: at most every
+    ``analytics.auto_snapshot_hours`` (6; 0 turns it off) and at most
+    ``analytics.auto_snapshot_max_calls`` (200) Threads calls a run. Returns
+    snapshots taken; never raises."""
+    try:
+        if not threads_api.is_authenticated():
+            return 0
+        settings = load_settings()
+        hours = float(settings.get("analytics.auto_snapshot_hours", 6) or 0)
+        if hours <= 0:
+            return 0
+        max_calls = max(1, int(settings.get("analytics.auto_snapshot_max_calls", 200) or 200))
+        now = now or utcnow()
+        with session_scope() as session:
+            if not _snapshot_due(session, now, dt.timedelta(hours=hours)):
+                return 0
+        with session_scope() as session:
+            n = snapshot_metrics(session, limit=max_calls)
+        log.info("Long-tail metrics snapshot: %d snapshot(s) (cap %d calls)", n, max_calls)
+        return n
+    except Exception:
+        log.exception("Long-tail metrics snapshot failed")
+        return 0
+
+
 # How long a missed first reply stays worth posting. Past this the sweep lets
 # it go: the reply would land under a post the feed has finished with.
 _FIRST_REPLY_HORIZON = dt.timedelta(hours=72)
@@ -3338,6 +3401,10 @@ def run_tick() -> None:
             log.info("Metrics poll took %d snapshot(s)", n)
     except Exception:
         log.exception("Metrics poll failed")
+
+    # The long tail (every published post, on its slower cadence): at most
+    # every 6 hours, bounded, never raising (run_metrics_snapshot).
+    run_metrics_snapshot()
 
     # Copyright claims and processing failures on the Facebook mirror only
     # surface after the upload; a match pauses the mirror.

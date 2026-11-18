@@ -28,7 +28,7 @@ from sqlalchemy.pool import StaticPool
 
 import run
 from app import clip_engine, spend
-from app.clip_engine import bench, engine, jobs, media, playbook, shotlog
+from app.clip_engine import bench, engine, handbook, jobs, media, playbook, shotlog
 from app.config import Settings
 from app.models import Base, Candidate, Channel, Cut
 from app.web import clip_bench
@@ -62,6 +62,16 @@ class ParserTest(unittest.TestCase):
              {"refresh": False, "model": None}),
             (["clip-engine", "playbook", "--refresh", "--model", "claude-opus-5-5"],
              run.cmd_clip_engine_playbook, {"refresh": True, "model": "claude-opus-5-5"}),
+            (["clip-engine", "handbook", "build"], run.cmd_clip_engine_handbook_build,
+             {"limit": None, "max_usd": None, "workspace": None}),
+            (["clip-engine", "handbook", "build", "--limit", "40", "--max-usd", "12.5"],
+             run.cmd_clip_engine_handbook_build, {"limit": 40, "max_usd": 12.5}),
+            (["clip-engine", "handbook", "validate"], run.cmd_clip_engine_handbook_validate,
+             {"limit": 15, "max_usd": None, "setup": None}),
+            (["clip-engine", "handbook", "validate", "--limit", "5", "--max-usd", "8",
+              "--setup", "hybrid"], run.cmd_clip_engine_handbook_validate,
+             {"limit": 5, "max_usd": 8.0, "setup": "hybrid"}),
+            (["clip-engine", "handbook", "show"], run.cmd_clip_engine_handbook_show, {}),
             (["clipbench", "run", "--name", "test-1"], run.cmd_clipbench_run,
              {"name": "test-1", "arms": None, "limit": None, "max_usd": None, "seed": "test",
               "workers": 1, "candidate": None, "allow_no_words": False, "negatives": 0,
@@ -112,6 +122,10 @@ class ParserTest(unittest.TestCase):
             ["retranscribe"],
             ["clip-engine"],
             ["clipbench"],
+            ["clip-engine", "handbook"],
+            ["clip-engine", "handbook", "build", "--limit", "0"],
+            ["clip-engine", "handbook", "build", "--max-usd", "0"],
+            ["clip-engine", "handbook", "validate", "--setup", "transcript"],
         ]
         for argv in cases:
             with self.subTest(argv=argv):
@@ -122,7 +136,9 @@ class ParserTest(unittest.TestCase):
                   ["clip-engine", "playbook"], ["clipbench", "run", "--name", "t"],
                   ["clipbench", "pairs", "--name", "t"], ["clipbench", "report", "--name", "t"],
                   ["clipbench", "reveal", "--name", "t"], ["clipbench", "critic-check"],
-                  ["clipbench", "list"], ["retranscribe", "--missing-words"]]
+                  ["clipbench", "list"], ["retranscribe", "--missing-words"],
+                  ["clip-engine", "handbook", "build"], ["clip-engine", "handbook", "validate"],
+                  ["clip-engine", "handbook", "show"]]
         for argv in leaves:
             with self.subTest(argv=argv):
                 self.assertEqual(parse(argv + ["--workspace", "other"]).workspace, "other")
@@ -136,7 +152,9 @@ class ParserTest(unittest.TestCase):
     def test_the_usage_docstring_lists_the_new_commands(self):
         for text in ("clip-engine try", "clip-engine shotlog", "clip-engine playbook",
                      "clipbench run", "clipbench pairs", "clipbench report", "clipbench reveal",
-                     "clipbench critic-check", "clipbench list", "retranscribe --missing-words"):
+                     "clipbench critic-check", "clipbench list", "retranscribe --missing-words",
+                     "clip-engine handbook build", "clip-engine handbook validate",
+                     "clip-engine handbook show"):
             self.assertIn(text, run.__doc__)
 
 
@@ -947,6 +965,113 @@ class RetranscribeTest(CliTestCase):
             s.commit()
         out, _ = self.cli(["retranscribe", "--missing-words"])
         self.assertIn("has a word stream", out)
+
+
+HANDBOOK_REPORT = {
+    "generated_at": "2026-11-18T10:00:00Z", "examples_used": 40, "holdout": 9, "holdout_videos": 6,
+    "summary": "He opens on pictures.", "validation": None,
+    "candidates": [{"id": "aerial", "text": "Open on the aerial b-roll, not the anchor",
+                    "when": "France 24 packages", "support": 8, "exceptions": 1,
+                    "examples": [100], "strength": "rule"}]}
+
+
+class HandbookCommandTest(CliTestCase):
+    def setUp(self):
+        super().setUp()
+        self.file = self.tmp / "config" / "clip_handbook.yaml"
+        self.start(mock.patch.object(handbook, "path", return_value=self.file))
+        self.calls = mock.Mock()
+        self.set_bucket = self.start(mock.patch.object(spend, "set_bucket", create=True))
+        self.calls.attach_mock(self.set_bucket, "set_bucket")
+        self.build = self.start(mock.patch.object(
+            handbook, "build", side_effect=lambda *a, **k: json.loads(json.dumps(HANDBOOK_REPORT))))
+        self.calls.attach_mock(self.build, "build")
+        self.propose = self.start(mock.patch.object(handbook, "propose",
+                                                    return_value=[{"idx": 0}]))
+        self.calls.attach_mock(self.propose, "propose")
+        self.validate = self.start(mock.patch.object(handbook, "validate", return_value={
+            "at": "2026-11-18T12:00:00Z", "videos": 15, "rules_tested": 1, "cost_usd": 19.2,
+            "stopped": "", "current": {"moment_hit1": 0.4, "moment_hit3": 0.6, "hit1": 0.2,
+                                       "hit3": 0.3, "errors": 1},
+            "candidates": {"moment_hit1": 0.533, "moment_hit3": 0.6, "hit1": 0.2, "hit3": 0.4,
+                           "errors": 0}}))
+        self.calls.attach_mock(self.validate, "validate")
+        self.start(mock.patch("app.clip_engine.gemini.is_configured", return_value=True))
+        self.start(mock.patch("app.clip_engine.claude.is_configured", return_value=True))
+        self.start(mock.patch.object(clip_engine, "effective_setup",
+                                     side_effect=lambda settings, requested=None: (requested or "gemini", "")))
+        self.start(mock.patch("app.clip_engine.notes.proposals", return_value=[]))
+        self.start(mock.patch("app.config.load_brand_rules", return_value=[]))
+
+    def test_build_books_spend_to_bench_proposes_then_saves(self):
+        self.settings = Settings(raw={"clip_engine": {"bench": {"max_usd": 25}}})
+        out, code = self.cli(["clip-engine", "handbook", "build", "--limit", "40"])
+        self.assertIsNone(code, out)
+        names = [c[0] for c in self.calls.mock_calls]
+        self.assertEqual(names[:3], ["set_bucket", "build", "propose"])
+        self.set_bucket.assert_called_once_with("bench")
+        kwargs = self.build.call_args.kwargs
+        self.assertEqual((kwargs["limit"], kwargs["max_usd"]), (40, 25.0))
+        self.assertEqual(kwargs["meter"].bucket, "bench")
+        self.assertIs(self.propose.call_args.kwargs["settings"], self.settings)
+        self.assertEqual(self.open, 0)
+        saved = handbook.load()
+        self.assertEqual(saved["examples_used"], 40)
+        self.assertIn("Queued 1 new suggested rule", out)
+        self.assertIn("Brand & audience", out)
+        self.assertIn("Open on the aerial b-roll", out)
+        self.init_db.assert_called_once()
+
+    def test_a_rebuild_backs_up_the_old_report(self):
+        handbook.save(HANDBOOK_REPORT)
+        old = self.file.read_text()
+        out, code = self.cli(["clip-engine", "handbook", "build", "--max-usd", "3"])
+        self.assertIsNone(code, out)
+        self.assertEqual(self.build.call_args.kwargs["max_usd"], 3.0)
+        backups = list((self.engine_dir / "handbook" / "backups").glob("clip_handbook-*.yaml"))
+        self.assertEqual([b.read_text() for b in backups], [old])
+
+    def test_a_failed_build_keeps_the_old_report_and_proposes_nothing(self):
+        handbook.save(HANDBOOK_REPORT)
+        before = self.file.read_text()
+        self.build.side_effect = handbook.HandbookError("only 4 analysed edits")
+        _, code = self.cli(["clip-engine", "handbook", "build"])
+        self.assertIn("only 4 analysed edits", str(code))
+        self.assertEqual(self.file.read_text(), before)
+        self.propose.assert_not_called()
+
+    def test_build_needs_both_keys(self):
+        with mock.patch("app.clip_engine.gemini.is_configured", return_value=False):
+            _, code = self.cli(["clip-engine", "handbook", "build"])
+        self.assertIn("GEMINI_API_KEY", str(code))
+        self.build.assert_not_called()
+
+    def test_validate_stores_the_summary(self):
+        handbook.save(HANDBOOK_REPORT)
+        out, code = self.cli(["clip-engine", "handbook", "validate", "--limit", "5"])
+        self.assertIsNone(code, out)
+        self.set_bucket.assert_called_once_with("bench")
+        kwargs = self.validate.call_args.kwargs
+        self.assertEqual((kwargs["limit"], kwargs["max_usd"], kwargs["setup"]), (5, 40.0, "gemini"))
+        self.assertEqual(handbook.load()["validation"]["videos"], 15)
+        self.assertIn("current + candidates", out)
+        self.assertIn("53%", out)
+
+    def test_validate_without_a_report(self):
+        _, code = self.cli(["clip-engine", "handbook", "validate"])
+        self.assertIn("No handbook yet", str(code))
+        self.validate.assert_not_called()
+
+    def test_show(self):
+        _, code = self.cli(["clip-engine", "handbook", "show"])
+        self.assertIn("No handbook yet", str(code))
+        handbook.save(HANDBOOK_REPORT)
+        out, code = self.cli(["clip-engine", "handbook", "show"])
+        self.assertIsNone(code)
+        self.assertIn("not proposed", out)
+        self.assertIn("8 of 9 edits", out)
+        self.assertIn("Not validated yet", out)
+        self.init_db.assert_not_called()
 
 
 if __name__ == "__main__":

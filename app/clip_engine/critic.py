@@ -19,6 +19,15 @@ Three judgments, each built against a known way model judges go wrong:
   it asks in both presentation orders and accepts the revision only when it
   wins both; "same" or any failure keeps the original.
 
+Every critique also answers three tests that came out of the first live
+run: ``premise_clear`` (within ~5 s you know what is happening and where),
+``speech_understood`` (every word is English or carried by an English
+voiceover; subtitles don't count) and ``monologue`` (mostly one reporter or
+anchor talking to camera). ``cold_score`` charges for each. When the
+operator gave advice for the pass, the critic also says whether the clip
+``follows_advice`` (with an ``advice_note``), and the ranking and revision
+judges read the advice too.
+
 Critique times are CLIP seconds (from the start of the rendered draft).
 """
 from __future__ import annotations
@@ -43,6 +52,17 @@ _WORDS_CHARS = 4000
 _STRINGS = {"first_impression": 400, "muted_reason": 300, "stop_reason": 300, "about": 300,
             "dangling": 200, "topic_note": 200, "person": 200, "fix": 300}
 _BOOLS = ("stops_scroll_muted", "stops_scroll", "person_at_start", "makes_sense", "ends_well")
+# The three tests, with the answer that costs nothing when a critique leaves
+# one out (an older critique, a sloppy answer): a missing answer is not a
+# verdict.
+_TESTS = {"premise_clear": True, "speech_understood": True, "monologue": False}
+_ADVICE_NOTE_CHARS = 300
+
+# cold_score's charges for the three tests and for ignoring the advice.
+PENALTY_SPEECH = 3.0
+PENALTY_PREMISE = 2.0
+PENALTY_MONOLOGUE = 2.0
+PENALTY_ADVICE = 3.0
 
 CRITIQUE_SCHEMA: dict = {
     "type": "object",
@@ -56,6 +76,13 @@ CRITIQUE_SCHEMA: dict = {
         "about": {"type": "string"},
         "makes_sense": {"type": "boolean"},
         "dangling": {"type": "string"},
+        "premise_clear": {"type": "boolean",
+                          "description": "within about 5 s you know what is happening and where"},
+        "speech_understood": {"type": "boolean",
+                              "description": "every spoken word is English or carried by an "
+                                             "English voiceover; subtitles don't count"},
+        "monologue": {"type": "boolean",
+                      "description": "mostly one reporter or anchor talking to camera"},
         "bored_at": {"type": ["number", "null"],
                      "description": "seconds from the clip's start; null if you'd watch to the end"},
         "dead_air": {
@@ -77,9 +104,26 @@ CRITIQUE_SCHEMA: dict = {
     },
     "required": ["first_impression", "stops_scroll_muted", "muted_reason", "stops_scroll",
                  "stop_reason", "person_at_start", "about", "makes_sense", "dangling",
+                 "premise_clear", "speech_understood", "monologue",
                  "bored_at", "dead_air", "ends_well", "topic", "topic_note", "person",
                  "visual", "audio", "score", "fix"],
 }
+
+
+def critique_schema(*, advice: bool = False) -> dict:
+    """CRITIQUE_SCHEMA, plus ``follows_advice`` and ``advice_note`` (right
+    after the three tests, before the verdict fields) when the operator gave
+    advice for this pass."""
+    if not advice:
+        return CRITIQUE_SCHEMA
+    properties: dict = {}
+    for key, value in CRITIQUE_SCHEMA["properties"].items():
+        properties[key] = copy.deepcopy(value)
+        if key == "monologue":
+            properties["follows_advice"] = {
+                "type": "boolean", "description": "the clip does what the operator asked"}
+            properties["advice_note"] = {"type": "string"}
+    return {"type": "object", "properties": properties, "required": list(properties)}
 
 # Notes come first: a judge that has written down what it saw in every draft
 # ranks more consistently than one that ranks first and justifies after.
@@ -215,7 +259,8 @@ def failure_critique(error: str, *, usage: dict | None = None) -> dict:
     out = {
         "first_impression": "", "stops_scroll_muted": False, "muted_reason": "",
         "stops_scroll": False, "stop_reason": "", "person_at_start": False, "about": "",
-        "makes_sense": False, "dangling": "", "bored_at": None, "dead_air": [],
+        "makes_sense": False, "dangling": "", "premise_clear": False,
+        "speech_understood": False, "monologue": False, "bored_at": None, "dead_air": [],
         "ends_well": False, "topic": "central", "topic_note": "", "person": "",
         "visual": 0, "audio": 0, "score": 0, "fix": "", "error": _text(error, 300) or "failed",
     }
@@ -224,11 +269,14 @@ def failure_critique(error: str, *, usage: dict | None = None) -> dict:
     return out
 
 
-def normalize_critique(raw, *, clip_seconds) -> dict:
+def normalize_critique(raw, *, clip_seconds, advice: bool = False) -> dict:
     """A model's critique, coerced: ints clamped (visual/audio 1-5, score
     1-10), ``bored_at`` None or within the clip, ``dead_air`` as clip-time
     {start, end} spans, topic one of prompts.TOPIC_LABELS (else "central").
-    An answer with no usable score is a failure, not a verdict."""
+    The three tests default to their no-charge answer when missing. With
+    ``advice``, ``follows_advice`` (default True when missing) and
+    ``advice_note`` are kept too. An answer with no usable score is a
+    failure, not a verdict."""
     if not isinstance(raw, dict):
         return failure_critique("the critic returned no critique")
     score = _int(raw.get("score"), 1, 10)
@@ -257,6 +305,12 @@ def normalize_critique(raw, *, clip_seconds) -> dict:
     topic = str(raw.get("topic") or "").strip().lower()
     out: dict[str, Any] = {key: _text(raw.get(key), limit) for key, limit in _STRINGS.items()}
     out.update({key: _bool(raw.get(key)) for key in _BOOLS})
+    out.update({key: _bool(raw[key]) if raw.get(key) is not None else default
+                for key, default in _TESTS.items()})
+    if advice:
+        out["follows_advice"] = (_bool(raw["follows_advice"])
+                                 if raw.get("follows_advice") is not None else True)
+        out["advice_note"] = _text(raw.get("advice_note"), _ADVICE_NOTE_CHARS)
     out.update({
         "bored_at": bored,
         "dead_air": dead_air,
@@ -266,11 +320,11 @@ def normalize_critique(raw, *, clip_seconds) -> dict:
         "score": score,
         "error": "",
     })
-    order = list(CRITIQUE_SCHEMA["properties"]) + ["error"]
+    order = list(critique_schema(advice=advice)["properties"]) + ["error"]
     return {key: out[key] for key in order}
 
 
-def _cold_gemini(settings, brand, render, seconds, credits, meter, label) -> dict:
+def _cold_gemini(settings, brand, render, seconds, credits, meter, label, advice="") -> dict:
     opening_end = min(_OPENING_SECONDS, seconds) if seconds > 0 else _OPENING_SECONDS
     parts = list(gemini.video_parts([
         {"path": render, "fps": _float(settings, "clip_engine.gemini.critic_fps", 2.0)},
@@ -282,15 +336,17 @@ def _cold_gemini(settings, brand, render, seconds, credits, meter, label) -> dic
         f"{_fmt_secs(opening_end)} seconds again, at a higher frame rate.\n"
         f"Credits: {credits or 'none'}"))
     return _metered(meter, "cold", lambda: gemini.generate_json(
-        model_for(settings, "gemini", "critic"), system=prompts.cold_system(brand, mode="video"),
-        parts=parts, schema=CRITIQUE_SCHEMA,
+        model_for(settings, "gemini", "critic"),
+        system=prompts.cold_system(brand, mode="video", advice=advice),
+        parts=parts, schema=critique_schema(advice=bool(advice)),
         thinking=opt(settings, "clip_engine.gemini.critic_thinking", "LOW"),
         media_resolution=opt(settings, "clip_engine.gemini.critic_media_resolution",
                              "MEDIA_RESOLUTION_LOW"),
         max_output_tokens=16384, label=label, bucket=_bucket(meter)))
 
 
-def _cold_claude(settings, brand, render, seconds, clip_words, credits, meter, label) -> dict:
+def _cold_claude(settings, brand, render, seconds, clip_words, credits, meter, label,
+                 advice="") -> dict:
     interval = _float(settings, "clip_engine.claude.critic_frame_interval", 1.0)
     frames = media.clip_frames(render, interval=interval,
                                width=int(_float(settings, "clip_engine.claude.frame_width", 448)),
@@ -303,32 +359,43 @@ def _cold_claude(settings, brand, render, seconds, clip_words, credits, meter, l
     content = [claude.text_block(text)] + list(claude.frames_blocks(frames, clock="clip"))
     return _metered(meter, "cold", lambda: claude.json_call(
         model_for(settings, "claude", "critic"),
-        system=prompts.cold_system(brand, mode="frames", frame_interval=effective),
-        content=content, schema=CRITIQUE_SCHEMA,
+        system=prompts.cold_system(brand, mode="frames", frame_interval=effective, advice=advice),
+        content=content, schema=critique_schema(advice=bool(advice)),
         effort=opt(settings, "clip_engine.claude.critic_effort", "medium"), max_tokens=16000,
         label=label, bucket=_bucket(meter)))
 
 
-def cold_watch(*, role, settings, brand, render, clip_seconds, clip_words, credits, meter) -> dict:
+def cold_watch(*, role, settings, brand, render, clip_seconds, clip_words, credits, meter,
+               advice: str = "") -> dict:
     """One cold critique of one rendered draft (spec §3 Critique, clip time).
 
-    Never raises: any failure returns ``failure_critique`` carrying the
-    error's usage, which is also charged to ``meter`` under "cold"."""
+    With ``advice`` (the operator's steer for this pass) the critic also
+    answers ``follows_advice`` / ``advice_note``. Never raises: any failure
+    returns ``failure_critique`` carrying the error's usage, which is also
+    charged to ``meter`` under "cold"."""
     seconds = max(0.0, _number(clip_seconds) or 0.0)
     label = f"cold {Path(str(render)).name}"
+    advice = prompts.clean_advice(advice)
     try:
         if role == "gemini":
-            raw = _cold_gemini(settings, brand or {}, render, seconds, credits, meter, label)
+            raw = _cold_gemini(settings, brand or {}, render, seconds, credits, meter, label,
+                               advice)
         elif role == "claude":
             raw = _cold_claude(settings, brand or {}, render, seconds, clip_words, credits, meter,
-                               label)
+                               label, advice)
         else:
             raise ValueError(f"unknown critic role {role!r}")
     except Exception as exc:  # noqa: BLE001 - an outage is "not reviewed", never a verdict
         usage = getattr(exc, "usage", None)
         log.warning("cold watch of %s failed: %s", render, exc)
         return failure_critique(f"{type(exc).__name__}: {exc}", usage=usage)
-    return normalize_critique(raw, clip_seconds=seconds)
+    return normalize_critique(raw, clip_seconds=seconds, advice=bool(advice))
+
+
+def _answer(critique: dict, key: str) -> bool | None:
+    """A test's answer, or None when the critique doesn't give one."""
+    value = critique.get(key)
+    return None if value is None else _bool(value)
 
 
 def cold_score(critique, *, clip_seconds, archetype="") -> float:
@@ -338,8 +405,12 @@ def cold_score(critique, *, clip_seconds, archetype="") -> float:
     it doesn't make sense, 1 when it ends badly, 1.5 when the opening stops
     nobody (0.5 when it stops a viewer only muted or only with sound), up to
     2 for an early swipe; the picture counts (+-0.25 a point) only where the
-    footage IS the hook (scene, revelation), the sound for every clip. A
-    failed critique scores -1e9 so it sorts after every reviewed draft."""
+    footage IS the hook (scene, revelation), the sound for every clip. Then
+    the three tests: 3 when the speech isn't understood, 2 when the premise
+    isn't clear in ~5 s, 2 for a reporter/anchor monologue; and 3 when the
+    clip doesn't follow the operator's advice. A test the critique doesn't
+    answer costs nothing. A failed critique scores -1e9 so it sorts after
+    every reviewed draft."""
     critique = critique or {}
     if critique.get("error"):
         return -1e9
@@ -362,6 +433,14 @@ def cold_score(critique, *, clip_seconds, archetype="") -> float:
     if archetype in ("scene", "revelation"):
         s += 0.25 * ((_number(critique.get("visual")) or 3) - 3)
     s += 0.2 * ((_number(critique.get("audio")) or 3) - 3)
+    if _answer(critique, "speech_understood") is False:
+        s -= PENALTY_SPEECH
+    if _answer(critique, "premise_clear") is False:
+        s -= PENALTY_PREMISE
+    if _answer(critique, "monologue") is True:
+        s -= PENALTY_MONOLOGUE
+    if _answer(critique, "follows_advice") is False:
+        s -= PENALTY_ADVICE
     return round(s, 3)
 
 
@@ -463,7 +542,8 @@ def _example_label(i: int, example: dict) -> str:
     return f"Example {i} — {example.get('title') or 'untitled'}: {performance_line(example)}"
 
 
-def _rank_gemini(settings, brand, playbook_text, drafts, renders, credits, examples, meter):
+def _rank_gemini(settings, brand, playbook_text, drafts, renders, credits, examples, meter,
+                 advice=""):
     """Builds the request parts once (examples first, uploaded; then drafts)
     and returns ``(run, drafts shown)``; ``run`` does one pass in a given
     order. Examples are optional: if they can't be attached, the drafts are
@@ -493,7 +573,7 @@ def _rank_gemini(settings, brand, playbook_text, drafts, renders, credits, examp
                       draft_video[str(d["id"])]]
         parts.append(gemini.text_part(f"Rank all {len(order)} drafts."))
         system = prompts.rank_system(brand, playbook_text or "", k=len(order),
-                                     has_examples=bool(examples), mode="video")
+                                     has_examples=bool(examples), mode="video", advice=advice)
         data = _metered(meter, "rank", lambda: gemini.generate_json(
             model, system=system, parts=parts, schema=_rank_schema(letters),
             thinking=opt(settings, "clip_engine.gemini.judge_thinking", "MEDIUM"),
@@ -513,7 +593,8 @@ def _frames_or_none(path, *, interval: float, width: int, max_frames: int):
         return None
 
 
-def _rank_claude(settings, brand, playbook_text, drafts, renders, credits, examples, meter):
+def _rank_claude(settings, brand, playbook_text, drafts, renders, credits, examples, meter,
+                 advice=""):
     """Extracts every file's frames once and returns ``(run, drafts shown)``.
     An example without frames is left out; so is a draft (it is appended
     after the ranked ones by ``rank``)."""
@@ -549,7 +630,7 @@ def _rank_claude(settings, brand, playbook_text, drafts, renders, credits, examp
         content.append(claude.text_block(f"Rank all {len(order)} drafts."))
         system = prompts.rank_system(brand, playbook_text or "", k=len(order),
                                      has_examples=bool(example_blocks), mode="frames",
-                                     frame_interval=_RANK_DRAFT_INTERVAL)
+                                     frame_interval=_RANK_DRAFT_INTERVAL, advice=advice)
         data = _metered(meter, "rank", lambda: claude.json_call(
             model, system=system, content=content, schema=_rank_schema(letters),
             effort=opt(settings, "clip_engine.claude.judge_effort", "medium"), max_tokens=16000,
@@ -560,10 +641,11 @@ def _rank_claude(settings, brand, playbook_text, drafts, renders, credits, examp
 
 
 def rank(*, role, settings, brand, playbook_text, drafts, renders, credits, scores,
-         examples, example_files, meter) -> list[str]:
+         examples, example_files, meter, advice: str = "") -> list[str]:
     """Draft ids, best first, from two head-to-head passes (given order, then
     reversed; letters by position in each pass; examples first in both)
-    merged by ``borda`` with the cold ``scores`` as tie-break.
+    merged by ``borda`` with the cold ``scores`` as tie-break. ``advice``
+    (the operator's steer for this pass) goes into the judge's system prompt.
 
     Gemini sends at most 10 videos per request (examples are dropped first).
     Drafts that can't be shown (no render) and drafts a pass left out are
@@ -587,10 +669,10 @@ def rank(*, role, settings, brand, playbook_text, drafts, renders, credits, scor
     try:
         if role == "gemini":
             run, shown = _rank_gemini(settings, brand or {}, playbook_text, shown, renders_by,
-                                      credits_by, pairs, meter)
+                                      credits_by, pairs, meter, prompts.clean_advice(advice))
         elif role == "claude":
             run, shown = _rank_claude(settings, brand or {}, playbook_text, shown, renders_by,
-                                      credits_by, pairs, meter)
+                                      credits_by, pairs, meter, prompts.clean_advice(advice))
         else:
             raise ValueError(f"unknown judge role {role!r}")
     except Exception as exc:  # noqa: BLE001 - ranking is advisory; fall back to the input order
@@ -637,16 +719,20 @@ def _choice(value: Any) -> str:
     return "same"
 
 
-def prefer(*, role, settings, brand, a, b, render_a, render_b, credits, intent, meter) -> str:
+def prefer(*, role, settings, brand, a, b, render_a, render_b, credits, intent, meter,
+           advice: str = "") -> str:
     """"b" when the revision ``b`` beats the original ``a`` in BOTH
-    presentation orders; "a" otherwise (any "same", disagreement or failure)."""
+    presentation orders; "a" otherwise (any "same", disagreement or failure).
+    ``advice`` (the operator's steer for this pass) goes into the judge's
+    system prompt."""
     credit_a, credit_b = _pair_credits(credits)
     versions = {"a": (a or {}, render_a, credit_a), "b": (b or {}, render_b, credit_b)}
+    advice = prompts.clean_advice(advice)
     try:
         if role == "gemini":
-            ask = _prefer_gemini(settings, brand or {}, versions, intent, meter)
+            ask = _prefer_gemini(settings, brand or {}, versions, intent, meter, advice)
         elif role == "claude":
-            ask = _prefer_claude(settings, brand or {}, versions, intent, meter)
+            ask = _prefer_claude(settings, brand or {}, versions, intent, meter, advice)
         else:
             raise ValueError(f"unknown judge role {role!r}")
     except Exception as exc:  # noqa: BLE001 - no verdict keeps the original
@@ -669,11 +755,11 @@ def prefer(*, role, settings, brand, a, b, render_a, render_b, credits, intent, 
     return verdict
 
 
-def _prefer_gemini(settings, brand, versions, intent, meter):
+def _prefer_gemini(settings, brand, versions, intent, meter, advice=""):
     fps = _float(settings, "clip_engine.gemini.critic_fps", 2.0)
     videos = list(gemini.video_parts([{"path": versions[k][1], "fps": fps} for k in ("a", "b")]))
     video = {"a": videos[0], "b": videos[1]}
-    system = prompts.prefer_system(brand, mode="video", intent=intent or "")
+    system = prompts.prefer_system(brand, mode="video", intent=intent or "", advice=advice)
     model = model_for(settings, "gemini", "judge")
 
     def ask(order: tuple[str, str]) -> str:
@@ -693,7 +779,7 @@ def _prefer_gemini(settings, brand, versions, intent, meter):
     return ask
 
 
-def _prefer_claude(settings, brand, versions, intent, meter):
+def _prefer_claude(settings, brand, versions, intent, meter, advice=""):
     interval = _float(settings, "clip_engine.claude.critic_frame_interval", 1.0)
     width = int(_float(settings, "clip_engine.claude.frame_width", 448))
     blocks = {}
@@ -708,7 +794,7 @@ def _prefer_claude(settings, brand, versions, intent, meter):
                       for s in versions[key][0].get("segments") or [])
         effective = max(effective, seconds / _COLD_MAX_FRAMES if seconds else interval)
     system = prompts.prefer_system(brand, mode="frames", frame_interval=effective,
-                                   intent=intent or "")
+                                   intent=intent or "", advice=advice)
     model = model_for(settings, "claude", "judge")
 
     def ask(order: tuple[str, str]) -> str:

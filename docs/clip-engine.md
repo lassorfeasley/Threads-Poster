@@ -107,6 +107,55 @@ Two more commands:
   - `--refresh` rebuilds them from this account's own first airings with one Claude call, and saves `config/clip_playbook.yaml`. The previous file is backed up under `clip_engine/playbooks/`.
   - The file is plain YAML; edit it by hand freely. Delete it to go back to the built-in default.
 
+## Telling it what's wrong: advice and notes
+
+The engine follows the playbook and your brand rules, but a single video can need something they don't say. Two ways to tell it, both from the dashboard:
+
+- **"What's wrong?" on a suggestion card.** Pick one or more chips — Wrong language, No premise, Reporter monologue, Weak opening, Boring, Off topic, Bad cut points, Too long, Something else — and, if you like, a line of your own words. **Re-suggest with this** dismisses the card and runs the engine again on the whole video (or the same section, for a section suggestion) with that advice; **Just dismiss** only dismisses it.
+- **Advice next to every Suggest button.** An optional line such as "open on the disaster footage; no interviews" for that one pass.
+
+Advice outranks the playbook for that run: the editor, the reviser and the ranking all see it, and the critic checks each draft against it (a draft that ignores it loses 3 points). It's listed in the run's notes.
+
+Every piece of advice is also kept as a **note** (`clip_engine/notes.jsonl`). When at least three new notes have piled up, one Claude call looks across your notes from the last 90 days for themes your brand rules don't already cover — a theme needs at least three notes on at least two videos — and proposes each as a rule. They appear under **Suggested rules** on the Brand & audience page with how many notes back them. **Add** makes one an ordinary brand rule (it then applies to every run); **Dismiss** drops it for good. Nothing changes until you add one.
+
+## The clip handbook: house rules from your past edits
+
+You've cut hundreds of clips, and they share habits no prompt spells out: what you open on, what you always cut, which languages you keep. The handbook reads those edits and proposes them as rules — in the same **Suggested rules** list as the ones drawn from your notes, and decided the same way.
+
+**1. Build.**
+
+```bash
+python run.py clip-engine handbook build              # all your exported cuts
+python run.py clip-engine handbook build --limit 40   # a cheap first look
+```
+
+- It studies every cut you exported (an exported file or a published post) whose source video and transcript are still available. Published clips count fully, exported-but-unposted ones half, and cuts that started from an accepted transcript suggestion 0.3 (their boundaries are partly the suggester's).
+- **One video in five is held back** (fixed by the video id) and never studied, so the rules can be tested on edits they weren't learned from.
+- For each cut, Gemini reads the video's shot log (made once per video and cached; a video already logged isn't even downloaded), the transcript, your segments in play order and the stretches you skipped. It describes what you chose, with times — what the clip opens on, what you kept and dropped, the structure, which languages are heard. It never guesses why.
+- One Claude call then turns those descriptions into rules, each with its condition ("France 24 packages", "an interview in another language", or always), how many edits follow it and how many go the other way. A pattern seen in at least 5 edits that holds at least 70% of the time is a **rule**; weaker ones are **tendencies**, proposed with "usually".
+- Candidates seen at least 3 times go into **Suggested rules** on the Brand & audience page (each one is tidied by the shared rule formatter, a small Claude call). A candidate you already dismissed, or that is already a brand rule, isn't asked again.
+- Cost: roughly $0.02–0.05 a cut for the descriptions plus logging any video not yet logged (about $0.06–0.30 each), and about $1–2 for the rules. Descriptions are cached per cut, so a rebuild only pays for new cuts and the rules call. `--max-usd` (default `clip_engine.bench.max_usd`, 40) stops studying cuts past that spend; spend goes to the "bench" bucket. It restores offloaded sources only while free disk stays above `clip_engine.min_free_gb`, and deletes them again afterwards.
+
+**2. Review.** Open **Analytics → Clip handbook** for the report: every candidate with its condition, support, exceptions, example cuts and where it stands (waiting for you, added, dismissed, not proposed). Then decide on the **Brand & audience** page. Nothing reaches the engine until you add it there; an added rule is a brand rule like any other, and you can edit or delete it on that page.
+
+**3. Validate (optional, before adding).**
+
+```bash
+python run.py clip-engine handbook validate            # 15 held-out videos
+```
+
+It replays held-out videos through the engine twice — with your current rules, and with the current rules plus every candidate you haven't added or dismissed — and reports how often the top suggestion (and the top three) lands on a moment you actually cut ("moment hit"), for both. About $1.50 a video at the 2027 Gemini price; replays are cached, so a rerun continues. Fifteen videos is a small sample: a one- or two-video gap is noise. `handbook show` prints the report in the terminal.
+
+**4. Refresh monthly.** Run `handbook build` again once a month or so: new edits are studied, the rest come from the cache, and only new patterns are proposed. The previous report is backed up under `clip_engine/handbook/backups/`.
+
+## Metrics capture
+
+The scheduler now takes the long-tail metrics snapshot by itself: every published post on its usual cadence (every 12 hours for 60 days, then weekly for a year), at most every 6 hours, and at most 200 Threads calls a run — the most overdue posts first; the rest are picked up next time. Before, this only happened when someone pressed **Pull latest metrics**, and views past a post's first six hours could go unrecorded for weeks. Those numbers are what taste examples, the playbook and the handbook are measured on.
+
+- The last run's time is kept in the database (`app_tokens`, name `metrics_snapshot_at`), so a restart or a second scheduler doesn't run it again early.
+- Settings under `analytics:` — `auto_snapshot_hours` (6; 0 turns it off) and `auto_snapshot_max_calls` (200).
+- The button still takes every due snapshot at once.
+
 ## The benchmark: is the engine actually better?
 
 The bench replays past videos through each setup ("arm") and compares the results. The decisive part is a **blind A/B test you judge yourself**: two clips cut from the same video, without knowing which suggester made which.
@@ -245,11 +294,16 @@ Everything is files; the engine adds nothing to the database except the suggesti
 | `data/clip_engine/inflight/` | temporary hard links to sources while a run reads them |
 | `data/clip_engine/tries/` | `clip-engine try` results |
 | `data/clip_engine/playbooks/` | backups made by `clip-engine playbook --refresh` |
+| `data/clip_engine/notes.jsonl` | your notes and advice, one per line |
+| `data/clip_engine/rule_proposals.json` | suggested rules (from notes and the handbook) and what you decided |
+| `data/clip_engine/handbook/edits/` | the handbook's description of each studied cut (cached) |
+| `data/clip_engine/handbook/validation/`, `backups/` | handbook validation replays; previous reports |
 | `data/clip_engine/gemini_files.json` | the Gemini upload cache |
 | `data/clipbench/<run>/` | a bench run: `manifest.json`, `videos.json`, one result per arm and video, `pairs.json`, `judgments.jsonl`, `ledger.json`, `renders/` |
 | `data/clipbench/touched.json` | videos the test seed must never draw |
 | `data/clipbench/critic_check-<date>.json` | critic-check results |
 | `config/clip_playbook.yaml` | the generated playbook (absent = built-in default) |
+| `config/clip_handbook.yaml` | the handbook report (a report only: rules live in `brand.yaml` once you add them) |
 
 `CLIP_ENGINE_DIR` and `CLIPBENCH_DIR` override the two data directories (the tests point them at temp dirs).
 

@@ -144,6 +144,11 @@
       <div class="suggest-head-actions">
         {# The clip engine works in the background: where it is, while it runs. #}
         <span class="meta engine-status" id="suggest-status" role="status" hidden></span>
+        {# Optional advice for the next pass, sent with it (and kept as a note). #}
+        <input type="text" class="advice-input" id="suggest-advice" maxlength="300"
+               placeholder="Advice for this pass, e.g. open on the disaster footage; no interviews"
+               aria-label="Advice for this suggestion pass (optional)"
+               onkeydown="if (event.key === 'Enter') { event.preventDefault(); suggestVideoClips(document.getElementById('suggest-video-btn')); }">
         <button type="button" class="ghost sm" id="suggest-video-btn" onclick="suggestVideoClips(this)"
                 title="Propose fresh clips for the whole video. Suggestions you haven't acted on are replaced.">
           {{ "Re-suggest" if suggested_clips else "Suggest clips" }}
@@ -193,6 +198,11 @@
           </div>
             {% endif %}
             {% if e.topic_doubt %}<div class="suggest-doubt">Topic doubtful: {{ e.topic_doubt }}</div>{% endif %}
+            {# The critic's yes/no tests: a warning only on a real "no". #}
+            {% if e.language_doubt or e.speech_understood is sameas false %}<div class="suggest-warn">Language: other-language speech{% if e.language_doubt %} — {{ e.language_doubt }}{% endif %}</div>{% endif %}
+            {% if e.premise_clear is sameas false %}<div class="suggest-warn">Premise unclear in the first seconds</div>{% endif %}
+            {% if e.monologue is sameas true %}<div class="suggest-warn">Mostly a reporter talking to camera</div>{% endif %}
+            {% if e.follows_advice is sameas false %}<div class="suggest-warn">Didn’t follow your advice{% if e.advice_note %}: {{ e.advice_note }}{% endif %}</div>{% endif %}
           {% endif %}
           {% if p.flag %}<div class="rule-flag" title="This clip carries a claim your brand rules reject. Check its framing before it goes anywhere.">⚑ Check the framing: {{ p.flag }}</div>{% endif %}
           {% if p.opening %}<blockquote class="suggest-line"><span class="suggest-line-k">Opens</span>“{{ p.opening }}”</blockquote>{% endif %}
@@ -203,7 +213,35 @@
             <form method="post" action="/clip-proposal/{{ p.id }}/make-cut" class="inline">
               <button class="approve sm">Make this clip →</button>
             </form>
+            <button type="button" class="ghost sm suggest-wrong" aria-expanded="false"
+                    aria-controls="suggest-feedback-{{ p.id }}"
+                    onclick="toggleSuggestFeedback({{ p.id }}, this)"
+                    title="Say what's wrong with it: the next pass follows it, and your notes teach the editor">What’s wrong?</button>
             <span class="meta suggest-at">at {{ (p.at // 60)|int }}:{{ "%02d"|format((p.at % 60)|int) }}</span>
+          </div>
+          {# "What's wrong?": tags, a line of your own, then a re-suggest that
+             follows it or a plain dismissal. #}
+          <div class="suggest-feedback proposal-feedback" id="suggest-feedback-{{ p.id }}" role="group"
+               aria-label="What's wrong with this suggestion?" hidden>
+            <div class="reason-ask-label">What’s wrong? <span class="reason-ask-optional">pick any, or say it</span></div>
+            <div class="reason-pills">
+              {% for slug, label in clip_note_tags() %}
+              <button type="button" class="reason-pill" data-tag="{{ slug }}" aria-pressed="false"
+                      onclick="toggleFeedbackTag(this)">{{ label }}</button>
+              {% endfor %}
+            </div>
+            <input type="text" class="feedback-text" maxlength="300"
+                   placeholder="In a line, e.g. nobody says where this is"
+                   aria-label="What's wrong, in your words"
+                   onkeydown="if (event.key === 'Enter') { event.preventDefault(); submitSuggestFeedback({{ p.id }}, true); } else if (event.key === 'Escape') { toggleSuggestFeedback({{ p.id }}); }">
+            <div class="feedback-actions">
+              <button type="button" class="approve sm" data-fb="resuggest"
+                      onclick="submitSuggestFeedback({{ p.id }}, true)"
+                      title="Dismiss this one and suggest again, following what you said">Re-suggest with this</button>
+              <button type="button" class="ghost sm" data-fb="dismiss"
+                      onclick="submitSuggestFeedback({{ p.id }}, false)"
+                      title="Dismiss it and keep your note, without a new pass">Just dismiss</button>
+            </div>
           </div>
         </div>
       </article>
@@ -444,23 +482,36 @@ let engineJob = {{ engine_job | tojson }};
 let engineBoot = engineJob ? engineJob.boot_id : null;
 let enginePollTimer = null;
 
+// Advice typed next to the button rides along with the pass (the engine
+// follows it; the transcript suggester only keeps it as a note).
 async function suggestVideoClips(btn) {
+  const adviceBox = document.getElementById('suggest-advice');
+  const advice = adviceBox ? adviceBox.value.trim() : '';
   btn.disabled = true;
   btn.classList.add('is-busy');
   btn.textContent = 'Suggesting…';
   try {
-    const r = await fetch('/video/{{ c.id }}/suggest-clips', { method: 'POST' });
+    const r = await fetch('/video/{{ c.id }}/suggest-clips', {
+      method: 'POST', body: new URLSearchParams(advice ? { advice } : {}),
+    });
     const d = await r.json();
     // The clip engine answers at once (202) and keeps working; 409 means a
     // run is already busy with part of this video.
     if (d.job && (r.status === 202 || r.status === 409)) {
       if (r.status === 409) alert(d.error || 'Already suggesting clips for this video.');
+      if (r.status === 202 && d.started && adviceBox) adviceBox.value = '';
       engineBoot = d.job.boot_id || engineBoot;
       handleEngineStatus({ job: d.job });
       return;
     }
     if (!r.ok || !d.clips) throw new Error(d.error || `HTTP ${r.status}`);
-    if (d.new) { location.reload(); return; }
+    if (d.new) {
+      if (d.advice_ignored) {
+        location.href = '/video/{{ c.id }}?msg=' + encodeURIComponent(
+          'The transcript suggester can’t take advice — it’s kept as a note.');
+      } else location.reload();
+      return;
+    }
     // An empty pass replaced nothing, so the cards on screen still stand and
     // the page stays put (see handleEngineStatus for why it must).
     alert('The model found nothing worth clipping here.');
@@ -474,7 +525,8 @@ function engineStatusText(job) {
   const n = (job && job.queue_position) || 0;
   const behind = n > 0 ? ` · queued behind ${n} video${n === 1 ? '' : 's'}` : '';
   const stage = job && job.state === 'running' && job.stage ? ` ${job.stage}` : '';
-  return `Watching the video…${stage}${behind}`;
+  const advised = job && job.advice ? ' · with your advice' : '';
+  return `Watching the video…${stage}${advised}${behind}`;
 }
 
 function showEngineJob(job) {
@@ -650,6 +702,88 @@ async function dismissSuggestion(id, btn) {
     const count = document.querySelector('.suggest-title .crumb-count');
     if (count) count.textContent = left || '';
   }));
+}
+
+// ---- "What's wrong?" on a card ----------------------------------------------
+function toggleSuggestFeedback(id, btn) {
+  const panel = document.getElementById(`suggest-feedback-${id}`);
+  if (!panel || panel.classList.contains('is-busy')) return;
+  const open = panel.hidden;
+  panel.hidden = !open;
+  const toggle = btn || document.querySelector(`.suggest-card[data-id="${id}"] .suggest-wrong`);
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.classList.toggle('is-on', open);
+  }
+  if (open) {
+    const first = panel.querySelector('.reason-pill');
+    if (first) first.focus();
+  }
+}
+
+function toggleFeedbackTag(chip) {
+  const on = chip.getAttribute('aria-pressed') !== 'true';
+  chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+  chip.classList.toggle('is-on', on);
+}
+
+function dropSuggestCard(card) {
+  if (previewing && previewing.card === card) stopPreview();
+  card.remove();
+  const left = document.querySelectorAll('.suggest-card').length;
+  const count = document.querySelector('.suggest-title .crumb-count');
+  if (count) count.textContent = left || '';
+}
+
+// "Re-suggest with this": the server keeps the note, dismisses the card and
+// queues a pass that follows it; the usual status line and reload take over.
+// "Just dismiss" keeps the note and stops there (a bare dismissal, with the
+// usual "why?", when the panel says nothing).
+async function submitSuggestFeedback(id, resuggest) {
+  const panel = document.getElementById(`suggest-feedback-${id}`);
+  const card = document.querySelector(`.suggest-card[data-id="${id}"]`);
+  if (!panel || !card || panel.classList.contains('is-busy')) return;
+  const tags = [...panel.querySelectorAll('.reason-pill[aria-pressed="true"]')]
+    .map(chip => chip.dataset.tag);
+  const input = panel.querySelector('.feedback-text');
+  const text = input ? input.value.trim() : '';
+  if (!tags.length && !text) {
+    if (!resuggest) {
+      const x = card.querySelector('.suggest-x');
+      if (x) dismissSuggestion(id, x);
+      return;
+    }
+    alert('Pick what’s wrong, or say it in a line.');
+    return;
+  }
+  const controls = panel.querySelectorAll('button, input');
+  panel.classList.add('is-busy');
+  controls.forEach(el => { el.disabled = true; });
+  let r, d;
+  try {
+    r = await fetch(`/clip-proposal/${id}/feedback`, {
+      method: 'POST',
+      body: new URLSearchParams({ tags: tags.join(','), text, resuggest: resuggest ? '1' : '0' }),
+    });
+    d = await r.json();
+  } catch (e) {
+    d = { error: 'Couldn’t send that: ' + (e.message || e) };
+  }
+  if (!d.dismissed) {
+    panel.classList.remove('is-busy');
+    controls.forEach(el => { el.disabled = false; });
+    alert(d.error || `HTTP ${r ? r.status : '?'}`);
+    return;
+  }
+  dropSuggestCard(card);
+  if (d.job && (r.status === 202 || r.status === 409)) {
+    if (r.status === 409) alert((d.error || 'Already suggesting clips for this video.') + ' Your note is saved.');
+    engineBoot = d.job.boot_id || engineBoot;
+    handleEngineStatus({ job: d.job });
+    return;
+  }
+  if (!r.ok) { alert((d.error || `HTTP ${r.status}`) + ' Your note is saved.'); return; }
+  if (window.toast) window.toast('Noted. Notes like this turn into suggested rules on Brand & audience.');
 }
 
 async function toggleMultiClip(cb) {

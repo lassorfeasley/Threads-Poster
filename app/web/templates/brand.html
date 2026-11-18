@@ -28,6 +28,22 @@
     <div class="btn-group" style="margin-top: 12px;">
       <button type="button" class="btn ghost sm" onclick="addRule()">＋ Add rule</button>
     </div>
+    <p class="meta" style="margin: 10px 0 0;">
+      <strong>Clips</strong> rules shape only which clips get picked and how they're cut.
+      New and edited rules are tidied into the house style when you save (spelling and
+      grammar fixed, your meaning kept) — hover a rule to see how you first wrote it.
+    </p>
+  </div>
+
+  {# Rules the clip engine proposes: drawn from your "What's wrong?" notes and
+     advice, or learned from your past edits. One queue, one kind of rule. #}
+  <div class="card rule-proposals" id="rule-proposals" style="margin-top: 14px;"{% if not rule_proposals %} hidden{% endif %}>
+    <div class="card-title" style="margin-bottom: 4px;">Suggested rules</div>
+    <p class="meta" style="margin: 0 0 12px;">
+      Drawn from your notes on clip suggestions and from your past edits. Nothing applies
+      until you add it; an added rule joins the list above as a <strong>Clips</strong> rule.
+    </p>
+    <div id="rule-proposals-list"></div>
   </div>
 
   <details class="card brand-advanced" style="margin-top: 14px;"{% if brand.voice_notes %} open{% endif %}>
@@ -99,6 +115,37 @@
 
 <script>
   let rules = {{ rules|tojson }};
+  let ruleProposals = {{ (rule_proposals or [])|tojson }};
+  const SOURCE_LABELS = { manual: 'Yours', notes: 'From your notes', handbook: 'From past edits' };
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // The formatter's markdown, escaped first; only **bold** and line breaks
+  // become markup.
+  function ruleMarkdown(md) {
+    return escapeHtml(md).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+  }
+
+  // What the engine reads for a formatted rule (mirrors notes.rule_text).
+  function formattedText(r) {
+    const rule = (r.rule || '').trim();
+    const when = (r.when || '').trim();
+    if (!rule) return '';
+    if (!when || when === 'Always') return rule;
+    return `When ${when.charAt(0).toLowerCase()}${when.slice(1)}: ${rule}`;
+  }
+
+  function sourceBadge(r) {
+    const source = SOURCE_LABELS[r.source] ? r.source : 'manual';
+    const badge = document.createElement('span');
+    badge.className = `rule-source is-${source}`;
+    badge.textContent = SOURCE_LABELS[source];
+    if (r.evidence) badge.title = r.evidence;
+    return badge;
+  }
   const RULE_EXAMPLES = [
     ['Write as "we" — the account speaks in the first person plural.', 'captions'],
     ['Never present climate denial or misinformation as credible.', 'everything'],
@@ -146,13 +193,27 @@
       text.maxLength = 400;
       text.placeholder = 'e.g. Never present climate denial as credible.';
       text.value = r.text || '';
+      // The formatted rendering, while the text is still what was formatted;
+      // the operator's first wording on hover.
+      const main = document.createElement('div');
+      main.className = 'rule-main';
+      main.appendChild(text);
+      if (r.markdown && formattedText(r) === (r.text || '')) {
+        const md = document.createElement('div');
+        md.className = 'rule-md meta';
+        md.innerHTML = ruleMarkdown(r.markdown);
+        if (r.original && r.original !== r.text) md.title = `You wrote: ${r.original}`;
+        main.appendChild(md);
+        text.addEventListener('input', () => { md.hidden = true; });
+      }
       text.addEventListener('input', () => { rules[i].text = text.value; });
 
       const scope = document.createElement('select');
       scope.className = 'rule-priority';
       scope.title = 'Everything: also shapes which videos and clips get picked. Captions: only what gets written.';
-      scope.innerHTML = '<option value="everything">Everything</option><option value="captions">Captions</option>';
-      scope.value = r.applies_to === 'captions' ? 'captions' : 'everything';
+      scope.title = 'Everything: also shapes which videos and clips get picked. Captions: only what gets written. Clips: only which clips get picked and how they are cut.';
+      scope.innerHTML = '<option value="everything">Everything</option><option value="captions">Captions</option><option value="clips">Clips</option>';
+      scope.value = ['captions', 'clips'].includes(r.applies_to) ? r.applies_to : 'everything';
       scope.addEventListener('change', () => { rules[i].applies_to = scope.value; });
 
       const del = document.createElement('button');
@@ -163,7 +224,7 @@
       del.innerHTML = TRASH_SVG;
       del.addEventListener('click', () => { rules.splice(i, 1); renderRules(); });
 
-      row.append(sw, text, scope, del);
+      row.append(sw, main, sourceBadge(r), scope, del);
       box.appendChild(row);
     });
   }
@@ -181,6 +242,57 @@
     return true;
   }
 
+  // ---- Suggested rules --------------------------------------------------
+  function renderProposals() {
+    const card = document.getElementById('rule-proposals');
+    const box = document.getElementById('rule-proposals-list');
+    if (!card || !box) return;
+    card.hidden = !ruleProposals.length;
+    box.textContent = '';
+    ruleProposals.forEach(p => {
+      const row = document.createElement('div');
+      row.className = 'rule-proposal';
+      const examples = (p.examples || []).map(e => `<li>${escapeHtml(e)}</li>`).join('');
+      const original = p.original && p.original !== p.text && p.original !== p.rule
+        ? `<div class="meta rule-proposal-original">Originally: “${escapeHtml(p.original)}”</div>` : '';
+      const body = p.markdown ? ruleMarkdown(p.markdown) : escapeHtml(p.text);
+      row.innerHTML = `
+        <div class="rule-proposal-main">
+          <div class="rule-md">${body}</div>
+          ${original}
+          <div class="meta rule-proposal-evidence">${escapeHtml(p.summary || '')}</div>
+          ${examples ? `<ul class="rule-proposal-examples meta">${examples}</ul>` : ''}
+        </div>
+        <div class="rule-proposal-actions">
+          <button type="button" class="sm approve" data-act="add">Add rule</button>
+          <button type="button" class="sm ghost" data-act="dismiss">Dismiss</button>
+        </div>`;
+      row.querySelector('.rule-proposal-main').prepend(sourceBadge(p));
+      row.querySelectorAll('[data-act]').forEach(btn => {
+        btn.addEventListener('click', () => decideProposal(p, btn.dataset.act, row));
+      });
+      box.appendChild(row);
+    });
+  }
+
+  async function decideProposal(p, act, row) {
+    row.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    try {
+      const r = await fetch(`/clip-engine/rule-proposals/${p.idx}/${act}`, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      // Saved already: the list above takes it so a later Save keeps it.
+      if (act === 'add' && d.rule) { rules.push(d.rule); renderRules(); }
+      ruleProposals = ruleProposals.filter(x => x.idx !== p.idx);
+      renderProposals();
+      if (window.toast) window.toast(act === 'add' ? 'Rule added' : 'Dismissed');
+    } catch (e) {
+      row.querySelectorAll('button').forEach(b => { b.disabled = false; });
+      alert('Couldn’t do that: ' + (e.message || e));
+    }
+  }
+
   renderRules();
+  renderProposals();
 </script>
 {% endblock %}

@@ -784,6 +784,71 @@ class ClaudeRolesEndToEndTest(_EndToEnd):
 
 # ---- the same flow through the dashboard's background runner ------------------------------
 
+class LanguageAndAdviceEndToEndTest(_EndToEnd):
+    """Round 2 through the real modules: the perceiver's speech languages
+    reach the editor, a draft whose speech nobody can follow (critic and log
+    agree) is dropped, and the operator's advice reaches every choosing
+    prompt and the cold critic's test."""
+
+    ADVICE = "Open on Bill Nye; no aerials."
+
+    def setUp(self) -> None:
+        super().setUp()
+        original = shot_log_answer
+
+        def foreign_aerials(*, on_topic: bool = True) -> dict:
+            answer = original(on_topic=on_topic)
+            languages = [("english", False), ("other", False), ("english", False)]
+            for beat, (language, voiceover) in zip(answer["beats"], languages):
+                beat["speech_language"] = language
+                beat["english_voiceover"] = voiceover
+            return answer
+
+        patcher = mock.patch(f"{__name__}.shot_log_answer", foreign_aerials)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.fake.critiques = copy.deepcopy(ON_TOPIC_CRITIQUES)
+        self.fake.critiques["picture"]["speech_understood"] = False
+        self.fake.critiques["picture"]["follows_advice"] = False
+        self.result = engine.run(
+            setup="gemini", settings=e2e_settings(), brand=BRAND, playbook=None,
+            video_id="e2e-lang", title=TITLE, description="A science educator warns.",
+            duration=None, source=self.source, words=self.words, transcript=self.transcript,
+            context={}, rejected=[], examples=[], used=[], advice=self.ADVICE,
+            meter=engine.CostMeter("engine"))
+        self.by_id = {d["id"]: d for d in self.result.drafts}
+
+    def test_the_editor_sees_each_beats_language(self):
+        payload = json.loads(self.fake.of("draft")[0]["parts"][-1]["text"])
+        beats = payload["shot_log"]["beats"]
+        self.assertEqual([b["speech_language"] for b in beats], ["english", "other", "english"])
+        self.assertIs(beats[1]["english_voiceover"], False)
+        self.assertIn("7. LANGUAGE", self.fake.of("draft")[0]["system"])
+
+    def test_foreign_speech_the_critic_lost_is_dropped(self):
+        self.assertEqual(self.result.outcome, "proposals", self.result.notes)
+        picture = self.by_id["d3"]
+        self.assertEqual(picture["dropped_reason"], "language")
+        self.assertIs(picture["critique"]["speech_understood"], False)
+        self.assertIs(picture["critique"]["follows_advice"], False)
+        self.assertNotIn("d3", self.result.orders["cold"])
+        self.assertNotIn("d3", [d["id"] for d in self.result.top])
+        self.assertEqual(self.by_id["d1"]["dropped_reason"], "")
+
+    def test_advice_reaches_every_choosing_prompt(self):
+        self.assertEqual(self.result.notes[0], f"advice: {self.ADVICE}")
+        # prefer runs only when a revision clears the cheaper checks first.
+        for kind in ("draft", "cold", "rank", "revise", "prefer"):
+            calls = self.fake.of(kind)
+            with self.subTest(kind=kind):
+                if kind != "prefer":
+                    self.assertTrue(calls)
+                for call in calls:
+                    self.assertIn(self.ADVICE, call["system"])
+        self.assertIn("follows_advice", self.fake.of("cold")[0]["system"])
+        self.assertNotIn(self.ADVICE, self.fake.of("perceive")[0]["system"])
+
+
 class JobsEndToEndTest(_EndToEnd):
     """jobs runs the real engine and writes through the real ledger."""
 

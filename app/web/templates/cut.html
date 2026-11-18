@@ -57,6 +57,12 @@
   <button type="button" class="ghost sm" id="frames-btn" onclick="findStrikingFrames()">
     Striking frames
   </button>
+  {# Optional advice for the next pass, sent with it (and kept as a note). #}
+  <input type="text" class="advice-input" id="suggest-advice" maxlength="300"
+         placeholder="Advice for this pass, e.g. open on the disaster footage; no interviews"
+         aria-label="Advice for this suggestion pass (optional)"
+         oninput="syncAdvice(this)"
+         onkeydown="if (event.key === 'Enter') { event.preventDefault(); suggestClips(); }">
   <button type="button" class="ghost sm" id="suggest-here" onclick="suggestClips()">
     Suggest clips
   </button>
@@ -258,6 +264,12 @@ let enginePollTimer = null;
 // Preview players by proposal id. The list is rebuilt on every edit; moving
 // the same <video> into the new row in the same task keeps it playing.
 const proposalVideos = new Map();
+// "What's wrong?" panels open on suggestion cards, by proposal id:
+// {tags: [slug], text, busy}. Kept out here because the list is rebuilt on
+// every edit; the card redraws its panel from this.
+const proposalFeedback = new Map();
+// [[slug, label]] for the panel's chips (clip_engine.notes.TAGS).
+const NOTE_TAGS = {{ clip_note_tags() | tojson }};
 // The video's chapters, if it has been indexed: [{start, end, topic, summary}]
 // tiling the whole timeline. Navigation only — nothing here edits a clip.
 let chapters = {{ chapters | tojson }};
@@ -1665,9 +1677,11 @@ document.addEventListener('keydown', e => {
   const el = document.activeElement;
   // A suggestion's preview player owns its keys (Space, arrows) while focused;
   // the editor's own player is the one these shortcuts drive.
+  // So does a card's "What's wrong?" panel: Space presses a chip there.
   const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
                         || el.tagName === 'SELECT' || el.isContentEditable
-                        || (el.tagName === 'VIDEO' && el !== player));
+                        || (el.tagName === 'VIDEO' && el !== player)
+                        || !!(el.closest && el.closest('.proposal-feedback')));
 
   if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
     if (typing) return;
@@ -1948,7 +1962,8 @@ function engineStatusText(job) {
   const n = (job && job.queue_position) || 0;
   const behind = n > 0 ? ` · queued behind ${n} video${n === 1 ? '' : 's'}` : '';
   const stage = job && job.state === 'running' && job.stage ? ` ${job.stage}` : '';
-  return `Watching the video…${stage}${behind}`;
+  const advised = job && job.advice ? ' · with your advice' : '';
+  return `Watching the video…${stage}${advised}${behind}`;
 }
 
 // Its own <video>, reused across re-renders (see proposalVideos).
@@ -2000,6 +2015,24 @@ function proposalCritic(clip, shown) {
     ${tip ? `title="${escapeHtml(tip)}"` : ''}>${line}</div>`;
 }
 
+// What the critic's yes/no tests flagged, and whether it followed your
+// advice: one warning line each, only on a real "no" (null = not asked).
+function proposalWarnings(clip) {
+  const e = clip.engine || {};
+  if (!e.setup) return '';
+  const lines = [];
+  if (e.language_doubt || e.speech_understood === false) {
+    lines.push('Language: other-language speech'
+               + (e.language_doubt ? ` — ${escapeHtml(e.language_doubt)}` : ''));
+  }
+  if (e.premise_clear === false) lines.push('Premise unclear in the first seconds');
+  if (e.monologue === true) lines.push('Mostly a reporter talking to camera');
+  if (e.follows_advice === false) {
+    lines.push('Didn’t follow your advice' + (e.advice_note ? `: ${escapeHtml(e.advice_note)}` : ''));
+  }
+  return lines.map(line => `<div class="proposal-warn">${line}</div>`).join('');
+}
+
 // One suggestion: what it is, and the two things you can do with it. The card
 // itself plays the clip, because auditioning is the step that always comes
 // first and reading two timestamps is no way to judge one.
@@ -2011,8 +2044,10 @@ function proposalCard(clip, shown) {
   const playable = !!clip.preview && !trimmed;
   const archetype = e.archetype && e.archetype !== 'other'
     ? `<span class="proposal-archetype">${escapeHtml(e.archetype)}</span>` : '';
+  const feedback = proposalFeedback.get(clip.id);
   const row = document.createElement('div');
   row.className = 'proposal-row' + (hoveredProposal === clip.id ? ' hot' : '');
+  row.setAttribute('data-id', String(clip.id));
   row.tabIndex = 0;
   row.setAttribute('role', 'button');
   row.title = 'Play this clip — nothing is applied until you use it';
@@ -2034,6 +2069,7 @@ function proposalCard(clip, shown) {
     </div>
     ${playable ? '<div class="proposal-video"></div>' : ''}
     ${proposalCritic(clip, shown)}
+    ${proposalWarnings(clip)}
     ${e.topic_doubt ? `<div class="proposal-doubt">Topic doubtful: ${escapeHtml(e.topic_doubt)}</div>` : ''}
     ${clip.flag ? `<div class="rule-flag" title="This clip carries a claim your brand rules reject. Check its framing before it goes anywhere.">⚑ Check the framing: ${escapeHtml(clip.flag)}</div>` : ''}
     ${clip.opening ? `<div class="proposal-line"><span class="proposal-line-k">Opens</span>“${escapeHtml(clip.opening)}”</div>` : ''}
@@ -2045,13 +2081,20 @@ function proposalCard(clip, shown) {
               title="Load these segments into the editor, replacing what's there">Use this clip</button>
       <button type="button" class="sm ghost" data-act="preview"
               title="Play it through — nothing is applied">▶ Preview</button>
-    </div>`;
+      <button type="button" class="sm ghost proposal-wrong${feedback ? ' is-on' : ''}" data-act="feedback"
+              aria-expanded="${feedback ? 'true' : 'false'}"
+              title="Say what's wrong with it: the next pass follows it, and your notes teach the editor">What’s wrong?</button>
+    </div>
+    ${feedback ? proposalFeedbackPanel(feedback) : ''}`;
   if (playable) row.querySelector('.proposal-video').appendChild(proposalVideo(clip));
+  if (feedback) wireProposalFeedback(row, clip.id, feedback);
   row.addEventListener('mouseenter', () => { hoveredProposal = clip.id; row.classList.add('hot'); });
   row.addEventListener('mouseleave', () => { hoveredProposal = null; row.classList.remove('hot'); });
   // Not on the card's own player: its controls are for it, not the editor's.
   row.addEventListener('click', ev => {
-    if (!ev.target.closest('[data-act], video, .proposal-video')) previewClipProposal(clip.id);
+    if (!ev.target.closest('[data-act], video, .proposal-video, .proposal-feedback')) {
+      previewClipProposal(clip.id);
+    }
   });
   // Enter only: Space already belongs to the player, everywhere on this page.
   // And only on the row itself, not a focused control inside it.
@@ -2063,7 +2106,8 @@ function proposalCard(clip, shown) {
       ev.stopPropagation();
       if (btn.dataset.act === 'use') useClipProposal(clip.id);
       else if (btn.dataset.act === 'preview') previewClipProposal(clip.id);
-      else dismissClipProposal(clip.id);
+      else if (btn.dataset.act === 'feedback') toggleProposalFeedback(clip.id);
+      else if (btn.dataset.act === 'dismiss') dismissClipProposal(clip.id);
     });
   });
   return row;
@@ -2082,12 +2126,77 @@ function proposalMeta(clip, shown) {
   return parts.join(' · ');
 }
 
+// The "What's wrong?" panel under a card: tag chips, a line of your own, and
+// either a re-suggest that follows it or a plain dismissal. Everything typed
+// here is model-bound or operator text, so it is escaped on the way in.
+function proposalFeedbackPanel(st) {
+  const chips = NOTE_TAGS.map(([slug, label]) => {
+    const on = st.tags.includes(slug);
+    return `<button type="button" class="reason-pill${on ? ' is-on' : ''}" data-tag="${escapeHtml(slug)}"
+      aria-pressed="${on ? 'true' : 'false'}"${st.busy ? ' disabled' : ''}>${escapeHtml(label)}</button>`;
+  }).join('');
+  return `<div class="proposal-feedback" role="group" aria-label="What's wrong with this suggestion?">
+    <div class="reason-ask-label">What’s wrong? <span class="reason-ask-optional">pick any, or say it</span></div>
+    <div class="reason-pills">${chips}</div>
+    <input type="text" class="feedback-text" maxlength="300" value="${escapeHtml(st.text || '')}"
+           placeholder="In a line, e.g. nobody says where this is"
+           aria-label="What's wrong, in your words"${st.busy ? ' disabled' : ''}>
+    <div class="feedback-actions">
+      <button type="button" class="sm approve" data-fb="resuggest"${st.busy ? ' disabled' : ''}
+              title="Dismiss this one and suggest again, following what you said">${st.busy ? 'Sending…' : 'Re-suggest with this'}</button>
+      <button type="button" class="sm ghost" data-fb="dismiss"${st.busy ? ' disabled' : ''}
+              title="Dismiss it and keep your note, without a new pass">Just dismiss</button>
+    </div>
+  </div>`;
+}
+
+// Chips and the line update the panel's state in place: redrawing the list
+// would take the focus away mid-word.
+function wireProposalFeedback(row, id, st) {
+  row.querySelectorAll('.proposal-feedback [data-tag]').forEach(chip => {
+    chip.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const tag = chip.getAttribute('data-tag');
+      st.tags = st.tags.includes(tag) ? st.tags.filter(t => t !== tag) : st.tags.concat([tag]);
+      const on = st.tags.includes(tag);
+      chip.classList.toggle('is-on', on);
+      chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  });
+  const input = row.querySelector('.proposal-feedback .feedback-text');
+  if (input) {
+    input.addEventListener('input', () => { st.text = input.value; });
+    input.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); submitProposalFeedback(id, true); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); toggleProposalFeedback(id); }
+    });
+  }
+  row.querySelectorAll('.proposal-feedback [data-fb]').forEach(btn => {
+    btn.addEventListener('click', ev => {
+      ev.stopPropagation();
+      submitProposalFeedback(id, btn.getAttribute('data-fb') === 'resuggest');
+    });
+  });
+}
+
 // Nothing waiting and nothing cut yet: one button away from a first draft.
 function proposalEmpty() {
   const box = document.createElement('div');
   box.className = 'proposal-empty';
   box.innerHTML = `<div class="meta">No suggestions waiting${view ? ' in this stretch' : ''}.</div>
+    <input type="text" class="advice-input" maxlength="300"
+           placeholder="Advice (optional), e.g. open on the disaster footage"
+           aria-label="Advice for this suggestion pass (optional)">
     <button type="button" class="sm" onclick="suggestClips()">Suggest clips${view ? ' here' : ''}</button>`;
+  const input = box.querySelector('.advice-input');
+  const shared = document.getElementById('suggest-advice');
+  if (input) {
+    if (shared) input.value = shared.value;
+    input.addEventListener('input', () => syncAdvice(input));
+    input.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); suggestClips(); }
+    });
+  }
   return box;
 }
 
@@ -2132,21 +2241,98 @@ function dismissClipProposal(id) {
   fetch(`/clip-proposal/${id}/dismiss`, { method: 'POST' }).catch(() => {});
 }
 
+function toggleProposalFeedback(id) {
+  if (proposalFeedback.has(id)) {
+    if (proposalFeedback.get(id).busy) return;
+    proposalFeedback.delete(id);
+    renderClipProposals();
+    return;
+  }
+  proposalFeedback.set(id, { tags: [], text: '', busy: false });
+  renderClipProposals();
+  const first = document.querySelector(`.proposal-row[data-id="${id}"] .proposal-feedback .reason-pill`);
+  if (first) first.focus();
+}
+
+// "Re-suggest with this": the server keeps the note, dismisses the card and
+// queues a pass that follows it; from there the usual polling takes over.
+// "Just dismiss" keeps the note and stops there (a bare dismissal when the
+// panel says nothing).
+async function submitProposalFeedback(id, resuggest) {
+  const st = proposalFeedback.get(id);
+  if (!st || st.busy) return;
+  const text = (st.text || '').trim();
+  if (!st.tags.length && !text) {
+    if (!resuggest) { proposalFeedback.delete(id); dismissClipProposal(id); return; }
+    alert('Pick what’s wrong, or say it in a line.');
+    return;
+  }
+  st.busy = true;
+  renderClipProposals();
+  let r, d;
+  try {
+    r = await fetch(`/clip-proposal/${id}/feedback`, {
+      method: 'POST',
+      body: new URLSearchParams({ tags: st.tags.join(','), text, resuggest: resuggest ? '1' : '0' }),
+    });
+    d = await r.json();
+  } catch (e) {
+    st.busy = false;
+    renderClipProposals();
+    alert('Couldn’t send that: ' + (e.message || e));
+    return;
+  }
+  if (!d.dismissed) {
+    // Nothing happened on the server (unknown card, already used, no note).
+    st.busy = false;
+    renderClipProposals();
+    alert(d.error || `HTTP ${r.status}`);
+    return;
+  }
+  proposalFeedback.delete(id);
+  suggestedClips = suggestedClips.filter(c => c.id !== id);
+  if (hoveredProposal === id) hoveredProposal = null;
+  forgetProposalVideos();
+  if (d.job && (r.status === 202 || r.status === 409)) {
+    if (r.status === 409) alert((d.error || 'Already suggesting clips for this video.') + ' Your note is saved.');
+    engineScope = null;   // its scope is the run's own window (the card's pass)
+    engineBoot = d.job.boot_id || engineBoot;
+    handleEngineStatus({ job: d.job });
+    return;
+  }
+  renderClipProposals();
+  if (!r.ok) { alert((d.error || `HTTP ${r.status}`) + ' Your note is saved.'); return; }
+  if (window.toast) window.toast('Noted. Notes like this turn into suggested rules on Brand & audience.');
+}
+
+// The advice boxes (wave bar, empty panel) are one value.
+function syncAdvice(el) {
+  document.querySelectorAll('.advice-input').forEach(other => {
+    if (other !== el) other.value = el.value;
+  });
+}
+
 // One pass, scoped to whatever is on screen: the chapter you zoomed into, or
-// the whole video when you haven't.
+// the whole video when you haven't. Advice typed next to the button rides
+// along (the engine follows it; the transcript suggester only notes it).
 async function suggestClips() {
   const btn = document.getElementById('suggest-here');
   const chapter = view ? chapterAt((view.a + view.b) / 2) : null;
   const query = view ? `?start=${view.a.toFixed(2)}&end=${view.b.toFixed(2)}` : '';
+  const adviceBox = document.getElementById('suggest-advice');
+  const advice = adviceBox ? adviceBox.value.trim() : '';
   btn.disabled = true;
   btn.classList.add('is-busy');
   try {
-    const r = await fetch(`/video/{{ c.id }}/suggest-clips${query}`, { method: 'POST' });
+    const r = await fetch(`/video/{{ c.id }}/suggest-clips${query}`, {
+      method: 'POST', body: new URLSearchParams(advice ? { advice } : {}),
+    });
     const d = await r.json();
     // The clip engine answers at once and works in the background (202); a
     // run already busy with another stretch of this video answers 409.
     if (d.job && (r.status === 202 || r.status === 409)) {
       if (r.status === 409) alert(d.error || 'Already suggesting clips for this video.');
+      if (r.status === 202 && adviceBox && d.started) { adviceBox.value = ''; syncAdvice(adviceBox); }
       if (r.status === 202) engineScope = { view, chapter };
       engineBoot = d.job.boot_id || engineBoot;
       handleEngineStatus({ job: d.job });
@@ -2156,6 +2342,9 @@ async function suggestClips() {
     suggestedClips = d.clips;
     reasonAsk = null;   // a fresh run makes the old strip stale
     renderClipProposals();
+    if (d.advice_ignored && window.toast) {
+      window.toast('The transcript suggester can’t take advice — it’s kept as a note.');
+    }
     const toggle = document.getElementById('multi-clip-toggle');
     if (toggle) toggle.checked = !!d.multi_clip;
     // What THIS run proposed — the list can still hold suggestions standing

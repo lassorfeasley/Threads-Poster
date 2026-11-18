@@ -6018,3 +6018,104 @@ details.panel > .panel-body { padding: 14px 18px; }
 .rule-capture-row .rule-capture-text { flex: 1 1 220px; min-width: 0; }
 .rule-capture-row .rule-capture-scope { flex: none; width: auto; }
 .rule-capture-status { margin-top: 6px; }
+
+/* --- Operator advice (clip engine round 2): an optional advice box next to
+   every Suggest button, a "What's wrong?" panel on every suggestion card, and
+   the rules the notes add up to on Brand & audience. --- */
+.advice-input {
+  font: inherit;
+  font-size: 12.5px;
+  min-width: 0;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+}
+.advice-input::placeholder { color: var(--muted); }
+.advice-input:focus { outline: none; border-color: var(--accent-border); }
+.wave-bar .advice-input { flex: 0 1 300px; width: 300px; }
+.suggest-head-actions .advice-input { flex: 0 1 300px; width: 300px; }
+.proposal-empty .advice-input { display: block; width: 100%; margin: 8px 0; }
+@media (max-width: 900px) {
+  .wave-bar .advice-input, .suggest-head-actions .advice-input { width: 160px; }
+}
+
+.reason-pill.is-on,
+.reason-pill[aria-pressed="true"] {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+.reason-pill:disabled { opacity: 0.55; cursor: default; }
+.proposal-wrong.is-on, .suggest-wrong.is-on { color: var(--text); border-color: var(--accent-border); }
+
+.proposal-feedback {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel2) 60%, transparent);
+  cursor: default;
+}
+.proposal-feedback[hidden] { display: none; }
+.proposal-feedback .feedback-text {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  font: inherit;
+  font-size: 12.5px;
+}
+.feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.suggest-feedback { margin: 10px 0 0; }
+.proposal-feedback.is-busy { opacity: 0.7; }
+
+/* Brand & audience: where a rule came from, its formatted reading, and the
+   queue of suggested rules. */
+.rule-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.rule-row .rule-main .rule-text { width: 100%; }
+.rule-md { line-height: 1.45; }
+.rule-md strong { font-weight: 650; color: var(--text-dim); }
+.rule-md[title] { cursor: help; }
+.rule-source {
+  flex: none;
+  align-self: center;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.rule-source.is-notes { color: var(--accent); border-color: var(--accent-border); }
+.rule-source.is-handbook { color: #a78bfa; border-color: rgba(167, 139, 250, 0.5); }
+.rule-proposals[hidden] { display: none; }
+.rule-proposal {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+.rule-proposal:first-child { border-top: none; padding-top: 0; }
+.rule-proposal-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.rule-proposal-main .rule-source { align-self: flex-start; }
+.rule-proposal-examples { margin: 2px 0 0; padding-left: 18px; }
+.rule-proposal-actions { flex: none; display: flex; gap: 6px; }
+@media (max-width: 720px) {
+  .rule-proposal { flex-direction: column; }
+}
+/* The critic's yes/no tests (language, premise, monologue, your advice). */
+.proposal-warn, .suggest-warn {
+  margin-top: 6px;
+  font-size: var(--text-meta);
+  line-height: 1.4;
+  color: var(--warn);
+}
+.proposal-warn::before, .suggest-warn::before { content: "⚠ "; }

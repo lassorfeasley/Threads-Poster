@@ -378,7 +378,32 @@ class PreviewTest(RouteTestBase):
             "stop_reason": "Nye pulls his glasses off in the first second",
             "stops_scroll": True, "stops_scroll_muted": True,
             "about": "A scientist losing patience", "bored_at": 75.5, "fix": "End on the stare",
-            "score": 7.4, "reviewed": True, "topic_doubt": "a film, not the news"})
+            "score": 7.4, "reviewed": True, "topic_doubt": "a film, not the news",
+            # Not asked (an older sidecar): no warnings.
+            "language_doubt": "", "premise_clear": None, "speech_understood": None,
+            "monologue": None, "follows_advice": None, "advice_note": ""})
+
+    def test_round_two_tests_and_advice_reach_the_card(self):
+        cid = self.add_candidate()
+        critique = {"stops_scroll": True, "stop_reason": "floods", "error": "",
+                    "premise_clear": False, "speech_understood": False, "monologue": True,
+                    "follows_advice": False, "advice_note": "opens on the anchor anyway"}
+        pid = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+        self.engine_sidecar(pid, [{"start": 10.0, "end": 30.0}], critique=critique,
+                            language_doubt="mostly Hindi, no voiceover")
+        engine = self.payload(pid)["engine"]
+        self.assertEqual({k: engine[k] for k in ("language_doubt", "premise_clear",
+                                                 "speech_understood", "monologue",
+                                                 "follows_advice", "advice_note")},
+                         {"language_doubt": "mostly Hindi, no voiceover", "premise_clear": False,
+                          "speech_understood": False, "monologue": True, "follows_advice": False,
+                          "advice_note": "opens on the anchor anyway"})
+        # An outage answers nothing, whatever its zeroed fields say.
+        self.engine_sidecar(pid, [{"start": 10.0, "end": 30.0}],
+                            critique=dict(critique, error="timeout"))
+        engine = self.payload(pid)["engine"]
+        self.assertEqual([engine[k] for k in ("premise_clear", "speech_understood", "monologue",
+                                              "follows_advice")], [None] * 4)
 
     def test_an_outage_reads_as_not_reviewed(self):
         cid = self.add_candidate()
@@ -518,6 +543,8 @@ CARD_HARNESS = """
 let otherSegments = [], segments = [], suggestedClips = [], chapters = [], view = null;
 let hoveredProposal = null;
 const proposalVideos = new Map();
+const proposalFeedback = new Map();
+const NOTE_TAGS = [['wrong_language', 'Wrong language'], ['other', 'Something <else>']];
 function chapterAt() { return null; }
 function element(tag) {
   return { tag, innerHTML: '', attrs: {}, classList: { add() {}, remove() {} },
@@ -527,8 +554,9 @@ function element(tag) {
 }
 const document = { createElement: element };
 %s
-const [clips, other, mine] = JSON.parse(process.argv[2]);
+const [clips, other, mine, open] = JSON.parse(process.argv[2]);
 otherSegments = other; segments = mine; suggestedClips = clips;
+(open || []).forEach(st => proposalFeedback.set(st.id, st));
 process.stdout.write(JSON.stringify(clips.map(clip => {
   const shown = visibleProposal(clip);
   const card = proposalCard(clip, shown);
@@ -538,7 +566,7 @@ process.stdout.write(JSON.stringify(clips.map(clip => {
 
 
 def run_proposal_cards(clips: list[dict], other_segments: list[dict],
-                       segments: list[dict]) -> list[dict]:
+                       segments: list[dict], feedback: list[dict] | None = None) -> list[dict]:
     template = (Path(__file__).resolve().parents[1] / "app" / "web" / "templates"
                 / "cut.html").read_text()
 
@@ -555,7 +583,8 @@ def run_proposal_cards(clips: list[dict], other_segments: list[dict],
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "cards.js"
         path.write_text(CARD_HARNESS % script)
-        result = subprocess.run(["node", str(path), json.dumps([clips, other_segments, segments])],
+        result = subprocess.run(["node", str(path),
+                                 json.dumps([clips, other_segments, segments, feedback or []])],
                                 capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise AssertionError(result.stderr[-2000:])
@@ -605,6 +634,47 @@ class ProposalCardJsTest(unittest.TestCase):
                 self.assertEqual("Gets slow at 1:15" in card["html"], verdict)
                 self.assertEqual("Shortened around footage" in card["html"], note)
                 self.assertEqual(card["video"], player)
+
+    def test_whats_wrong_button_and_panel(self):
+        clip = self.clip(6, [{"start": 10, "end": 30}], trimmed=False, preview=False)
+        closed = run_proposal_cards([clip], [], [])[0]["html"]
+        self.assertIn('data-act="feedback"', closed)
+        self.assertIn('aria-expanded="false"', closed)
+        self.assertNotIn("proposal-feedback", closed)
+        state = {"id": 6, "tags": ["other"], "text": 'too "dark" <b>', "busy": False}
+        opened = run_proposal_cards([clip], [], [], [state])[0]["html"]
+        self.assertIn('aria-expanded="true"', opened)
+        self.assertIn('class="proposal-feedback"', opened)
+        self.assertIn("Re-suggest with this", opened)
+        self.assertIn("Just dismiss", opened)
+        # Labels and the operator's text are escaped; the chosen chip shows as pressed.
+        self.assertIn("Something &lt;else&gt;", opened)
+        self.assertIn('value="too &quot;dark&quot; &lt;b&gt;"', opened)
+        self.assertRegex(opened, r'data-tag="other"\s+aria-pressed="true"')
+        self.assertRegex(opened, r'data-tag="wrong_language"\s+aria-pressed="false"')
+        busy = run_proposal_cards([clip], [], [], [dict(state, busy=True)])[0]["html"]
+        self.assertIn("Sending…", busy)
+        self.assertIn(" disabled", busy)
+
+    def test_round_two_warnings(self):
+        cases = [
+            ({}, []),
+            ({"speech_understood": False}, ["Language: other-language speech"]),
+            ({"language_doubt": "mostly <Hindi>"},
+             ["Language: other-language speech — mostly &lt;Hindi&gt;"]),
+            ({"premise_clear": False, "monologue": True},
+             ["Premise unclear in the first seconds", "Mostly a reporter talking to camera"]),
+            ({"premise_clear": None, "monologue": False, "follows_advice": True}, []),
+            ({"follows_advice": False, "advice_note": "opens on the anchor"},
+             ["Didn’t follow your advice: opens on the anchor"]),
+        ]
+        for engine, lines in cases:
+            with self.subTest(engine=engine):
+                clip = self.clip(7, [{"start": 10, "end": 30}], trimmed=False, preview=False,
+                                 **engine)
+                html = run_proposal_cards([clip], [], [])[0]["html"]
+                self.assertEqual(re.findall(r'<div class="proposal-warn">(.*?)</div>', html),
+                                 lines)
 
     def test_a_card_nobody_reviewed_says_so_even_when_trimmed(self):
         clip = self.clip(5, [{"start": 10, "end": 25}], trimmed=True, preview=False,
@@ -1008,6 +1078,421 @@ process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).map(job => {
         for (job, busy), got in zip(cases, json.loads(result.stdout)):
             with self.subTest(job=job):
                 self.assertEqual(got, {"disabled": busy, "busy": busy})
+
+
+# ---- operator advice and notes (round 2) ---------------------------------------------------
+
+class NotesRouteBase(RouteTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        from app import config
+        from app.clip_engine import notes
+
+        self.notes, self.config = notes, config
+        conf = self.dir / "config"
+        conf.mkdir()
+        (conf / "brand.yaml").write_text("topic: climate change\n")
+        self.patch(mock.patch.object(config, "CONFIG_DIR", conf))
+        self.propose_soon = self.patch(mock.patch.object(notes, "propose_rules_soon"))
+        self.enqueue.return_value = {"started": True, "conflict": False, **job_status("queued")}
+
+    def proposal_row(self, pid: int) -> ClipProposal:
+        with self.Session() as s:
+            return s.get(ClipProposal, pid)
+
+
+class SuggestAdviceTest(NotesRouteBase):
+    def test_advice_from_the_form_or_the_query(self):
+        cid = self.add_candidate()
+        for how in ("form", "query"):
+            with self.subTest(how=how):
+                if how == "form":
+                    r = self.client.post(f"/video/{cid}/suggest-clips",
+                                         data={"advice": "  open on the floods;  no interviews "})
+                else:
+                    r = self.client.post(f"/video/{cid}/suggest-clips?advice=open%20on%20the%20floods"
+                                         "%3B%20no%20interviews")
+                self.assertEqual(r.status_code, 202)
+                self.assertEqual(self.enqueue.call_args.kwargs["advice"],
+                                 "open on the floods; no interviews")
+        steer = self.notes.for_candidate(cid)
+        self.assertEqual([(n["kind"], n["text"], n["video_id"]) for n in steer],
+                         [("steer", "open on the floods; no interviews", "vid1")] * 2)
+        self.assertEqual(self.propose_soon.call_count, 2)
+
+    def test_no_advice_no_note(self):
+        cid = self.add_candidate()
+        self.client.post(f"/video/{cid}/suggest-clips")
+        self.assertEqual(self.enqueue.call_args.kwargs["advice"], "")
+        self.assertEqual(self.notes.for_candidate(cid), [])
+        self.propose_soon.assert_not_called()
+
+    def test_a_refused_request_keeps_no_note(self):
+        no_transcript = self.add_candidate("vid2", transcript=False)
+        r = self.client.post(f"/video/{no_transcript}/suggest-clips", data={"advice": "x"})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(self.notes.for_candidate(no_transcript), [])
+
+    def test_a_busy_video_says_the_advice_waits(self):
+        cid = self.add_candidate()
+        self.enqueue.return_value = {"started": False, "conflict": True, **job_status("running")}
+        r = self.client.post(f"/video/{cid}/suggest-clips", data={"advice": "no interviews"})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("advice", r.json()["error"])
+
+    def test_the_transcript_suggester_keeps_the_advice_as_a_note(self):
+        cid = self.add_candidate()
+        self.setup_answer = ("transcript", "")
+        pending = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+        with mock.patch.object(self.main, "_source_ready", return_value=None), \
+                mock.patch.object(self.main.clip_proposals, "propose", return_value=[pending]):
+            r = self.client.post(f"/video/{cid}/suggest-clips", data={"advice": "no interviews"})
+            plain = self.client.post(f"/video/{cid}/suggest-clips")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["advice_ignored"])
+        self.assertNotIn("advice_ignored", plain.json())
+        self.assertEqual([n["kind"] for n in self.notes.for_candidate(cid)], ["steer"])
+        self.enqueue.assert_not_called()
+
+
+class FeedbackRouteTest(NotesRouteBase):
+    def post(self, pid: int, **data):
+        return self.client.post(f"/clip-proposal/{pid}/feedback", data=data)
+
+    def test_whats_wrong_dismisses_notes_and_re_suggests_with_advice(self):
+        cid = self.add_candidate()
+        pid = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+        r = self.post(pid, tags="other,wrong_language,monologue,bogus",
+                      text="open on the floods")
+        self.assertEqual(r.status_code, 202, r.text)
+        body = r.json()
+        self.assertEqual(body["dismissed"], pid)
+        self.assertEqual(body["engine"], "gemini")
+        row = self.proposal_row(pid)
+        self.assertEqual((row.verdict, row.dismiss_reason), ("dismissed", "not_clipworthy"))
+        [note] = self.notes.for_candidate(cid)
+        self.assertEqual(body["noted"], note["id"])
+        self.assertEqual((note["kind"], note["proposal_id"], note["video_id"], note["tags"],
+                          note["text"]),
+                         ("card", pid, "vid1", ["other", "wrong_language", "monologue"],
+                          "open on the floods"))
+        args, kwargs = self.enqueue.call_args
+        self.assertEqual(args, (cid,))
+        self.assertEqual((kwargs["window"], kwargs["reason"], kwargs["topic"]),
+                         (None, "reroll", ""))
+        self.assertEqual(kwargs["advice"], self.notes.advice_from(
+            ["other", "wrong_language", "monologue"], "open on the floods"))
+        self.assertIs(kwargs["on_done"], self.main.pagecache.invalidate)
+        self.propose_soon.assert_called_once_with()
+
+    def test_dismiss_reason_mapping(self):
+        cid = self.add_candidate()
+        cases = [("weak_opening", "weak_visuals"), ("other,too_long", "too_long"),
+                 ("off_topic", "off_topic"), ("bad_boundaries", "bad_boundaries"),
+                 ("no_premise,off_topic", "not_clipworthy"), ("other", "")]
+        for tags, reason in cases:
+            with self.subTest(tags=tags):
+                pid = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+                self.assertEqual(self.post(pid, tags=tags, resuggest="0").status_code, 200)
+                row = self.proposal_row(pid)
+                self.assertEqual((row.verdict, row.dismiss_reason), ("dismissed", reason))
+
+    def test_a_section_pass_re_suggests_its_own_stretch(self):
+        chapters = [{"start": 0, "end": 100, "topic": "Intro", "summary": "the anchor"},
+                    {"start": 100, "end": 300, "topic": "Fire", "summary": "the planet burns"}]
+        cid = self.add_candidate(chapters=json.dumps(chapters))
+        pid = self.add_proposal(cid, [{"start": 130.0, "end": 150.0}])
+        self.engine_sidecar(pid, [{"start": 130.0, "end": 150.0}],
+                            window={"start": 120.0, "end": 180.0})
+        self.assertEqual(self.post(pid, tags="boring").status_code, 202)
+        kwargs = self.enqueue.call_args.kwargs
+        self.assertEqual((kwargs["window"], kwargs["reason"], kwargs["topic"]),
+                         ({"start": 120.0, "end": 180.0}, "section", "Fire — the planet burns"))
+        # A sidecar with no (or a broken) window means the whole video.
+        for window in (None, {"start": "x"}, {"start": 50, "end": 10}):
+            with self.subTest(window=window):
+                other = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+                self.engine_sidecar(other, [{"start": 10.0, "end": 30.0}], window=window)
+                self.post(other, tags="boring")
+                self.assertIsNone(self.enqueue.call_args.kwargs["window"])
+
+    def test_just_dismiss_keeps_the_note_and_stops(self):
+        cid = self.add_candidate()
+        pid = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+        r = self.post(pid, text="nobody says where this is", resuggest="0")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["ok"], True)
+        self.assertEqual(self.proposal_row(pid).verdict, "dismissed")
+        self.assertEqual(len(self.notes.for_candidate(cid)), 1)
+        self.enqueue.assert_not_called()
+
+    def test_saying_nothing_is_refused_and_changes_nothing(self):
+        cid = self.add_candidate()
+        pid = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+        r = self.post(pid, tags="bogus", text="   ")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.proposal_row(pid).verdict, "pending")
+        self.assertEqual(self.notes.for_candidate(cid), [])
+        self.enqueue.assert_not_called()
+
+    def test_unknown_and_already_used(self):
+        cid = self.add_candidate()
+        self.assertEqual(self.post(4242, tags="boring").status_code, 404)
+        used = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}], verdict="accepted")
+        self.assertEqual(self.post(used, tags="boring").status_code, 409)
+        self.assertEqual(self.notes.for_candidate(cid), [])
+        # Already dismissed (the ✕ first, then "What's wrong?"): still taken.
+        gone = self.add_proposal(cid, [{"start": 40.0, "end": 60.0}], verdict="dismissed")
+        self.assertEqual(self.post(gone, tags="too_long").status_code, 202)
+        self.assertEqual(self.proposal_row(gone).dismiss_reason, "too_long")
+
+    def test_a_busy_video_still_keeps_the_note(self):
+        cid = self.add_candidate()
+        pid = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+        self.enqueue.return_value = {"started": False, "conflict": True, **job_status("running")}
+        r = self.post(pid, tags="boring")
+        self.assertEqual(r.status_code, 409)
+        body = r.json()
+        self.assertEqual(body["job"]["state"], "running")
+        self.assertTrue(body["noted"])
+        self.assertEqual(body["dismissed"], pid)
+        self.assertEqual(self.proposal_row(pid).verdict, "dismissed")
+
+    def test_the_transcript_suggester_also_runs_through_the_queue(self):
+        cid = self.add_candidate()
+        self.setup_answer = ("transcript", "")
+        pid = self.add_proposal(cid, [{"start": 10.0, "end": 30.0}])
+        r = self.post(pid, tags="boring")
+        self.assertEqual(r.status_code, 202)
+        self.assertEqual(r.json()["engine"], "transcript")
+        self.enqueue.assert_called_once()
+
+
+class RuleProposalRoutesTest(NotesRouteBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.notes.add_proposals([
+            {"text": "never open on a reporter talking to camera", "evidence": ["n1", "n2", "n3"],
+             "count": 3, "summary": "From 3 of your notes on 2 videos"},
+            {"text": "Open on the footage", "evidence": [101], "count": 12,
+             "when": "news packages"},
+        ], source="notes")
+        self.notes.add_proposals([{"text": "Cut on complete sentences", "count": 9}],
+                                 source="handbook")
+
+    def test_list(self):
+        body = self.client.get("/clip-engine/rule-proposals").json()
+        self.assertEqual([(p["idx"], p["source"]) for p in body["proposals"]],
+                         [(0, "notes"), (1, "notes"), (2, "handbook")])
+        self.assertEqual(body["proposals"][0]["markdown"],
+                         "**Rule:** Never open on a reporter talking to camera.\n**When:** Always"
+                         "\n**Why:** From 3 of your notes on 2 videos.")
+        self.client.post("/clip-engine/rule-proposals/2/dismiss")
+        self.assertEqual(len(self.client.get("/clip-engine/rule-proposals").json()["proposals"]), 2)
+        everything = self.client.get("/clip-engine/rule-proposals?status=all").json()
+        self.assertEqual([p["status"] for p in everything["proposals"]],
+                         ["pending", "pending", "dismissed"])
+
+    def test_add_makes_an_ordinary_clips_rule(self):
+        r = self.client.post("/clip-engine/rule-proposals/1/add")
+        self.assertEqual(r.status_code, 200)
+        rule = r.json()["rule"]
+        self.assertEqual(rule["text"], "When news packages: Open on the footage.")
+        self.assertEqual((rule["applies_to"], rule["source"], rule["when"]),
+                         ("clips", "notes", "News packages"))
+        self.assertEqual(rule["evidence"], "From 12 of your notes (when: News packages)")
+        self.assertEqual(rule["original"], "Open on the footage")
+        self.assertEqual(self.config.load_brand_rules(), [rule])
+        self.assertIn("Open on the footage", self.config.render_brand_rules("content"))
+        self.assertEqual(self.config.render_brand_rules("captions"), "")
+        self.assertEqual(self.notes.proposals()[1]["status"], "added")
+        # Decided: gone.
+        self.assertEqual(self.client.post("/clip-engine/rule-proposals/1/add").status_code, 404)
+        self.assertEqual(self.client.post("/clip-engine/rule-proposals/9/add").status_code, 404)
+
+    def test_handbook_proposals_keep_their_source(self):
+        rule = self.client.post("/clip-engine/rule-proposals/2/add").json()["rule"]
+        self.assertEqual(rule["source"], "handbook")
+        self.assertEqual(rule["evidence"], "Seen in 9 of your past edits")
+
+    def test_a_reworded_rule_is_formatted_again(self):
+        with mock.patch.object(self.notes, "format_rule",
+                               wraps=self.notes.format_rule) as fmt:
+            rule = self.client.post("/clip-engine/rule-proposals/0/add",
+                                    data={"text": "never open on an anchor"}).json()["rule"]
+        fmt.assert_called_once()
+        self.assertEqual(rule["text"], "Never open on an anchor.")
+        self.assertEqual(rule["original"], "never open on an anchor")
+
+    def test_a_rule_already_there_still_marks_it_added(self):
+        self.config.add_brand_rule("Never open on a reporter talking to camera.", "everything")
+        r = self.client.post("/clip-engine/rule-proposals/0/add")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.json()["rule"])
+        self.assertEqual(self.notes.proposals()[0]["status"], "added")
+
+    def test_dismiss(self):
+        self.assertEqual(self.client.post("/clip-engine/rule-proposals/0/dismiss").json(),
+                         {"ok": True})
+        self.assertEqual(self.client.post("/clip-engine/rule-proposals/0/dismiss").status_code, 404)
+        self.assertEqual(self.config.load_brand_rules(), [])
+
+    def test_writes_touch_no_cached_page(self):
+        for path in ("/clip-engine/rule-proposals/{idx}/add",
+                     "/clip-engine/rule-proposals/{idx}/dismiss"):
+            self.assertEqual(self.main._WRITE_SCOPE[path], ())
+
+    def test_brand_page_lists_them_and_badges_rules(self):
+        self.notes.add_proposals([{"text": "Never trust </script><b>this</b>"}], source="notes")
+        self.config.add_brand_rule("A learned rule", "clips", source="handbook",
+                                   evidence="Seen in 5 of your past edits")
+        r = self.client.get("/brand")
+        self.assertEqual(r.status_code, 200)
+        html = r.text
+        self.assertIn("Suggested rules", html)
+        self.assertNotIn('id="rule-proposals" style="margin-top: 14px;" hidden', html)
+        proposals = json.loads(re.search(r"let ruleProposals = (\[.*?\]);\n", html).group(1))
+        self.assertEqual([p["source"] for p in proposals], ["notes", "notes", "handbook", "notes"])
+        self.assertNotIn("</script><b>", html)          # tojson escapes it
+        rules = json.loads(re.search(r"let rules = (\[.*?\]);\n", html).group(1))
+        self.assertEqual(rules[0]["source"], "handbook")
+        self.assertIn('<option value="clips">Clips</option>', html)
+        self.assertIn("From past edits", html)
+        if shutil.which("node"):
+            for i, script in enumerate(re.findall(r"<script>(.*?)</script>", html, flags=re.S)):
+                path = self.dir / f"brand-{i}.js"
+                path.write_text(script)
+                done = subprocess.run(["node", "--check", str(path)], capture_output=True,
+                                      text=True, timeout=60)
+                self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+
+    def test_brand_page_without_proposals(self):
+        self.notes.util.atomic_write_json(self.notes.proposals_path(), {"proposals": []})
+        html = self.client.get("/brand").text
+        self.assertIn('id="rule-proposals" style="margin-top: 14px;" hidden', html)
+        with mock.patch.object(self.notes, "pending_proposals", side_effect=OSError("x")):
+            self.assertEqual(self.client.get("/brand").status_code, 200)
+
+
+class BrandRuleFormattingTest(NotesRouteBase):
+    def fake_format(self):
+        def fmt(text, **kw):
+            return dict(self.notes._tidy_rule(text.replace("teh", "the")), formatted=True)
+
+        return mock.patch.object(self.notes, "format_rule", side_effect=fmt)
+
+    def test_saving_formats_new_and_edited_rules_only(self):
+        formatted = {"text": "When floods: Open on the water.", "rule": "Open on the water.",
+                     "when": "Floods", "markdown": "**Rule:** Open on the water.\n**When:** Floods",
+                     "original": "open on teh water for floods", "source": "notes",
+                     "applies_to": "clips"}
+        edited = dict(formatted, text="Open on the water, always")
+        rules = [formatted, edited, {"text": "write as we", "applies_to": "captions"}]
+        with self.fake_format() as fmt:
+            r = self.client.post("/brand", data={"topic": "climate change",
+                                                 "rules_json": json.dumps(rules)},
+                                 follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual([c.args[0] for c in fmt.call_args_list],
+                         ["Open on the water, always", "write as we"])
+        saved = self.config.load_brand_rules()
+        self.assertEqual(saved[0], {**formatted, "enabled": True})        # untouched
+        self.assertEqual((saved[1]["text"], saved[1]["source"], saved[1]["original"]),
+                         ("Open on the water, always.", "notes", "Open on the water, always"))
+        self.assertEqual((saved[2]["text"], saved[2]["applies_to"]), ("Write as we.", "captions"))
+
+    def test_the_caption_editors_add_goes_through_the_formatter(self):
+        with self.fake_format():
+            r = self.client.post("/brand/rules/add", data={"text": "no emojis in teh caption"})
+        rule = r.json()["rule"]
+        self.assertEqual(rule["text"], "No emojis in the caption.")
+        self.assertEqual(rule["original"], "no emojis in the caption")   # (the fake fixed it)
+        self.assertEqual(rule["applies_to"], "captions")
+        with self.fake_format():
+            again = self.client.post("/brand/rules/add", data={"text": "No emojis in the caption"})
+        self.assertEqual(again.status_code, 409)
+
+
+class AdvicePageTest(NotesRouteBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.cid = self.add_candidate(local_video_path=str(self.dir / "vid1.mp4"))
+        self.pid = self.add_proposal(self.cid, [{"start": 10.0, "end": 30.0}])
+        self.engine_sidecar(self.pid, [{"start": 10.0, "end": 30.0}], critique={
+            "stops_scroll": True, "stop_reason": "floods", "error": "", "premise_clear": False,
+            "speech_understood": True, "monologue": False, "follows_advice": False,
+            "advice_note": "opens on <the anchor>"}, language_doubt="mostly Hindi")
+        self.cut_id = self.add_cut(self.cid, [])
+
+    def test_video_page(self):
+        html = self.client.get(f"/video/{self.cid}").text
+        self.assertIn('id="suggest-advice"', html)
+        self.assertIn("Advice for this pass, e.g. open on the disaster footage; no interviews",
+                      html)
+        self.assertIn(f"toggleSuggestFeedback({self.pid}, this)", html)
+        self.assertIn(f'id="suggest-feedback-{self.pid}"', html)
+        for slug, label in self.notes.tag_labels():
+            self.assertIn(f'data-tag="{slug}"', html)
+        self.assertIn("Re-suggest with this", html)
+        self.assertIn("Language: other-language speech — mostly Hindi", html)
+        self.assertIn("Premise unclear in the first seconds", html)
+        self.assertIn("Didn’t follow your advice: opens on &lt;the anchor&gt;", html)
+        self.assertNotIn("Mostly a reporter talking to camera", html)
+
+    def test_cut_page(self):
+        html = self.client.get(f"/cut/{self.cut_id}").text
+        self.assertIn('id="suggest-advice"', html)
+        tags = json.loads(re.search(r"const NOTE_TAGS = (\[.*?\]);\n", html).group(1))
+        self.assertEqual(tags, [list(t) for t in self.notes.tag_labels()])
+        clip = json.loads(re.search(r"let suggestedClips = (\[.*?\]);\n", html).group(1))[0]
+        self.assertEqual(clip["engine"]["follows_advice"], False)
+
+    def test_pages_render_when_the_notes_module_breaks(self):
+        with mock.patch.object(self.notes, "tag_labels", side_effect=RuntimeError("x")):
+            html = self.client.get(f"/cut/{self.cut_id}").text
+        self.assertIn("const NOTE_TAGS = [];", html)
+        with mock.patch.object(self.notes, "tag_labels", side_effect=RuntimeError("x")):
+            self.assertEqual(self.client.get(f"/video/{self.cid}").status_code, 200)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
+class SuggestWithAdviceJsTest(unittest.TestCase):
+    """The Suggest buttons send the advice box's text, and only when there is some."""
+
+    def run_video(self, advice):
+        template = (Path(__file__).resolve().parents[1] / "app" / "web" / "templates"
+                    / "video.html").read_text()
+        script = template[template.index("async function suggestVideoClips"):
+                          template.index("function scheduleEnginePoll")]
+        harness = """
+let engineJob = null, engineBoot = null; const suggestions = [];
+let sent = null; const box = %s;
+const document = { getElementById: id => (id === 'suggest-advice' ? box : null) };
+function alert() {} function handleEngineStatus() {}
+const location = { reload() {} };
+async function fetch(url, opts) { sent = String(opts.body); return { status: 202, ok: true,
+  json: async () => ({ started: true, job: { state: 'queued', boot_id: 'b' } }) }; }
+%s
+(async () => {
+  const btn = { disabled: false, textContent: '', classList: { add() {}, remove() {}, toggle() {} } };
+  await suggestVideoClips(btn);
+  process.stdout.write(JSON.stringify({ sent, left: box ? box.value : null }));
+})();
+""" % (json.dumps({"value": advice}) if advice is not None else "null",
+       script.replace("{{ c.id }}", "42"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "advice.js"
+            path.write_text(harness)
+            result = subprocess.run(["node", str(path)], capture_output=True, text=True,
+                                    timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        return json.loads(result.stdout)
+
+    def test_video_page(self):
+        self.assertEqual(self.run_video("  no interviews "),
+                         {"sent": "advice=no+interviews", "left": ""})
+        self.assertEqual(self.run_video("   "), {"sent": "", "left": ""})
+        self.assertEqual(self.run_video(None), {"sent": "", "left": None})
 
 
 # ---- the archive hand-off and process wiring --------------------------------------------------
