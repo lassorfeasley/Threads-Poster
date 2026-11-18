@@ -32,8 +32,15 @@ def main() -> None:
     print("ok  scheduler thread not started (SCHEDULER_EMBEDDED=false)")
 
     # Every mapped write route must exist, or a typo silently reverts that
-    # route to blanket invalidation (worse: a rename would too).
-    known = {getattr(r, "path_format", None) for r in web_main.app.routes}
+    # route to blanket invalidation (worse: a rename would too). FastAPI 0.139
+    # lists an included router (the clip bench page) as one lazy entry in
+    # app.routes; iter_route_contexts is the flattened view requests match.
+    try:
+        from fastapi.routing import iter_route_contexts
+    except ImportError:   # older FastAPI copied included routes in directly
+        iter_route_contexts = list
+    known = {getattr(r, "path_format", None)
+             for r in iter_route_contexts(web_main.app.routes)}
     missing = [p for p in web_main._WRITE_SCOPE if p not in known]
     assert not missing, f"_WRITE_SCOPE patterns with no matching route: {missing}"
     print(f"ok  all {len(web_main._WRITE_SCOPE)} _WRITE_SCOPE patterns match real routes")

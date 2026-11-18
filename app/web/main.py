@@ -440,6 +440,24 @@ _WRITE_SCOPE: dict[str, tuple[str, ...]] = {
 }
 
 
+# The replay-benchmark judging page (app/web/clip_bench.py). Its router renders
+# base.html, whose globals live on THIS module's ``templates``, so it reaches
+# them through app.state rather than importing this module (circular). Guarded:
+# a broken bench module must cost the bench page, not the whole dashboard.
+app.state.templates = templates
+try:
+    from .clip_bench import router as clip_bench_router
+except Exception:
+    log.exception("Clip bench page unavailable")
+else:
+    app.include_router(clip_bench_router)
+    # Its writes (judgments, reveal) go to files under the bench directory and
+    # never touch a cached page.
+    for _route in clip_bench_router.routes:
+        if "POST" in (getattr(_route, "methods", None) or ()):
+            _WRITE_SCOPE[_route.path_format] = ()
+
+
 @app.middleware("http")
 async def _drop_cached_reads_after_writes(request: Request, call_next):
     """Any successful write invalidates the cached reads.
@@ -547,18 +565,69 @@ def _retrain_triage_model_in_background() -> None:
     threading.Thread(target=_run, daemon=True, name="triage-retrain").start()
 
 
+# Candidates with an archive thread running. Approve then Retry (or a resume
+# racing a click) used to start two archives of one video, and the second
+# one's download purge would clobber the file the first — or a clip engine run
+# reading it — was using.
+_scrape_inflight: set[int] = set()
+_scrape_inflight_lock = threading.Lock()
+
+
 def _scrape_in_thread(candidate_id: int) -> None:
-    session = SessionLocal()
+    with _scrape_inflight_lock:
+        if candidate_id in _scrape_inflight:
+            log.info("Archive already running for candidate %s; not starting another", candidate_id)
+            return
+        _scrape_inflight.add(candidate_id)
+    archived = False
     try:
-        candidate = session.get(Candidate, candidate_id)
-        if candidate:
-            archive_candidate(session, candidate)
-            session.commit()
-    except Exception:
-        session.rollback()
-        log.exception("Background scrape failed for candidate %s", candidate_id)
+        session = SessionLocal()
+        try:
+            candidate = session.get(Candidate, candidate_id)
+            if candidate:
+                was_archived = candidate.status == STATUS_ARCHIVED
+                archive_candidate(session, candidate)
+                session.commit()
+                archived = not was_archived and candidate.status == STATUS_ARCHIVED
+        except Exception:
+            session.rollback()
+            log.exception("Background scrape failed for candidate %s", candidate_id)
+        finally:
+            session.close()
     finally:
-        session.close()
+        with _scrape_inflight_lock:
+            _scrape_inflight.discard(candidate_id)
+    if archived:
+        _queue_clip_engine_after_archive(candidate_id)
+
+
+def _queue_clip_engine_after_archive(candidate_id: int) -> None:
+    """Queue the clip engine for a video that was just archived.
+
+    After the commit, never inside it: the engine reads the committed row in
+    its own session, and its minutes of work must not hold the archive's
+    transaction (or keep the video out of the trim editor). Its own try/except,
+    so an engine problem is never reported as a failed archive. Skipped when
+    the transcript suggester is in charge (it already ran inline, in
+    ``archive_candidate``) or when suggestions are already waiting.
+    """
+    try:
+        from ..clip_engine import effective_setup, jobs
+
+        setup, why = effective_setup(load_settings())
+        if setup == "transcript":
+            return
+        with session_scope() as session:
+            c = session.get(Candidate, candidate_id)
+            if c is None or c.status != STATUS_ARCHIVED:
+                return
+            if not (c.transcript_path and Path(c.transcript_path).is_file()):
+                return
+            if clip_proposals.pending_for_candidate(session, candidate_id):
+                return
+        jobs.enqueue(candidate_id, reason="archive", on_done=pagecache.invalidate)
+    except Exception:
+        log.exception("Couldn't queue clip suggestions for candidate %s", candidate_id)
 
 
 def _resume_stalled_scrapes() -> None:
@@ -576,8 +645,35 @@ def _resume_stalled_scrapes() -> None:
         _in_background(_scrape_in_thread, cid)
 
 
+def _resume_clip_engine_runs() -> None:
+    """Re-queue clip engine runs a restart killed (every save under app/
+    restarts this process with reload on). Only runs an earlier boot left
+    unfinished, never ones that finished empty — see jobs.resume_recent."""
+    try:
+        from ..clip_engine import jobs
+
+        jobs.resume_recent(on_done=pagecache.invalidate)
+    except Exception:
+        log.exception("Couldn't resume clip engine runs")
+
+
+def _stop_clip_engine() -> None:
+    """Cancel the clip engine's run in progress as the server stops, so it
+    records itself as interrupted (the next start resumes it) instead of
+    vanishing mid-write."""
+    try:
+        from ..clip_engine import jobs
+
+        jobs.shutdown()
+    except Exception:
+        log.exception("Couldn't stop the clip engine")
+
+
 _resume_stalled_scrapes()
+_resume_clip_engine_runs()
 _retrain_triage_model_in_background()
+# Not ``@app.on_event``: deprecated on this FastAPI, and this is the same hook.
+app.router.add_event_handler("shutdown", _stop_clip_engine)
 
 
 # --- Workflow step helpers ----------------------------------------------------
@@ -1404,6 +1500,7 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
         {"c": c, "state": state, "step": step,
          "cut_rows": cut_rows, "posts": posts,
          "suggested_clips": suggested_clips,
+         "engine_job": _active_engine_job(c.id),
          "transcript_segments": transcript_segments,
          "has_local": has_local,
          "trait_vocab": trait_vocab,
@@ -1473,12 +1570,109 @@ def _proposal_payload(row, used: list[dict], words: list[dict] | None = None,
     if not segments:
         return None
     lines = clip_proposals.excerpts(segments, words or [], transcript or [])
+    engine, preview = _engine_card(row.id, segments)
+    # ``confidence`` stays in the payload (and the ledger) but no card shows it:
+    # a number the operator can't act on only anchors the judgment.
     return {"id": row.id, "story": row.story, "why": row.why,
             "confidence": row.confidence, "segments": segments,
             "seconds": clip_proposals.duration(segments), "trimmed": trimmed,
             "at": segments[0]["start"], "count": len(segments),
             "opening": lines["opening"], "closing": lines["closing"],
-            "thumb": f"/clip-proposal/{row.id}/thumb", "flag": row.flag or ""}
+            "thumb": f"/clip-proposal/{row.id}/thumb", "flag": row.flag or "",
+            "engine": engine, "preview": preview}
+
+
+def _same_segments(a: list[dict], b: list[dict], tolerance: float = 0.05) -> bool:
+    """Same spans in the same (play) order, to within rounding."""
+    if len(a) != len(b):
+        return False
+    try:
+        return all(abs(float(x["start"]) - float(y["start"])) <= tolerance
+                   and abs(float(x["end"]) - float(y["end"])) <= tolerance
+                   for x, y in zip(a, b))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _engine_card(proposal_id: int, offered: list[dict]) -> tuple[dict, str]:
+    """What the clip engine's critic said about one suggestion, and its preview.
+
+    ``({}, "")`` for proposals the engine didn't make, and on any error — a card
+    must render whatever happened to the sidecar. The preview is a render of
+    the segments as proposed, so it is only offered while the card offers
+    exactly those: once part of the proposal has been claimed by another clip,
+    the video (and the critic's clip-time notes) describe footage the card no
+    longer contains.
+    """
+    try:
+        from ..clip_engine import sidecars
+
+        meta = sidecars.load(proposal_id)
+        if not isinstance(meta, dict) or not meta:
+            return {}, ""
+        critique = meta.get("critique") if isinstance(meta.get("critique"), dict) else {}
+        bored_at = critique.get("bored_at")
+        bored_at = (float(bored_at) if isinstance(bored_at, (int, float))
+                    and not isinstance(bored_at, bool) and bored_at >= 0 else None)
+        score = meta.get("score")
+
+        def text(value, limit: int = 300) -> str:
+            return str(value or "").strip()[:limit]
+
+        engine = {
+            "setup": text(meta.get("setup"), 20),
+            "archetype": text(meta.get("archetype"), 40),
+            "lens": text(meta.get("lens"), 40),
+            "hook": text(meta.get("hook")),
+            "stop_reason": text(critique.get("stop_reason")),
+            "stops_scroll": bool(critique.get("stops_scroll")),
+            "stops_scroll_muted": bool(critique.get("stops_scroll_muted")),
+            "about": text(critique.get("about")),
+            "bored_at": bored_at,
+            "fix": text(critique.get("fix")),
+            "score": float(score) if isinstance(score, (int, float))
+            and not isinstance(score, bool) else None,
+            # A critic outage leaves an error and zeroed fields behind: that is
+            # "nobody watched it", not "it doesn't stop the scroll".
+            "reviewed": bool(critique) and not critique.get("error"),
+            "topic_doubt": text(meta.get("topic_doubt")),
+        }
+        preview = ""
+        path = sidecars.preview_path(proposal_id)
+        if (path is not None and Path(path).is_file()
+                and _same_segments(meta.get("segments") or [], offered)):
+            preview = f"/clip-proposal/{proposal_id}/preview"
+        return engine, preview
+    except Exception:
+        log.exception("Clip engine sidecar unreadable for proposal %s", proposal_id)
+        return {}, ""
+
+
+def _active_engine_job(candidate_id: int) -> dict | None:
+    """The clip engine's run for this video while one is queued or running, so
+    a page opened mid-run shows its progress and refreshes when it ends. None
+    otherwise, and on any error: a status read must never break a page."""
+    try:
+        from ..clip_engine import jobs
+
+        job = jobs.status(candidate_id)
+    except Exception:
+        log.exception("Clip engine status unavailable for candidate %s", candidate_id)
+        return None
+    return job if job.get("state") in ("queued", "running") else None
+
+
+def _clip_engine_setup(settings) -> str:
+    """The suggester in charge right now: an engine setup, or "transcript"
+    (also when a setup's API key is missing). Never raises — an engine that
+    can't even be asked leaves the transcript suggester in charge, as before."""
+    try:
+        from ..clip_engine import effective_setup
+
+        return effective_setup(settings)[0]
+    except Exception:
+        log.exception("Clip engine setup unreadable; using the transcript suggester")
+        return "transcript"
 
 
 def _pending_proposals(session, candidate_pk: int) -> list[dict]:
@@ -1509,14 +1703,22 @@ def video_suggest_clips(candidate_id: int, start: float | None = None,
     ``new`` in the response counts what THIS run proposed. The clips list is
     everything still pending on the video, so on a section pass it can be
     non-empty even when the section itself turned up nothing.
+
+    With the clip engine on (``clip_engine.setup``), the run takes minutes, so
+    this only validates and queues it: 202 ``{"started", "job", "engine"}``,
+    then the page polls ``/video/{id}/suggest-status``. A run already working
+    on a DIFFERENT stretch of the video answers 409 with its status.
     """
-    # Opening-shot refinement samples frames from the file.
-    if (err := _source_ready(candidate_id)) is not None:
-        return err
     settings = load_settings()
     window, topic = None, ""
     if start is not None and end is not None and end > start:
         window = {"start": max(0.0, start), "end": end}
+    setup = _clip_engine_setup(settings)
+    if setup != "transcript":
+        return _suggest_in_background(candidate_id, window, setup)
+    # Opening-shot refinement samples frames from the file.
+    if (err := _source_ready(candidate_id)) is not None:
+        return err
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c is None:
@@ -1538,6 +1740,70 @@ def video_suggest_clips(candidate_id: int, start: float | None = None,
         multi_clip = bool(c.multi_clip_potential)
     return JSONResponse({"clips": clips, "multi_clip": multi_clip,
                          "new": len(ids)})
+
+
+def _suggest_in_background(candidate_id: int, window: dict | None, setup: str) -> JSONResponse:
+    """Queue a clip engine run for the Suggest button (see video_suggest_clips).
+
+    The source isn't restored here: the run brings it back itself, so the
+    request returns at once even for an offloaded video.
+    """
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        if not clip_proposals.load_transcript(c):
+            return JSONResponse(
+                {"error": "No transcript for this video — clip suggestions are "
+                          "drafted from what is said in it."},
+                status_code=409)
+        topic = _topic_for_window(c, window) if window else ""
+    try:
+        from ..clip_engine import jobs
+
+        result = jobs.enqueue(candidate_id, window=window, topic=topic,
+                              reason="section" if window else "reroll",
+                              on_done=pagecache.invalidate)
+    except Exception as exc:
+        log.exception("Couldn't queue clip suggestions for candidate %s", candidate_id)
+        return JSONResponse({"error": f"Couldn't start the clip engine: {exc}"}, status_code=500)
+    job = {k: v for k, v in result.items() if k not in ("started", "conflict")}
+    if result.get("conflict"):
+        return JSONResponse({"error": "Already suggesting clips for this video", "job": job},
+                            status_code=409)
+    return JSONResponse({"started": bool(result.get("started")), "job": job, "engine": setup},
+                        status_code=202)
+
+
+@app.get("/video/{candidate_id}/suggest-status")
+def video_suggest_status(candidate_id: int):
+    """Polled every 3 s while the clip engine works on a video.
+
+    The suggestion cards ride along only once the run is over (any state but
+    queued/running — interrupted and idle included, so a page whose run died
+    with a restart stops polling): building them reads the word stream and
+    runs several queries, which a 3-second poll shouldn't repeat for minutes.
+    """
+    headers = {"Cache-Control": "no-store"}
+    try:
+        from ..clip_engine import jobs
+
+        job = jobs.status(candidate_id)
+    except Exception as exc:
+        log.exception("Clip engine status unavailable for candidate %s", candidate_id)
+        job = {"state": "failed", "stage": "", "error": str(exc), "outcome": "failed",
+               "new": [], "boot_id": "", "job_id": "", "queue_position": 0,
+               "message": f"Suggestion status unavailable: {exc}"}
+    if job.get("state") in ("queued", "running"):
+        return JSONResponse({"job": job}, headers=headers)
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return JSONResponse({"error": "Video not found"}, status_code=404)
+        clips = _pending_proposals(session, candidate_id)
+        multi_clip = bool(c.multi_clip_potential)
+    return JSONResponse({"job": job, "clips": clips, "multi_clip": multi_clip},
+                        headers=headers)
 
 
 def _topic_for_window(c: Candidate, window: dict) -> str:
@@ -1737,6 +2003,25 @@ def clip_proposal_thumb(proposal_id: int):
         return JSONResponse({"error": "no frame"}, status_code=404)
     return FileResponse(str(path), media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/clip-proposal/{proposal_id}/preview")
+def clip_proposal_preview(proposal_id: int):
+    """The clip engine's own render of a suggestion — exactly what its critic
+    watched, segments in play order — so a card plays the clip as proposed
+    without the source on disk. 404 for suggestions the engine didn't render.
+    Starlette answers the Range requests a <video> makes."""
+    try:
+        from ..clip_engine import sidecars
+
+        path = sidecars.preview_path(proposal_id)
+    except Exception:
+        log.exception("Preview lookup failed for proposal %s", proposal_id)
+        path = None
+    if path is None or not Path(path).is_file():
+        return JSONResponse({"error": "no preview"}, status_code=404)
+    return FileResponse(str(path), media_type="video/mp4",
+                        headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.post("/clip-proposal/{proposal_id}/dismiss")
@@ -2034,6 +2319,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
          "opener_seconds": load_settings().get("clips.opener_seconds", 2.0),
          "other_cut_segments": other_cut_segments,
          "suggested_clips": suggested_clips,
+         "engine_job": _active_engine_job(c.id),
          "accepted_caption_draft": accepted_draft,
          "clip_transcript": clip_transcript,
          "clip_transcript_text": clip_transcript_text,
@@ -5715,7 +6001,23 @@ def _analytics_view(report: dict) -> dict:
     return {"rows": report["rows"], "slices": report["slices"], "digest": report["digest"],
             "timeseries": report["timeseries"], "summary": report["summary"],
             "spend_today": spend.today_spend(), "spend_budget": spend.daily_budget(),
-            "spend_recent": spend.recent(30)}
+            "spend_recent": spend.recent(30), **_engine_spend_view()}
+
+
+def _engine_spend_view() -> dict:
+    """The clip engine's own spend for the LLM spend chart. It is booked to a
+    separate bucket so it can't use up ``llm.daily_budget_usd`` — which also
+    keeps it out of the shared figures above, so without this the dashboard
+    would never show what the engine costs. Never raises: a chart extra must
+    not break the page."""
+    try:
+        cap = load_settings().get("clip_engine.daily_usd", 5.0)
+        return {"engine_spend_recent": spend.recent(30, bucket="engine"),
+                "engine_spend_today": spend.bucket_spend("engine"),
+                "engine_spend_cap": float(cap if cap not in (None, "") else 5.0)}
+    except Exception:
+        log.exception("Clip engine spend unavailable for the analytics chart")
+        return {"engine_spend_recent": [], "engine_spend_today": 0.0, "engine_spend_cap": 0.0}
 
 
 @app.get("/analytics", response_class=HTMLResponse)

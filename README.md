@@ -71,6 +71,7 @@ Optional extras:
 |---|---|
 | `YOUTUBE_API_KEY` | YouTube Data API v3 key. Create at [console.cloud.google.com](https://console.cloud.google.com) → enable "YouTube Data API v3" → Credentials → API key. Used for discovery only. |
 | `ANTHROPIC_API_KEY` | Claude API key ([console.anthropic.com](https://console.anthropic.com)) for relevance scoring, caption drafts, digest. |
+| `GEMINI_API_KEY` | Optional. Gemini API key ([aistudio.google.com](https://aistudio.google.com), paid tier) for the clip engine's `gemini` and `hybrid` setups. Without it, clip suggestions fall back to the transcript suggester. See [docs/clip-engine.md](docs/clip-engine.md). |
 | `GIPHY_API_KEY` | Optional. Free Giphy key ([developers.giphy.com](https://developers.giphy.com/)) so you can attach GIFs when replying on a post page. |
 | `DATABASE_URL` | Optional. Empty = local SQLite at `data/app.db` (fast for local UI work). For Supabase Postgres use the connection string from Project Settings → Database. Keep Storage (`SUPABASE_*`) even when using SQLite. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Supabase project (Settings → API). Used for the trimmed-clip bucket and the source-video bucket (`source-videos`); both are created private on first use. Raise the project's global file size limit (Storage → Settings) above your largest source video, ~3 GB. |
@@ -190,6 +191,19 @@ python run.py metrics          # snapshot Threads metrics (time series)
 python run.py digest           # print the analytics digest
 python run.py cleanup          # apply retention (only if you set it; default keeps everything)
 python run.py offload --dry-run  # which source videos would move to Supabase (drop --dry-run to do it)
+
+# Clip engine (docs/clip-engine.md)
+python run.py clip-engine try <id>        # run the engine on one video, print every draft (writes nothing)
+python run.py clip-engine try <id> --log  # ...and save its top picks as suggestions
+python run.py clip-engine shotlog <id>    # build (or show the cached) shot log of a video
+python run.py clip-engine playbook        # print the clip playbook (--refresh rebuilds it from your posts)
+python run.py clipbench run --name N      # replay past videos through each setup (resumable)
+python run.py clipbench pairs --name N    # render the blind A/B pairs for Analytics -> Clip bench
+python run.py clipbench report --name N   # a run's report (results only after the reveal)
+python run.py clipbench reveal --name N   # unlock a run's results; closes its judging
+python run.py clipbench critic-check      # does the critic agree with your "gripping?" labels?
+python run.py clipbench list              # bench runs and their judging progress
+python run.py retranscribe --missing-words  # add Whisper word streams to videos that lack them
 ```
 
 Typical always-on setup on a Mac mini / Pi: run `python run.py monitor --loop` and
@@ -318,6 +332,36 @@ for the day once `llm.daily_budget_usd` (default $3) is reached, and it's capped
 at `vision.max_per_run` candidates per monitor pass. Today's spend and the
 budget are shown on the Analytics page and after each monitor run. Relevance
 scoring, caption/reply drafts, and the digest are cheap and always run.
+
+## Clip engine
+
+Clip suggestions come from the **clip engine**, which picks clips by watching
+the video. The original suggester only read the transcript, so its clips
+opened weakly, dragged, and sometimes drifted off topic. The engine works in
+six steps:
+
+1. A video model logs the whole source.
+2. It drafts about ten candidate clips.
+3. It snaps every cut onto word edges, shot changes and pauses.
+4. It renders each draft and watches the render cold, muted and with sound.
+5. It ranks the best drafts head to head against this account's own hits.
+6. It revises the winner once.
+
+Suggestion cards then show a playable preview and the critic's one-line
+verdict.
+
+- **Setups.** `clip_engine.setup` in `settings.yaml` picks `transcript`
+  (the original), `gemini`, `hybrid` or `claude`.
+- **Fallback.** A setup whose API key is missing, and any failed run, fall
+  back to the transcript suggester.
+- **Spend.** Engine spend has its own daily cap (`clip_engine.daily_usd`),
+  kept apart from `llm.daily_budget_usd`.
+- **Benchmark.** `run.py clipbench` replays past videos through each setup,
+  and **Analytics → Clip bench** is where you judge the results blind
+  against each other and against your own cuts.
+
+Setups, costs, the benchmark and how to read its verdict are in
+[docs/clip-engine.md](docs/clip-engine.md).
 
 ## Config
 

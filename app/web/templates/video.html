@@ -141,15 +141,30 @@
       <h2 class="video-section-title suggest-title">Suggested clips
         {% if suggested_clips %}<span class="crumb-count">{{ suggested_clips|length }}</span>{% endif %}
       </h2>
-      <button type="button" class="ghost sm" id="suggest-video-btn" onclick="suggestVideoClips(this)"
-              title="Read the whole transcript again and propose fresh clips. Suggestions you haven't acted on are replaced.">
-        {{ "Re-suggest" if suggested_clips else "Suggest clips" }}
-      </button>
+      <div class="suggest-head-actions">
+        {# The clip engine works in the background: where it is, while it runs. #}
+        <span class="meta engine-status" id="suggest-status" role="status" hidden></span>
+        <button type="button" class="ghost sm" id="suggest-video-btn" onclick="suggestVideoClips(this)"
+                title="Propose fresh clips for the whole video. Suggestions you haven't acted on are replaced.">
+          {{ "Re-suggest" if suggested_clips else "Suggest clips" }}
+        </button>
+      </div>
     </div>
     {% if suggested_clips %}
     <div class="suggest-grid">
       {% for p in suggested_clips %}
+      {% set e = p.engine or {} %}
       <article class="suggest-card" data-id="{{ p.id }}">
+        {# The engine's own render of the clip, when the card still offers
+           exactly what was rendered (the payload drops it once trimmed). A
+           <video> can't live inside a <button>, hence the div. No confidence
+           badge: the model's opinion of itself anchored the judgment. #}
+        {% if p.preview %}
+        <div class="suggest-thumb suggest-media">
+          <video src="{{ p.preview }}" poster="{{ p.thumb }}" preload="none" controls playsinline></video>
+          <span class="suggest-dur">{{ p.seconds|round|int }}s{% if p.count > 1 %} · {{ p.count }} cuts{% endif %}</span>
+        </div>
+        {% else %}
         <button type="button" class="suggest-thumb" onclick="previewSuggestion({{ p.id }})"
                 {% if not has_local %}disabled title="Preview needs the downloaded video"{% else %}title="Play this clip in the player above"{% endif %}>
           <img src="{{ p.thumb }}" alt="" loading="lazy"
@@ -157,18 +172,28 @@
           {% if has_local %}<span class="suggest-play" aria-hidden="true">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>{% endif %}
           <span class="suggest-dur">{{ p.seconds|round|int }}s{% if p.count > 1 %} · {{ p.count }} cuts{% endif %}</span>
-          {% if p.confidence is not none %}
-          {% set conf = "strong" if p.confidence >= 0.75 else ("good" if p.confidence >= 0.5 else "long shot") %}
-          <span class="suggest-conf is-{{ conf|replace(' ', '-') }}" title="The model's own confidence: {{ (p.confidence * 100)|round|int }}%">{{ conf }}</span>
-          {% endif %}
         </button>
+        {% endif %}
         <button type="button" class="suggest-x" onclick="dismissSuggestion({{ p.id }}, this)"
                 title="Dismiss this suggestion" aria-label="Dismiss this suggestion">
           <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
                stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
         <div class="suggest-body">
+          {% if e.archetype and e.archetype != "other" %}<span class="suggest-archetype">{{ e.archetype }}</span>{% endif %}
           <div class="suggest-story">{{ p.story or "Suggested clip" }}</div>
+          {% if e.setup %}
+            {% if not e.reviewed %}
+          <div class="suggest-critic is-unreviewed">Not reviewed (critic unavailable)</div>
+            {% elif not p.trimmed %}
+          {# Written about the clip as rendered: gone once the card offers less. #}
+          <div class="suggest-critic {{ 'is-good' if e.stops_scroll else 'is-weak' }}"
+               {% if e.about or e.fix %}title="{% if e.about %}About: {{ e.about }}{% endif %}{% if e.about and e.fix %}&#10;{% endif %}{% if e.fix %}Could be better: {{ e.fix }}{% endif %}"{% endif %}>
+            {{ "Stops the scroll" if e.stops_scroll else "Wouldn’t stop the scroll" }}{% if e.stop_reason %}: {{ e.stop_reason }}{% endif %}{% if e.bored_at is number %} · Gets slow at {{ (e.bored_at // 60)|int }}:{{ "%02d"|format((e.bored_at % 60)|int) }}{% endif %}
+          </div>
+            {% endif %}
+            {% if e.topic_doubt %}<div class="suggest-doubt">Topic doubtful: {{ e.topic_doubt }}</div>{% endif %}
+          {% endif %}
           {% if p.flag %}<div class="rule-flag" title="This clip carries a claim your brand rules reject. Check its framing before it goes anywhere.">⚑ Check the framing: {{ p.flag }}</div>{% endif %}
           {% if p.opening %}<blockquote class="suggest-line"><span class="suggest-line-k">Opens</span>“{{ p.opening }}”</blockquote>{% endif %}
           {% if p.closing %}<blockquote class="suggest-line"><span class="suggest-line-k">Ends</span>“{{ p.closing }}”</blockquote>{% endif %}
@@ -410,14 +435,29 @@ async function scoreVisuals() {
 
 // ---- Suggested clips ------------------------------------------------------
 const suggestions = {{ suggested_clips | tojson }};
+// The clip engine's run for this video while it is queued or running, else
+// null. It works in the background for minutes; the line next to the button
+// says where it is, and the page reloads when it ends. A run belongs to one
+// server process: a different boot id means a restart killed it.
+let engineJob = {{ engine_job | tojson }};
+let engineBoot = engineJob ? engineJob.boot_id : null;
+let enginePollTimer = null;
 
 async function suggestVideoClips(btn) {
   btn.disabled = true;
   btn.classList.add('is-busy');
-  btn.textContent = 'Reading the transcript…';
+  btn.textContent = 'Suggesting…';
   try {
     const r = await fetch('/video/{{ c.id }}/suggest-clips', { method: 'POST' });
     const d = await r.json();
+    // The clip engine answers at once (202) and keeps working; 409 means a
+    // run is already busy with part of this video.
+    if (d.job && (r.status === 202 || r.status === 409)) {
+      if (r.status === 409) alert(d.error || 'Already suggesting clips for this video.');
+      engineBoot = d.job.boot_id || engineBoot;
+      handleEngineStatus({ job: d.job });
+      return;
+    }
     if (!r.ok || !d.clips) throw new Error(d.error || `HTTP ${r.status}`);
     if (!d.new) alert('The model found nothing worth clipping here.');
     location.reload();
@@ -425,10 +465,99 @@ async function suggestVideoClips(btn) {
   } catch (e) {
     alert('Suggestion failed: ' + (e.message || e));
   }
-  btn.disabled = false;
-  btn.classList.remove('is-busy');
-  btn.textContent = suggestions.length ? 'Re-suggest' : 'Suggest clips';
+  showEngineJob(null);
 }
+
+function engineStatusText(job) {
+  const n = (job && job.queue_position) || 0;
+  const behind = n > 0 ? ` · queued behind ${n} video${n === 1 ? '' : 's'}` : '';
+  const stage = job && job.state === 'running' && job.stage ? ` ${job.stage}` : '';
+  return `Watching the video…${stage}${behind}`;
+}
+
+function showEngineJob(job) {
+  const line = document.getElementById('suggest-status');
+  const btn = document.getElementById('suggest-video-btn');
+  if (line) {
+    line.hidden = !job;
+    line.textContent = job ? engineStatusText(job) : '';
+  }
+  if (btn) {
+    btn.disabled = !!job;
+    btn.classList.toggle('is-busy', !!job);
+    btn.textContent = job ? 'Suggesting…' : (suggestions.length ? 'Re-suggest' : 'Suggest clips');
+  }
+}
+
+function scheduleEnginePoll() {
+  clearTimeout(enginePollTimer);
+  enginePollTimer = setTimeout(pollEngine, 3000);
+}
+
+async function pollEngine() {
+  enginePollTimer = null;
+  let d;
+  try {
+    const r = await fetch('/video/{{ c.id }}/suggest-status', { cache: 'no-store' });
+    d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  } catch (e) {
+    scheduleEnginePoll();   // the server may be mid-restart; keep asking
+    return;
+  }
+  handleEngineStatus(d);
+}
+
+// Queued/running from the same server process: keep polling. Anything else
+// ends it — a changed boot id (a restart killed the run) and "idle" or
+// "interrupted" included, so a dead run never leaves the line spinning. A run
+// that finished before the restart is still a result, not an interruption.
+function handleEngineStatus(d) {
+  const job = d.job || {};
+  const active = job.state === 'queued' || job.state === 'running';
+  const restarted = !!(engineBoot && job.boot_id && job.boot_id !== engineBoot);
+  if (active && !restarted) {
+    engineJob = job;
+    engineBoot = job.boot_id || engineBoot;
+    showEngineJob(job);
+    scheduleEnginePoll();
+    return;
+  }
+  engineJob = null;
+  const found = (job.new || []).length;
+  const lost = (restarted && active) || job.state === 'idle';
+  if (job.message && found && !lost) {
+    // A note to go with fresh suggestions: shown as the reloaded page's toast.
+    location.href = '/video/{{ c.id }}?msg=' + encodeURIComponent(job.message);
+    return;
+  }
+  if (lost) alert('The suggestion run was interrupted — press Suggest again.');
+  else if (job.message) alert(job.message);
+  else if (!found) alert(job.window ? 'Nothing worth clipping in this stretch.'
+                                    : 'The model found nothing worth clipping here.');
+  location.reload();
+}
+
+if (engineJob && (engineJob.state === 'queued' || engineJob.state === 'running')) {
+  showEngineJob(engineJob);   // opened mid-run: pick it up where it is
+  scheduleEnginePoll();
+}
+
+// One player at a time: a card's preview pauses the page player (which also
+// ends a suggestion pass playing there) and the other previews, and the page
+// player pauses the previews.
+document.addEventListener('play', ev => {
+  const video = ev.target;
+  if (!(video instanceof HTMLVideoElement)) return;
+  const player = document.getElementById('player');
+  const previews = document.querySelectorAll('.suggest-media video');
+  if (video.closest('.suggest-media')) {
+    if (player && !player.paused) player.pause();
+    previews.forEach(other => { if (other !== video) other.pause(); });
+  } else if (video === player) {
+    previews.forEach(other => other.pause());
+  }
+}, true);   // capture: media events don't bubble
 
 // Audition a suggestion in the page's player: play each segment in turn,
 // skipping the gaps, then stop. Any manual seek outside the clip ends it.

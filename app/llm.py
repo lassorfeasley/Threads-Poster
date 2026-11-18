@@ -89,6 +89,20 @@ def client() -> Anthropic:
     return _client
 
 
+# Models that refuse sampling parameters: they always think, and `temperature`
+# is rejected alongside thinking. Sending it anyway costs a failed request and a
+# retry on every call, so it is left out up front (the retry below stays for
+# any model this list doesn't know yet).
+_NO_TEMPERATURE_PREFIXES = (
+    "claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "claude-fable",
+    "claude-mythos", "claude-opus-4-7", "claude-opus-4-8",
+)
+
+
+def _sends_temperature(model: str) -> bool:
+    return not str(model or "").strip().lower().startswith(_NO_TEMPERATURE_PREFIXES)
+
+
 def _create(model: str, system: str, content, max_tokens: int, temperature: float):
     """Single entry point for Anthropic message calls. `content` is either a
     plain string or a list of content blocks (for multimodal). Records token
@@ -98,14 +112,15 @@ def _create(model: str, system: str, content, max_tokens: int, temperature: floa
         system=system,
         messages=[{"role": "user", "content": content}],
         max_tokens=max_tokens,
-        temperature=temperature,
     )
+    if _sends_temperature(model):
+        kwargs["temperature"] = temperature
     try:
         resp = client().messages.create(**kwargs)
     except Exception as exc:
         # Some newer models deprecate/reject `temperature`; retry without it.
-        if "temperature" in str(exc).lower():
-            kwargs.pop("temperature", None)
+        if "temperature" in kwargs and "temperature" in str(exc).lower():
+            kwargs.pop("temperature")
             resp = client().messages.create(**kwargs)
         else:
             raise
@@ -671,8 +686,9 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     The output is a partition, not a window, because clipping happens on two
     levels that the model has to keep apart:
 
-    - Several SEGMENTS in one clip: the same story, compressed. Most clips are
-      cut this way — the filler comes out and the vivid beats are joined.
+    - Several SEGMENTS in one clip: the same story, compressed — the filler
+      comes out and the vivid beats are joined. Only when cutting makes the
+      clip tighter: many good clips are one continuous take.
     - Several CLIPS: separate stories that can't share a caption, each its own
       post and its own ``Cut`` row.
 
@@ -774,8 +790,9 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
            "must fall inside it. The rest of the video is not yours to cut, "
            "and it is being handled separately.\n\n" if window else "")
         + "Two levels, and they are NOT the same thing:\n"
-        "- SEGMENTS within one clip: one story, compressed. Most good clips "
-        "are 2-4 segments joined together, not one continuous take.\n"
+        "- SEGMENTS within one clip: one story, compressed. Many good clips "
+        "are one continuous take; join segments only when cutting makes the "
+        "clip tighter.\n"
         "- Separate CLIPS: separate stories that could not share a single "
         "caption. Only split when the video genuinely covers more than one "
         "story. Most videos yield exactly one clip.\n"

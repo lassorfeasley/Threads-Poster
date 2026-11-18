@@ -1,0 +1,295 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{#
+  Clip bench: blind A/B judging for `run.py clipbench` runs (app/web/clip_bench.py).
+
+  Before a run is revealed this page must stay blind: it gets only the run's
+  progress and an item id (+ whether it is a solo clip). Never add the arm,
+  the video's title, a pair's kind or any score to the judging view.
+#}
+{% set cb_crumbs %}
+<nav class="crumbs" aria-label="Clip bench">
+  <a class="crumb" href="/analytics">Analytics</a>
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  {% if selected %}
+  <a class="crumb" href="/clip-bench">Clip bench</a>
+  <span class="crumb-sep" aria-hidden="true">›</span>
+  <span class="crumb crumb-current">{{ selected.name }}</span>
+  {% else %}
+  <span class="crumb crumb-current">Clip bench</span>
+  {% endif %}
+</nav>
+{% endset %}
+
+{% if selected %}
+  {% set cb_extra %}{% if selected.revealed %}<span class="badge info">Revealed</span>{% else %}<span class="badge" id="cb-progress">{{ selected.judged }} / {{ selected.total }} judged</span>{% endif %}{% endset %}
+  {% set cb_actions %}{% if not selected.revealed %}<button type="button" class="btn ghost" id="cb-reveal" data-run="{{ selected.name }}" data-left="{{ [selected.total - selected.judged, 0]|max }}">Reveal results</button>{% endif %}{% endset %}
+  {% if selected.revealed %}
+    {% set cb_sub %}Results for this run. Judging is closed.{% endset %}
+  {% else %}
+    {% set cb_sub %}Pick the clip you'd rather post. Which suggester made which clip stays hidden until you reveal the results.{% endset %}
+  {% endif %}
+  {{ ui.pagebar(selected.name, crumbs=cb_crumbs, sub=cb_sub, title_extra=cb_extra, actions=cb_actions) }}
+{% else %}
+  {% set cb_sub %}Blind A/B judging for replay benchmark runs: two clips cut from the same past video, without knowing which suggester made which. Start a run from the terminal — see docs/clip-engine.md.{% endset %}
+  {{ ui.pagebar("Clip bench", crumbs=cb_crumbs, sub=cb_sub) }}
+{% endif %}
+
+<style>
+  .cb-error { color: var(--danger); border-color: var(--danger-border); }
+  .cb-runs td a { font-weight: 600; }
+  .cb-judge { display: flex; flex-direction: column; gap: 16px; }
+  .cb-judge.is-busy { opacity: 0.6; pointer-events: none; }
+  .cb-players { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .cb-players.is-solo { grid-template-columns: minmax(0, 720px); justify-content: center; }
+  @media (max-width: 900px) { .cb-players { grid-template-columns: 1fr; } }
+  .cb-player { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  .cb-side { font-weight: 700; font-size: 15px; letter-spacing: 0.04em; }
+  .cb-media { aspect-ratio: 16 / 9; background: #000; border-radius: var(--radius-lg); overflow: hidden; }
+  .cb-media video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .cb-question { font-weight: 600; font-size: 15px; }
+  .cb-choices { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cb-choice { flex: 1 1 140px; justify-content: center; }
+  .cb-choice.is-on { color: var(--ink-contrast); background: var(--ink); border-color: var(--ink); }
+  .cb-reason { display: flex; flex-direction: column; gap: 8px; }
+  .cb-reason-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cb-confirm { display: flex; gap: 8px; align-items: center; }
+  .cb-recognised { display: inline-flex; gap: 8px; align-items: center; font-size: 13.5px; cursor: pointer; }
+  .cb-keys { margin: 0; }
+  .cb-report { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre; overflow-x: auto; }
+</style>
+
+<div class="canvas canvas-wide">
+{% if error %}
+  <div class="card tight cb-error" role="alert">{{ error }}</div>
+{% endif %}
+
+{% if not selected %}
+  {% if runs %}
+  <div class="table-wrap">
+    <table class="cb-runs">
+      <thead>
+        <tr><th>Run</th><th>Arms</th><th>Videos</th><th>Judged</th><th>Status</th><th>Created</th></tr>
+      </thead>
+      <tbody>
+      {% for r in runs %}
+        <tr>
+          <td>
+            <a href="/clip-bench?run={{ r.name|urlencode }}">{{ r.name }}</a>
+            {% if r.dev %}
+            <span class="badge" title="A dev or hand-picked run — useful for tuning, but not the benchmark.">dev</span>
+            {% endif %}
+            {% if r.stopped %}
+            <span class="badge score-lo" title="This run stopped before its last video (its spend cap or low disk). The report says why.">stopped early</span>
+            {% endif %}
+          </td>
+          <td>{{ r.arms|join(', ') }}</td>
+          <td>{{ r.videos }}</td>
+          <td>{% if r.total %}{{ r.judged }} / {{ r.total }}{% else %}<span class="meta">no pairs yet</span>{% endif %}</td>
+          <td>
+            {% if r.revealed %}<span class="badge info">Revealed</span>
+            {% elif r.total and r.judged >= r.total %}<span class="badge score-hi">Ready to reveal</span>
+            {% elif r.total %}<span class="badge">Judging</span>
+            {% else %}<span class="badge">Needs pairs</span>{% endif %}
+          </td>
+          <td class="meta">{{ r.created_at }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% elif not error %}
+  <div class="empty">
+    <strong>No bench runs yet</strong>
+    Start one from the terminal, then render its pairs:<br>
+    <code>python run.py clipbench run --name dev-1 --seed dev --limit 10</code><br>
+    <code>python run.py clipbench pairs --name dev-1</code>
+  </div>
+  {% endif %}
+
+{% elif selected.revealed %}
+  {% if report %}
+  <pre class="digest cb-report">{{ report }}</pre>
+  {% else %}
+  <div class="empty"><strong>No report</strong>
+    Print it from the terminal: <code>python run.py clipbench report --name {{ selected.name }}</code></div>
+  {% endif %}
+
+{% elif item %}
+  <section class="cb-judge" id="cb-judge" data-run="{{ selected.name }}" data-item="{{ item.item_id }}"
+           data-solo="{{ 1 if item.solo else 0 }}">
+    <div class="cb-players{{ ' is-solo' if item.solo }}">
+      {% for side in item.sides %}
+      <figure class="cb-player">
+        {% if not item.solo %}<figcaption class="cb-side">{{ side|upper }}</figcaption>{% endif %}
+        <div class="cb-media">
+          <video src="/clip-bench/{{ selected.name|urlencode }}/media/{{ item.item_id }}/{{ side }}"
+                 preload="metadata" controls playsinline></video>
+        </div>
+      </figure>
+      {% endfor %}
+    </div>
+
+    <div class="cb-question">{{ "Would you post this clip?" if item.solo else "Which one would you rather post?" }}</div>
+    <div class="cb-choices" role="group" aria-label="Your judgment">
+      {% if item.solo %}
+      <button type="button" class="btn cb-choice" data-choice="yes"><kbd>1</kbd> Would post</button>
+      <button type="button" class="btn cb-choice" data-choice="no"><kbd>2</kbd> Wouldn't post</button>
+      {% else %}
+      <button type="button" class="btn cb-choice" data-choice="a"><kbd>1</kbd> A is better</button>
+      <button type="button" class="btn cb-choice" data-choice="b"><kbd>2</kbd> B is better</button>
+      <button type="button" class="btn cb-choice" data-choice="tie"><kbd>3</kbd> Tie</button>
+      <button type="button" class="btn cb-choice" data-choice="neither"><kbd>4</kbd> Neither</button>
+      {% endif %}
+    </div>
+
+    <div class="cb-reason" id="cb-reason" hidden>
+      <span class="meta" id="cb-reason-q">What was wrong with it? (optional)</span>
+      <div class="cb-reason-pills">
+        {% for key, label in reasons %}
+        <button type="button" class="chip cb-reason-pill" data-reason="{{ key }}"><kbd>{{ loop.index + 4 }}</kbd> {{ label }}</button>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="cb-confirm" id="cb-confirm" hidden>
+      <button type="button" class="btn-primary" id="cb-save">Save <kbd>Enter</kbd></button>
+      <button type="button" class="btn ghost" id="cb-cancel">Change <kbd>Esc</kbd></button>
+    </div>
+
+    {% if not item.solo %}
+    <label class="cb-recognised"><input type="checkbox" id="cb-recognised"> I recognised one of these as mine <kbd>M</kbd></label>
+    {% endif %}
+    <p class="meta cb-keys">Choose with the buttons or keys, then save — a reason is optional and saves on its own.</p>
+  </section>
+
+{% elif error %}
+  {# Shown above; nothing else is trustworthy for this run right now. #}
+
+{% elif selected.total == 0 %}
+  <div class="empty">
+    <strong>No pairs yet</strong>
+    Render this run's pairs first:<br>
+    <code>python run.py clipbench pairs --name {{ selected.name }}</code>
+  </div>
+
+{% else %}
+  <div class="empty">
+    <strong>All {{ selected.total }} judged</strong>
+    Reveal the results to see how each suggester did. Revealing closes judging for this run.
+  </div>
+{% endif %}
+</div>
+
+<script>
+(function () {
+  const box = document.getElementById('cb-judge');
+  if (box) {
+    const run = box.dataset.run;
+    const item = box.dataset.item;
+    const solo = box.dataset.solo === '1';
+    const reasonRow = document.getElementById('cb-reason');
+    const reasonQ = document.getElementById('cb-reason-q');
+    const confirmRow = document.getElementById('cb-confirm');
+    const recognised = document.getElementById('cb-recognised');
+    const choiceKeys = solo ? ['yes', 'no'] : ['a', 'b', 'tie', 'neither'];
+    const reasonKeys = Array.from(box.querySelectorAll('.cb-reason-pill')).map(b => b.dataset.reason);
+    // Choices with no losing clip: nothing to give a reason for.
+    const NO_LOSER = new Set(['tie', 'yes']);
+    let staged = null;
+    let busy = false;
+
+    const questionFor = c => c === 'a' ? 'What was wrong with B? (optional)'
+      : c === 'b' ? 'What was wrong with A? (optional)'
+      : c === 'neither' ? 'What was wrong with them? (optional)'
+      : 'What was wrong with it? (optional)';
+
+    function stage(choice) {
+      if (busy) return;
+      staged = choice;
+      box.querySelectorAll('.cb-choice').forEach(b => b.classList.toggle('is-on', b.dataset.choice === choice));
+      const asks = !NO_LOSER.has(choice);
+      reasonRow.hidden = !asks;
+      if (asks) reasonQ.textContent = questionFor(choice);
+      confirmRow.hidden = false;
+    }
+
+    function unstage() {
+      if (busy) return;
+      staged = null;
+      box.querySelectorAll('.cb-choice').forEach(b => b.classList.remove('is-on'));
+      reasonRow.hidden = true;
+      confirmRow.hidden = true;
+    }
+
+    async function save(reason) {
+      if (!staged || busy) return;
+      busy = true;
+      box.classList.add('is-busy');
+      try {
+        const body = new URLSearchParams({
+          item_id: item, choice: staged, reason: reason || '',
+          recognised: recognised && recognised.checked ? '1' : '',
+        });
+        const r = await fetch(`/clip-bench/${encodeURIComponent(run)}/judge`, { method: 'POST', body });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        location.reload();
+      } catch (e) {
+        busy = false;
+        box.classList.remove('is-busy');
+        alert('Could not save: ' + e.message);
+      }
+    }
+
+    box.querySelectorAll('.cb-choice').forEach(b => b.addEventListener('click', () => stage(b.dataset.choice)));
+    box.querySelectorAll('.cb-reason-pill').forEach(b => b.addEventListener('click', () => save(b.dataset.reason)));
+    document.getElementById('cb-save').addEventListener('click', () => save(''));
+    document.getElementById('cb-cancel').addEventListener('click', unstage);
+
+    // One clip plays at a time.
+    const videos = Array.from(box.querySelectorAll('video'));
+    videos.forEach(v => v.addEventListener('play', () => videos.forEach(o => { if (o !== v) o.pause(); })));
+
+    document.addEventListener('keydown', ev => {
+      if (ev.metaKey || ev.ctrlKey || ev.altKey || busy) return;
+      if (document.querySelector('dialog[open]')) return;
+      const t = ev.target;
+      if (t && ((t.tagName === 'INPUT' && t.type !== 'checkbox') || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const n = /^[1-9]$/.test(ev.key) ? Number(ev.key) : 0;
+      if (n >= 1 && n <= choiceKeys.length) { ev.preventDefault(); stage(choiceKeys[n - 1]); return; }
+      if (staged && !reasonRow.hidden && n >= 5 && n < 5 + reasonKeys.length) {
+        ev.preventDefault(); save(reasonKeys[n - 5]); return;
+      }
+      if (ev.key === 'Enter' && staged) { ev.preventDefault(); save(''); return; }
+      if (ev.key === 'Escape' && staged) { ev.preventDefault(); unstage(); return; }
+      if ((ev.key === 'm' || ev.key === 'M') && recognised) { ev.preventDefault(); recognised.checked = !recognised.checked; }
+    });
+  }
+
+  const reveal = document.getElementById('cb-reveal');
+  if (reveal) {
+    reveal.addEventListener('click', async () => {
+      const left = Number(reveal.dataset.left || 0);
+      const msg = (left > 0 ? `${left} item(s) are still unjudged. ` : '') +
+        'Revealing shows which suggester made which clip and closes judging for this run for good.';
+      const ok = window.confirmDialog
+        ? await window.confirmDialog(msg, { title: 'Reveal the results?', okText: 'Reveal', okVariant: 'danger' })
+        : window.confirm(msg);
+      if (!ok) return;
+      reveal.disabled = true;
+      try {
+        const r = await fetch(`/clip-bench/${encodeURIComponent(reveal.dataset.run)}/reveal`, { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        location.reload();
+      } catch (e) {
+        reveal.disabled = false;
+        alert('Could not reveal: ' + e.message);
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}

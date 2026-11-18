@@ -28,12 +28,27 @@ Usage:
   python run.py scheduler          # one adaptive-scheduler tick (windows + metrics)
   python run.py scheduler --loop   # keep the adaptive scheduler running
   python run.py migrate-db         # copy local SQLite data into DATABASE_URL (Supabase)
+
+Clip engine (docs/clip-engine.md):
+  python run.py clip-engine try <id>        # run the engine on one video, print every draft (writes nothing)
+  python run.py clip-engine try <id> --log  # ...and save its top picks as suggestions
+  python run.py clip-engine shotlog <id>    # build (or show the cached) shot log of a video
+  python run.py clip-engine playbook        # print the clip playbook (--refresh rebuilds it from your posts)
+  python run.py clipbench run --name N      # replay past videos through each setup (resumable)
+  python run.py clipbench pairs --name N    # render the blind A/B pairs for Analytics -> Clip bench
+  python run.py clipbench report --name N   # a run's report (results only after the reveal)
+  python run.py clipbench reveal --name N   # unlock a run's results; closes its judging
+  python run.py clipbench critic-check      # does the critic agree with your "gripping?" labels?
+  python run.py clipbench list              # bench runs and their judging progress
+  python run.py retranscribe --missing-words  # add Whisper word streams to videos that lack them
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import logging
+import math
 import os
 import re
 import subprocess
@@ -809,7 +824,1153 @@ def cmd_offload(args) -> None:
     print(f"Free disk space: {free_bytes() / 1e9:.1f} GB")
 
 
-def main() -> None:
+# --- Clip engine and its replay bench (docs/clip-engine.md) -------------------
+#
+# How the engine is tried, inspected and benchmarked outside the dashboard. The
+# rules of the dashboard's job runner apply here too: no DB session is held
+# across a model call, a download, ffmpeg or Whisper (read into plain values,
+# roll back, do the slow work, write in a fresh short session); sources are
+# hard-linked under the engine's inflight/ directory while ffmpeg reads them;
+# and `clipbench` books its spend to the "bench" bucket, apart from the
+# dashboard's daily budget and the engine's own cap.
+
+_ENGINE_SETUPS = ("gemini", "hybrid", "claude")
+_CRITIC_ROLES = ("gemini", "claude")
+# Run names become a directory under data/clipbench and a URL path segment.
+# Keep in step with bench.py and app/web/clip_bench.py (a test checks).
+_RUN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_CANDIDATE_FIELDS = ("id", "video_id", "title", "description", "duration_seconds",
+                     "local_video_path", "source_object_key", "transcript_path",
+                     "word_transcript_path", "transcription_method", "status",
+                     "archived_at")
+
+
+def _say(message: str) -> None:
+    print(message, flush=True)
+
+
+# argparse types. They run before --workspace is applied, so no app.* imports.
+
+def _parse_time(text: str) -> float:
+    """Seconds from "95", "95.5", "1:35" or "1:01:35"."""
+    parts = str(text).strip().split(":")
+    try:
+        values = [float(p) for p in parts]
+    except ValueError:
+        values = []
+    ok = (bool(values) and len(values) <= 3
+          and all(math.isfinite(v) and v >= 0 for v in values)
+          and all(v < 60 for v in values[1:])
+          and all(v == int(v) for v in values[:-1]))
+    if not ok:
+        raise argparse.ArgumentTypeError(
+            f"not a time: {text!r} (use seconds, m:ss or h:mm:ss)")
+    seconds = 0.0
+    for v in values:
+        seconds = seconds * 60 + v
+    return seconds
+
+
+def _run_name(text: str) -> str:
+    name = str(text).strip()
+    if not _RUN_NAME_RE.match(name):
+        raise argparse.ArgumentTypeError(
+            f"bad run name {text!r}: start with a letter or digit, then letters, "
+            "digits, '.', '_' or '-' (64 at most)")
+    return name
+
+
+def _csv(text: str) -> list[str]:
+    return [p.strip() for p in str(text).split(",") if p.strip()]
+
+
+def _critic_roles(text: str) -> list[str]:
+    roles = _csv(text)
+    if not roles or any(r not in _CRITIC_ROLES for r in roles):
+        raise argparse.ArgumentTypeError(
+            f"a comma list of {', '.join(_CRITIC_ROLES)}, got {text!r}")
+    return list(dict.fromkeys(roles))
+
+
+def _int_at_least(minimum: int):
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+        if value < minimum:
+            raise argparse.ArgumentTypeError(f"must be at least {minimum}, got {value}")
+        return value
+    return parse
+
+
+def _positive_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"must be above 0, got {text!r}")
+    return value
+
+
+# Reading a candidate: short sessions, plain values out.
+
+def _resolve_candidate_pk(session, ident: str) -> int:
+    """A candidate's pk from its pk or its YouTube video id (the newest
+    archived row when one video id was ingested more than once)."""
+    from sqlalchemy import select
+
+    from app.models import STATUS_ARCHIVED, Candidate
+
+    ident = str(ident).strip()
+    if ident.isdigit():
+        pk = session.execute(select(Candidate.id).where(Candidate.id == int(ident))).scalar()
+        if pk is not None:
+            return int(pk)
+    rows = session.execute(select(Candidate.id, Candidate.status)
+                           .where(Candidate.video_id == ident)
+                           .order_by(Candidate.id.desc())).all()
+    if not rows:
+        raise SystemExit(f"No video with id or YouTube id {ident!r}.")
+    archived = [r for r in rows if r.status == STATUS_ARCHIVED]
+    return int((archived or rows)[0].id)
+
+
+def _candidate_fields(session, pk: int) -> dict | None:
+    from sqlalchemy import select
+
+    from app.models import Candidate
+
+    row = session.execute(select(*[getattr(Candidate, f) for f in _CANDIDATE_FIELDS])
+                          .where(Candidate.id == pk)).first()
+    return dict(row._mapping) if row is not None else None
+
+
+def _read_candidate(ident: str) -> dict:
+    """One candidate's plain fields, read in a short session that is rolled
+    back and closed before anything slow happens."""
+    from app.db import session_scope
+
+    with session_scope() as session:
+        fields = _candidate_fields(session, _resolve_candidate_pk(session, ident))
+        session.rollback()
+    if fields is None:
+        raise SystemExit(f"No video with id or YouTube id {ident!r}.")
+    return fields
+
+
+def _resolve_candidate_pks(idents: list[str]) -> list[int]:
+    from app.db import session_scope
+
+    with session_scope() as session:
+        pks = [_resolve_candidate_pk(session, ident) for ident in idents]
+        session.rollback()
+    return list(dict.fromkeys(pks))
+
+
+def _load_texts(fields: dict) -> tuple[list[dict], list[dict]]:
+    """(transcript entries, Whisper words) from the local JSON files."""
+    from types import SimpleNamespace
+
+    from app import clip_proposals
+
+    ns = SimpleNamespace(transcript_path=fields.get("transcript_path") or "",
+                         word_transcript_path=fields.get("word_transcript_path") or "")
+    return clip_proposals.load_transcript(ns), clip_proposals.load_words(ns)
+
+
+def _duration(fields: dict) -> float | None:
+    try:
+        value = float(fields.get("duration_seconds") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _inflight_key(video_id: str) -> str:
+    """The CLI's inflight link name for a video. Stable, so consecutive CLI
+    runs share the render/proxy caches (they key on the linked path), and
+    distinct from the dashboard's (it links under the bare video id), so
+    neither process's release removes a link the other is still reading."""
+    return f"{video_id}-cli"
+
+
+@contextlib.contextmanager
+def _inflight_source(fields: dict, key: str):
+    """The source video, restored from storage when it was offloaded, and
+    hard-linked under the engine's inflight/ directory while it is in use, so
+    an offload sweep or a re-archive can't pull it out from under ffmpeg."""
+    from app.clip_engine import media
+    from app.offload import SourceUnavailable, ensure_local
+
+    try:
+        source = ensure_local(fields.get("local_video_path") or "",
+                              fields.get("source_object_key") or "")
+    except SourceUnavailable as exc:
+        raise SystemExit(f"The source video is unavailable: {exc}") from None
+    except Exception as exc:  # storage/network trouble while restoring it
+        raise SystemExit(f"Couldn't bring the source video back: "
+                         f"{type(exc).__name__}: {exc}") from None
+    try:
+        linked = media.link_inflight(Path(source), key)
+    except Exception as exc:  # the link is a safety net; the run can go on without it
+        log.warning("Could not link %s under inflight/ (%s); using it in place", source, exc)
+        yield Path(source)
+        return
+    try:
+        yield linked
+    finally:
+        media.release_inflight(linked)
+
+
+def _require_provider(provider: str) -> None:
+    if provider == "gemini":
+        from app.clip_engine import gemini
+
+        ok, key = gemini.is_configured(), "GEMINI_API_KEY"
+    else:
+        from app.clip_engine import claude
+
+        ok, key = claude.is_configured(), "ANTHROPIC_API_KEY"
+    if not ok:
+        raise SystemExit(f"{key} is not set (see .env.example).")
+
+
+def _engine_setup(settings, requested: str | None) -> str:
+    """The engine setup to run, or exit saying why it can't run."""
+    from app import clip_engine
+
+    setup, reason = clip_engine.effective_setup(settings, requested)
+    if setup != "transcript":
+        return setup
+    if not requested and not reason:
+        raise SystemExit("clip_engine.setup is 'transcript' (the original suggester). "
+                         "Pass --setup gemini|hybrid|claude to try the engine.")
+    wanted = requested or clip_engine.configured_setup(settings)
+    raise SystemExit(f"Can't run the {wanted} setup: {reason}.")
+
+
+def _mark_touched(video_ids, *, by: str) -> None:
+    """Add videos to the bench's touched.json. A video you've seen engine
+    output for is tuning data now, and the test-seed bench must never select
+    it — a go/no-go measured on the videos the prompts were tuned against
+    says nothing. Best effort: a failure warns but never stops the command."""
+    # bench.touch_videos is touched.json's one writer, so the file has one
+    # owner and one format.
+    ids = list(dict.fromkeys(str(v) for v in video_ids if v))
+    if not ids:
+        return
+    try:
+        from app.clip_engine import bench
+
+        bench.touch_videos(ids, source=by)
+    except Exception as exc:
+        log.warning("Could not add %s to the bench's touched.json: %s", ", ".join(ids), exc)
+        print(f"Warning: couldn't record {', '.join(ids)} as touched ({exc}); "
+              "keep it out of test-seed bench runs by hand.")
+
+
+# Text output for the engine commands (pure; tested directly).
+
+def _trim(text, limit: int) -> str:
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[:max(0, limit - 1)] + "…"
+
+
+def _clock(seconds, decimals: int = 1) -> str:
+    """75.3 -> "1:15.3"; 3723 -> "1:02:03.0"; "?" for anything that isn't a time."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return "?"
+    if not math.isfinite(value):
+        return "?"
+    t = round(max(0.0, value), decimals)
+    hours, rem = divmod(t, 3600)
+    minutes, secs = divmod(rem, 60)
+    width = 3 + decimals if decimals else 2
+    sec = f"{secs:0{width}.{decimals}f}"
+    return f"{int(hours)}:{int(minutes):02d}:{sec}" if hours else f"{int(minutes)}:{sec}"
+
+
+def _seg_seconds(segments) -> float:
+    total = 0.0
+    for seg in segments or []:
+        try:
+            total += max(0.0, float(seg["end"]) - float(seg["start"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return total
+
+
+def _fmt_segments(segments) -> str:
+    """Segments in PLAY order (a cold open shows as a later stretch first)."""
+    parts = []
+    for seg in segments or []:
+        try:
+            parts.append(f"{_clock(seg['start'])}-{_clock(seg['end'])}")
+        except (KeyError, TypeError):
+            continue
+    return " -> ".join(parts) or "-"
+
+
+def _score(value) -> str:
+    if value is None:
+        return "-"
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    return "error" if v <= -1e8 else f"{v:.2f}"
+
+
+def _critic_line(critique, *, with_fix: bool = True) -> str:
+    """The cold critic's verdict in one line, the way the suggestion cards say it."""
+    if not isinstance(critique, dict) or not critique:
+        return "not watched"
+    if critique.get("error"):
+        return f"not reviewed ({_trim(critique['error'], 80)})"
+    verdict = "Stops the scroll" if critique.get("stops_scroll") else "Wouldn't stop the scroll"
+    text = f"{verdict}: {critique.get('stop_reason') or '-'}"
+    bored = critique.get("bored_at")
+    if isinstance(bored, (int, float)) and not isinstance(bored, bool):
+        text += f" · slow at {_clock(bored, decimals=0)}"
+    if critique.get("topic") in ("incidental", "none"):
+        text += f" · topic: {critique['topic']}"
+    if with_fix and critique.get("fix"):
+        text += f" · fix: {critique['fix']}"
+    return text
+
+
+def _cost_lines(total, by_stage) -> list[str]:
+    stages = {}
+    for key, value in (by_stage or {}).items():
+        try:
+            stages[str(key)] = float(value or 0)
+        except (TypeError, ValueError):
+            continue
+    charged = {k: v for k, v in stages.items() if not k.endswith("_cached")}
+    cached = {k: v for k, v in stages.items() if k.endswith("_cached")}
+    line = f"Cost: ${float(total or 0):.4f}"
+    if charged:
+        line += " — " + " · ".join(f"{k} ${v:.4f}" for k, v in charged.items())
+    lines = [line]
+    for key, value in cached.items():
+        lines.append(f"  (+ {key[:-len('_cached')]} ${value:.4f} paid by an earlier run: "
+                     "its stored result was reused, not charged again)")
+    return lines
+
+
+def format_try_report(result) -> str:
+    """An EngineResult as text: every draft in the editor's order with its
+    critic verdict and why it was dropped; the top picks; cost, tokens,
+    timings, the four orderings (editor / cold / rank / final) and notes."""
+    top = [t for t in (getattr(result, "top", None) or []) if isinstance(t, dict)]
+    drafts = [d for d in (getattr(result, "drafts", None) or []) if isinstance(d, dict)]
+    picked = {str(t.get("id")): i for i, t in enumerate(top, 1)}
+    out = [f"Setup {result.setup} · {result.model or '-'} · outcome {result.outcome}", ""]
+
+    out.append(f"Drafts ({len(drafts)}, in the editor's order):")
+    if drafts:
+        out.append(f"  {'id':<6} {'archetype':<11} {'lens':<8} {'secs':>5} {'score':>6}  "
+                   f"{'result':<22} critic")
+    for d in drafts:
+        did = str(d.get("id") or "")
+        if did in picked:
+            status = f"pick #{picked[did]}"
+        elif d.get("dropped_reason"):
+            status = f"dropped: {d['dropped_reason']}"
+        else:
+            status = "not picked"
+        out.append(f"  {did:<6.6} {str(d.get('archetype') or ''):<11.11} "
+                   f"{str(d.get('lens') or ''):<8.8} {_seg_seconds(d.get('segments')):>5.1f} "
+                   f"{_score(d.get('score')):>6}  {status:<22.22} "
+                   f"{_trim(_critic_line(d.get('critique')), 110)}")
+
+    out.append("")
+    if not top:
+        out.append(f"No top picks (outcome: {result.outcome}).")
+    else:
+        out.append("Top picks:")
+    for i, t in enumerate(top, 1):
+        origin = (f" (revision of {t['parent']})"
+                  if t.get("origin") == "revision" and t.get("parent") else "")
+        out.append(f"  {i}. {t.get('id')}{origin} · {t.get('archetype') or '-'}/"
+                   f"{t.get('lens') or '-'} · {_seg_seconds(t.get('segments')):.1f} s · "
+                   f"score {_score(t.get('score'))}")
+        out.append(f"     plays: {_fmt_segments(t.get('segments'))}")
+        for key in ("story", "hook", "payoff", "why", "risk"):
+            if t.get(key):
+                out.append(f"     {key}: {_trim(t[key], 160)}")
+        critique = t.get("critique") if isinstance(t.get("critique"), dict) else {}
+        out.append(f"     critic: {_trim(_critic_line(critique, with_fix=False), 160)}")
+        if critique.get("fix") and not critique.get("error"):
+            out.append(f"     fix: {_trim(critique['fix'], 160)}")
+        if t.get("credits"):
+            out.append(f"     credits: {_trim(t['credits'], 160)}")
+        if t.get("render"):
+            out.append(f"     render: {t['render']}")
+
+    out.append("")
+    out.extend(_cost_lines(getattr(result, "cost_usd", 0.0), getattr(result, "by_stage", {})))
+    tokens = getattr(result, "tokens", None) or {}
+    if tokens:
+        out.append("Tokens: " + " · ".join(
+            f"{model} {int(t.get('input', 0) or 0):,} in / {int(t.get('output', 0) or 0):,} out"
+            for model, t in tokens.items() if isinstance(t, dict)))
+    timings = {k: v for k, v in (getattr(result, "timings", None) or {}).items()
+               if isinstance(v, (int, float))}
+    if timings:
+        out.append("Timings: " + " · ".join(f"{k} {float(v):.1f} s" for k, v in timings.items()))
+    orders = getattr(result, "orders", None) or {}
+    for key in ("editor", "cold", "rank", "final"):
+        if orders.get(key):
+            out.append(f"Order by {key}: {' '.join(str(x) for x in orders[key])}")
+    notes = getattr(result, "notes", None) or []
+    if notes:
+        out.append("Notes:")
+        out.extend(f"  - {_trim(n, 300)}" for n in notes)
+    return "\n".join(out)
+
+
+def format_shotlog_report(shot_log: dict, *, video_id: str = "") -> str:
+    """A shot log as text: the summary, who is on screen, every beat, highlights."""
+    beats = [b for b in (shot_log.get("beats") or []) if isinstance(b, dict)]
+    highlights = [h for h in (shot_log.get("highlights") or []) if isinstance(h, dict)]
+    people = [p for p in (shot_log.get("people") or []) if isinstance(p, dict)]
+    head = (f"Shot log {video_id} · {shot_log.get('perceiver') or '?'}/"
+            f"{shot_log.get('model') or '?'} · {_clock(shot_log.get('source_seconds') or 0)} · "
+            f"{len(beats)} beats · {len(highlights)} highlights · "
+            f"${float(shot_log.get('cost_usd') or 0):.4f}")
+    if not shot_log.get("complete", True):
+        head += " · INCOMPLETE"
+    out = [head.replace("Shot log  ·", "Shot log ·")]
+    for label, key in (("Summary", "summary"), ("Format", "format"), ("Structure", "structure")):
+        if shot_log.get(key):
+            out.append(f"{label}: {shot_log[key]}")
+    if people:
+        out.append("People:")
+        for p in people:
+            out.append(f"  {p.get('name') or '?'} — {p.get('role') or '?'} "
+                       f"({p.get('prominence') or '?'}; {p.get('evidence') or 'no evidence'})")
+    if beats:
+        out.append("Beats:")
+    for b in beats:
+        pieces = []
+        if b.get("line"):
+            pieces.append(f"{b.get('speaker') or '?'}: \"{b['line']}\"")
+        if b.get("on_screen"):
+            pieces.append(f"on screen: {b['on_screen']}")
+        if b.get("sound"):
+            pieces.append(f"sound: {b['sound']}")
+        if b.get("note"):
+            pieces.append(str(b["note"]))
+        out.append(f"  {_clock(b.get('start'))}-{_clock(b.get('end'))}  "
+                   f"{str(b.get('shot') or ''):<14.14} face {str(b.get('face') or '-'):<5.5} "
+                   f"E{b.get('energy', '-')} V{b.get('visual', '-')} T{b.get('topic', '-')}  "
+                   f"{_trim(' | '.join(pieces), 160)}")
+    if highlights:
+        out.append("Highlights:")
+    for h in highlights:
+        out.append(f"  {_clock(h.get('start'))}-{_clock(h.get('end'))}  "
+                   f"{str(h.get('kind') or ''):<7.7} {_trim(h.get('what') or '', 160)}")
+    return "\n".join(out)
+
+
+def _print_summary(data, indent: str = "  ", depth: int = 0) -> None:
+    """A dict from bench.py, printed as key: value lines (nested two deep;
+    lists shown by length) — its shape belongs to bench.py, not this file."""
+    if not isinstance(data, dict):
+        if data is not None:
+            print(f"{indent}{data}")
+        return
+    for key, value in data.items():
+        if isinstance(value, dict) and depth < 2:
+            print(f"{indent * (depth + 1)}{key}:")
+            _print_summary(value, indent, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            shown = ", ".join(str(v) for v in value) if all(
+                isinstance(v, (str, int, float)) for v in value) else f"{len(value)} item(s)"
+            print(f"{indent * (depth + 1)}{key}: {_trim(shown, 200)}")
+        else:
+            print(f"{indent * (depth + 1)}{key}: {_trim(value, 200)}")
+
+
+def _save_try(result, video_id: str) -> Path | None:
+    """The full EngineResult as JSON under the engine's tries/ directory: the
+    printed tables truncate, this keeps every draft, critique and ordering."""
+    import dataclasses
+
+    from app.clip_engine import engine_dir, util
+
+    try:
+        data = dataclasses.asdict(result) if dataclasses.is_dataclass(result) else dict(vars(result))
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        return util.atomic_write_json(
+            engine_dir() / "tries" / f"{video_id}-{result.setup}-{stamp}.json", data)
+    except Exception as exc:
+        log.warning("Could not save the engine result: %s", exc)
+        return None
+
+
+def cmd_clip_engine_try(args) -> None:
+    """Run the clip engine on one archived video and print everything it did.
+
+    Dry by default — nothing is written to the database. ``--log`` writes the
+    top picks as the video's pending suggestions, exactly like a Re-suggest in
+    the dashboard (the previous pending ones are superseded). The video is
+    added to the bench's touched.json either way."""
+    from app import clip_engine, spend
+    from app.clip_engine import engine, jobs
+    from app.config import load_settings
+    from app.db import init_db, session_scope
+
+    settings = load_settings()
+    setup = _engine_setup(settings, args.setup)
+    window = None
+    if args.section:
+        start, end = args.section
+        if end <= start:
+            raise SystemExit(f"--section END must be after START ({_clock(start)} >= {_clock(end)}).")
+        window = {"start": start, "end": end}
+
+    init_db()
+    with session_scope() as session:
+        pk = _resolve_candidate_pk(session, args.id)
+        session.rollback()
+    inputs = jobs.prepare_inputs(pk, window=window)
+    cand = dict(inputs.get("candidate") or {})
+    if not cand:
+        raise SystemExit(f"Video {pk} not found.")
+    if cand.get("status") != "archived":
+        raise SystemExit(f"Video {pk} isn't archived (status {cand.get('status')!r}); "
+                         "the engine needs the downloaded video and its transcript.")
+    transcript, words = _load_texts(cand)
+    if not transcript:
+        raise SystemExit(f"Video {pk} has no transcript on this machine "
+                         f"({cand.get('transcript_path') or 'no transcript_path'}).")
+    for note in inputs.get("notes") or []:
+        print(f"note: {note}")
+    _mark_touched([cand.get("video_id")], by="clip-engine try")
+
+    duration = _duration(cand)
+    print(f"Video {pk} ({cand.get('video_id')}): {_trim(cand.get('title'), 90)}")
+    detail = [f"setup {setup}", f"{len(words):,} words" if words else "no word stream (rougher cuts)"]
+    if duration:
+        detail.append(f"{_clock(duration, 0)} long")
+        try:
+            detail.append(f"estimate ~${engine.estimate_usd(setup, settings, duration):.2f}")
+        except Exception:
+            pass
+    if window:
+        detail.append(f"section {_clock(window['start'])}-{_clock(window['end'])}")
+    try:
+        cap = float(clip_engine.opt(settings, "clip_engine.daily_usd", 5.0))
+        detail.append(f"engine spend today ${spend.bucket_spend('engine'):.2f} of ${cap:.2f}")
+    except Exception:
+        pass
+    print(" · ".join(detail))
+
+    meter = engine.CostMeter("engine")
+    started = time.monotonic()
+    timeout = float(clip_engine.opt(settings, "clip_engine.job_timeout_seconds", 1800))
+
+    def progress(label: str) -> None:
+        _say(f"[{time.monotonic() - started:6.1f}s] {label}")
+
+    with _inflight_source(cand, key=_inflight_key(cand.get("video_id") or str(pk))) as source:
+        try:
+            result = engine.run(
+                setup=setup, settings=settings, brand=clip_engine.brand(), playbook=None,
+                video_id=cand.get("video_id") or "", title=cand.get("title") or "",
+                description=cand.get("description") or "", duration=duration,
+                source=source, words=words, transcript=transcript,
+                context=inputs.get("context") or {}, rejected=inputs.get("rejected") or [],
+                examples=inputs.get("examples") or [], used=inputs.get("used") or [],
+                window=window, section_topic="", keep=None, meter=meter, progress=progress,
+                cancel=None, deadline=started + timeout)
+        except KeyboardInterrupt:
+            print("\nInterrupted. Spent so far:")
+            print("\n".join(_cost_lines(meter.total, meter.by_stage)))
+            raise SystemExit(130) from None
+        except Exception as exc:
+            print(f"\nThe engine run failed: {type(exc).__name__}: {exc}")
+            print("\n".join(_cost_lines(meter.total, meter.by_stage)))
+            raise SystemExit(1) from None
+
+    print()
+    print(format_try_report(result))
+    saved = _save_try(result, cand.get("video_id") or str(pk))
+    if saved:
+        print(f"\nFull result: {saved}")
+    if not args.log:
+        print("Dry run: nothing written. Add --log to save the top picks as suggestions.")
+    elif not result.top:
+        print(f"Nothing to log (outcome: {result.outcome}); the video's pending "
+              "suggestions are unchanged.")
+    else:
+        ids = jobs.write_result(pk, result, window=window)
+        print(f"Logged {len(ids)} suggestion(s) {list(ids)} — see /video/{pk}")
+
+
+def cmd_clip_engine_shotlog(args) -> None:
+    """Build a video's shot log (or show the cached one) and print it."""
+    from app import clip_engine
+    from app.clip_engine import engine, shotlog
+    from app.config import load_settings
+    from app.db import init_db
+
+    init_db()
+    settings = load_settings()
+    perceiver = args.perceiver or clip_engine.ROLES.get(
+        clip_engine.configured_setup(settings), {}).get("perceiver", "gemini")
+    model = clip_engine.model_for(settings, perceiver, "perceiver")
+    cand = _read_candidate(args.id)
+    video_id = cand.get("video_id") or ""
+
+    cached = None if args.force else shotlog.load_cached(video_id, perceiver, model)
+    if cached is not None:
+        print(format_shotlog_report(cached, video_id=video_id))
+        print(f"\nCached (no new spend): {shotlog.cache_path(video_id, perceiver, model)}")
+        return
+
+    _require_provider(perceiver)
+    transcript, words = _load_texts(cand)
+    if not transcript and not words:
+        print("note: no transcript on this machine; the log will rest on the picture and sound alone")
+    meter = engine.CostMeter("engine")
+    print(f"Logging {video_id} with {perceiver} ({model})…", flush=True)
+    with _inflight_source(cand, key=_inflight_key(video_id or str(cand.get("id")))) as source:
+        try:
+            shot_log = shotlog.build(
+                video_id=video_id, source=source, perceiver=perceiver, settings=settings,
+                brand=clip_engine.brand(), title=cand.get("title") or "",
+                description=cand.get("description") or "", duration=_duration(cand),
+                words=words, transcript=transcript, window=None, meter=meter,
+                force=args.force)
+        except Exception as exc:
+            print(f"Logging failed: {type(exc).__name__}: {exc}")
+            print("\n".join(_cost_lines(meter.total, meter.by_stage)))
+            raise SystemExit(1) from None
+    print(format_shotlog_report(shot_log, video_id=video_id))
+    print()
+    print("\n".join(_cost_lines(meter.total, meter.by_stage)))
+    print(f"Cached at {shotlog.cache_path(video_id, perceiver, model)}")
+
+
+def _backup_playbook(path: Path) -> Path | None:
+    """Copy a playbook about to be overwritten to the engine's playbooks/
+    directory (outside the git-tracked config/), so a refresh never loses
+    hand edits."""
+    if not path.is_file():
+        return None
+    from app.clip_engine import engine_dir, util
+
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return util.atomic_copy(path, engine_dir() / "playbooks" / f"clip_playbook-{stamp}.yaml")
+
+
+def cmd_clip_engine_playbook(args) -> None:
+    """Print the playbook the engine runs with, or rebuild it from this
+    account's own first airings (``--refresh``: one Claude call)."""
+    from app.clip_engine import playbook
+
+    if args.model and not args.refresh:
+        raise SystemExit("--model only applies with --refresh.")
+    if not args.refresh:
+        pb = playbook.load()
+        path = playbook.path()
+        where = str(path) if path.is_file() else "the built-in default (no config/clip_playbook.yaml)"
+        print(f"Playbook: {where} · fingerprint {playbook.fingerprint(pb)}\n")
+        print(playbook.render(pb))
+        return
+
+    from app.clip_engine import engine
+    from app.config import load_settings
+    from app.db import init_db, session_scope
+
+    _require_provider("claude")
+    init_db()
+    settings = load_settings()
+    meter = engine.CostMeter("engine")
+    print("Reading this account's first airings and asking Claude for a playbook "
+          "(a minute or two)…", flush=True)
+    try:
+        with session_scope() as session:
+            try:
+                pb = playbook.generate(session, settings, model=args.model, meter=meter)
+            finally:
+                session.rollback()
+    except Exception as exc:
+        raise SystemExit(f"Playbook generation failed ({type(exc).__name__}: {exc}); "
+                         "the current playbook is unchanged.") from None
+    backup = _backup_playbook(playbook.path())
+    path = playbook.save(pb)
+    print(f"Saved {path} (fingerprint {playbook.fingerprint(pb)}, cost ${meter.total:.4f}).")
+    if backup:
+        print(f"The previous playbook is at {backup}.")
+    print("Bench runs strip the example titles, but the rules were learned from these "
+          "posts: judge the engine on videos archived after today (docs/clip-engine.md).\n")
+    print(playbook.render(pb))
+
+
+def _bench():
+    """bench.py, with this process's spend booked to the "bench" bucket — kept
+    out of the dashboard's daily budget and the engine's own cap."""
+    from app import spend
+    from app.clip_engine import bench
+
+    spend.set_bucket("bench")
+    return bench
+
+
+def _settings_list(value) -> list[str]:
+    if isinstance(value, str):
+        return _csv(value)
+    return [str(v).strip() for v in (value or []) if str(v).strip()]
+
+
+def _bench_run_view(bench, name: str) -> dict:
+    from app.web.clip_bench import run_view
+
+    for entry in bench.list_runs() or []:
+        if isinstance(entry, dict) and str(entry.get("name") or "") == name:
+            return run_view(entry)
+    raise SystemExit(f"No bench run named {name!r} (see: python run.py clipbench list).")
+
+
+def cmd_clipbench_run(args) -> None:
+    """Replay past videos through each arm and save every result (resumable:
+    rerun the same command to continue; finished results are kept)."""
+    from app import clip_engine
+    from app.config import load_settings
+    from app.db import init_db
+
+    bench = _bench()
+    settings = load_settings()
+    arms = args.arms or _settings_list(
+        clip_engine.opt(settings, "clip_engine.bench.arms", ["gemini", "transcript"]))
+    if not arms:
+        raise SystemExit("No arms to run (--arms gemini,transcript).")
+    for spec in arms:
+        try:
+            bench.parse_arm(spec)
+        except ValueError as exc:
+            raise SystemExit(f"Bad arm {spec!r}: {exc}") from None
+    limit = args.limit if args.limit is not None else int(
+        clip_engine.opt(settings, "clip_engine.bench.limit", 60))
+    max_usd = args.max_usd if args.max_usd is not None else float(
+        clip_engine.opt(settings, "clip_engine.bench.max_usd", 40))
+
+    init_db()
+    candidate_ids = _resolve_candidate_pks(args.candidate) if args.candidate else None
+    picked = f"{len(candidate_ids)} hand-picked videos" if candidate_ids else f"up to {limit} videos"
+    print(f"Bench run {args.name!r}: arms {', '.join(arms)} · {picked} · seed {args.seed} · "
+          f"stops once results pass ${max_usd:.2f}", flush=True)
+    try:
+        summary = bench.run(
+            args.name, arms=arms, limit=limit, max_usd=max_usd, seed=args.seed,
+            workers=args.workers, candidate_ids=candidate_ids,
+            require_words=not args.allow_no_words, negatives=args.negatives,
+            new_version=args.new_version, keep_errors=args.keep_errors,
+            settings=settings, log=_say)
+    except KeyboardInterrupt:
+        print("\nInterrupted. Finished results are kept: run the same command again to resume.")
+        raise SystemExit(130) from None
+    except ValueError as exc:
+        raise SystemExit(f"The bench refused: {exc}") from None
+    print("\nDone:")
+    _print_summary(summary)
+    print(f"\nNext: python run.py clipbench pairs --name {args.name}")
+
+
+def cmd_clipbench_pairs(args) -> None:
+    """Render the blind A/B pairs of a run for the judging page."""
+    from app import clip_engine
+    from app.config import current_workspace, load_settings
+
+    bench = _bench()
+    settings = load_settings()
+    height = int(clip_engine.opt(settings, "clip_engine.bench.judge_height", 540))
+    try:
+        n = bench.prepare_pairs(args.name, height=height)
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(f"Couldn't prepare pairs for {args.name!r}: {exc}") from None
+    port = current_workspace()["port"]
+    print(f"{n} item(s) ready to judge: http://127.0.0.1:{port}/clip-bench?run={args.name} "
+          "(Analytics -> Clip bench).")
+
+
+def cmd_clipbench_report(args) -> None:
+    bench = _bench()
+    try:
+        print(bench.report(args.name))
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(f"No report for {args.name!r}: {exc}") from None
+
+
+def cmd_clipbench_reveal(args) -> None:
+    """Unlock a run's results. Irreversible: judging closes for the run."""
+    bench = _bench()
+    run = _bench_run_view(bench, args.name)
+    if not run["revealed"]:
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise SystemExit("Revealing closes judging for this run for good; "
+                                 "pass --yes to confirm.")
+            answer = input(f"{run['judged']} of {run['total']} judged. Reveal {args.name!r} "
+                           "and close its judging? [y/N] ")
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Not revealed.")
+                return
+        try:
+            bench.reveal(args.name)
+        except ValueError as exc:
+            raise SystemExit(f"The reveal was refused: {exc}") from None
+    else:
+        print(f"{args.name!r} was already revealed.\n")
+    print(bench.report(args.name))
+
+
+def cmd_clipbench_critic_check(args) -> None:
+    """How well does the critic agree with your "gripping?" labels? Runs the
+    cold critic over labelled posted clips (about $0.01 a clip on Gemini)."""
+    from app.config import load_settings
+    from app.db import init_db
+
+    bench = _bench()
+    roles = tuple(args.roles or ("gemini",))
+    for role in roles:
+        _require_provider(role)
+    init_db()
+    settings = load_settings()
+    result = bench.critic_check(args.name, roles=roles, limit=args.limit,
+                                settings=settings, log=_say)
+    print("\nCritic check:")
+    _print_summary(result)
+
+
+def cmd_clipbench_list(_args) -> None:
+    from app.web.clip_bench import run_view
+
+    bench = _bench()
+    runs = [run_view(r) for r in (bench.list_runs() or []) if isinstance(r, dict)]
+    if not runs:
+        print("No bench runs yet. Start one: "
+              "python run.py clipbench run --name dev-1 --seed dev --limit 10")
+        return
+    print(f"{'run':<24} {'seed':<6} {'arms':<34} {'videos':>6} {'judged':>9}  status")
+    for r in runs:
+        if r["revealed"]:
+            status = "revealed"
+        elif r["total"] and r["judged"] >= r["total"]:
+            status = "ready to reveal"
+        else:
+            status = "judging" if r["total"] else "needs pairs"
+        seed = "picked" if r["mode"] == "hand-picked" else (r["seed"] or "-")
+        judged = f"{r['judged']}/{r['total']}"
+        print(f"{r['name']:<24} {seed:<6} {_trim(', '.join(r['arms']), 34):<34} "
+              f"{r['videos']:>6} {judged:>9}  {status}")
+
+
+def _is_file(path) -> bool:
+    return bool(path) and Path(str(path)).is_file()
+
+
+def _free_gb_near(path: Path | None) -> float:
+    """Free space on the disk that would hold ``path``. media.disk_free_gb
+    measures the nearest existing parent (the file and its folder may not
+    exist yet) and answers 0.0 when it can't tell, so the guard stops."""
+    from app.clip_engine import media
+    from app.config import DATA_DIR
+
+    return float(media.disk_free_gb(Path(path) if path else DATA_DIR))
+
+
+def _missing_word_streams(session) -> list[dict]:
+    """Archived videos whose transcript file is on disk but whose Whisper word
+    stream isn't. Videos with an exported clip come first (they are the bench's
+    pool, and the account's celebrity hits predate word streams), then newest."""
+    from sqlalchemy import select
+
+    from app.models import STATUS_ARCHIVED, Candidate, Cut, ThreadsPost
+
+    rows = session.execute(
+        select(Candidate.id, Candidate.video_id, Candidate.title, Candidate.transcript_path,
+               Candidate.word_transcript_path, Candidate.local_video_path,
+               Candidate.source_object_key, Candidate.archived_at)
+        .where(Candidate.status == STATUS_ARCHIVED, Candidate.transcript_path != "")).all()
+    exported = set(session.execute(
+        select(Cut.candidate_pk).where(Cut.trimmed_clip_path != "")).scalars())
+    exported |= set(session.execute(
+        select(ThreadsPost.candidate_pk).where(ThreadsPost.status == "published",
+                                               ThreadsPost.candidate_pk.is_not(None))).scalars())
+    out = []
+    for r in rows:
+        if not _is_file(r.transcript_path) or _is_file(r.word_transcript_path):
+            continue
+        local = Path(r.local_video_path) if r.local_video_path else None
+        out.append({
+            "id": int(r.id), "video_id": r.video_id, "title": r.title or "",
+            "exported": r.id in exported, "archived_at": r.archived_at,
+            "source": ("local" if local is not None and local.is_file()
+                       else "storage" if r.source_object_key else "none"),
+        })
+
+    def order(item: dict):
+        stamp = item["archived_at"].timestamp() if item["archived_at"] else 0.0
+        return (not item["exported"], -stamp, -item["id"])
+
+    out.sort(key=order)
+    return out
+
+
+def _add_word_stream(pk: int, settings, *, min_free_gb: float) -> tuple[str, str]:
+    """Whisper one video and record its word stream. Returns ``(outcome,
+    detail)`` with outcome added | no_words | failed | skipped | stop.
+
+    Words only: the transcript itself (transcript_path, transcript_text) is
+    never touched; word_transcript_path is set and transcription_method
+    "captions" becomes "captions+whisper". A source this restored from
+    storage is deleted again afterwards."""
+    from app import scrape
+    from app.db import session_scope
+    from app.models import Candidate
+    from app.offload import SourceUnavailable, ensure_local
+
+    with session_scope() as session:
+        c = session.get(Candidate, pk)
+        fields = None if c is None else {
+            "video_id": c.video_id, "transcript_path": c.transcript_path or "",
+            "word_transcript_path": c.word_transcript_path or "",
+            "local": c.local_video_path or "", "key": c.source_object_key or ""}
+        session.rollback()
+    if fields is None or not _is_file(fields["transcript_path"]):
+        return "skipped", "its transcript is gone"
+    if _is_file(fields["word_transcript_path"]):
+        return "skipped", "it has a word stream now"
+
+    local = Path(fields["local"]) if fields["local"] else None
+    on_disk = local is not None and local.is_file() and local.stat().st_size > 0
+    if on_disk:
+        source = local
+    else:
+        if not (fields["local"] and fields["key"]):
+            return "skipped", "no source video on disk or in storage"
+        free = _free_gb_near(local)
+        if free < min_free_gb:
+            return "stop", f"only {free:.1f} GB free (clip_engine.min_free_gb is {min_free_gb:g})"
+        try:
+            source = ensure_local(fields["local"], fields["key"])
+        except SourceUnavailable as exc:
+            return "skipped", str(exc)
+        except Exception as exc:  # storage/network trouble: this one fails, the batch goes on
+            log.warning("Restoring %s failed: %s", fields["video_id"], exc)
+            return "failed", f"couldn't restore the source: {type(exc).__name__}: {exc}"
+    try:
+        _segments, words, tier = scrape.transcribe_word_stream(source, settings)
+    except Exception as exc:
+        log.warning("Whisper failed for %s: %s", fields["video_id"], exc)
+        return "failed", f"Whisper failed: {exc}"
+    finally:
+        if not on_disk:
+            try:
+                Path(source).unlink(missing_ok=True)
+            except OSError as exc:
+                log.warning("Could not delete restored source %s: %s", source, exc)
+    if not words:
+        return "no_words", "Whisper heard no words"
+
+    try:
+        transcript_dir = Path(fields["transcript_path"]).parent
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        word_path = scrape._write_word_transcript(words, transcript_dir, fields["video_id"])
+        with session_scope() as session:
+            c = session.get(Candidate, pk)
+            if c is None:
+                return "failed", "the video was deleted meanwhile"
+            c.word_transcript_path = str(word_path)
+            if (c.transcription_method or "") == "captions":
+                c.transcription_method = "captions+whisper"
+    except Exception as exc:
+        log.warning("Saving the word stream of %s failed: %s", fields["video_id"], exc)
+        return "failed", f"couldn't save the word stream: {type(exc).__name__}: {exc}"
+    return "added", f"{len(words):,} words ({tier})"
+
+
+def cmd_retranscribe(args) -> None:
+    """Add Whisper word streams to archived videos that have a transcript but
+    no word file — mostly videos archived before word streams existed, which
+    the bench otherwise has to leave out.
+
+    WORDS ONLY. ``scrape.retranscribe_candidate`` is not used: it re-fetches
+    YouTube captions and rewrites the transcript, and captions that have since
+    vanished would quietly be replaced by Whisper segments. Here the existing
+    transcript is never touched. No DB session is open during a download or a
+    Whisper run, sources restored from storage are deleted again after use,
+    and the batch stops when free disk drops below clip_engine.min_free_gb."""
+    from app import clip_engine
+    from app.config import load_settings
+    from app.db import init_db, session_scope
+
+    init_db()
+    settings = load_settings()
+    min_free_gb = float(clip_engine.opt(settings, "clip_engine.min_free_gb", 10))
+    with session_scope() as session:
+        todo = _missing_word_streams(session)
+        session.rollback()
+    if args.limit:
+        todo = todo[:args.limit]
+    if not todo:
+        print("Every archived video with a transcript on this machine has a word stream.")
+        return
+    if args.dry_run:
+        for item in todo:
+            mark = " (has an exported clip)" if item["exported"] else ""
+            print(f"  {item['id']:>6} {item['video_id']:<12} source: {item['source']:<7} "
+                  f"{_trim(item['title'], 60)}{mark}")
+        print(f"Would add word streams to {len(todo)} video(s). Nothing changed.")
+        return
+
+    counts = {"added": 0, "no_words": 0, "failed": 0, "skipped": 0}
+    stopped = ""
+    interrupted = False
+    try:
+        for i, item in enumerate(todo, 1):
+            started = time.monotonic()
+            _say(f"[{i}/{len(todo)}] {item['video_id']} {_trim(item['title'], 60)}")
+            outcome, detail = _add_word_stream(item["id"], settings, min_free_gb=min_free_gb)
+            if outcome == "stop":
+                stopped = f"{detail}. Free some space and run it again."
+                break
+            counts[outcome] += 1
+            _say(f"    {outcome.replace('_', ' ')}: {detail} ({time.monotonic() - started:.0f} s)")
+    except KeyboardInterrupt:
+        interrupted = True
+        stopped = "interrupted. Finished videos are saved; run it again to continue."
+    print(f"\nAdded word streams to {counts['added']} video(s); {counts['no_words']} heard no "
+          f"words; {counts['failed']} failed; {counts['skipped']} skipped.")
+    if stopped:
+        print(f"Stopped early: {stopped}")
+    if interrupted:
+        raise SystemExit(130)
+
+
+def _add_clip_engine_parsers(sub, common) -> None:
+    """``clip-engine``, ``clipbench`` and ``retranscribe``. ``parents=[common]``
+    sits on the leaf parsers only: on a group AND its leaf, the leaf's default
+    would overwrite a --workspace given at group level with None."""
+    p = sub.add_parser("clip-engine",
+                       help="try the clip engine on one video; inspect shot logs and the playbook")
+    esub = p.add_subparsers(dest="engine_command", required=True)
+
+    ep = esub.add_parser("try", parents=[common],
+                         help="run the engine on one archived video and print every draft "
+                              "(writes nothing unless --log)")
+    ep.add_argument("id", help="candidate id or YouTube video id")
+    ep.add_argument("--setup", choices=_ENGINE_SETUPS, default=None,
+                    help="engine setup (default: clip_engine.setup)")
+    ep.add_argument("--section", nargs=2, type=_parse_time, metavar=("START", "END"), default=None,
+                    help="suggest inside this stretch only, like 'Suggest a clip here' "
+                         "(seconds or m:ss)")
+    ep.add_argument("--log", action="store_true",
+                    help="save the top picks as the video's pending suggestions, like Re-suggest")
+    ep.set_defaults(func=cmd_clip_engine_try)
+
+    ep = esub.add_parser("shotlog", parents=[common],
+                         help="build (or show the cached) shot log of a video")
+    ep.add_argument("id", help="candidate id or YouTube video id")
+    ep.add_argument("--perceiver", choices=_CRITIC_ROLES, default=None,
+                    help="who logs the video (default: the configured setup's perceiver)")
+    ep.add_argument("--force", action="store_true",
+                    help="log it again even when a cached log exists (paid again)")
+    ep.set_defaults(func=cmd_clip_engine_shotlog)
+
+    ep = esub.add_parser("playbook", parents=[common],
+                         help="print the clip playbook; --refresh rebuilds it from your posts")
+    ep.add_argument("--refresh", action="store_true",
+                    help="regenerate config/clip_playbook.yaml with Claude (one call; the old "
+                         "file is backed up)")
+    ep.add_argument("--model", default=None, metavar="M",
+                    help="model for --refresh (default: the Claude editor model)")
+    ep.set_defaults(func=cmd_clip_engine_playbook)
+
+    p = sub.add_parser("clipbench", help="replay benchmark for the clip engine (docs/clip-engine.md)")
+    bsub = p.add_subparsers(dest="bench_command", required=True)
+
+    bp = bsub.add_parser("run", parents=[common],
+                         help="replay past videos through each arm (resumable)")
+    bp.add_argument("--name", required=True, type=_run_name, metavar="N",
+                    help="run name (a folder under data/clipbench)")
+    bp.add_argument("--arms", type=_csv, default=None, metavar="A,B",
+                    help="comma list of arms, e.g. gemini,transcript or "
+                         "gemini+editor_thinking=HIGH (default: clip_engine.bench.arms)")
+    bp.add_argument("--limit", type=_int_at_least(1), default=None, metavar="N",
+                    help="videos to sample (default: clip_engine.bench.limit)")
+    bp.add_argument("--max-usd", type=_positive_float, default=None, metavar="USD",
+                    help="stop after the video whose results pass this spend "
+                         "(default: clip_engine.bench.max_usd)")
+    bp.add_argument("--seed", choices=("test", "dev"), default="test",
+                    help="'dev' while tuning; 'test' (default) for the decision: it only draws "
+                         "videos no try or earlier run has touched")
+    bp.add_argument("--workers", type=_int_at_least(1), default=1, metavar="N",
+                    help="videos replayed at once (default 1)")
+    bp.add_argument("--candidate", action="extend", nargs="+", default=None, metavar="ID",
+                    help="hand-pick videos (candidate or YouTube ids) instead of sampling; "
+                         "a hand-picked run is never the benchmark")
+    bp.add_argument("--allow-no-words", action="store_true",
+                    help="also sample videos without a Whisper word stream")
+    bp.add_argument("--negatives", type=_int_at_least(0), default=0, metavar="K",
+                    help="add K archived videos you never cut, judged 'would you post this?'")
+    bp.add_argument("--new-version", action="store_true",
+                    help="resume after prompts or settings changed; new results get new arm labels")
+    bp.add_argument("--keep-errors", action="store_true",
+                    help="don't retry videos whose earlier attempt errored")
+    bp.set_defaults(func=cmd_clipbench_run)
+
+    bp = bsub.add_parser("pairs", parents=[common],
+                         help="render a run's blind A/B pairs for the judging page")
+    bp.add_argument("--name", required=True, type=_run_name, metavar="N")
+    bp.set_defaults(func=cmd_clipbench_pairs)
+
+    bp = bsub.add_parser("report", parents=[common],
+                         help="print a run's report (results only after the reveal)")
+    bp.add_argument("--name", required=True, type=_run_name, metavar="N")
+    bp.set_defaults(func=cmd_clipbench_report)
+
+    bp = bsub.add_parser("reveal", parents=[common],
+                         help="unlock a run's results and close its judging (irreversible)")
+    bp.add_argument("--name", required=True, type=_run_name, metavar="N")
+    bp.add_argument("--yes", action="store_true", help="don't ask for confirmation")
+    bp.set_defaults(func=cmd_clipbench_reveal)
+
+    bp = bsub.add_parser("critic-check", parents=[common],
+                         help="run the critic over your labelled posted clips and compare "
+                              "with your 'gripping?' labels")
+    bp.add_argument("--roles", type=_critic_roles, default=None, metavar="R,R",
+                    help="critics to check: gemini, claude (default: gemini)")
+    bp.add_argument("--limit", type=_int_at_least(1), default=40, metavar="N",
+                    help="clips to check (default 40)")
+    bp.add_argument("--name", type=_run_name, default=None, metavar="N",
+                    help="file the check under this bench run")
+    bp.set_defaults(func=cmd_clipbench_critic_check)
+
+    bp = bsub.add_parser("list", parents=[common], help="bench runs and their judging progress")
+    bp.set_defaults(func=cmd_clipbench_list)
+
+    p = sub.add_parser("retranscribe", parents=[common],
+                       help="add Whisper word streams to archived videos that lack them "
+                            "(transcripts untouched)")
+    p.add_argument("--missing-words", action="store_true", required=True,
+                   help="videos with a transcript but no word-stream file (the only mode)")
+    p.add_argument("--limit", type=_int_at_least(1), default=None, metavar="N",
+                   help="process at most N videos")
+    p.add_argument("--dry-run", action="store_true", help="list them, change nothing")
+    p.set_defaults(func=cmd_retranscribe)
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -917,6 +2078,12 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=None, help="act on at most this many files")
     p.set_defaults(func=cmd_offload)
 
+    _add_clip_engine_parsers(sub, common)
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     # Apply the workspace choice BEFORE any app.* import resolves it.

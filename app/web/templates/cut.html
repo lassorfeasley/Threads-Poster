@@ -247,6 +247,17 @@ const otherSegments = {{ other_cut_segments | tojson }};
 // normal editing tool already works. There is deliberately no second editor.
 let suggestedClips = {{ suggested_clips | tojson }};
 let hoveredProposal = null;   // proposal id emphasized on the waveform
+// The clip engine's run for this video while it is queued or running, else
+// null. It suggests in the background (minutes, not seconds), so the panel
+// shows where it is and refreshes itself when it ends. A run belongs to one
+// server process: a different boot id means a restart killed it.
+let engineJob = {{ engine_job | tojson }};
+let engineBoot = engineJob ? engineJob.boot_id : null;
+let engineScope = null;        // {view, chapter} of the Suggest press that started it
+let enginePollTimer = null;
+// Preview players by proposal id. The list is rebuilt on every edit; moving
+// the same <video> into the new row in the same task keeps it playing.
+const proposalVideos = new Map();
 // The video's chapters, if it has been indexed: [{start, end, topic, summary}]
 // tiling the whole timeline. Navigation only — nothing here edits a clip.
 let chapters = {{ chapters | tojson }};
@@ -1652,8 +1663,11 @@ wave.addEventListener('pointerup', () => {
 
 document.addEventListener('keydown', e => {
   const el = document.activeElement;
+  // A suggestion's preview player owns its keys (Space, arrows) while focused;
+  // the editor's own player is the one these shortcuts drive.
   const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-                        || el.tagName === 'SELECT' || el.isContentEditable);
+                        || el.tagName === 'SELECT' || el.isContentEditable
+                        || (el.tagName === 'VIDEO' && el !== player));
 
   if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
     if (typing) return;
@@ -1818,19 +1832,34 @@ function claimedRanges() {
   return normalizeRanges(otherSegments.concat(segments));
 }
 
+// Segments keep their PLAY order (a suggestion may open on a shot from later
+// in the video): only the claimed ranges are sorted and merged. Each segment
+// loses the claimed time inside it; a segment split in two keeps its pieces in
+// time order, in its own slot. Only pieces a claim actually cut are held to
+// PROPOSAL_MIN_FRAGMENT: a short segment nothing touches (the clip engine
+// keeps deliberate 1-1.5 s shots) passes as it is, so an untouched proposal
+// never reads as trimmed. Mirrors clip_proposals.subtract_play_order.
 function visibleProposal(clip) {
   const original = clip.segments.reduce((n, s) => n + (s.end - s.start), 0);
-  let pieces = normalizeRanges(clip.segments);
-  claimedRanges().forEach(u => {
-    const next = [];
-    pieces.forEach(p => {
-      if (u.end <= p.start || u.start >= p.end) { next.push(p); return; }
-      if (u.start > p.start) next.push({ start: p.start, end: u.start });
-      if (u.end < p.end) next.push({ start: u.end, end: p.end });
+  const claimed = claimedRanges();
+  let pieces = [];
+  clip.segments.forEach(seg => {
+    const whole = { start: +seg.start, end: +seg.end };
+    if (!(whole.end > whole.start)) return;
+    let parts = [whole];
+    claimed.forEach(u => {
+      const next = [];
+      parts.forEach(p => {
+        if (u.end <= p.start || u.start >= p.end) { next.push(p); return; }
+        if (u.start > p.start) next.push({ start: p.start, end: u.start });
+        if (u.end < p.end) next.push({ start: u.end, end: p.end });
+      });
+      parts = next;
     });
-    pieces = next;
+    const untouched = parts.length === 1 && parts[0] === whole;
+    pieces = pieces.concat(untouched ? parts
+                                     : parts.filter(p => p.end - p.start >= PROPOSAL_MIN_FRAGMENT));
   });
-  pieces = pieces.filter(p => p.end - p.start >= PROPOSAL_MIN_FRAGMENT);
   const seconds = pieces.reduce((n, p) => n + (p.end - p.start), 0);
   if (seconds < PROPOSAL_MIN_REMAINING) return { segments: [], seconds: 0, trimmed: true };
   return { segments: pieces, seconds, trimmed: seconds < original - 0.05 };
@@ -1877,10 +1906,12 @@ function renderClipProposals() {
   // leads there — and offers a pass when nothing is waiting, rather than
   // vanishing. Once the clip has segments it steps back to a quiet list.
   const empty = !segments.length;
+  const working = engineActive();
   panel.classList.toggle('is-lead', empty && live.length > 0);
   // The reason strip outlives the dismissal that emptied the list — that's
-  // exactly the moment it exists for — so it keeps the panel open too.
-  panel.hidden = !live.length && !reasonAsk && !empty;
+  // exactly the moment it exists for — so it keeps the panel open too. So
+  // does a run in progress: its status line lives here.
+  panel.hidden = !live.length && !reasonAsk && !empty && !working;
   // The key answers for what's painted on the waveform, which is every pending
   // proposal — not just the ones the panel is listing right now.
   if (legend) {
@@ -1896,17 +1927,81 @@ function renderClipProposals() {
 
   list.innerHTML = '';
   if (!panel.hidden) {
+    if (working) list.appendChild(engineStatusLine());
     renderReasonAsk(list);
     live.forEach(({ clip, shown }) => list.appendChild(proposalCard(clip, shown)));
-    if (!live.length && !reasonAsk) list.appendChild(proposalEmpty());
+    if (!live.length && !reasonAsk && !working) list.appendChild(proposalEmpty());
   }
   renderChapters();   // which chapters hold a suggestion just changed
+}
+
+// "Watching the video… <stage>": the engine's progress, from engineJob.
+function engineStatusLine() {
+  const line = document.createElement('div');
+  line.className = 'engine-status';
+  line.setAttribute('role', 'status');
+  line.textContent = engineStatusText(engineJob);
+  return line;
+}
+
+function engineStatusText(job) {
+  const n = (job && job.queue_position) || 0;
+  const behind = n > 0 ? ` · queued behind ${n} video${n === 1 ? '' : 's'}` : '';
+  const stage = job && job.state === 'running' && job.stage ? ` ${job.stage}` : '';
+  return `Watching the video…${stage}${behind}`;
+}
+
+// Its own <video>, reused across re-renders (see proposalVideos).
+function proposalVideo(clip) {
+  let video = proposalVideos.get(clip.id);
+  if (!video || video.getAttribute('src') !== clip.preview) {
+    video = document.createElement('video');
+    video.src = clip.preview;
+    if (clip.thumb) video.poster = clip.thumb;
+    video.preload = 'none';
+    video.controls = true;
+    video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    proposalVideos.set(clip.id, video);
+  }
+  return video;
+}
+
+function forgetProposalVideos() {
+  const live = new Set(suggestedClips.map(c => c.id));
+  for (const [id, video] of proposalVideos) {
+    if (!live.has(id)) { video.pause(); proposalVideos.delete(id); }
+  }
+}
+
+// What the clip engine's critic made of the clip, on one line — written about
+// the clip as rendered, so it goes once the card offers less than that.
+function proposalCritic(clip, shown) {
+  const e = clip.engine || {};
+  if (!e.setup) return '';
+  if (!e.reviewed) {
+    return '<div class="proposal-critic is-unreviewed">Not reviewed (critic unavailable)</div>';
+  }
+  if (shown.trimmed) return '';
+  const reason = e.stop_reason ? `: ${escapeHtml(e.stop_reason)}` : '';
+  let line = (e.stops_scroll ? 'Stops the scroll' : 'Wouldn’t stop the scroll') + reason;
+  if (typeof e.bored_at === 'number') line += ` · Gets slow at ${txFmt(e.bored_at)}`;
+  const tip = [e.about ? `About: ${e.about}` : '', e.fix ? `Could be better: ${e.fix}` : '']
+    .filter(Boolean).join('\n');
+  return `<div class="proposal-critic ${e.stops_scroll ? 'is-good' : 'is-weak'}"
+    ${tip ? `title="${escapeHtml(tip)}"` : ''}>${line}</div>`;
 }
 
 // One suggestion: what it is, and the two things you can do with it. The card
 // itself plays the clip, because auditioning is the step that always comes
 // first and reading two timestamps is no way to judge one.
 function proposalCard(clip, shown) {
+  const e = clip.engine || {};
+  // The engine's own render plays in the card — but only while the card offers
+  // exactly what was rendered; a trimmed suggestion previews in the editor.
+  const playable = !!clip.preview && !shown.trimmed;
+  const archetype = e.archetype && e.archetype !== 'other'
+    ? `<span class="proposal-archetype">${escapeHtml(e.archetype)}</span>` : '';
   const row = document.createElement('div');
   row.className = 'proposal-row' + (hoveredProposal === clip.id ? ' hot' : '');
   row.tabIndex = 0;
@@ -1921,13 +2016,16 @@ function proposalCard(clip, shown) {
       </svg>
     </button>
     <div class="proposal-top">
-      ${clip.thumb ? `<span class="proposal-thumb"><img src="${clip.thumb}" alt="" loading="lazy"
+      ${clip.thumb && !playable ? `<span class="proposal-thumb"><img src="${clip.thumb}" alt="" loading="lazy"
             onerror="this.parentNode.remove()"><span class="proposal-play" aria-hidden="true">▶</span></span>` : ''}
       <div class="proposal-head">
         <div class="proposal-story">${escapeHtml(clip.story || 'Suggested clip')}</div>
-        <div class="proposal-meta meta">${proposalMeta(clip, shown)}</div>
+        <div class="proposal-meta meta">${archetype}${proposalMeta(clip, shown)}</div>
       </div>
     </div>
+    ${playable ? '<div class="proposal-video"></div>' : ''}
+    ${proposalCritic(clip, shown)}
+    ${e.topic_doubt ? `<div class="proposal-doubt">Topic doubtful: ${escapeHtml(e.topic_doubt)}</div>` : ''}
     ${clip.flag ? `<div class="rule-flag" title="This clip carries a claim your brand rules reject. Check its framing before it goes anywhere.">⚑ Check the framing: ${escapeHtml(clip.flag)}</div>` : ''}
     ${clip.opening ? `<div class="proposal-line"><span class="proposal-line-k">Opens</span>“${escapeHtml(clip.opening)}”</div>` : ''}
     ${clip.closing ? `<div class="proposal-line"><span class="proposal-line-k">Ends</span>“${escapeHtml(clip.closing)}”</div>` : ''}
@@ -1939,14 +2037,17 @@ function proposalCard(clip, shown) {
       <button type="button" class="sm ghost" data-act="preview"
               title="Play it through — nothing is applied">▶ Preview</button>
     </div>`;
+  if (playable) row.querySelector('.proposal-video').appendChild(proposalVideo(clip));
   row.addEventListener('mouseenter', () => { hoveredProposal = clip.id; row.classList.add('hot'); });
   row.addEventListener('mouseleave', () => { hoveredProposal = null; row.classList.remove('hot'); });
+  // Not on the card's own player: its controls are for it, not the editor's.
   row.addEventListener('click', ev => {
-    if (!ev.target.closest('[data-act]')) previewClipProposal(clip.id);
+    if (!ev.target.closest('[data-act], video, .proposal-video')) previewClipProposal(clip.id);
   });
   // Enter only: Space already belongs to the player, everywhere on this page.
+  // And only on the row itself, not a focused control inside it.
   row.addEventListener('keydown', ev => {
-    if (ev.key === 'Enter') { ev.preventDefault(); previewClipProposal(clip.id); }
+    if (ev.key === 'Enter' && ev.target === row) { ev.preventDefault(); previewClipProposal(clip.id); }
   });
   row.querySelectorAll('[data-act]').forEach(btn => {
     btn.addEventListener('click', ev => {
@@ -1959,8 +2060,9 @@ function proposalCard(clip, shown) {
   return row;
 }
 
-// Length, cut count, where it sits, and how sure the model was — the facts
-// that decide whether it's worth a listen, on one line.
+// Length, cut count and where it opens — the facts that decide whether it's
+// worth a listen, on one line. No confidence badge: the model's opinion of
+// itself anchored the judgment without informing it (the payload keeps it).
 function proposalMeta(clip, shown) {
   const n = shown.segments.length;
   const parts = [`${Math.round(shown.seconds)}s`];
@@ -1968,14 +2070,7 @@ function proposalMeta(clip, shown) {
   parts.push(`at ${txFmt(shown.segments[0].start)}`);
   const ch = chapters.length ? chapterAt(shown.segments[0].start) : null;
   if (ch && ch.topic && !view) parts.push(escapeHtml(ch.topic));
-  let out = parts.join(' · ');
-  if (clip.confidence != null) {
-    const c = clip.confidence;
-    const label = c >= 0.75 ? 'strong' : c >= 0.5 ? 'good' : 'long shot';
-    out += ` <span class="proposal-conf is-${label.replace(' ', '-')}"
-      title="The model's own confidence: ${Math.round(c * 100)}%">${label}</span>`;
-  }
-  return out;
+  return parts.join(' · ');
 }
 
 // Nothing waiting and nothing cut yet: one button away from a first draft.
@@ -2010,6 +2105,8 @@ function useClipProposal(id) {
   }));
   selectedSeg = 0;
   suggestedClips = suggestedClips.filter(c => c.id !== id);
+  const video = proposalVideos.get(id);
+  if (video) video.pause();
   renderSegments();
   fetch(`/clip-proposal/${id}/accept`, {
     method: 'POST',
@@ -2021,6 +2118,7 @@ function dismissClipProposal(id) {
   suggestedClips = suggestedClips.filter(c => c.id !== id);
   if (hoveredProposal === id) hoveredProposal = null;
   reasonAsk = { ids: [id] };
+  forgetProposalVideos();
   renderClipProposals();
   fetch(`/clip-proposal/${id}/dismiss`, { method: 'POST' }).catch(() => {});
 }
@@ -2036,6 +2134,15 @@ async function suggestClips() {
   try {
     const r = await fetch(`/video/{{ c.id }}/suggest-clips${query}`, { method: 'POST' });
     const d = await r.json();
+    // The clip engine answers at once and works in the background (202); a
+    // run already busy with another stretch of this video answers 409.
+    if (d.job && (r.status === 202 || r.status === 409)) {
+      if (r.status === 409) alert(d.error || 'Already suggesting clips for this video.');
+      if (r.status === 202) engineScope = { view, chapter };
+      engineBoot = d.job.boot_id || engineBoot;
+      handleEngineStatus({ job: d.job });
+      return;   // the button stays busy until the run ends
+    }
     if (!d.clips) throw new Error(d.error || 'No clips returned');
     suggestedClips = d.clips;
     reasonAsk = null;   // a fresh run makes the old strip stale
@@ -2056,6 +2163,117 @@ async function suggestClips() {
   btn.disabled = false;
   btn.classList.remove('is-busy');
 }
+
+// ---- Clip engine runs: poll until the run ends ----------------------------
+function engineActive() {
+  return !!engineJob && (engineJob.state === 'queued' || engineJob.state === 'running');
+}
+
+function syncSuggestButton() {
+  const btn = document.getElementById('suggest-here');
+  if (!btn) return;
+  btn.disabled = engineActive();
+  btn.classList.toggle('is-busy', engineActive());
+}
+
+function scheduleEnginePoll() {
+  clearTimeout(enginePollTimer);
+  enginePollTimer = setTimeout(pollEngine, 3000);
+}
+
+async function pollEngine() {
+  enginePollTimer = null;
+  let d;
+  try {
+    const r = await fetch(`/video/{{ c.id }}/suggest-status`, { cache: 'no-store' });
+    d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  } catch (e) {
+    scheduleEnginePoll();   // the server may be mid-restart; keep asking
+    return;
+  }
+  handleEngineStatus(d);
+}
+
+// Queued/running from the same server process: keep polling. Anything else is
+// the end of the run — including a changed boot id (a restart killed it) and
+// "idle"/"interrupted", so a dead run can never leave the line spinning. A run
+// that finished before the restart is still a result, not an interruption.
+function handleEngineStatus(d) {
+  const job = d.job || {};
+  const active = job.state === 'queued' || job.state === 'running';
+  const restarted = !!(engineBoot && job.boot_id && job.boot_id !== engineBoot);
+  if (active && !restarted) {
+    const line = engineActive() && document.querySelector('#clip-proposals-list > .engine-status');
+    engineJob = job;
+    engineBoot = job.boot_id || engineBoot;
+    syncSuggestButton();
+    // Only the line changes while it runs: rebuilding the cards every poll
+    // would take keyboard focus away from whichever one has it.
+    if (line) line.textContent = engineStatusText(job);
+    else renderClipProposals();
+    scheduleEnginePoll();
+    return;
+  }
+  const scope = engineScope;
+  engineJob = null;
+  engineScope = null;
+  if (d.clips) {
+    suggestedClips = d.clips;
+    reasonAsk = null;   // a fresh run makes the old strip stale
+    // Undo snapshots must not resurrect what this run superseded: from here
+    // on, any of them restores the current list.
+    undoStack = undoStack.map(snap => {
+      const st = JSON.parse(snap);
+      if (st.suggestedClips) st.suggestedClips = d.clips;
+      return JSON.stringify(st);
+    });
+    forgetProposalVideos();
+    const toggle = document.getElementById('multi-clip-toggle');
+    if (toggle && typeof d.multi_clip === 'boolean') toggle.checked = d.multi_clip;
+  }
+  syncSuggestButton();
+  renderClipProposals();
+  const found = (job.new || []).length;
+  const lost = (restarted && active) || job.state === 'idle';
+  if (lost) {
+    alert('The suggestion run was interrupted — press Suggest again.');
+  } else if (job.message && found) {
+    if (window.toast) window.toast(job.message); else alert(job.message);
+  } else if (job.message) {
+    alert(job.message);
+  } else if (!found) {
+    const chapter = scope ? scope.chapter : null;
+    const scoped = scope ? !!scope.view : !!job.window;
+    alert(scoped
+      ? (chapter ? `Nothing worth clipping in "${chapter.topic}".`
+                 : 'Nothing worth clipping in this stretch.')
+      : 'The model found nothing worth clipping here.');
+  }
+}
+
+// One player at a time: a card preview pauses the editor's player (and any
+// segment playback) and the other previews; the editor's player pauses them.
+(function () {
+  const list = document.getElementById('clip-proposals-list');
+  if (list) {
+    list.addEventListener('play', ev => {
+      if (!(ev.target instanceof HTMLVideoElement)) return;
+      if (previewMode) setPreviewMode(false);
+      cancelPlayback();
+      activeStop = null;
+      if (!player.paused) player.pause();
+      proposalVideos.forEach(v => { if (v !== ev.target) v.pause(); });
+    }, true);   // capture: media events don't bubble
+  }
+  player.addEventListener('play', () => proposalVideos.forEach(v => v.pause()));
+  // Opened mid-run: pick it up where it is. (The page's first render, at the
+  // end of this script, already draws the status line.)
+  if (engineActive()) {
+    syncSuggestButton();
+    scheduleEnginePoll();
+  }
+})();
 
 // ---- Prompted edits ------------------------------------------------------
 // One instruction against the segments as they are on screen right now. The

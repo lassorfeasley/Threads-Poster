@@ -446,6 +446,24 @@ def _wants_transcript_title(candidate: Candidate) -> bool:
     return bool(channel and channel.url == PASTED_CHANNEL_URL)
 
 
+def _clip_engine_suggests(settings) -> bool:
+    """Whether the clip engine, not the inline transcript suggester, owns this
+    archive's suggestions (``clip_engine.setup`` names a setup whose API key is
+    present).
+
+    Imported lazily: the headless scheduler imports this module and must never
+    pull in the engine. Never raises — if the engine can't even be asked, the
+    inline suggester runs exactly as it did before the engine existed.
+    """
+    try:
+        from .clip_engine import effective_setup
+
+        return effective_setup(settings)[0] != "transcript"
+    except Exception as exc:
+        log.warning("Clip engine setup unreadable (%s); suggesting inline from the transcript", exc)
+        return False
+
+
 def archive_candidate(session, candidate: Candidate, with_suggestions: bool = True) -> None:
     """Full post-approval pipeline for one approved candidate.
 
@@ -536,7 +554,14 @@ def archive_candidate(session, candidate: Candidate, with_suggestions: bool = Tr
         # (clearly drafts). Budget-gated because this runs unattended over a
         # whole monitor pass; the operator's on-demand re-roll is not.
         if with_suggestions and segments:
-            if not spend.within_budget():
+            if _clip_engine_suggests(settings):
+                # The engine runs for minutes (restore, watch, render, review):
+                # inline it would hold this archive's transaction open and keep
+                # the video out of the trim editor. The dashboard queues it
+                # once this commits (web/main.py _scrape_in_thread).
+                log.info("Skipping inline clip suggestions for %s: the clip engine "
+                         "will suggest after archiving", candidate.video_id)
+            elif not spend.within_budget():
                 log.info("Skipping clip suggestions for %s: daily LLM budget reached",
                          candidate.video_id)
             else:

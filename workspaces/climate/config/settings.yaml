@@ -157,6 +157,83 @@ chapters:
   max: 12
   min_seconds: 30
 
+clip_engine:
+  # Which clip suggester runs when a video is archived and when you press Suggest.
+  #   transcript — the original suggester: reads the transcript only (clips.* above)
+  #   gemini     — Gemini watches and listens to the video, drafts clips, then
+  #                watches a render of every draft and ranks them
+  #   hybrid     — Gemini logs the video; Claude drafts and reviews (from frames)
+  #   claude     — Claude only: logs from sampled frames + Whisper, drafts, reviews
+  # A setup whose API key is missing falls back to transcript. See docs/clip-engine.md.
+  setup: gemini
+  drafts: 10                 # candidate clips drafted per whole-video pass
+  section_drafts: 6          # ...per section pass ("Suggest a clip here")
+  keep: 3                    # proposals shown (section passes keep clips.section_max_clips)
+  compare_top: 5             # drafts that go to the head-to-head ranking
+  revise_top: 1              # best drafts that get one revision round (0 = off)
+  min_seconds: 12
+  max_seconds: 45
+  max_segments: 6
+  taste_hits: 3              # this account's best clips shown to the ranking critic
+  taste_flops: 2             # only clips you labelled "not gripping" (Analytics → Label clips)
+  taste_lookback_days: 180
+  workers: 1                 # engine jobs that run at once in the dashboard
+  daily_usd: 5.00            # the engine's own daily cap for unattended runs; kept apart from llm.daily_budget_usd
+  estimate_usd_base: {gemini: 0.60, hybrid: 1.40, claude: 1.40}
+  estimate_usd_per_minute: {gemini: 0.03, hybrid: 0.02, claude: 0.06}
+  max_usd_per_video: 1.50    # the optional revision round is skipped past this
+  hard_cap_usd: 4.00         # a run that passes this stops and falls back to the transcript suggester
+  max_source_seconds: 3600   # longer sources: unattended whole-video runs use the transcript suggester
+  job_timeout_seconds: 1800
+  proxy_height: 360          # preview renders on suggestion cards
+  perception_window_seconds: 300
+  editor_video_max_seconds: 3600   # the Gemini editor watches the whole source up to this length
+  min_free_gb: 10            # bulk restores (bench, retranscribe) stop below this much free disk
+  gemini:
+    model: gemini-3.8-flash
+    perceiver_model: ""      # blank = model
+    editor_model: ""
+    critic_model: ""
+    judge_model: ""          # head-to-head ranking and revision checks (blank = critic)
+    media_resolution: MEDIA_RESOLUTION_LOW
+    critic_media_resolution: MEDIA_RESOLUTION_LOW
+    perception_fps: 1.0
+    long_video_fps: 0.5      # sources longer than 20 minutes
+    critic_fps: 2.0
+    opening_fps: 8.0         # the critic also sees the first 3 seconds at this rate
+    perceiver_thinking: LOW
+    editor_thinking: HIGH
+    critic_thinking: LOW
+    judge_thinking: MEDIUM
+    inline_request_mb: 14    # videos beyond this per request go through the Files API
+  claude:
+    perceiver_model: claude-opus-5-5
+    editor_model: claude-opus-5-5
+    critic_model: claude-opus-5-5
+    judge_model: ""          # blank = critic_model
+    perceiver_effort: low
+    editor_effort: high
+    critic_effort: medium
+    judge_effort: medium
+    frame_interval: 2.0      # seconds between stills when Claude logs a source
+    max_total_frames: 600    # long sources are sampled more sparsely to stay under this
+    frame_width: 448
+    critic_frame_interval: 1.0
+    max_frames_per_call: 150
+    editor_keyframes: 40     # stills of the strongest shots shown to a Claude editor
+  snap:
+    word_window: 0.6
+    picture_window: 1.0
+    flash_guard: 0.4
+    start_pad: 0.08
+    end_pad: 0.25
+    min_shot_score: 20
+  bench:
+    arms: [gemini, transcript]
+    limit: 60
+    max_usd: 40
+    judge_height: 540
+
 vision:
   # Optionally tag candidates from YouTube storyboard stills (metadata-only —
   # nothing downloaded). Neutral labels only; no visual "punch" score. Ranking
@@ -292,19 +369,64 @@ voice:
   length_max_words: 40
 
 llm:
-  # Budget guardrail. Total Anthropic spend per day (UTC) is tracked in
+  # Budget guardrail. LLM spend per day (UTC) is tracked in
   # data/llm_spend.json; vision scoring stops for the day once this is hit
-  # (relevance scoring and the digest are cheap and always run).
+  # (relevance scoring and the digest are cheap and always run). The clip
+  # engine's spend is NOT counted here: it has its own cap,
+  # clip_engine.daily_usd, and the replay bench records under "bench".
   daily_budget_usd: 3.0
-  # Approximate prices in USD per 1,000,000 tokens, used only to estimate spend
-  # for the budget guardrail. Update if Anthropic's pricing changes.
+  # Approximate prices in USD per 1,000,000 tokens (output includes thinking),
+  # used only to estimate spend for the budget guards — this one and the clip
+  # engine's clip_engine.daily_usd. Keep in step with spend.DEFAULT_PRICING; a
+  # model missing here and there is priced at `default`. Update when Anthropic
+  # or Google change prices.
   pricing:
+    claude-opus-5-5:
+      input: 4.0
+      output: 20.0
+    # Server-side fallback targets when Opus 5.5 declines a request.
+    claude-opus-5:
+      input: 5.0
+      output: 25.0
+    claude-opus-4-8:
+      input: 5.0
+      output: 25.0
+    claude-sonnet-5-5:
+      input: 2.0
+      output: 10.0
+    claude-sonnet-5:
+      input: 2.0
+      output: 10.0
+    claude-haiku-5-5:
+      input: 0.10
+      output: 0.50
     claude-haiku-4-5:
       input: 1.0
       output: 5.0
-    claude-sonnet-5:
-      input: 3.0
-      output: 15.0
+    # Gemini 3.8 / 3.6 Flash at their 2027 prices on purpose, so the guard errs
+    # high: they are $0.75 / $3.75 until 2026-12-31.
+    gemini-3.8-flash:
+      input: 1.50
+      output: 7.50
+    gemini-3.6-flash:
+      input: 1.50
+      output: 7.50
+    gemini-3.5-flash-lite:
+      input: 0.30
+      output: 2.50
+    gemini-4-hydrogen:
+      input: 1.50
+      output: 7.50
+    gemini-4-carbon:
+      input: 4.00
+      output: 20.00
+    gemini-4-argon:
+      input: 4.00
+      output: 20.00
+    # The >200k-token prompt rate, to err high.
+    gemini-3.1-pro-preview:
+      input: 4.00
+      output: 18.00
     default:
       input: 3.0
       output: 15.0

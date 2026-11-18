@@ -149,6 +149,12 @@ const TS = {{ timeseries | tojson }};
 const SPEND = ({{ spend_recent | tojson }}).slice().reverse();
 const SPEND_BUDGET = {{ spend_budget }};
 const SPEND_TODAY = {{ spend_today }};
+// The clip engine's spend, same days: its own bucket and cap, never part of
+// the shared budget above — shown beside it, not in it.
+const ENGINE_SPEND = ({{ (engine_spend_recent or []) | tojson }}).slice().reverse();
+const ENGINE_TODAY = {{ engine_spend_today or 0 }};
+const ENGINE_CAP = {{ engine_spend_cap or 0 }};
+const ENGINE_SHOWN = ENGINE_SPEND.length === SPEND.length && ENGINE_SPEND.some((d) => d.spend_usd > 0);
 const METRIC_LABELS = { views: 'Views', likes: 'Likes', replies: 'Replies',
                         reposts: 'Reposts', quotes: 'Quotes', shares: 'Shares' };
 
@@ -247,12 +253,18 @@ if (window.Chart && TS.days && TS.days.length) {
     },
     spend: {
       note: `Estimated LLM cost per UTC day, from token usage. Today: ${dollars(SPEND_TODAY)}`
-        + ` of the ${dollars(SPEND_BUDGET)} daily budget (dashed line).`,
+        + ` of the ${dollars(SPEND_BUDGET)} daily budget (dashed line).`
+        + (ENGINE_SHOWN ? ` The clip engine has its own cap and isn't in that budget:`
+           + ` ${dollars(ENGINE_TODAY)} of ${dollars(ENGINE_CAP)} today.` : ''),
       labels: () => SPEND.map((d) => d.date),
       datasets: () => [
         { type: 'bar', label: 'LLM spend', isSpend: true,
           data: SPEND.map((d) => d.spend_usd),
           backgroundColor: amber + 'b3', hoverBackgroundColor: amber, borderRadius: 4 },
+        ...(ENGINE_SHOWN ? [{ type: 'bar', label: 'Clip engine (own cap)',
+          data: ENGINE_SPEND.map((d) => d.spend_usd),
+          backgroundColor: accentFill, borderColor: accent, borderWidth: 1,
+          hoverBackgroundColor: accent, borderRadius: 4 }] : []),
         { type: 'line', label: 'Daily budget',
           data: SPEND.map(() => SPEND_BUDGET),
           borderColor: '#e05252', borderWidth: 1.5, borderDash: [6, 4],

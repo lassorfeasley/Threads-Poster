@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import uuid
 from pathlib import Path
 
@@ -140,6 +141,122 @@ def subtract(segments: list[dict], used: list[dict]) -> list[dict]:
     return [p for p in out if p["end"] - p["start"] >= _MIN_FRAGMENT]
 
 
+# ---- play order -------------------------------------------------------------
+#
+# A clip's segment list is in PLAY order: a cold open plays its payoff first
+# and then cuts back to the setup. ``normalize`` above sorts and merges, which
+# is right for scoring "did it pick the right material" and wrong for anything
+# that will be played, stored as a proposal, or loaded into the trim editor —
+# a sorted cold open is a different clip. Everything below keeps list order.
+
+def _span(segment) -> tuple[float, float] | None:
+    """``(start, end)`` as finite floats, or None when the entry is unusable."""
+    if not isinstance(segment, dict):
+        return None
+    try:
+        start, end = float(segment["start"]), float(segment["end"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (math.isfinite(start) and math.isfinite(end)):
+        return None
+    return start, end
+
+
+def _minus(start: float, end: float,
+           holes: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """``[start, end)`` with every hole removed, as pieces in time order."""
+    pieces = [(start, end)]
+    for hole_start, hole_end in holes:
+        nxt: list[tuple[float, float]] = []
+        for piece_start, piece_end in pieces:
+            if hole_end <= piece_start or hole_start >= piece_end:
+                nxt.append((piece_start, piece_end))
+                continue
+            if hole_start > piece_start:
+                nxt.append((piece_start, hole_start))
+            if hole_end < piece_end:
+                nxt.append((hole_end, piece_end))
+        pieces = nxt
+    return [p for p in pieces if p[1] > p[0]]
+
+
+def clean_play_order(segments: list[dict], *, min_len: float = 0.5,
+                     floor: float = 0.0, horizon: float | None = None) -> list[dict]:
+    """Coerce, clamp and de-overlap a segment list WITHOUT reordering it.
+
+    Each segment is clamped to ``[floor, horizon]``. A segment overlapping an
+    EARLIER one in the list is cut down to the part not already played — the
+    same footage twice in one clip is a mistake far more often than a choice —
+    and when that splits it, the longer piece is kept so the segment stays one
+    shot. Anything shorter than ``min_len`` afterwards is dropped. Extra keys
+    (an engine draft's ``lead``) ride along; times are rounded to 2 dp, and
+    overlap is judged on the rounded values so the output never overlaps.
+    """
+    lo = 0.0 if floor is None else float(floor)
+    hi = None if horizon is None else float(horizon)
+    shortest = float(min_len or 0.0)
+    out: list[dict] = []
+    for segment in segments or []:
+        span = _span(segment)
+        if span is None:
+            continue
+        start, end = max(span[0], lo), span[1]
+        if hi is not None:
+            end = min(end, hi)
+        pieces = _minus(start, end, [(s["start"], s["end"]) for s in out])
+        if not pieces:
+            continue
+        # max() keeps the first of equal pieces: the earlier one wins a tie.
+        start, end = max(pieces, key=lambda p: p[1] - p[0])
+        start, end = round(start, 2), round(end, 2)
+        if end - start < shortest - 1e-9:
+            continue
+        kept = dict(segment)
+        kept["start"], kept["end"] = start, end
+        out.append(kept)
+    return out
+
+
+def subtract_play_order(segments: list[dict], used: list[dict]) -> list[dict]:
+    """``subtract`` that keeps play order: remove already-claimed time from
+    each segment in turn, leaving the list order alone.
+
+    A segment that a used range cuts in two keeps both pieces, in time order,
+    where it stood. Only pieces actually produced by a cut are held to
+    ``_MIN_FRAGMENT`` — a sliver left beside claimed footage isn't a usable
+    shot — while a segment no used range touches passes through whatever its
+    length, so a deliberate one-second reaction shot isn't mistaken for
+    leftovers (and an untouched proposal never reads as "trimmed"). Extra
+    keys are preserved on every piece.
+    """
+    holes = [(u["start"], u["end"]) for u in normalize(used or [])]
+    out: list[dict] = []
+    for segment in segments or []:
+        span = _span(segment)
+        if span is None or span[1] <= span[0]:
+            continue
+        start, end = span
+        pieces = _minus(start, end, holes)
+        if pieces == [(start, end)]:
+            out.append({**segment, "start": start, "end": end})
+            continue
+        for piece_start, piece_end in pieces:
+            if piece_end - piece_start >= _MIN_FRAGMENT:
+                out.append({**segment, "start": piece_start, "end": piece_end})
+    return out
+
+
+def strip_segments(segments: list[dict]) -> list[dict]:
+    """``[{start, end}]`` only, in the order given — what the ledger stores.
+    Engine-only keys such as ``lead`` stay out of ``proposed_segments``."""
+    out: list[dict] = []
+    for segment in segments or []:
+        span = _span(segment)
+        if span is not None:
+            out.append({"start": span[0], "end": span[1]})
+    return out
+
+
 def used_ranges(session, candidate_pk: int,
                 exclude_cut_pk: int | None = None) -> list[dict]:
     """Time on this video already claimed by a clip.
@@ -174,8 +291,11 @@ def visible_segments(proposed: list[dict], used: list[dict]) -> tuple[list[dict]
     The stored proposal is deliberately left alone. It's the ledger's record of
     what the model actually asked for, and proposing used material is a miss
     that the export-time score should keep reflecting.
+
+    Play order survives: a cold open is served opening-first, exactly as it
+    was proposed (and as its preview render plays).
     """
-    kept = subtract(proposed, used)
+    kept = subtract_play_order(proposed, used)
     trimmed = duration(kept) < duration(proposed) - 0.05
     if duration(kept) < _MIN_REMAINING:
         return [], True
@@ -201,8 +321,15 @@ def span_deltas(proposed: list[dict], final: list[dict]) -> tuple[float | None, 
 
 # Bumped whenever the suggester's prompt or inputs change in a way that should
 # be scored separately. Blank was the original transcript-only prompt;
-# "v2" added the editorial rubric, account context and visual moments.
-PROMPT_VERSION = "v2"
+# "v2" added the editorial rubric, account context and visual moments; "v3"
+# stopped telling the model that most clips join 2-4 segments (single takes
+# are often the better clip) and stores proposals in play order.
+PROMPT_VERSION = "v3"
+
+# The clip engine's own regime (app/clip_engine), joined with its setup in the
+# policy fingerprint ("engine-v1:gemini") so engine proposals are never pooled
+# with the transcript suggester's when the ledger is scored.
+ENGINE_PROMPT_VERSION = "engine-v1"
 
 
 def policy_version(*, model: str, max_clips: int, max_segments_per_clip: int,
@@ -239,7 +366,21 @@ def log_run(session, candidate_pk: int, clips: list[dict], *,
     A SECTION pass only supersedes what it actually replaces: the pending
     proposals overlapping ``window``. Asking again about chapter three is not
     an answer to a suggestion standing for chapter seven.
+
+    A run with nothing to record — no clips, or none with a usable segment —
+    writes nothing and supersedes NOTHING. An empty pass (a failed render
+    batch, an off-topic video, a re-roll that found less) is not a verdict on
+    the suggestions already standing, and wiping them would leave the operator
+    with fewer clips than before they asked.
+
+    Segments are stored in PLAY order (``clean_play_order``: clamped,
+    de-overlapped, never sorted) and stripped to ``{start, end}``.
     """
+    prepared = [strip_segments(clean_play_order(clip.get("segments") or []))
+                if isinstance(clip, dict) else []
+                for clip in clips or []]
+    if not any(prepared):
+        return []
     if window is None:
         session.execute(
             update(ClipProposal)
@@ -259,8 +400,7 @@ def log_run(session, candidate_pk: int, clips: list[dict], *,
                 row.decided_at = utcnow()
     run_id = uuid.uuid4().hex[:16]
     ids: list[int] = []
-    for index, clip in enumerate(clips):
-        segments = normalize(clip.get("segments") or [])
+    for index, (clip, segments) in enumerate(zip(clips, prepared)):
         if not segments:
             continue
         row = ClipProposal(
@@ -275,8 +415,10 @@ def log_run(session, candidate_pk: int, clips: list[dict], *,
             why=str(clip.get("why", ""))[:300],
             confidence=clip.get("confidence"),
             flag=str(clip.get("challenges_rules") or "")[:300],
-            model=model,
-            policy_version=policy,
+            # String(60)/String(40): Postgres rejects an overlong value (SQLite
+            # doesn't), which would fail the whole write in production only.
+            model=str(model or "")[:60],
+            policy_version=str(policy or "")[:40],
         )
         session.add(row)
         session.flush()
@@ -568,7 +710,9 @@ def propose(session, candidate, settings, transcript_segments: list[dict], *,
                       scope="section" if window else "video",
                       prompt=PROMPT_VERSION,
                   ))
-    if window:
+    # An empty pass left the standing suggestions in place (see log_run), so
+    # the candidate-level markers that describe them stay as they were too.
+    if window or not ids:
         return ids
 
     if clips and clips[0].get("draft_caption"):
