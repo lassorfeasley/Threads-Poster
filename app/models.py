@@ -15,6 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 
 def utcnow() -> dt.datetime:
@@ -23,6 +24,38 @@ def utcnow() -> dt.datetime:
 
 class Base(DeclarativeBase):
     pass
+
+
+class DataPath(TypeDecorator):
+    """A file path under a workspace's data tree, readable on any machine.
+
+    Rows store the absolute path of whichever machine wrote them (the
+    operator's Mac, the hosted dashboard, the home worker). Reading one maps
+    ``<anything>/workspaces/<this workspace>/data/<rest>`` onto THIS machine's
+    data directory, so every caller can keep treating it as a local path.
+    Writes are stored as given. Paths outside a workspace data tree, and empty
+    values, pass through untouched.
+
+    Comparing paths inside SQL would still see the writer's form; match on the
+    file name instead (names are versioned and unique).
+    """
+    impl = Text
+    cache_ok = True
+
+    def process_result_value(self, value, dialect):
+        return localize_data_path(value)
+
+
+def localize_data_path(value: str | None) -> str | None:
+    if not value:
+        return value
+    from .config import DATA_DIR, WORKSPACE
+
+    marker = f"/workspaces/{WORKSPACE}/data/"
+    head, sep, rest = value.replace("\\", "/").partition(marker)
+    if not sep or not rest:
+        return value
+    return str(DATA_DIR / rest)
 
 
 class Channel(Base):
@@ -123,20 +156,20 @@ class Candidate(Base):
     archived_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     scrape_error: Mapped[str] = mapped_column(Text, default="")
 
-    local_video_path: Mapped[str] = mapped_column(Text, default="")
+    local_video_path: Mapped[str] = mapped_column(DataPath, default="")
     # Key of the source video's copy in the private source-video bucket, once
     # it has one (see app/offload.py). Set before the local file is deleted,
     # and kept when the file is restored, so the local file may or may not
     # exist alongside it; ``local_video_path`` stays the restore destination.
     source_object_key: Mapped[str] = mapped_column(Text, default="")
     source_uploaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    transcript_path: Mapped[str] = mapped_column(Text, default="")
+    transcript_path: Mapped[str] = mapped_column(DataPath, default="")
     transcript_text: Mapped[str] = mapped_column(Text, default="")
     transcription_method: Mapped[str] = mapped_column(String(20), default="")  # captions | whisper | captions+whisper | "" (none)
     # Full-video Whisper word stream ([{word, start, end}] JSON sidecar),
     # written at archive time. Clip suggestions cut against it and exports
     # slice it by trim windows instead of re-running Whisper per clip.
-    word_transcript_path: Mapped[str] = mapped_column(Text, default="")
+    word_transcript_path: Mapped[str] = mapped_column(DataPath, default="")
 
     # Topical chapters over the whole video, as JSON [{start, end, topic,
     # summary}] covering the timeline end to end with no gaps. Navigation
@@ -212,7 +245,7 @@ class Cut(Base):
     # Operator-chosen segments (JSON [{start, end}, ...]) and the exported
     # supercut file produced from them.
     trim_segments: Mapped[str] = mapped_column(Text, default="")
-    trimmed_clip_path: Mapped[str] = mapped_column(Text, default="")
+    trimmed_clip_path: Mapped[str] = mapped_column(DataPath, default="")
     # Background export job: "" | "exporting" | "failed". The Post step shows a
     # skeleton while exporting so Save can navigate immediately.
     export_status: Mapped[str] = mapped_column(String(20), default="")
@@ -220,14 +253,14 @@ class Cut(Base):
     # Optional stylized-caption variant of the exported clip (Funnel font,
     # word-by-word highlight). Cleared on re-export; posting uses it only when
     # ``use_subtitles`` is on.
-    subtitled_clip_path: Mapped[str] = mapped_column(Text, default="")
+    subtitled_clip_path: Mapped[str] = mapped_column(DataPath, default="")
     use_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
     # Where burned-in captions sit on the frame: "bottom" (default) or "top".
     subs_position: Mapped[str] = mapped_column(String(10), default="bottom")
     # Whisper word stream of the trimmed clip (same pass that drives burned-in
     # captions). JSON sidecar path; Suggest caption / Copy transcript read it.
     # Cleared on re-export with the video files.
-    clip_transcript_path: Mapped[str] = mapped_column(Text, default="")
+    clip_transcript_path: Mapped[str] = mapped_column(DataPath, default="")
 
     # Vertical (9:16) composite for Instagram Reels: hook text rendered at the
     # top of the frame, the 16:9 clip mid-frame on a branded background,
@@ -239,7 +272,7 @@ class Cut(Base):
     # this flag is what stops the auto-draft from refilling a field the operator
     # deliberately cleared. The sparkle button ignores it.
     hook_autodrafted: Mapped[bool] = mapped_column(Boolean, default=False)
-    vertical_clip_path: Mapped[str] = mapped_column(Text, default="")
+    vertical_clip_path: Mapped[str] = mapped_column(DataPath, default="")
     # Unused: reel caption is the Threads ``draft_caption``. Kept for existing DBs.
     ig_draft_caption: Mapped[str] = mapped_column(Text, default="")
 
@@ -277,7 +310,7 @@ class ThreadsPost(Base):
     # history imported from outside the app, which has no clip/title concept).
     calendar_name: Mapped[str] = mapped_column(Text, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase Storage object key
-    clip_local_path: Mapped[str] = mapped_column(Text, default="")
+    clip_local_path: Mapped[str] = mapped_column(DataPath, default="")
     # When the clip's storage copy was last confirmed (uploaded or verified —
     # see scheduler.repair_clip_uploads). NULL means a headless runner may
     # find nothing to sign at publish time; the repair sweep re-uploads from
@@ -425,7 +458,7 @@ class InstagramPost(Base):
         ForeignKey("threads_posts.id"), nullable=True,
     )
     caption: Mapped[str] = mapped_column(Text, default="")
-    clip_local_path: Mapped[str] = mapped_column(Text, default="")
+    clip_local_path: Mapped[str] = mapped_column(DataPath, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase object key
     # Storage copy last confirmed (see ThreadsPost.clip_uploaded_at).
     clip_uploaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

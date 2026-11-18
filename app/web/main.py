@@ -3285,20 +3285,27 @@ def _delete_if_unreferenced(session, paths: list[str]) -> None:
     re-caption) for that clip until a re-export recreated the file.
     """
     for path in {p for p in paths if p}:
+        # By file name, not full path: rows hold the path of whichever machine
+        # wrote them (models.DataPath), and clip names are versioned and unique.
+        tail = "/" + Path(path).name
+
+        def _refs(col):
+            return col.endswith(tail, autoescape=True)
+
         referenced = session.execute(
-            select(ThreadsPost.id).where(ThreadsPost.clip_local_path == path).limit(1)
+            select(ThreadsPost.id).where(_refs(ThreadsPost.clip_local_path)).limit(1)
         ).scalar_one_or_none()
         if referenced is None:
             referenced = session.execute(
                 select(InstagramPost.id)
-                .where(InstagramPost.clip_local_path == path).limit(1)
+                .where(_refs(InstagramPost.clip_local_path)).limit(1)
             ).scalar_one_or_none()
         if referenced is None:
             referenced = session.execute(
                 select(Cut.id).where(or_(
-                    Cut.trimmed_clip_path == path,
-                    Cut.subtitled_clip_path == path,
-                    Cut.vertical_clip_path == path,
+                    _refs(Cut.trimmed_clip_path),
+                    _refs(Cut.subtitled_clip_path),
+                    _refs(Cut.vertical_clip_path),
                 )).limit(1)
             ).scalar_one_or_none()
         if referenced is not None:
