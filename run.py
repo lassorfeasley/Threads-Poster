@@ -10,6 +10,7 @@ Usage:
   python run.py dashboard          # supervisor: one dashboard per enabled workspace
   python run.py dashboard --workspace climate   # a single workspace's dashboard
   python run.py workspace list     # show the workspace registry
+  python run.py datasync push --dry-run  # files the hosted dashboard needs, not yet in Storage
   python run.py user hash <email>  # make a DASHBOARD_USERS login entry (prompts for the password)
   python run.py user secret        # make an AUTH_SECRET for the login cookie
   python run.py workspace create <slug>         # scaffold a new workspace
@@ -100,6 +101,24 @@ def cmd_dashboard(args) -> None:
         _run_single_dashboard(args)
     else:
         _run_supervisor(args)
+
+
+def cmd_datasync(args) -> None:
+    from app import datasync
+
+    res = datasync.push_sweep(dry_run=args.dry_run, limit=args.limit)
+    total = sum(size for _, size in res.pending)
+    if args.dry_run:
+        by_folder: dict[str, list[int]] = {}
+        for rel, size in res.pending:
+            folder = next((f for f in datasync.MIRRORED if rel.startswith(f + "/")), "?")
+            by_folder.setdefault(folder, []).append(size)
+        for folder, sizes in by_folder.items():
+            print(f"  {folder:24} {len(sizes):6} files  {sum(sizes) / 1e6:9.1f} MB")
+        print(f"Would upload {len(res.pending)} files ({total / 1e6:.1f} MB).")
+        return
+    print(f"Uploaded {res.uploaded} files ({res.uploaded_bytes / 1e6:.1f} MB); "
+          f"{res.failed} failed.")
 
 
 def cmd_user(args) -> None:
@@ -2185,6 +2204,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="interface to listen on (single-workspace mode). Anything but "
                         "loopback requires DASHBOARD_USERS and AUTH_SECRET")
     p.set_defaults(func=cmd_dashboard, reload=True)
+
+    p = sub.add_parser("datasync", parents=[common],
+                       help="share working files (transcripts, clips, thumbnails) via Storage")
+    dsub = p.add_subparsers(dest="datasync_command", required=True)
+    dp = dsub.add_parser("push", parents=[common], help="upload new or changed files now")
+    dp.add_argument("--dry-run", action="store_true", help="list what would upload")
+    dp.add_argument("--limit", type=int, default=None, help="stop after this many files")
+    p.set_defaults(func=cmd_datasync)
 
     p = sub.add_parser("user", help="dashboard logins (DASHBOARD_USERS / AUTH_SECRET)")
     usub = p.add_subparsers(dest="user_command", required=True)

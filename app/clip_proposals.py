@@ -634,6 +634,9 @@ def load_transcript(candidate) -> list[dict]:
     if not candidate.transcript_path:
         return []
     try:
+        from .datasync import ensure_file
+
+        ensure_file(candidate.transcript_path)
         data = json.loads(Path(candidate.transcript_path).read_text())
     except (OSError, ValueError):
         return []

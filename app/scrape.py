@@ -218,6 +218,9 @@ def load_word_transcript(candidate) -> list[dict]:
     path = getattr(candidate, "word_transcript_path", "") or ""
     if not path:
         return []
+    from .datasync import ensure_file
+
+    ensure_file(path)
     try:
         data = json.loads(Path(path).read_text())
     except (OSError, ValueError):

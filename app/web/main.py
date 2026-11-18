@@ -27,7 +27,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import chapters as chapter_index
-from .. import (channel_health, clip_proposals, facebook_api, instagram_api, linkedin_api, spend, threads_api,
+from .. import (channel_health, clip_proposals, datasync, facebook_api, instagram_api, linkedin_api, spend, threads_api,
                vision, x_api, youtube)
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
@@ -426,6 +426,7 @@ pagecache.start_refresher()
 # Uploads source videos that are out of the workflow to storage and frees the
 # disk (no-op unless storage.offload_sources is on; see app/offload.py).
 start_offload_thread()
+datasync.start_mirror_thread()
 
 
 # Datasets a given write can actually change, keyed by the route's path
@@ -534,6 +535,7 @@ def _restore_clips_for(kind: str, pk: int) -> None:
     if now - _clips_checked.get((kind, pk), -1e9) < _CLIPS_CHECK_TTL:
         return
     paths: list[str] = []
+    sidecar = ""
     with session_scope(read_only=True) as session:
         cut = None
         if kind == "post":
@@ -545,6 +547,7 @@ def _restore_clips_for(kind: str, pk: int) -> None:
             cut = session.get(Cut, pk)
         if cut is not None:
             paths += [cut.trimmed_clip_path, cut.subtitled_clip_path, cut.vertical_clip_path]
+            sidecar = cut.clip_transcript_path
             ig = session.execute(
                 select(InstagramPost.clip_local_path).where(InstagramPost.cut_pk == cut.id)
             ).scalars().all()
@@ -552,11 +555,18 @@ def _restore_clips_for(kind: str, pk: int) -> None:
     for path in {p for p in paths if p}:
         if not Path(path).expanduser().exists():
             ensure_clip_file(path)
+    if sidecar:
+        datasync.ensure_file(sidecar)  # the clip's word timings (captions, editing)
     _clips_checked[(kind, pk)] = now
 
 
 @app.middleware("http")
 async def _restore_archived_clips(request: Request, call_next):
+    if request.url.path.startswith("/brand-static/"):
+        # The uploaded logo may have been uploaded on another machine.
+        name = Path(request.url.path).name
+        await run_in_threadpool(datasync.ensure_file, _BRAND_LOGO_DIR / name)
+        return await call_next(request)
     m = _CLIP_ROUTE.match(request.url.path)
     if m and m.group(3) not in _CLIP_ROUTE_SKIP:
         kind = "post" if m.group(1) in ("post", "media/post") else "cut"
@@ -1605,7 +1615,7 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
         ]
 
         transcript_segments = []
-        if c.transcript_path and Path(c.transcript_path).exists():
+        if c.transcript_path and datasync.ensure_file(c.transcript_path):
             try:
                 transcript_segments = json.loads(Path(c.transcript_path).read_text())
             except Exception:
@@ -2312,6 +2322,7 @@ def clip_proposal_thumb(proposal_id: int):
     at += 0.4
     key = f"proposal-{proposal_id}-{int(at * 1000)}"
     cached = THUMBS_DIR / f"{key}.jpg"
+    datasync.ensure_file(cached)
     if not Path(source).exists():
         if cached.exists():
             return FileResponse(str(cached), media_type="image/jpeg",
@@ -2613,7 +2624,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         ).scalar_one_or_none() or ""
 
         transcript_segments = []
-        if c.transcript_path and Path(c.transcript_path).exists():
+        if c.transcript_path and datasync.ensure_file(c.transcript_path):
             try:
                 transcript_segments = json.loads(Path(c.transcript_path).read_text())
             except Exception:
@@ -3082,6 +3093,7 @@ def media_thumb(candidate_id: int):
             return JSONResponse({"error": "no local video"}, status_code=404)
         source = c.local_video_path
     cached = THUMBS_DIR / f"{candidate_id}.jpg"
+    datasync.ensure_file(cached)
     if not Path(source).exists() and cached.exists():
         # Offloaded source: the still was cached before the file left the disk.
         return FileResponse(str(cached), media_type="image/jpeg",
@@ -3107,6 +3119,7 @@ def media_cut_thumb(cut_id: int):
             return JSONResponse({"error": "no clip"}, status_code=404)
         source = cut.trimmed_clip_path
     cached = THUMBS_DIR / f"cut-{cut_id}.jpg"
+    datasync.ensure_file(cached)
     if not Path(source).exists() and cached.exists():
         # Archived clip: the still was cached before the file left the disk.
         return FileResponse(str(cached), media_type="image/jpeg",
@@ -3428,7 +3441,7 @@ def _export_cut_in_thread(cut_id: int) -> None:
         # videos archived before word sidecars fall back to Whisper-on-the-clip
         # inside ensure_clip_words, exactly as before.
         transcript_sidecar = ""
-        if word_transcript_path and Path(word_transcript_path).exists():
+        if word_transcript_path and datasync.ensure_file(word_transcript_path):
             try:
                 from ..subtitles import (
                     load_clip_words, save_clip_transcript, slice_source_words,
@@ -3892,7 +3905,7 @@ def _caption_scene_context(cut: Cut, lead_in_seconds: float = 60.0) -> tuple[str
     except (ValueError, TypeError, KeyError, IndexError):
         return "", None
     lead_in = ""
-    if c.transcript_path and Path(c.transcript_path).exists():
+    if c.transcript_path and datasync.ensure_file(c.transcript_path):
         try:
             segments = json.loads(Path(c.transcript_path).read_text())
         except Exception:
