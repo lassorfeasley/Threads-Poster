@@ -152,6 +152,7 @@ def download_to_file(bucket: str, object_key: str, dest: str | Path,
     """Stream a stored object to ``dest`` without holding it in memory. Written
     to a temp name and renamed into place, so a reader never sees half a file."""
     dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)  # a fresh machine has no clips/ yet
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.part")
     try:
         with httpx.Client(timeout=httpx.Timeout(120.0, connect=30.0)) as http:

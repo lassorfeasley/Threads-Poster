@@ -690,7 +690,20 @@ _scrape_inflight: set[int] = set()
 _scrape_inflight_lock = threading.Lock()
 
 
+def _archives_here() -> bool:
+    """Whether this machine downloads and transcribes approved videos.
+
+    YouTube blocks downloads from datacenter IPs, so the hosted dashboard sets
+    ARCHIVE_ON_THIS_MACHINE=off: approving there only marks the video
+    ``approved``, and a machine on a home connection picks it up (today: the
+    Mac's dashboard, which resumes every approved video when it starts)."""
+    return env("ARCHIVE_ON_THIS_MACHINE", "on").strip().lower() not in ("0", "off", "false", "no")
+
+
 def _scrape_in_thread(candidate_id: int) -> None:
+    if not _archives_here():
+        log.info("Candidate %s approved; its download waits for a home machine", candidate_id)
+        return
     with _scrape_inflight_lock:
         if candidate_id in _scrape_inflight:
             log.info("Archive already running for candidate %s; not starting another", candidate_id)
@@ -2777,6 +2790,9 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
 
     from ..config import storage_dir
 
+    if not _archives_here():
+        return _flash("/", "Uploading your own video isn't available on the hosted "
+                           "dashboard yet. Upload it from the Mac's dashboard.")
     filename = file.filename or "upload.mp4"
     ext = Path(filename).suffix.lower()
     if ext not in _UPLOAD_EXTS:

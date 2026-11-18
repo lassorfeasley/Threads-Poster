@@ -1,0 +1,54 @@
+# Hosted dashboard for the CLIMATE workspace (Renewables.org), served at
+# https://app.continuity.marketing. Deploy: fly deploy -c fly.dashboard.toml
+#
+# Secrets (fly secrets set -a throughline-climate ...), none in this file:
+#   DASHBOARD_USERS, AUTH_SECRET          the login (python run.py user hash/secret)
+#   DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY
+#   ANTHROPIC_API_KEY, GEMINI_API_KEY, YOUTUBE_API_KEY, GIPHY_API_KEY
+#   THREADS_/INSTAGRAM_/LINKEDIN_/FACEBOOK_/X_ app ids, secrets and
+#   *_REDIRECT_URI values pointing at https://app.continuity.marketing/...
+#
+# First deploy also needs the volume:
+#   fly volumes create climate_data -a throughline-climate -r sea -s 20
+
+app = "throughline-climate"
+# Next to the database (Supabase, AWS us-west-2): pages make dozens of
+# queries, and a cross-country round trip on each added seconds.
+primary_region = "sea"
+
+[build]
+  dockerfile = "Dockerfile.dashboard"
+
+[env]
+  WORKSPACE = "climate"
+  # Share the workspace with the Mac and the home worker: documents in the
+  # database, working files through Storage.
+  SHARED_WORKSPACE = "on"
+  # YouTube blocks datacenter IPs: downloads and transcription stay home.
+  ARCHIVE_ON_THIS_MACHINE = "off"
+  # The scheduler app (fly.toml) publishes; don't tick twice.
+  SCHEDULER_EMBEDDED = "false"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Background work (clip engine runs, exports, the file mirror) lives in
+  # this process, so keep one machine up rather than scaling to zero.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[mounts]
+  source = "climate_data"
+  destination = "/app/workspaces/climate/data"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

@@ -9,10 +9,8 @@ workspaces/.shared/
 .env.example
 workspaces/*/.env
 
-# Not needed for a headless tick: the dashboard/scrape/transcribe dependency set,
-# the web assets, and local tooling.
-requirements.txt
-assets/
+# Local tooling. (requirements.txt and assets/ stay in the context for the
+# dashboard image, Dockerfile.dashboard; the scheduler image never copies them.)
 .venv/
 venv/
 
@@ -26,3 +24,7 @@ __pycache__/
 *.db-wal
 .DS_Store
 README.md
+demo/
+docs/
+lab/
+tests/
