@@ -2107,7 +2107,9 @@ function proposalCard(clip, shown) {
       if (btn.dataset.act === 'use') useClipProposal(clip.id);
       else if (btn.dataset.act === 'preview') previewClipProposal(clip.id);
       else if (btn.dataset.act === 'feedback') toggleProposalFeedback(clip.id);
-      else if (btn.dataset.act === 'dismiss') dismissClipProposal(clip.id);
+      // ✕ asks what's wrong (the advice panel) instead of the old reason strip;
+      // its Dismiss button with nothing filled in is the plain one-click dismissal.
+      else if (btn.dataset.act === 'dismiss') toggleProposalFeedback(clip.id);
     });
   });
   return row;
@@ -2145,7 +2147,7 @@ function proposalFeedbackPanel(st) {
       <button type="button" class="sm approve" data-fb="resuggest"${st.busy ? ' disabled' : ''}
               title="Dismiss this one and suggest again, following what you said">${st.busy ? 'Sending…' : 'Re-suggest with this'}</button>
       <button type="button" class="sm ghost" data-fb="dismiss"${st.busy ? ' disabled' : ''}
-              title="Dismiss it and keep your note, without a new pass">Just dismiss</button>
+              title="Dismiss it (and keep your note, if you wrote one) without a new pass">Dismiss</button>
     </div>
   </div>`;
 }
@@ -2235,7 +2237,6 @@ function useClipProposal(id) {
 function dismissClipProposal(id) {
   suggestedClips = suggestedClips.filter(c => c.id !== id);
   if (hoveredProposal === id) hoveredProposal = null;
-  reasonAsk = { ids: [id] };
   forgetProposalVideos();
   renderClipProposals();
   fetch(`/clip-proposal/${id}/dismiss`, { method: 'POST' }).catch(() => {});

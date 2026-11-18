@@ -179,8 +179,8 @@
           <span class="suggest-dur">{{ p.seconds|round|int }}s{% if p.count > 1 %} · {{ p.count }} cuts{% endif %}</span>
         </button>
         {% endif %}
-        <button type="button" class="suggest-x" onclick="dismissSuggestion({{ p.id }}, this)"
-                title="Dismiss this suggestion" aria-label="Dismiss this suggestion">
+        <button type="button" class="suggest-x" onclick="toggleSuggestFeedback({{ p.id }})"
+                title="Dismiss — say what's wrong (optional)" aria-label="Dismiss this suggestion">
           <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
                stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
@@ -240,7 +240,7 @@
                       title="Dismiss this one and suggest again, following what you said">Re-suggest with this</button>
               <button type="button" class="ghost sm" data-fb="dismiss"
                       onclick="submitSuggestFeedback({{ p.id }}, false)"
-                      title="Dismiss it and keep your note, without a new pass">Just dismiss</button>
+                      title="Dismiss it (and keep your note, if you wrote one) without a new pass">Dismiss</button>
             </div>
           </div>
         </div>
@@ -681,27 +681,7 @@ async function dismissSuggestion(id, btn) {
     alert('Could not dismiss: ' + e.message);
     return;
   }
-  card.classList.add('is-dismissed');
-  card.innerHTML = `
-    <div class="suggest-reason">
-      <div class="reason-ask-label">Dismissed — why? <span class="reason-ask-optional">(optional, teaches the next pass)</span></div>
-      <div class="reason-pills">${DISMISS_REASONS.map(([slug, label]) =>
-        `<button type="button" class="reason-pill" data-reason="${slug}">${label}</button>`).join('')}
-        <button type="button" class="reason-pill is-skip" data-reason="">Skip</button>
-      </div>
-    </div>`;
-  card.querySelectorAll('.reason-pill').forEach(pill => pill.addEventListener('click', () => {
-    const reason = pill.dataset.reason;
-    if (reason) {
-      fetch(`/clip-proposal/${id}/reason`, {
-        method: 'POST', body: new URLSearchParams({ reason }),
-      }).catch(() => {});
-    }
-    card.remove();
-    const left = document.querySelectorAll('.suggest-card').length;
-    const count = document.querySelector('.suggest-title .crumb-count');
-    if (count) count.textContent = left || '';
-  }));
+  dropSuggestCard(card);
 }
 
 // ---- "What's wrong?" on a card ----------------------------------------------

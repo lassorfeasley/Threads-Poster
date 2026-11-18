@@ -646,7 +646,7 @@ class ProposalCardJsTest(unittest.TestCase):
         self.assertIn('aria-expanded="true"', opened)
         self.assertIn('class="proposal-feedback"', opened)
         self.assertIn("Re-suggest with this", opened)
-        self.assertIn("Just dismiss", opened)
+        self.assertIn(">Dismiss</button>", opened)
         # Labels and the operator's text are escaped; the chosen chip shows as pressed.
         self.assertIn("Something &lt;else&gt;", opened)
         self.assertIn('value="too &quot;dark&quot; &lt;b&gt;"', opened)
