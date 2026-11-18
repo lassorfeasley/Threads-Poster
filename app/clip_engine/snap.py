@@ -30,8 +30,10 @@ An end rounded into the head of the next word stops before that word
 (``_end_in``) instead of taking it in.
 
 Neither boundary is left on a flash of a shot shorter than ``flash_guard``
-when moving off it splits no word. Blocked (already used) footage is never
-entered. Pure: no I/O and no settings; the engine passes the knobs in.
+when moving off it splits no word. A clip never OPENS inside a blocked window
+(another clip's opening shot): clips may reuse each other's footage, never
+each other's opening. Pure: no I/O and no settings; the engine passes the
+knobs in.
 """
 from __future__ import annotations
 
@@ -357,24 +359,32 @@ def _tail_guard(a: float, b: float, last, cuts: list[float], r: _Rules) -> float
     return b
 
 
-def _unblock(a: float, b: float,
-             blocked: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """``[a, b]`` minus blocked footage, as pieces in time order: a start
-    inside a blocked range moves to its end, an end inside one moves to its
-    start, and a segment straddling one splits around it."""
-    pieces = [(a, b)]
-    for lo, hi in blocked:
-        nxt: list[tuple[float, float]] = []
-        for start, end in pieces:
-            if hi <= start or lo >= end:
-                nxt.append((start, end))
-                continue
-            if lo > start:
-                nxt.append((start, lo))
-            if hi < end:
-                nxt.append((hi, end))
-        pieces = nxt
-    return pieces
+def _off_openings(segments: list[dict], blocked: list[tuple[float, float]],
+                  words: _Words, min_len: float) -> list[dict]:
+    """Keep the clip's OPENING out of ``blocked`` windows (other clips'
+    opening shots). Only the first played segment's start is checked: while
+    it lies inside a window it moves forward to the window's end (past a word
+    running across that point, so it never starts mid-word); a first segment
+    left shorter than ``min_len`` is dropped and the next one is checked as
+    the new opening. Footage further into the clip is never touched."""
+    out = [dict(s) for s in segments]
+    for _ in range(4 * (len(blocked) + 1) * (len(out) + 1)):
+        if not out:
+            break
+        first = out[0]
+        start, end = float(first["start"]), float(first["end"])
+        hit = next(((lo, hi) for lo, hi in blocked if lo <= start < hi), None)
+        if hit is None:
+            break
+        new_start = hit[1]
+        word = words.inside(new_start)
+        if word is not None:
+            new_start = word[1] + _GAP
+        if end - new_start < min_len - 1e-9:
+            out.pop(0)
+            continue
+        first["start"] = round(new_start, 2)
+    return out
 
 
 def _coerce(segment) -> tuple[float, float] | None:
@@ -402,7 +412,9 @@ def snap_segments(segments: list[dict], *, words: list[dict], cuts: list[dict],
     ``cuts``: shot-map cuts ``[{t, score}]`` (only ``score >= min_shot_score``
     count). ``quiet``: shot-map pauses ``[[s, e]]``. ``floor``/``horizon``:
     the stretch the clip may use (a section, or the whole source).
-    ``blocked``: footage other clips already use.
+    ``blocked``: other clips' opening windows; the clip's FIRST segment may
+    not start inside one (see ``_off_openings``). The rest of the clip may
+    reuse any footage.
 
     Any signal can be empty: no words skips the word rules, no cuts or quiet
     skips theirs. Segments left shorter than ``min_len`` are dropped; the
@@ -418,7 +430,7 @@ def snap_segments(segments: list[dict], *, words: list[dict], cuts: list[dict],
     stream = _Words(words)
     shot_cuts = _cut_times(cuts, float(min_shot_score))
     pauses = _spans(quiet)
-    used = [(s["start"], s["end"]) for s in clip_proposals.normalize(
+    openings = [(s["start"], s["end"]) for s in clip_proposals.normalize(
         [{"start": s, "end": e} for s, e in _spans(blocked)])]
 
     out: list[dict] = []
@@ -441,12 +453,13 @@ def snap_segments(segments: list[dict], *, words: list[dict], cuts: list[dict],
         end = _tail_guard(start, end, last, shot_cuts, rules)
 
         start, end = max(start, lo), min(end, hi)
-        for piece_start, piece_end in _unblock(start, end, used):
-            if piece_end - piece_start >= rules.min_len - 1e-9:
-                out.append({**segment, "start": piece_start, "end": piece_end,
-                            "lead": lead})
+        if end - start >= rules.min_len - 1e-9:
+            out.append({**segment, "start": start, "end": end, "lead": lead})
         if log.isEnabledFor(logging.DEBUG):
             log.debug("snap %s %.2f-%.2f -> %.2f-%.2f", lead, a, b, start, end)
 
-    return clip_proposals.clean_play_order(
+    cleaned = clip_proposals.clean_play_order(
         out, min_len=rules.min_len, floor=lo, horizon=None if math.isinf(hi) else hi)
+    if not openings:
+        return cleaned
+    return _off_openings(cleaned, openings, stream, rules.min_len)

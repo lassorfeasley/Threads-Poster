@@ -88,19 +88,19 @@ def _video_path(inputs: dict, candidate: dict) -> str:
 
 
 def _refine_openings(clips: list[dict], target: SimpleNamespace, settings,
-                     used: list[dict]) -> None:
+                     others: list[dict]) -> None:
     """``propose``'s opening pass: each clip's start may move earlier onto a
-    stronger frame, never into claimed material — and sibling clips from
-    this run count as claimed, so two proposals can't reach back onto the
-    same lead-in footage."""
-    blocked = list(used)
+    stronger frame — over footage other clips use, but never into another
+    clip's opening shot; sibling clips from this run count too, so two
+    proposals can't reach back onto the same opening."""
+    blocked = clip_proposals.opening_windows(others)
     for clip in clips:
         try:
             clip["segments"] = clip_proposals.refine_opening(
                 target, clip["segments"], settings, blocked, story=clip.get("story", ""))
         except Exception as exc:
             log.warning("Opening refinement failed for %s: %s", target.video_id, exc)
-        blocked = blocked + list(clip["segments"])
+        blocked = blocked + clip_proposals.opening_windows([clip])
 
 
 def suggest(*, settings, inputs: dict, window: dict | None = None, topic: str = "",
@@ -108,7 +108,9 @@ def suggest(*, settings, inputs: dict, window: dict | None = None, topic: str = 
     """The transcript suggester on plain inputs. Opens no DB session.
 
     ``inputs`` is ``jobs.prepare_inputs``' dict: ``candidate`` (plain fields),
-    ``used``, ``context``, ``striking``, and optionally ``transcript`` /
+    ``other_clips`` (the clips already made from this video: their footage
+    may be reused, their openings and stories may not), ``context``,
+    ``striking``, and optionally ``transcript`` /
     ``words`` (else read from the candidate's files) and ``source`` (a local
     video path for the opening pass). ``context`` overrides
     ``inputs["context"]`` (the bench passes its replay context).
@@ -126,7 +128,7 @@ def suggest(*, settings, inputs: dict, window: dict | None = None, topic: str = 
     if not transcript:
         log.info("No transcript for %s; nothing to suggest from", candidate.get("video_id"))
         return out
-    used = list(inputs.get("used") or [])
+    others = [c for c in (inputs.get("other_clips") or []) if isinstance(c, dict)]
     target = SimpleNamespace(local_video_path=_video_path(inputs, candidate),
                              title=candidate.get("title") or "",
                              video_id=candidate.get("video_id") or "")
@@ -136,7 +138,7 @@ def suggest(*, settings, inputs: dict, window: dict | None = None, topic: str = 
             max_clips=lim["max_clips"], max_segments_per_clip=lim["max_segments"],
             min_seconds=lim["min_seconds"], max_seconds=lim["max_seconds"],
             opening_hold=lim["opening_hold"],
-            used_ranges=used,
+            other_clips=others,
             words=_words(inputs, candidate),
             description=candidate.get("description") or "",
             window=window, topic=topic,
@@ -144,7 +146,7 @@ def suggest(*, settings, inputs: dict, window: dict | None = None, topic: str = 
             visual_moments=list(inputs.get("striking") or []),
         )
         clips = [c for c in (clips or []) if isinstance(c, dict)]
-        _refine_openings(clips, target, settings, used)
+        _refine_openings(clips, target, settings, others)
     out["clips"] = clips
     out["cost_usd"] = round(float(meter.total or 0.0), 6)
     return out

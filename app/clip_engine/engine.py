@@ -319,6 +319,25 @@ def same_cut(a: list[dict], b: list[dict]) -> bool:
     return clip_proposals.iou(a, b) > 0.95
 
 
+def clean_other_clips(raw: Any) -> list[dict]:
+    """The video's other clips as plain dicts — ``{title, words_heard,
+    segments (play order, {start, end})}`` — dropping entries with no usable
+    segment. Whatever else rides along is left out."""
+    out: list[dict] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        segments = plain_segments(_segments_of(item))
+        segments = [s for s in segments if s["end"] > s["start"]]
+        if not segments:
+            continue
+        out.append({"title": " ".join(str(item.get("title") or "").split())[:200]
+                    or "another clip",
+                    "words_heard": " ".join(str(item.get("words_heard") or "").split())[:600],
+                    "segments": segments})
+    return out
+
+
 def _segments_of(item: Any) -> list[dict]:
     raw = item.get("segments") if isinstance(item, dict) else None
     if isinstance(raw, str):
@@ -799,6 +818,8 @@ DROPPED_REJECTED = "rejected before"
 DROPPED_RENDER = "render failed"
 DROPPED_OFF_TOPIC = "off topic"
 DROPPED_LANGUAGE = "language"              # speech the audience can't follow
+DROPPED_SAME_OPENING = "same opening"      # opens on another clip's opening shot
+DROPPED_SAME_CLIP = "same clip"            # IoU > 0.6 with a clip already made
 DROPPED_REVISED = "revised"                # replaced in place by its adopted revision
 DROPPED_REVISION = "revision not used"     # a revision that lost to its original
 
@@ -856,7 +877,7 @@ class _Run:
     def __init__(self, *, setup, settings, brand, playbook, video_id, title, description,
                  duration, source, words, transcript, context, rejected, examples, used,
                  window, section_topic, keep, meter, progress, cancel, deadline,
-                 advice="") -> None:
+                 advice="", other_clips=None) -> None:
         self.setup = setup
         self.roles = ROLES[setup]
         self.settings = settings
@@ -873,7 +894,12 @@ class _Run:
         self.context = context or {}
         self.rejected = list(rejected or [])
         self.examples = [e for e in (examples or []) if isinstance(e, dict)]
+        # Kept for old callers, never used: clips may share footage.
         self.used = list(used or [])
+        # The clips already made from this video. Their footage is fair game;
+        # their opening shots and their stories are not.
+        self.other_clips = clean_other_clips(other_clips)
+        self.opening_blocks = clip_proposals.opening_windows(self.other_clips)
         self.window = window
         self.section_topic = section_topic or ""
         self.advice = prompts.clean_advice(advice)
@@ -1119,7 +1145,7 @@ class _Run:
                 playbook_text=self.playbook_text, rules=self.rules, title=self.title,
                 description=self.description, duration=self.duration, shotlog=self.log,
                 shot_map=self.shot_map, entries=self.entries, has_words=self.has_words,
-                context=self.context, used=self.used, window=self.window,
+                context=self.context, other_clips=self.other_clips, window=self.window,
                 section_topic=self.section_topic,
                 n=self.cfg.section_drafts if self.window else self.cfg.drafts,
                 min_s=self.cfg.min_s, max_s=self.cfg.max_s,
@@ -1170,7 +1196,7 @@ class _Run:
             out = snap.snap_segments(
                 segments, words=self.words, cuts=self.shot_map["cuts"],
                 quiet=self.shot_map["quiet"], floor=self.floor, horizon=self.horizon,
-                blocked=self.used, **self.cfg.snap)
+                blocked=self.opening_blocks, **self.cfg.snap)
         except Exception as exc:
             log.warning("Snapping %s failed: %s", label, exc)
             self.note(f"{label}: snapping failed ({_brief(exc)}); kept the editor's boundaries.")
@@ -1191,8 +1217,36 @@ class _Run:
             self.note(f"Outside {0.8 * self.cfg.min_s:.1f}-{1.3 * self.cfg.max_s:.1f} s after "
                       "snapping: " + ", ".join(f"{d['id']} ({d['seconds']:.1f} s)" for d in short))
 
+    def conflict(self, segments: list[dict]) -> tuple[str, dict | None]:
+        """``clip_proposals.clip_conflict`` against this video's other clips,
+        with the shot map's cuts when there is one (two openings inside the
+        same shot are the same opening shot)."""
+        if not self.other_clips:
+            return "", None
+        cuts = [] if self.shot_map.get("error") else self.shot_map.get("cuts") or []
+        return clip_proposals.clip_conflict(
+            segments, self.other_clips, cuts=cuts,
+            min_shot_score=float(self.cfg.snap.get("min_shot_score", 20.0)))
+
+    def drop_conflict(self, d: dict) -> bool:
+        """Drop a draft that opens on another clip's opening shot or is
+        another clip again. Recycled footage further in is fine."""
+        kind, other = self.conflict(d["segments"])
+        if not kind:
+            return False
+        title = (other or {}).get("title") or "another clip"
+        if kind == clip_proposals.CONFLICT_DUPLICATE:
+            d["dropped_reason"] = DROPPED_SAME_CLIP
+            self.note(f"{d['id']} is the same clip as “{title}”, already made.")
+        else:
+            d["dropped_reason"] = DROPPED_SAME_OPENING
+            self.note(f"{d['id']} opens on the same shot as “{title}”.")
+        d["conflicts_with"] = title
+        return True
+
     def filter_all(self) -> None:
-        """Drop what the operator already dismissed here, then true
+        """Drop what the operator already dismissed here, drafts that open on
+        another clip's opening shot or repeat a clip already made, then true
         duplicates (the editor's earlier draft wins). Nothing left at all is
         a mechanical failure: the caller falls back."""
         kept: list[dict] = []
@@ -1202,6 +1256,8 @@ class _Run:
                 d["dropped_reason"] = DROPPED_REJECTED
                 reason = dismissed.get("reason") or "no reason given"
                 self.note(f"{d['id']} repeats a clip you dismissed here ({reason}).")
+                continue
+            if self.drop_conflict(d):
                 continue
             twin = next((k for k in kept if same_cut(k["segments"], d["segments"])), None)
             if twin is not None:
@@ -1460,7 +1516,7 @@ class _Run:
                 role=self.roles["editor"], settings=self.settings, brand=self.brand,
                 playbook_text=self.playbook_text, rules=self.rules, draft=original,
                 critique=original["critique"], shotlog=self.log, shot_map=self.shot_map,
-                entries=self.entries, has_words=self.has_words, used=self.used,
+                entries=self.entries, has_words=self.has_words, other_clips=self.other_clips,
                 window=self.window, min_s=self.cfg.min_s, max_s=self.cfg.max_s,
                 max_segments=self.cfg.max_segments, source_video=self.source_video,
                 meter=self.meter, advice=self.advice)
@@ -1507,6 +1563,11 @@ class _Run:
             return "it came out the same as the original after snapping"
         if repeats_rejection(revision["segments"], self.rejected) is not None:
             return "it repeats a clip you dismissed"
+        kind, other = self.conflict(revision["segments"])
+        if kind:
+            title = (other or {}).get("title") or "another clip"
+            return (f"it is the same clip as “{title}”" if kind == clip_proposals.CONFLICT_DUPLICATE
+                    else f"it opens on the same shot as “{title}”")
         revision["render"] = str(media.render_cached(
             self.source, plain_segments(revision["segments"]), height=self.cfg.proxy_height))
         revision["credits"] = self.credits(revision["segments"])
@@ -1562,17 +1623,23 @@ class _Run:
 def run(*, setup: str, settings, brand: dict, playbook: dict | None = None, video_id: str,
         title: str, description: str, duration: float | None, source, words: list[dict],
         transcript: list[dict], context: dict, rejected: list[dict], examples: list[dict],
-        used: list[dict], window: dict | None = None, section_topic: str = "",
+        used: list[dict] | None = None, window: dict | None = None, section_topic: str = "",
         keep: int | None = None, meter: CostMeter | None = None,
         progress: Callable[[str], Any] | None = None,
         cancel: threading.Event | None = None, deadline: float | None = None,
-        advice: str = "") -> EngineResult:
+        advice: str = "", other_clips: list[dict] | None = None) -> EngineResult:
     """Suggest clips for one video (or one section of it) by watching it.
 
     Pure: no database. ``source`` must be a local file for the whole run (jobs
     hardlinks it into ``engine_dir()/inflight``). ``words``/``transcript`` are
-    on the source clock; ``used`` is the already-claimed material (blocked for
-    snapping, subtracted by the editor); ``rejected`` the dismissed proposals
+    on the source clock; ``other_clips`` the clips already made from this
+    video (``[{title, words_heard, segments, opening?}]``, segments in play
+    order): their footage may be reused, but a draft may not open on another
+    clip's opening shot (snapping keeps first segments out of those windows;
+    a draft that still opens there, or within the same shot-map shot, is
+    dropped as "same opening") nor repeat one (IoU > 0.6: "same clip"), and
+    the editor is told to tell a different story. ``used`` is accepted for
+    old callers and ignored. ``rejected`` the dismissed proposals
     on this video (``[{segments, reason}]``); ``examples`` this account's taste
     examples (``taste.select_examples``). ``window`` (``{"start", "end"}``)
     scopes the run to one section. ``keep`` defaults to ``clip_engine.keep``
@@ -1600,7 +1667,7 @@ def run(*, setup: str, settings, brand: dict, playbook: dict | None = None, vide
                source=source, words=words, transcript=transcript, context=context,
                rejected=rejected, examples=examples, used=used, window=window,
                section_topic=section_topic, keep=keep, meter=meter, progress=progress,
-               cancel=cancel, deadline=deadline, advice=advice)
+               cancel=cancel, deadline=deadline, advice=advice, other_clips=other_clips)
     try:
         return job.execute()
     except (EngineError, util.Cancelled) as exc:

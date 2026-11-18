@@ -223,22 +223,33 @@ CASES = [
     dict(name="the tail guard won't cut into the last word",
          segments=[S(0, 20)], words=W((19.0, 19.75)), cuts=C(19.7), expected=[(0.0, 20.0)]),
 
-    # ---- clamping and used footage --------------------------------------------
+    # ---- clamping and other clips' openings ------------------------------------
     dict(name="clamped to the window", segments=[S(8, 35)], words=[], cuts=[],
          floor=10, horizon=30, expected=[(10.0, 30.0)]),
-    dict(name="a start inside used footage moves to its end",
-         segments=[S(10, 30)], words=[], cuts=[], blocked=[S(5, 12)], expected=[(12.0, 30.0)]),
-    dict(name="an end inside used footage moves to its start",
-         segments=[S(10, 30)], words=[], cuts=[], blocked=[S(25, 40)], expected=[(10.0, 25.0)]),
-    dict(name="squeezed under min_len by used footage: dropped",
-         segments=[S(10, 15)], words=[], cuts=[], blocked=[S(0, 10.5), S(11.2, 20)],
-         expected=[]),
-    dict(name="straddling used footage: split around it",
-         segments=[S(10, 30)], words=[], cuts=[], blocked=[S(15, 18)],
-         expected=[(10.0, 15.0), (18.0, 30.0)]),
-    dict(name="blocked ranges as unsorted pairs are normalized",
-         segments=[S(10, 30)], words=[], cuts=[], blocked=[[25, 40], [5, 12]],
-         expected=[(12.0, 25.0)]),
+    # Blocked = other clips' OPENING windows: only the clip's first played
+    # segment may not START inside one. Reusing that footage later is fine.
+    dict(name="an opening inside another clip's opening moves to its end",
+         segments=[S(10, 30)], words=[], cuts=[], blocked=[S(9, 12)], expected=[(12.0, 30.0)]),
+    dict(name="an end inside a blocked window is left alone",
+         segments=[S(10, 30)], words=[], cuts=[], blocked=[S(25, 28)], expected=[(10.0, 30.0)]),
+    dict(name="a segment straddling a blocked window is not split",
+         segments=[S(10, 30)], words=[], cuts=[], blocked=[S(15, 18)], expected=[(10.0, 30.0)]),
+    dict(name="only the first played segment is checked",
+         segments=[S(50, 60, "picture"), S(10, 30)], words=[], cuts=[], blocked=[S(9, 12)],
+         expected=[(50.0, 60.0), (10.0, 30.0)]),
+    dict(name="the moved opening never starts mid-word",
+         # 12.0 falls inside the word 11.8-12.4: the opening moves past it
+         segments=[S(10, 30)], words=W((11.8, 12.4), (13.0, 13.5)), cuts=[],
+         blocked=[S(9, 12)], expected=[(12.42, 30.0)]),
+    dict(name="a first segment squeezed under min_len goes; the next opens instead",
+         segments=[S(10, 12), S(40, 50)], words=[], cuts=[], blocked=[S(9, 11.5)],
+         expected=[(40.0, 50.0)]),
+    dict(name="the next opening is checked too",
+         segments=[S(10, 12), S(40, 50)], words=[], cuts=[], blocked=[S(9, 11.5), S(39, 42)],
+         expected=[(42.0, 50.0)]),
+    dict(name="blocked windows as unsorted pairs are normalized",
+         segments=[S(10, 30)], words=[], cuts=[], blocked=[[25, 40], [9, 12]],
+         expected=[(12.0, 30.0)]),
 
     # ---- general --------------------------------------------------------------
     dict(name="cold-open order kept", segments=[S(50, 60, "picture"), S(10, 30)],

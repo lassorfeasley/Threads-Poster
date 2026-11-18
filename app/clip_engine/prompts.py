@@ -149,8 +149,25 @@ def cutting_rules(*, min_s: float, max_s: float, max_segments: int,
         + "- Mark each segment's lead: \"word\" when it opens on speech, "
         "\"picture\" when it opens on a shot. A picture-led segment starts exactly "
         "on one of the shot changes listed in that beat's `cuts`.\n"
-        "- Never use material inside used_ranges.\n"
+        + OTHER_CLIPS_RULES
     )
+
+
+# The footage-reuse rule (clip_proposals.clip_conflict): clips of one video
+# may recycle each other's footage, never each other's opening or story.
+OTHER_CLIPS_RULES = (
+    "- other_clips in the payload (when present) are clips already made from "
+    "this video: title, words heard, segments in play order, and `opening` "
+    "(the first 3 seconds each one plays). Reusing their footage is fine and "
+    "expected: the same setup, context or b-roll can serve more than one "
+    "clip. Two rules do apply:\n"
+    "  DIFFERENT OPENING: never open on the same shot as another clip. Your "
+    "first segment must not start inside, or within 3 seconds of, any other "
+    "clip's `opening`, nor anywhere in the shot that opening is in.\n"
+    "  DIFFERENT STORY: tell a meaningfully different story from each of "
+    "them (another person, craft, place, claim or turn). A draft that is "
+    "substantially another clip again is thrown away.\n"
+)
 
 
 ACCOUNT_CONTEXT_GUIDE = (

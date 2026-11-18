@@ -1763,7 +1763,7 @@ def _error_record(exc: BaseException, *, cost: float = 0.0, by_stage=None, token
 
 def legacy_arm(*, video: dict, source, settings, inputs: dict) -> dict:
     """The transcript arm: today's transcript suggester (``legacy.suggest``),
-    replayed with no used ranges and no striking-frame scan (both came later
+    replayed with no other clips and no striking-frame scan (both came later
     than the archive-time pass) and the same replay context the engine arms
     get. Labelled with its prompt version ("transcript-v3"): this is the
     suggester that would remain as the fallback, not the one behind the
@@ -1774,6 +1774,7 @@ def legacy_arm(*, video: dict, source, settings, inputs: dict) -> dict:
     started = time.monotonic()
     replay = dict(inputs)
     replay["used"] = []
+    replay["other_clips"] = []   # the archive moment: no clip had been made yet
     replay["striking"] = []
     replay["rejected"] = []
     # The opening pass samples frames from the video: point it at the
@@ -1837,7 +1838,7 @@ def _run_arm(label: str, arm: dict, video: dict, *, inputs: dict, source: Path,
                 description=(inputs.get("candidate") or {}).get("description") or "",
                 duration=duration, source=source, words=words, transcript=transcript,
                 context=context, rejected=[], examples=examples, used=[],
-                window=None, meter=meter,
+                other_clips=[], window=None, meter=meter,
                 progress=lambda stage: say(f"      {label}: {stage}"),
                 cancel=cancel, deadline=time.monotonic() + _arm_timeout(arm_settings, timeout))
             record = _engine_record(result, meter)

@@ -674,6 +674,57 @@ def _fit_entries(entries: list[dict], cap: int) -> list[dict]:
     return out
 
 
+def other_clips_payload(other_clips: list[dict] | None, *, words_limit: int = 40) -> list[dict]:
+    """The video's other clips as a model sees them: ``[{title, words_heard,
+    segments (play order), opening: [s, s+3]}]``.
+
+    The footage-reuse rule (see ``clip_proposals.clip_conflict``): a clip may
+    recycle another clip's footage, but must open on a different shot and
+    tell a meaningfully different story. ``opening`` is the window the new
+    clip may not open on; the title and words heard are how the model judges
+    "a different story". Entries without usable segments are dropped.
+    """
+    out: list[dict] = []
+    for clip in other_clips or []:
+        if not isinstance(clip, dict):
+            continue
+        segments = []
+        for s in clip.get("segments") or []:
+            try:
+                start, end = round(float(s["start"]), 1), round(float(s["end"]), 1)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end > start:
+                segments.append({"start": start, "end": end})
+        if not segments:
+            continue
+        heard = " ".join(str(clip.get("words_heard") or "").split())
+        words = heard.split(" ")
+        if len(words) > words_limit:
+            heard = " ".join(words[:words_limit]).rstrip("…") + "…"
+        out.append({"title": " ".join(str(clip.get("title") or "").split())[:200],
+                    "words_heard": heard,
+                    "segments": segments,
+                    "opening": [segments[0]["start"], round(segments[0]["start"] + 3.0, 1)]})
+    return out
+
+
+# The footage-reuse rule in words, shared by the suggester and the reviser.
+OTHER_CLIPS_RULE = (
+    "Other clips have already been made from this video — other_clips in the "
+    "input: each one's title, the words heard in it, its segments in play "
+    "order, and its `opening` (the first 3 seconds it plays). Reusing their "
+    "footage is fine and expected: setup, context and b-roll can appear in "
+    "more than one clip. Two rules do apply:\n"
+    "- DIFFERENT OPENING: never open on the same shot as another clip. The "
+    "first segment's first 3 seconds must not overlap any other clip's "
+    "`opening`.\n"
+    "- DIFFERENT STORY: the story must be meaningfully different from each "
+    "of theirs (another person, craft, place, claim or turn), not the same "
+    "clip cut again.\n"
+)
+
+
 def suggest_clips(model: str, title: str, transcript_segments: list[dict],
                   max_clips: int = 3, max_segments_per_clip: int = 4,
                   min_seconds: int = 15, max_seconds: int = 40,
@@ -681,6 +732,7 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
                   used_ranges: list[dict] | None = None,
                   words: list[dict] | None = None,
                   description: str = "",
+                  other_clips: list[dict] | None = None,
                   window: dict | None = None, topic: str = "",
                   context: dict | None = None,
                   visual_moments: list[dict] | None = None) -> list[dict]:
@@ -695,10 +747,10 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     - Several CLIPS: separate stories that can't share a caption, each its own
       post and its own ``Cut`` row.
 
-    ``used_ranges`` are windows already claimed by other clips from this video.
-    They're shown to the model so it spends its proposals on fresh material;
-    the caller still subtracts them afterwards, because a proposal made at
-    archive time goes stale as soon as the next clip is cut.
+    ``other_clips`` are the clips already made from this video (see
+    ``other_clips_payload``). Their footage may be reused; each proposal must
+    open on a different shot and tell a different story. ``used_ranges`` is
+    accepted for old callers and ignored: used footage is no longer off limits.
 
     ``words`` is the full-video Whisper word stream (``[{word, start, end}]``).
     When present it replaces ``transcript_segments`` as the model's timeline:
@@ -764,8 +816,7 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
         if horizon - floor < min_seconds:
             return []   # nothing here long enough to be a clip
 
-    used = [{"start": round(float(r["start"]), 1), "end": round(float(r["end"]), 1)}
-            for r in (used_ranges or [])]
+    others = other_clips_payload(other_clips)
 
     moments = []
     for m in (visual_moments or []):
@@ -855,10 +906,9 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
            "segment on the first word you want heard and end it right after "
            "the last one, using the entry timestamps as-is.\n"
            if word_accurate else "")
-        + ("Some of this video is ALREADY published in other clips — the "
-           "used_ranges below. Do not propose any of that material again, and "
-           "do not build a clip that merely straddles it. Find fresh moments "
-           "or return fewer clips.\n" if used else "")
+        + (OTHER_CLIPS_RULE + "Never propose a clip that is substantially "
+           "one of theirs again; find another story, or return fewer clips.\n"
+           if others else "")
         + ("\nLEARN FROM THIS ACCOUNT — account_context in the payload:\n"
            "- shipped_examples: clips this operator actually posted, the "
            "words heard in order, best-performing first. That is the bar: "
@@ -889,8 +939,8 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
                               "about": topic}
     if description:
         payload["source_video_description"] = description[:2000]
-    if used:
-        payload["used_ranges"] = used
+    if others:
+        payload["other_clips"] = others
     if moments:
         payload["visual_moments"] = moments
     if context:
@@ -931,7 +981,8 @@ def revise_clip(model: str, title: str, instruction: str,
                 current_segments: list[dict], transcript_segments: list[dict],
                 words: list[dict] | None = None,
                 used_ranges: list[dict] | None = None,
-                max_segments: int = 8) -> dict:
+                max_segments: int = 8,
+                other_clips: list[dict] | None = None) -> dict:
     """Apply ONE operator instruction to an existing clip's segments.
 
     The complement of ``suggest_clips``: that call has to find the story on its
@@ -944,6 +995,10 @@ def revise_clip(model: str, title: str, instruction: str,
     time order. Output preserves whatever order the model returns and is only
     coerced/clamped, never sorted or merged — reordering someone's supercut to
     "fix" it would be a worse bug than any overlap.
+
+    ``other_clips`` are the video's other clips (``other_clips_payload``):
+    their footage may be reused, but this clip must keep its own opening shot
+    and its own story. ``used_ranges`` is accepted for old callers and ignored.
 
     Returns ``{"segments": [...], "note": str, "changed": bool}``. When the
     model can't comply, ``segments`` is the input unchanged and ``note`` says
@@ -973,8 +1028,7 @@ def revise_clip(model: str, title: str, instruction: str,
                 "changed": False}
     horizon = max(w["end"] for w in compact)
 
-    used = [{"start": round(float(r["start"]), 1), "end": round(float(r["end"]), 1)}
-            for r in (used_ranges or [])]
+    others = other_clips_payload(other_clips)
 
     b = _brand()
     system = (
@@ -993,20 +1047,18 @@ def revise_clip(model: str, title: str, instruction: str,
            "segment on the first word you want heard and end it right after "
            "the last one, using the entry timestamps as-is.\n"
            if word_accurate else "")
-        + ("Some of this video is already published in other clips — the "
-           "used_ranges in the input. Do not pull any of that material in.\n"
-           if used else "")
-        + "If the instruction can't be done (the material isn't in this video, "
-        "or it's already used elsewhere), return the segments UNCHANGED and "
-        "say why in the note.\n"
+        + (OTHER_CLIPS_RULE if others else "")
+        + "If the instruction can't be done (the material isn't in this "
+        "video), return the segments UNCHANGED and say why in the note. "
+        "Footage another clip also uses is never a reason to refuse.\n"
         f"At most {max_segments} segments.\n"
         "JSON shape: {\"segments\": [{\"start\": n, \"end\": n}], "
         "\"note\": \"one line on what you changed, or why you couldn't\"}"
     )
     payload = {"title": title, "instruction": instruction[:500],
                "current_segments": current, "transcript": compact}
-    if used:
-        payload["used_ranges"] = used
+    if others:
+        payload["other_clips"] = others
     data = _json_chat(model, system, json.dumps(payload), max_tokens=1500)
 
     # Coerce and clamp only — no sorting, no merging (see docstring).

@@ -810,7 +810,8 @@ class RunTest(_RunFixture):
         self.run_bench()
         self.assertEqual(len(self.engine_calls), 3)
         call = next(c for c in self.engine_calls if c["video_id"] == "v1")
-        self.assertEqual((call["used"], call["rejected"], call["window"]), ([], [], None))
+        self.assertEqual((call["used"], call["other_clips"], call["rejected"], call["window"]),
+                         ([], [], [], None))     # the archive moment: no clip made yet
         self.assertEqual(call["setup"], "gemini")
         self.assertEqual(call["playbook"], {"archetypes": [{"key": "voice"}], "flops": [], "notes": ""})
         self.assertEqual(call["meter"].bucket, "bench")
@@ -1422,10 +1423,12 @@ class LegacyArmTest(_Env):
 
         self.patch(legacy, "suggest", fake_suggest)
         inputs = {"candidate": {"video_id": "v", "local_video_path": "/orig.mp4"},
-                  "used": [S(0, 3)], "striking": [{"t": 1}], "context": {"x": 1}}
+                  "used": [S(0, 3)], "striking": [{"t": 1}], "context": {"x": 1},
+                  "other_clips": [{"title": "later clip", "segments": [S(0, 3)]}]}
         out = bench.legacy_arm(video={"video_id": "v", "candidate_pk": 7}, source=Path("/link.mp4"),
                                settings=Settings(raw={}), inputs=inputs)
         self.assertEqual(seen["inputs"]["used"], [])
+        self.assertEqual(seen["inputs"]["other_clips"], [])
         self.assertEqual(seen["inputs"]["striking"], [])
         self.assertEqual(seen["inputs"]["candidate"]["local_video_path"], "/link.mp4")
         self.assertEqual(seen["inputs"]["source"], "/link.mp4")

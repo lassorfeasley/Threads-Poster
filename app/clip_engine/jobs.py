@@ -357,8 +357,13 @@ def prepare_inputs(candidate_id: int, *, window: dict | None = None, as_of=None,
     yields an empty value and a line in ``notes`` instead of poisoning the
     transaction for the rest, or the run.
 
+    ``other_clips`` are the clips already made from this video, oldest first:
+    ``[{cut_pk, title, segments (play order), opening, words_heard}]``. Their
+    footage may be reused; a new clip must open on a different shot and tell a
+    different story. ``used`` stays in the dict for old callers, always empty.
+
     ``replay`` (the bench) leaves out everything that leaks the operator's
-    later verdicts on this video: claimed ranges, dismissals and striking
+    later verdicts on this video: other clips, dismissals and striking
     frames, and asks ``clip_context`` for its replay view without calibration.
     """
     from .. import clip_context, vision
@@ -366,8 +371,8 @@ def prepare_inputs(candidate_id: int, *, window: dict | None = None, as_of=None,
 
     settings = load_settings()
     notes: list[str] = []
-    out: dict[str, Any] = {"candidate": None, "used": [], "context": {}, "rejected": [],
-                           "examples": [], "striking": [], "notes": notes,
+    out: dict[str, Any] = {"candidate": None, "used": [], "other_clips": [], "context": {},
+                           "rejected": [], "examples": [], "striking": [], "notes": notes,
                            "window": _clean_window(window)}
     with session_scope() as session:
         try:
@@ -379,8 +384,9 @@ def prepare_inputs(candidate_id: int, *, window: dict | None = None, as_of=None,
             out["candidate"] = fields
             striking_raw = c.striking_frames or ""
             if not replay:
-                out["used"] = _piece(session, "claimed ranges", notes, [],
-                                     lambda: clip_proposals.used_ranges(session, fields["id"]))
+                out["other_clips"] = _piece(
+                    session, "other clips", notes, [],
+                    lambda: clip_proposals.other_clips(session, fields["id"]))
                 out["rejected"] = _piece(session, "dismissed suggestions", notes, [],
                                          lambda: _rejected(session, fields["id"]))
                 out["striking"] = _piece(
@@ -400,7 +406,26 @@ def prepare_inputs(candidate_id: int, *, window: dict | None = None, as_of=None,
                     seed=fields["video_id"]) or []))
         finally:
             session.rollback()
+    if out["other_clips"] and out["candidate"]:
+        _hear_other_clips(out["other_clips"], out["candidate"])
     return out
+
+
+def _hear_other_clips(clips: list[dict], fields: dict) -> None:
+    """Fill each other clip's ``words_heard`` from the video's word stream
+    (or its transcript), read from local JSON after the session has closed.
+    Best effort: a clip keeps "" when there is nothing to read."""
+    try:
+        files = SimpleNamespace(transcript_path=fields.get("transcript_path") or "",
+                                word_transcript_path=fields.get("word_transcript_path") or "")
+        words = clip_proposals.load_words(files)
+        transcript = [] if words else clip_proposals.load_transcript(files)
+        for clip in clips:
+            clip["words_heard"] = clip_proposals.words_heard(clip.get("segments") or [],
+                                                             words, transcript)
+    except Exception as exc:
+        log.warning("Couldn't read what the other clips of video %s say: %s",
+                    fields.get("video_id"), exc)
 
 
 def write_result(candidate_id: int, result, *, window: dict | None = None) -> list[int]:
@@ -683,7 +708,8 @@ def _execute(job: _Job) -> dict:
             description=cand.get("description") or "", duration=duration,
             source=link or local, words=words, transcript=transcript,
             context=inputs.get("context") or {}, rejected=inputs.get("rejected") or [],
-            examples=inputs.get("examples") or [], used=inputs.get("used") or [],
+            examples=inputs.get("examples") or [], used=[],
+            other_clips=inputs.get("other_clips") or [],
             window=job.window, section_topic=job.topic, keep=None, meter=meter,
             progress=lambda label: _update(job, stage=str(label or "")[:80]),
             cancel=_cancel, deadline=time.monotonic() + timeout, advice=advice_for_engine)

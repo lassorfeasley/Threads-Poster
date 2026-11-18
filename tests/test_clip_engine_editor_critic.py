@@ -150,9 +150,14 @@ def seg(start, end, lead=None):
     return out
 
 
+OTHER_CLIPS = [{"cut_pk": 7, "title": "The weaver's loom", "segments": [
+    {"start": 500, "end": 520}, {"start": 40, "end": 44}], "opening": [500.0, 503.0],
+    "words_heard": "she weaves every morning"}]
+
+
 class CleanDraftsTest(unittest.TestCase):
     def clean(self, raw, **kw):
-        args = dict(floor=0.0, horizon=300.0, min_s=12, max_s=45, max_segments=6, used=[],
+        args = dict(floor=0.0, horizon=300.0, min_s=12, max_s=45, max_segments=6,
                     archetypes=ARCHETYPES)
         args.update(kw)
         return editor.clean_drafts(raw, **args)
@@ -166,12 +171,12 @@ class CleanDraftsTest(unittest.TestCase):
         (out,) = self.clean([raw_draft([seg(80, 100), seg(90, 110)])])
         self.assertEqual([(s["start"], s["end"]) for s in out["segments"]], [(80, 100), (100, 110)])
 
-    def test_used_footage_is_subtracted_in_place(self):
+    def test_footage_other_clips_use_is_not_subtracted(self):
+        # Clips may share footage: the old ``used`` argument is ignored.
         (out,) = self.clean([raw_draft([seg(120, 128, "picture"), seg(50, 80)])],
                             used=[{"start": 60, "end": 70}])
         self.assertEqual(out["segments"], [{"start": 120.0, "end": 128.0, "lead": "picture"},
-                                           {"start": 50.0, "end": 60.0, "lead": "word"},
-                                           {"start": 70.0, "end": 80.0, "lead": "word"}])
+                                           {"start": 50.0, "end": 80.0, "lead": "word"}])
 
     def test_length_bounds(self):
         cases = [(9.5, False), (9.6, True), (58.5, True), (58.6, False)]
@@ -305,7 +310,7 @@ class DraftTest(EditorCase):
                                                           {"t": 15.0, "score": 3}],
                               "quiet": [], "error": ""},
                     entries=ENTRIES, has_words=True, context={"rejected_here": [{"story": "x"}]},
-                    used=[{"start": 500, "end": 520}], window=None, section_topic="", n=10,
+                    other_clips=OTHER_CLIPS, window=None, section_topic="", n=10,
                     min_s=12, max_s=45, max_segments=6, source_video=self.proxy,
                     keyframe_frames=[], meter=FakeMeter())
         args.update(kw)
@@ -353,13 +358,16 @@ class DraftTest(EditorCase):
         self.run_draft()
         payload = self.payload()
         self.assertEqual(list(payload), ["title", "description", "duration", "shot_log",
-                                         "transcript", "account_context", "used_ranges"])
+                                         "transcript", "account_context", "other_clips"])
         self.assertEqual(payload["title"], "Fire season")
         self.assertEqual(len(payload["description"]), 2000)
         self.assertEqual(payload["duration"], 600.0)
         self.assertEqual(payload["transcript"], ENTRIES)
         self.assertEqual(payload["account_context"], {"rejected_here": [{"story": "x"}]})
-        self.assertEqual(payload["used_ranges"], [{"start": 500, "end": 520}])
+        self.assertEqual(payload["other_clips"], [{
+            "title": "The weaver's loom", "words_heard": "she weaves every morning",
+            "segments": [{"start": 500.0, "end": 520.0}, {"start": 40.0, "end": 44.0}],
+            "opening": [500.0, 503.0]}])
         beats = payload["shot_log"]["beats"]
         self.assertEqual(beats[1]["cuts"], [12.04])             # the weak change is left out
         self.assertEqual(payload["shot_log"]["people"][0]["name"], "Bill Nye")
@@ -434,23 +442,42 @@ class DraftTest(EditorCase):
         self.assertEqual(self.calls, [])
 
     def test_drafts_all_dropped_by_cleaning_are_a_failure_not_an_answer(self):
-        # A reroll on a video whose best stretches are taken: every draft lies in
-        # used footage, so cleaning leaves nothing (or too little) of any of them.
+        # Every draft too short (or unreadable): cleaning leaves nothing.
         self.answer = {"moments": [{"id": "m1", "start": 100, "end": 140, "kind": "line",
                                     "why": "x"}],
-                       "drafts": [raw_draft([{"start": 100 + i, "end": 130 + i, "lead": "word"}])
+                       "drafts": [raw_draft([{"start": 100 + i, "end": 105 + i, "lead": "word"}])
                                   for i in range(10)] + ["junk"]}
         with self.assertRaises(editor.DraftsDropped) as caught:
-            self.run_draft(used=[{"start": 95, "end": 150}])
-        self.assertEqual(caught.exception.reasons, {"inside used footage": 10, "unreadable": 1})
+            self.run_draft()
+        self.assertEqual(caught.exception.reasons, {"too short": 10, "unreadable": 1})
         self.assertIn("11 drafts", str(caught.exception))
         self.assertEqual([s for s, _ in self.meter.added], ["draft"])   # the call was charged
-        # Some survive: an answer, as before. Used footage to 128 s leaves 128-138
-        # and 128-139 long enough (>= 9.6 s); the other eight are too short.
-        drafts, _ = self.run_draft(used=[{"start": 95, "end": 128}])
-        self.assertEqual([d["segments"] for d in drafts],
-                         [[{"start": 128.0, "end": 138.0, "lead": "word"}],
-                          [{"start": 128.0, "end": 139.0, "lead": "word"}]])
+
+    def test_footage_other_clips_use_is_never_cleaned_away(self):
+        # A reroll on a video whose best stretches another clip already uses:
+        # the drafts come back whole (the engine judges openings and repeats).
+        self.answer = {"moments": [],
+                       "drafts": [raw_draft([{"start": 100 + i, "end": 130 + i, "lead": "word"}])
+                                  for i in range(3)]}
+        drafts, _ = self.run_draft(used=[{"start": 95, "end": 150}],
+                                   other_clips=[{"title": "x", "segments": [
+                                       {"start": 95, "end": 150}]}])
+        self.assertEqual([(d["segments"][0]["start"], d["segments"][0]["end"]) for d in drafts],
+                         [(100.0, 130.0), (101.0, 131.0), (102.0, 132.0)])
+        self.assertIn("other_clips", self.payload())
+
+    def test_the_footage_reuse_rule_is_in_every_cutting_prompt(self):
+        rules = prompts.cutting_rules(min_s=12, max_s=45, max_segments=6)
+        self.assertNotIn("used_ranges", rules)
+        self.assertIn("Reusing their footage is fine and expected", rules)
+        self.assertIn("DIFFERENT OPENING", rules)
+        self.assertIn("DIFFERENT STORY", rules)
+        for system in (prompts.editor_system(BRAND, PLAYBOOK_TEXT, "", n=10, min_s=12, max_s=45,
+                                             max_segments=6, sees_video=True),
+                       prompts.revise_system(BRAND, PLAYBOOK_TEXT, "", min_s=12, max_s=45,
+                                             max_segments=6, sees_video=True)):
+            self.assertIn(prompts.OTHER_CLIPS_RULES, system)
+            self.assertNotIn("used_ranges", system)
 
     def test_an_answer_with_no_drafts_is_empty_not_a_failure(self):
         self.answer = {"moments": [{"id": "m1", "start": 10, "end": 40, "kind": "line",
@@ -528,13 +555,13 @@ class DraftsDroppedInTheRunTest(TempCase):
 
     def test_every_draft_cleaned_away_is_a_failure(self):
         self.answer = {"moments": [],
-                       "drafts": [raw_draft([{"start": 100 + i, "end": 130 + i, "lead": "word"}])
+                       "drafts": [raw_draft([{"start": 100 + i, "end": 104 + i, "lead": "word"}])
                                   for i in range(10)]}
         meter = engine.CostMeter()
         with self.assertRaises(engine.EngineError) as caught:
-            self.run_engine(used=[{"start": 95, "end": 150}], meter=meter)
+            self.run_engine(meter=meter)
         self.assertIn("drafting failed: DraftsDropped", str(caught.exception))
-        self.assertIn("10 inside used footage", str(caught.exception))
+        self.assertIn("10 too short", str(caught.exception))
         self.assertAlmostEqual(meter.by_stage["draft"], 0.04)     # charged once
 
     def test_an_editor_that_drafted_nothing_is_an_answer(self):
@@ -558,7 +585,7 @@ class ReviseTest(EditorCase):
                     rules="", draft=self.original(),
                     critique={"score": 4, "fix": "start at 0:03", "error": "", "usage": usage()},
                     shotlog=shot_log(), shot_map={"cuts": [{"t": 102.0, "score": 50}]},
-                    entries=ENTRIES, has_words=True, used=[], window=None, min_s=12, max_s=45,
+                    entries=ENTRIES, has_words=True, window=None, min_s=12, max_s=45,
                     max_segments=6, source_video=self.proxy, meter=FakeMeter())
         args.update(kw)
         self.meter = args["meter"]
@@ -592,7 +619,7 @@ class ReviseTest(EditorCase):
 
     def test_payload_and_parts(self):
         self.run_revise({"change": "x", "archetype": "voice", "segments": []},
-                        used=[{"start": 0, "end": 5}])
+                        other_clips=OTHER_CLIPS)
         call = self.calls[-1]
         self.assertEqual(call["parts"][0], {"video": str(self.proxy), "fps": 1.0})
         payload = self.payload(call)
@@ -605,7 +632,11 @@ class ReviseTest(EditorCase):
         self.assertEqual([b["start"] for b in payload["shot_log"]["beats"]], [40.0, 60.0])
         self.assertEqual((payload["transcript"][0]["start"], payload["transcript"][-1]["start"]),
                          (40.0, 175.0))
-        self.assertEqual(payload["used_ranges"], [{"start": 0, "end": 5}])
+        self.assertEqual([c["title"] for c in payload["other_clips"]], ["The weaver's loom"])
+        self.assertEqual(payload["other_clips"][0]["opening"], [500.0, 503.0])
+        self.assertNotIn("used_ranges", payload)
+        self.run_revise({"change": "x", "archetype": "voice", "segments": []})
+        self.assertNotIn("other_clips", self.payload(self.calls[-1]))
         self.assertEqual(call["system"], prompts.revise_system(
             BRAND, PLAYBOOK_TEXT, "", min_s=12, max_s=45, max_segments=6, sees_video=True,
             has_words=True))
@@ -632,11 +663,12 @@ class ReviseTest(EditorCase):
         self.assertEqual(len(call["content"]), 1)
         self.assertIn("You can't watch the video", call["system"])
 
-    def test_used_footage_is_subtracted_from_the_revision(self):
+    def test_footage_other_clips_use_stays_in_the_revision(self):
         out = self.run_revise({"change": "x", "archetype": "voice",
                                "segments": [{"start": 90, "end": 128, "lead": "word"}]},
-                              used=[{"start": 120, "end": 130}])
-        self.assertEqual(out["segments"], [{"start": 90.0, "end": 120.0, "lead": "word"}])
+                              used=[{"start": 120, "end": 130}],
+                              other_clips=[{"title": "y", "segments": [{"start": 120, "end": 130}]}])
+        self.assertEqual(out["segments"], [{"start": 90.0, "end": 128.0, "lead": "word"}])
 
 
     def test_advice_reaches_the_reviser(self):

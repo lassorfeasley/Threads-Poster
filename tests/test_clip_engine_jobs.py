@@ -535,7 +535,11 @@ class EngineRunTest(JobsTestBase):
         self.assertEqual(kwargs["section_topic"], "Fire — the planet")
         self.assertEqual([w["word"] for w in kwargs["words"]], ["hello", "world"])
         self.assertEqual(len(kwargs["transcript"]), 2)
-        self.assertEqual(kwargs["used"], [{"start": 100.0, "end": 110.0}])
+        self.assertEqual(kwargs["used"], [])           # clips may share footage
+        (other,) = kwargs["other_clips"]
+        self.assertEqual((other["title"], other["segments"], other["opening"]),
+                         (f"Clip {other['cut_pk']}", [{"start": 100.0, "end": 110.0}],
+                          [100.0, 103.0]))
         self.assertEqual(kwargs["rejected"], [{"segments": [{"start": 40.0, "end": 60.0}],
                                                "reason": "bad_boundaries"}])
         self.assertEqual(kwargs["context"], {"shipped_examples": ["a hit"]})
@@ -1179,7 +1183,11 @@ class PrepareInputsTest(JobsTestBase):
         inputs = jobs.prepare_inputs(cid)
         self.assertEqual(inputs["candidate"]["video_id"], "vid1")
         self.assertEqual(inputs["candidate"]["archived_at"].tzinfo, dt.timezone.utc)
-        self.assertEqual(inputs["used"], [{"start": 10.0, "end": 20.0}])
+        self.assertEqual(inputs["used"], [])
+        (other,) = inputs["other_clips"]
+        self.assertEqual({k: other[k] for k in ("segments", "opening")},
+                         {"segments": [{"start": 10.0, "end": 20.0}], "opening": [10.0, 13.0]})
+        self.assertTrue(other["title"].startswith("Clip "))
         self.assertEqual(inputs["rejected"], [{"segments": [{"start": 30.0, "end": 40.0}],
                                                "reason": "off_topic"}])
         self.assertEqual(inputs["striking"], [{"t": 12.5, "why": "flames"}])
@@ -1199,7 +1207,8 @@ class PrepareInputsTest(JobsTestBase):
         self.add_proposal(cid, [{"start": 30.0, "end": 40.0}], verdict="dismissed")
         as_of = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
         inputs = jobs.prepare_inputs(cid, as_of=as_of, replay=True)
-        self.assertEqual((inputs["used"], inputs["rejected"], inputs["striking"]), ([], [], []))
+        self.assertEqual((inputs["used"], inputs["other_clips"], inputs["rejected"],
+                          inputs["striking"]), ([], [], [], []))
         self.assertEqual(self.context_build.call_args.kwargs,
                          {"as_of": as_of, "replay": True, "calibration": "none"})
         kwargs = self.select_examples.call_args.kwargs
@@ -1216,10 +1225,26 @@ class PrepareInputsTest(JobsTestBase):
         inputs = jobs.prepare_inputs(cid)
         self.assertEqual(inputs["context"], {})
         self.assertEqual(inputs["examples"], [])
-        self.assertEqual(inputs["used"], [{"start": 10.0, "end": 20.0}])
+        self.assertEqual([c["segments"] for c in inputs["other_clips"]],
+                         [[{"start": 10.0, "end": 20.0}]])
         self.assertEqual(len(inputs["notes"]), 2)
         self.assertIn("account context unavailable", inputs["notes"][0])
         self.assertIn("taste examples unavailable", inputs["notes"][1])
+
+    def test_other_clips_carry_their_titles_and_words_heard(self):
+        cid = self.add_candidate()
+        with self.Session() as s:
+            s.add(Cut(candidate_pk=cid, clip_title="The loom",
+                      trim_segments=json.dumps([{"start": 5.0, "end": 9.0},
+                                                {"start": 0.0, "end": 2.0}])))
+            s.add(Cut(candidate_pk=cid, trim_segments=""))          # no segments: not a clip
+            s.commit()
+        (other,) = jobs.prepare_inputs(cid)["other_clips"]
+        self.assertEqual(other["title"], "The loom")
+        # Play order kept; the opening is the first PLAYED segment's first 3 s.
+        self.assertEqual(other["segments"], [{"start": 5.0, "end": 9.0}, {"start": 0.0, "end": 2.0}])
+        self.assertEqual(other["opening"], [5.0, 8.0])
+        self.assertEqual(other["words_heard"], "world hello")   # word stream, play order
 
     def test_unknown_video(self):
         inputs = jobs.prepare_inputs(999)

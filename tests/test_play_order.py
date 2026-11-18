@@ -2,7 +2,7 @@
 
 A clip's segment list is in PLAY order — a cold open plays its payoff first.
 These pin down the order-preserving interval helpers (clean_play_order,
-subtract_play_order, strip_segments), visible_segments, and log_run (which
+strip_segments), visible_segments, and log_run (which
 stores play order and never supersedes anything on an empty run), plus the v3
 prompt wording and the no-temperature rule in llm._create.
 
@@ -88,37 +88,6 @@ class CleanPlayOrderTest(unittest.TestCase):
                          clip_proposals.normalize(legacy))
 
 
-class SubtractPlayOrderTest(unittest.TestCase):
-    CASES = [
-        ("nothing used: unchanged, order kept",
-         [seg(100, 130), seg(10, 40)], [], [(100, 130), (10, 40)]),
-        ("used time in the middle splits the segment in place, pieces in time order",
-         [seg(100, 130), seg(10, 40)], [seg(115, 120)], [(100, 115), (120, 130), (10, 40)]),
-        ("a sliver left beside used footage is dropped",
-         [seg(10, 20)], [seg(11, 30)], []),
-        ("a short segment no used range touches is kept",
-         [seg(10, 11.2), seg(50, 60)], [seg(55, 56)], [(10, 11.2), (50, 55), (56, 60)]),
-        ("used ranges are normalized first",
-         [seg(0, 30)], [seg(12, 15), seg(5, 8), seg(7, 10)], [(0, 5), (10, 12), (15, 30)]),
-        ("fully used segment disappears, the rest keep their order",
-         [seg(40, 50), seg(0, 10)], [seg(39, 51)], [(0, 10)]),
-        ("touching a used range is not overlapping it",
-         [seg(10, 20)], [seg(0, 10), seg(20, 30)], [(10, 20)]),
-        ("unusable entries are skipped",
-         [seg(None, 3), seg(5, 4), seg(1, 4)], [], [(1, 4)]),
-    ]
-
-    def test_cases(self):
-        for name, segments, used, expected in self.CASES:
-            with self.subTest(name):
-                self.assertEqual(spans(clip_proposals.subtract_play_order(segments, used)),
-                                 expected)
-
-    def test_extra_keys_preserved_on_every_piece(self):
-        out = clip_proposals.subtract_play_order([seg(0, 30, lead="picture")], [seg(10, 15)])
-        self.assertEqual(out, [seg(0.0, 10.0, lead="picture"), seg(15.0, 30.0, lead="picture")])
-
-
 class StripSegmentsTest(unittest.TestCase):
     def test_keeps_order_and_only_start_end(self):
         self.assertEqual(
@@ -133,21 +102,26 @@ class VisibleSegmentsTest(unittest.TestCase):
         self.assertEqual(spans(kept), [(100, 115), (10, 25)])
         self.assertFalse(trimmed)
 
-    def test_used_footage_trims_in_place(self):
-        kept, trimmed = clip_proposals.visible_segments([seg(100, 130), seg(10, 25)],
-                                                        [seg(115, 120)])
-        self.assertEqual(spans(kept), [(100, 115), (120, 130), (10, 25)])
-        self.assertTrue(trimmed)
+    def test_footage_other_clips_use_is_never_cut_out(self):
+        # Clips may recycle each other's footage: the old "used" argument is
+        # ignored and nothing is subtracted, trimmed or dropped.
+        for used in ([seg(115, 120)], [seg(0, 1000)], [seg(4, 30)]):
+            with self.subTest(used=used):
+                kept, trimmed = clip_proposals.visible_segments(
+                    [seg(100, 130), seg(10, 25)], used)
+                self.assertEqual(spans(kept), [(100, 130), (10, 25)])
+                self.assertFalse(trimmed)
 
-    def test_too_little_left_is_not_offered(self):
-        self.assertEqual(clip_proposals.visible_segments([seg(0, 20)], [seg(4, 30)]),
-                         ([], True))
-
-    def test_unrelated_used_range_doesnt_mark_trimmed(self):
-        kept, trimmed = clip_proposals.visible_segments([seg(10, 11.2), seg(50, 70)],
-                                                        [seg(200, 210)])
-        self.assertEqual(spans(kept), [(10, 11.2), (50, 70)])
+    def test_unusable_entries_are_dropped_and_extra_keys_kept(self):
+        kept, trimmed = clip_proposals.visible_segments(
+            [seg(None, 3), seg(5, 4), seg(1, 4, lead="picture")])
+        self.assertEqual(kept, [seg(1.0, 4.0, lead="picture")])
         self.assertFalse(trimmed)
+        self.assertEqual(clip_proposals.visible_segments([]), ([], False))
+
+    def test_no_subtraction_helpers_remain(self):
+        for name in ("subtract", "subtract_play_order", "used_ranges"):
+            self.assertFalse(hasattr(clip_proposals, name), name)
 
 
 class _LedgerDb(unittest.TestCase):
@@ -207,8 +181,8 @@ class LogRunTest(_LedgerDb):
         [row_id] = self.log([{"segments": [seg(100, 130), seg(10, 40)]}])
         _, segments = self.stored(row_id)
         kept, trimmed = clip_proposals.visible_segments(segments, [seg(115, 120)])
-        self.assertEqual(spans(kept), [(100, 115), (120, 130), (10, 40)])
-        self.assertTrue(trimmed)
+        self.assertEqual(spans(kept), [(100, 130), (10, 40)])
+        self.assertFalse(trimmed)
 
     def test_empty_run_supersedes_nothing(self):
         standing = self.pending([seg(0, 30)])

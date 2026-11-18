@@ -1599,24 +1599,30 @@ def toggle_multi_clip(candidate_id: int):
     return JSONResponse({"multi_clip": flag})
 
 
-def _proposal_payload(row, used: list[dict], words: list[dict] | None = None,
+def _proposal_payload(row, others: list[dict], words: list[dict] | None = None,
                       transcript: list[dict] | None = None) -> dict | None:
     """One pending proposal, shaped for the suggestion cards + waveform overlay.
 
-    Material already claimed by another clip is cut out here rather than at
-    generation time: the archive-time pass runs before any cut exists, so a
-    proposal only becomes a duplicate later. Nothing offered can overlap a clip
-    that already exists, whatever the model asked for.
+    ``others`` are the video's clips (``clip_proposals.other_clips``). Clips
+    may recycle each other's footage, so a proposal is offered as proposed —
+    but one that is the same clip as an existing one (IoU above
+    ``DUPLICATE_IOU``) is not offered at all (None), and one that opens on
+    another clip's opening shot carries ``same_opening`` (that clip's title)
+    for its card to flag. Checked when served, not when made: the
+    archive-time pass runs before any cut exists.
 
     ``opening``/``closing`` are the words heard at either end of what's
-    actually offered (post-trim), so the card can be judged without playing.
+    offered, so the card can be judged without playing.
     """
     try:
         proposed = json.loads(row.proposed_segments or "[]")
     except (ValueError, TypeError):
         return None
-    segments, trimmed = clip_proposals.visible_segments(proposed, used)
+    segments, trimmed = clip_proposals.visible_segments(proposed)
     if not segments:
+        return None
+    conflict, clash = clip_proposals.clip_conflict(segments, others or [])
+    if conflict == clip_proposals.CONFLICT_DUPLICATE:
         return None
     lines = clip_proposals.excerpts(segments, words or [], transcript or [])
     engine, preview = _engine_card(row.id, segments)
@@ -1628,6 +1634,7 @@ def _proposal_payload(row, used: list[dict], words: list[dict] | None = None,
             "at": segments[0]["start"], "count": len(segments),
             "opening": lines["opening"], "closing": lines["closing"],
             "thumb": f"/clip-proposal/{row.id}/thumb", "flag": row.flag or "",
+            "same_opening": (clash or {}).get("title", "") if conflict else "",
             "engine": engine, "preview": preview}
 
 
@@ -1648,10 +1655,9 @@ def _engine_card(proposal_id: int, offered: list[dict]) -> tuple[dict, str]:
 
     ``({}, "")`` for proposals the engine didn't make, and on any error — a card
     must render whatever happened to the sidecar. The preview is a render of
-    the segments as proposed, so it is only offered while the card offers
-    exactly those: once part of the proposal has been claimed by another clip,
-    the video (and the critic's clip-time notes) describe footage the card no
-    longer contains.
+    the segments as rendered, so it is only offered while the card offers
+    exactly those: a proposal stored differently from its render (a later
+    re-cut, a cleaned segment) would play footage the card doesn't contain.
     """
     try:
         from ..clip_engine import sidecars
@@ -1739,14 +1745,14 @@ def _clip_engine_setup(settings) -> str:
 
 
 def _pending_proposals(session, candidate_pk: int) -> list[dict]:
-    used = clip_proposals.used_ranges(session, candidate_pk)
     rows = clip_proposals.pending_for_candidate(session, candidate_pk)
     if not rows:
         return []
+    others = clip_proposals.other_clips(session, candidate_pk)
     c = session.get(Candidate, candidate_pk)
     words = clip_proposals.load_words(c) if c else []
     transcript = [] if words or c is None else clip_proposals.load_transcript(c)
-    return [p for p in (_proposal_payload(r, used, words, transcript) for r in rows) if p]
+    return [p for p in (_proposal_payload(r, others, words, transcript) for r in rows) if p]
 
 
 @app.post("/video/{candidate_id}/suggest-clips")
@@ -2083,8 +2089,10 @@ def video_striking_frames(candidate_id: int, start: float | None = None,
         try:
             found = vision.find_striking_frames(
                 c, settings, start=a, end=b,
-                # Never offer an image out of footage another clip published.
-                used=clip_proposals.used_ranges(session, c.id),
+                # Footage may be reused across clips, but never another
+                # clip's opening shot: no image from those first seconds.
+                used=clip_proposals.opening_windows(
+                    clip_proposals.other_clips(session, c.id)),
                 topic=_topic_for_window(c, window),
             )
         except Exception as exc:
@@ -2168,7 +2176,9 @@ def accept_clip_proposal(proposal_id: int, cut_id: int = Form(...)):
 @app.post("/clip-proposal/{proposal_id}/make-cut")
 def make_cut_from_proposal(proposal_id: int):
     """Turn a suggestion into a clip in one click: a new cut holding the
-    proposal's (still-unclaimed) segments, opened in the trim editor.
+    proposal's segments, opened in the trim editor. A suggestion that is the
+    same clip as one already made is refused (its card is hidden for that
+    reason); one opening on another clip's shot is made, with a reminder.
 
     This is "Use this clip" from outside the editor. The proposal is accepted
     into the new cut, so the export-time score still measures it against what
@@ -2188,15 +2198,22 @@ def make_cut_from_proposal(proposal_id: int):
             proposed = json.loads(row.proposed_segments or "[]")
         except (ValueError, TypeError):
             proposed = []
-        segments, _ = clip_proposals.visible_segments(
-            proposed, clip_proposals.used_ranges(session, c.id))
+        segments, _ = clip_proposals.visible_segments(proposed)
         if not segments:
-            return _flash(back, "Your other clips already use that footage")
+            return _flash(back, "That suggestion has no usable segments")
+        conflict, clash = clip_proposals.clip_conflict(
+            segments, clip_proposals.other_clips(session, c.id))
+        if conflict == clip_proposals.CONFLICT_DUPLICATE:
+            return _flash(back, f"You already have that clip: {clash['title']}")
         cut = Cut(candidate_pk=c.id, trim_segments=json.dumps(segments))
         session.add(cut)
         session.flush()
         clip_proposals.accept(session, row.id, cut.id)
         cut_id = cut.id
+    if conflict == clip_proposals.CONFLICT_SAME_OPENING:
+        return _flash(f"/cut/{cut_id}?step=trim",
+                      f"Suggested clip loaded — it opens on the same shot as "
+                      f"{clash['title']}, so give it a different opening")
     return _flash(f"/cut/{cut_id}?step=trim",
                   "Suggested clip loaded — preview it, tweak, then save")
 
@@ -2313,12 +2330,14 @@ def revise_cut_segments(cut_id: int, instruction: str = Form(...),
                 status_code=409)
         model = settings.get("clips.model",
                              settings.get("matching.model", "claude-haiku-4-5"))
+        # The video's other clips: their footage is fair game, their opening
+        # shots and their stories are not (see clip_proposals.clip_conflict).
+        others = clip_proposals.other_clips(session, c.id, exclude_cut_pk=cut.id,
+                                            words=words, transcript=transcript)
         try:
             result = revise_clip(
                 model, c.title, instruction, current, transcript,
-                words=words,
-                used_ranges=clip_proposals.used_ranges(session, c.id,
-                                                       exclude_cut_pk=cut.id),
+                words=words, other_clips=others,
             )
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
@@ -2327,7 +2346,22 @@ def revise_cut_segments(cut_id: int, instruction: str = Form(...),
             before=current, after=result["segments"], note=result["note"],
             changed=result["changed"], model=model,
         )
-    return JSONResponse(result)
+    conflict = _revision_conflict(result, others)
+    if conflict:
+        result = dict(result, note=f"{result.get('note') or ''} {conflict}".strip())
+    return JSONResponse(dict(result, conflict=conflict))
+
+
+def _revision_conflict(result: dict, others: list[dict]) -> str:
+    """One line when a revised clip breaks the footage-reuse rule against the
+    video's other clips ("" when it doesn't): the model was told, but the
+    operator should hear it too before saving."""
+    conflict, clash = clip_proposals.clip_conflict(result.get("segments") or [], others)
+    if conflict == clip_proposals.CONFLICT_DUPLICATE:
+        return f"Heads up: this is now nearly the same clip as “{clash['title']}”."
+    if conflict == clip_proposals.CONFLICT_SAME_OPENING:
+        return f"Heads up: it opens on the same shot as “{clash['title']}”."
+    return ""
 
 
 @app.post("/cut/{cut_id}/refine-opening")
@@ -2362,11 +2396,12 @@ def refine_cut_opening(cut_id: int, segments_json: str = Form(...)):
         c = session.get(Candidate, cut.candidate_pk)
         if c is None:
             return JSONResponse({"error": "Video not found"}, status_code=404)
-        # This clip's own later segments block the pull-back as firmly as
-        # another clip's material does: an opening must not reach back into
-        # footage the same supercut plays further along.
-        blocked = clip_proposals.used_ranges(session, c.id, exclude_cut_pk=cut.id)
-        blocked = blocked + clip_proposals.normalize(current[1:])
+        # The pull-back may reach over footage other clips also use, but never
+        # into another clip's opening shot — and never into this clip's own
+        # later segments (the same supercut would play that footage twice).
+        others = clip_proposals.other_clips(session, c.id, exclude_cut_pk=cut.id)
+        blocked = clip_proposals.normalize(
+            clip_proposals.opening_windows(others) + list(current[1:]))
         model = settings.get("clips.opening_model",
                              settings.get("vision.model", "claude-haiku-4-5"))
         try:
@@ -2380,7 +2415,11 @@ def refine_cut_opening(cut_id: int, segments_json: str = Form(...)):
             before=current, after=segments, note=note, changed=changed,
             model=model,
         )
-    return JSONResponse({"segments": segments, "note": note, "changed": changed})
+        conflict = _revision_conflict({"segments": segments, "note": note}, others)
+    if conflict:
+        note = f"{note} {conflict}".strip()
+    return JSONResponse({"segments": segments, "note": note, "changed": changed,
+                         "conflict": conflict})
 
 
 @app.get("/video/{candidate_id}/cut")
@@ -2462,15 +2501,16 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
             except Exception:
                 pass
 
-        # Segments already claimed by the video's OTHER cuts, drawn as dashed
-        # outlines on the trim waveform so a second pass doesn't re-clip the
-        # same material.
+        # Segments the video's OTHER cuts use, washed on the trim waveform so
+        # a second pass sees what's been clipped. Reusing that footage is fine;
+        # each cut's FIRST entry here (play order) is its opening shot, which
+        # the page keeps suggestions and edits from opening on again.
         other_cut_segments = []
         siblings = session.execute(
             select(Cut).where(
                 Cut.candidate_pk == c.id, Cut.id != cut.id,
                 Cut.trim_segments != "",
-            )
+            ).order_by(Cut.id.asc())
         ).scalars().all()
         for sib in siblings:
             try:
@@ -2483,10 +2523,10 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
                     {"start": s["start"], "end": s["end"],
                      "cut_id": sib.id, "title": title})
 
-        # Clips the model proposed and the operator hasn't ruled on, with any
-        # material this video's cuts already claim removed. What survives is
-        # always fresh footage — the dashed overlay and the violet one can
-        # never describe the same seconds.
+        # Clips the model proposed and the operator hasn't ruled on: offered
+        # as proposed (footage may be shared between clips), minus any that
+        # are the same clip as one already made; one opening on another
+        # clip's shot carries a flag.
         suggested_clips = _pending_proposals(session, c.id)
         # The AI caption the operator last accepted for this clip — what an
         # edit gets compared against when turning it into a rule.

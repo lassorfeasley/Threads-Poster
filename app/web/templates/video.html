@@ -160,8 +160,8 @@
       {% for p in suggested_clips %}
       {% set e = p.engine or {} %}
       <article class="suggest-card" data-id="{{ p.id }}">
-        {# The engine's own render of the clip, when the card still offers
-           exactly what was rendered (the payload drops it once trimmed). A
+        {# The engine's own render of the clip, when the card offers exactly
+           what was rendered (the payload drops it otherwise). A
            <video> can't live inside a <button>, hence the div. No confidence
            badge: the model's opinion of itself anchored the judgment. #}
         {% if p.preview %}
@@ -191,7 +191,7 @@
             {% if not e.reviewed %}
           <div class="suggest-critic is-unreviewed">Not reviewed (critic unavailable)</div>
             {% elif not p.trimmed %}
-          {# Written about the clip as rendered: gone once the card offers less. #}
+          {# Written about the clip as rendered. #}
           <div class="suggest-critic {{ 'is-good' if e.stops_scroll else 'is-weak' }}"
                {% if e.about or e.fix %}title="{% if e.about %}About: {{ e.about }}{% endif %}{% if e.about and e.fix %}&#10;{% endif %}{% if e.fix %}Could be better: {{ e.fix }}{% endif %}"{% endif %}>
             {{ "Stops the scroll" if e.stops_scroll else "Wouldn’t stop the scroll" }}{% if e.stop_reason %}: {{ e.stop_reason }}{% endif %}{% if e.bored_at is number %} · Gets slow at {{ (e.bored_at // 60)|int }}:{{ "%02d"|format((e.bored_at % 60)|int) }}{% endif %}
@@ -208,7 +208,8 @@
           {% if p.opening %}<blockquote class="suggest-line"><span class="suggest-line-k">Opens</span>“{{ p.opening }}”</blockquote>{% endif %}
           {% if p.closing %}<blockquote class="suggest-line"><span class="suggest-line-k">Ends</span>“{{ p.closing }}”</blockquote>{% endif %}
           {% if p.why %}<div class="meta suggest-why">{{ p.why }}</div>{% endif %}
-          {% if p.trimmed %}<div class="meta suggest-why">Shortened around footage your other clips already use.</div>{% endif %}
+          {# Clips may share footage but not an opening shot (clip_proposals.clip_conflict). #}
+          {% if p.same_opening %}<div class="suggest-warn is-opening">Opens on the same shot as “{{ p.same_opening }}” — give it a different opening</div>{% endif %}
           <div class="suggest-actions">
             <form method="post" action="/clip-proposal/{{ p.id }}/make-cut" class="inline">
               <button class="approve sm">Make this clip →</button>

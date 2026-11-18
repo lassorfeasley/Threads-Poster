@@ -37,7 +37,8 @@ SETTINGS = Settings(raw={"clips": {
     "min_seconds": 15, "max_seconds": 40, "opening_hold_seconds": 3.0}})
 TRANSCRIPT = [{"start": float(i * 5), "end": i * 5 + 5.0, "text": f"line {i}"} for i in range(60)]
 WORDS = [{"word": "Hello", "start": 10.0, "end": 10.4}, {"word": "there.", "start": 10.5, "end": 11.0}]
-USED = [{"start": 200.0, "end": 230.0}]
+OTHERS = [{"cut_pk": 3, "title": "The weaver", "segments": [{"start": 200.0, "end": 230.0}],
+           "opening": [200.0, 203.0], "words_heard": "she weaves every morning"}]
 CONTEXT = {"shipped_examples": [{"words": "a shipped clip"}], "rejected_here": []}
 STRIKING = [{"t": 12.0, "why": "a burning roof"}]
 CLIPS = [
@@ -97,7 +98,8 @@ class LegacySuggestTest(_TempDirTest):
                              "description": "A description",
                              "local_video_path": str(self.video), "transcript_path": "",
                              "word_transcript_path": ""},
-               "used": list(USED), "context": dict(CONTEXT), "striking": list(STRIKING),
+               "used": [], "other_clips": copy.deepcopy(OTHERS), "context": dict(CONTEXT),
+               "striking": list(STRIKING),
                "transcript": list(TRANSCRIPT), "words": list(WORDS)}
         out.update(extra)
         return out
@@ -115,7 +117,8 @@ class LegacySuggestTest(_TempDirTest):
             return [1, 2]
 
         with self.patch_model(), \
-                mock.patch.object(clip_proposals, "used_ranges", return_value=list(USED)), \
+                mock.patch.object(clip_proposals, "other_clips",
+                                  return_value=copy.deepcopy(OTHERS)), \
                 mock.patch.object(clip_context, "build", return_value=dict(CONTEXT)), \
                 mock.patch.object(clip_proposals, "load_words", return_value=list(WORDS)), \
                 mock.patch.object(vision, "load_striking", return_value=list(STRIKING)), \
@@ -140,6 +143,10 @@ class LegacySuggestTest(_TempDirTest):
                 self.assertEqual(out["policy"], logged["policy"])
                 self.assertEqual(out["model"], logged["model"])
                 self.assertEqual(out["clips"], logged["clips"])
+                # Both hand the model the other clips, never a list of used ranges.
+                kwargs = self.model_calls[0][1]
+                self.assertEqual(kwargs["other_clips"], OTHERS)
+                self.assertNotIn("used_ranges", kwargs)
 
     def test_section_pass_budget_and_scope(self):
         with self.patch_model():
@@ -161,8 +168,11 @@ class LegacySuggestTest(_TempDirTest):
             out = legacy.suggest(settings=SETTINGS, inputs=self.inputs(source=str(link)))
         first, second = self.refine_calls
         self.assertEqual(first["path"], str(link))
-        self.assertEqual(first["blocked"], USED)
-        self.assertEqual(second["blocked"], USED + out["clips"][0]["segments"])
+        # Only openings are off limits: the other clip's, then this run's first
+        # clip's (refined to open at 9.0) for its sibling.
+        self.assertEqual(first["blocked"], [{"start": 200.0, "end": 203.0}])
+        self.assertEqual(second["blocked"], [{"start": 200.0, "end": 203.0},
+                                             {"start": 9.0, "end": 12.0}])
         self.assertEqual(second["story"], "second story")
         self.assertEqual(out["clips"][0]["segments"][0]["start"], 9.0)
 

@@ -188,6 +188,13 @@
           </svg>
         </button>
       </form>
+      {# While a request runs (20-60 s): what's happening and for how long,
+         right under the field, so a slow answer never looks like no answer. #}
+      <div class="revise-status" id="revise-status" role="status" aria-live="polite" hidden>
+        <span class="revise-spinner" aria-hidden="true"></span>
+        <span class="revise-status-text" id="revise-status-text">Revising your clip…</span>
+        <span class="revise-elapsed" id="revise-elapsed">0s</span>
+      </div>
       {# The one instruction you can't type: only the footage knows what the
          opening looks like. #}
       <div class="revise-chips">
@@ -245,8 +252,9 @@
 const player = document.getElementById('player');
 let pending = { start: null, end: null };
 let segments = {{ saved_segments | tojson }};
-// Segments already claimed by this video's other clips — drawn as dashed
-// outlines on the main waveform (display-only, never draggable).
+// Segments this video's other clips use — washed on the main waveform
+// (display-only, never draggable). Reusing them is fine; each clip's first
+// entry is its opening shot, which no other clip may open on.
 const otherSegments = {{ other_cut_segments | tojson }};
 // Clips the model proposed for this video that haven't been ruled on yet.
 // Display-only: accepting one copies its segments into `segments`, where every
@@ -308,6 +316,7 @@ function pushUndo() {
   if (undoStack.length > 100) undoStack.shift();
 }
 function undoEdit() {
+  if (editsLocked()) return;
   const snap = undoStack.pop();
   if (!snap) return;
   const st = JSON.parse(snap);
@@ -320,8 +329,8 @@ function undoEdit() {
 }
 
 function seek(t) { cancelPlayback(); activeStop = null; player.currentTime = t; player.play(); updateTranscriptFocus(true); }
-function setStart() { pushUndo(); pending.start = player.currentTime; renderPending(); }
-function setEnd() { pushUndo(); pending.end = player.currentTime; renderPending(); }
+function setStart() { if (editsLocked()) return; pushUndo(); pending.start = player.currentTime; renderPending(); }
+function setEnd() { if (editsLocked()) return; pushUndo(); pending.end = player.currentTime; renderPending(); }
 
 // ---- Scrollable transcript with focused current line + keyword search ----
 function txFmt(t) {
@@ -457,6 +466,7 @@ function renderPending() {
   drawWave();
 }
 function addSegment() {
+  if (editsLocked()) return;
   if (pending.start === null || pending.end === null) return;
   if (pending.end - pending.start < 0.5) return;
   pushUndo();
@@ -469,6 +479,7 @@ function addSegment() {
   // segment row later to audition it.
 }
 function removeSegment(i) {
+  if (editsLocked()) return;
   pushUndo();
   segments.splice(i, 1);
   if (selectedSeg === i) selectedSeg = null;
@@ -660,6 +671,7 @@ function reorderSegment(from, to) {
   // `to` is an insertion index in 0..n, so dropping immediately above or below
   // the clip's own slot is a no-op rather than a pointless undo entry.
   if (from === null || to === null || to === from || to === from + 1) return;
+  if (editsLocked()) return;
   pushUndo();
   const selObj = selectedSeg !== null ? segments[selectedSeg] : null;
   const [moved] = segments.splice(from, 1);
@@ -683,6 +695,7 @@ function initSegDnd() {
   box.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
     if (e.target.closest('.seg-del')) return;
+    if (editsLocked()) return;   // no reorder or trim while a revision runs
     const row = e.target.closest('.seg-row');
     if (!row) return;
     const onWave = e.target.closest('.seg-wave');
@@ -1146,7 +1159,7 @@ function renderChapters() {
   // question a second pass over a long video asks), and there's a suggestion
   // waiting inside — which is the only signpost to suggestions now that they
   // live behind a chapter click.
-  const claimed = otherSegments.concat(segments);
+  const clipped = otherSegments.concat(segments);
   const suggested = suggestedClips.flatMap(c => visibleProposal(c).segments);
   const stripWidth = strip.clientWidth || 1;
   chapters.forEach((ch, i) => {
@@ -1161,7 +1174,7 @@ function renderChapters() {
       + (ch.summary ? `\n${ch.summary}` : '')
       + (holds ? '\nA suggested clip is waiting in here' : '')
       + '\nClick to zoom the waveform here';
-    if (claimed.some(s => s.start < ch.end && s.end > ch.start)) {
+    if (clipped.some(s => s.start < ch.end && s.end > ch.start)) {
       band.classList.add('is-clipped');
     }
     if (holds) band.classList.add('has-suggestion');
@@ -1367,6 +1380,7 @@ function frameCard(f) {
 // caption pass follow that order — so an opener from five minutes away lands
 // exactly where you put it, and the words stay lined up behind it.
 function useAsOpener(t) {
+  if (editsLocked()) return;
   pushUndo();
   segments.unshift({
     start: +t.toFixed(2),
@@ -1427,8 +1441,8 @@ function drawWave() {
   const gridColor = css.getPropertyValue('--wave-grid').trim() || 'rgba(255,255,255,0.12)';
   wctx.clearRect(0, 0, W, H);
 
-  // Material already used by the video's other clips: a flat amber wash and
-  // nothing else. The fill is the message; outlining every claimed stretch
+  // Material the video's other clips use: a flat amber wash and nothing
+  // else (reusing it is fine). The fill is the message; outlining every stretch
   // turned a long video into a fence. Painted first, so the active (green)
   // segments sit on top.
   otherSegments.forEach(s => {
@@ -1438,13 +1452,12 @@ function drawWave() {
   });
 
   // Model proposals awaiting a verdict: the same wash in violet, so a
-  // suggestion never reads as material already used. Hovering its card in the
+  // suggestion reads apart from other clips' material. Hovering its card in the
   // panel deepens it, which is how the list and the timeline point at each
   // other.
   suggestedClips.forEach(clip => {
     const hot = hoveredProposal === clip.id;
-    // Only the part not already claimed by a clip — the violet wash and the
-    // amber one can never describe the same seconds.
+    // Hidden duplicates paint nothing; shared footage paints over the amber.
     visibleProposal(clip).segments.forEach(s => {
       const x0 = xOf(s.start), x1 = xOf(s.end);
       wctx.fillStyle = hot ? 'rgba(167,139,250,0.34)' : 'rgba(167,139,250,0.15)';
@@ -1565,6 +1578,7 @@ function segAtTime(t) {
 }
 
 function setSegEdge(i, edge, t) {
+  if (revising) return;
   const s = segments[i];
   t = Math.max(0, Math.min(t, duration()));
   if (edge === 'start') s.start = +Math.min(t, s.end - 0.1).toFixed(2);
@@ -1585,7 +1599,8 @@ wave.addEventListener('pointerdown', e => {
   cancelPlayback();
   activeStop = null;
   try { wave.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
-  const h = handleAt(e);
+  // While a revision runs a handle only scrubs: no trimming.
+  const h = revising ? null : handleAt(e);
   const t = timeAt(e);
   if (h) {
     // Arm an edge drag, but don't move the edge until the pointer actually
@@ -1819,12 +1834,15 @@ function renderReasonAsk(list) {
   list.appendChild(strip);
 }
 
-// Mirror of clip_proposals.subtract / visible_segments on the server. A
-// proposal must never offer footage a clip already claims. The server filters
-// on page load; this keeps the panel honest while you edit, so marking a
-// segment yourself immediately shrinks any proposal that covered it.
-const PROPOSAL_MIN_FRAGMENT = 1.5;   // a shorter sliver isn't a usable shot
-const PROPOSAL_MIN_REMAINING = 5;    // less than this left isn't a clip
+// Mirror of clip_proposals.visible_segments / clip_conflict on the server.
+// Clips may recycle each other's footage (one video about several artisans
+// can reuse the same setup shots in every clip), so a suggestion is offered
+// as proposed. What can't repeat is an OPENING — the first 3 s of the first
+// played segment — or the whole clip (IoU above 0.6). The server checks on
+// page load; this keeps the panel honest while you edit: marking segments
+// that make a suggestion the same clip as this one hides it at once.
+const PROPOSAL_OPENING_SECONDS = 3;   // clip_proposals.OPENING_SECONDS
+const PROPOSAL_DUPLICATE_IOU = 0.6;   // clip_proposals.DUPLICATE_IOU
 
 function normalizeRanges(list) {
   const sorted = (list || [])
@@ -1840,48 +1858,82 @@ function normalizeRanges(list) {
   return merged;
 }
 
-// Every claim on this video's timeline: the other clips' material plus what
-// this clip already holds.
-function claimedRanges() {
-  return normalizeRanges(otherSegments.concat(segments));
+// Temporal IoU of two clips, rounded like clip_proposals.iou (4 dp).
+function rangesIou(a, b) {
+  const x = normalizeRanges(a), y = normalizeRanges(b);
+  if (!x.length || !y.length) return 0;
+  const total = list => list.reduce((n, s) => n + (s.end - s.start), 0);
+  let inter = 0;
+  x.forEach(p => y.forEach(q => {
+    inter += Math.max(0, Math.min(p.end, q.end) - Math.max(p.start, q.start));
+  }));
+  const union = total(x) + total(y) - inter;
+  return union > 0 ? Math.round((inter / union) * 1e4) / 1e4 : 0;
 }
 
-// Segments keep their PLAY order (a suggestion may open on a shot from later
-// in the video): only the claimed ranges are sorted and merged. Each segment
-// loses the claimed time inside it; a segment split in two keeps its pieces in
-// time order, in its own slot. Only pieces a claim actually cut are held to
-// PROPOSAL_MIN_FRAGMENT: a short segment nothing touches (the clip engine
-// keeps deliberate 1-1.5 s shots) passes as it is, so an untouched proposal
-// never reads as trimmed. Mirrors clip_proposals.subtract_play_order.
-function visibleProposal(clip) {
-  const original = clip.segments.reduce((n, s) => n + (s.end - s.start), 0);
-  const claimed = claimedRanges();
-  let pieces = [];
-  clip.segments.forEach(seg => {
-    const whole = { start: +seg.start, end: +seg.end };
-    if (!(whole.end > whole.start)) return;
-    let parts = [whole];
-    claimed.forEach(u => {
-      const next = [];
-      parts.forEach(p => {
-        if (u.end <= p.start || u.start >= p.end) { next.push(p); return; }
-        if (u.start > p.start) next.push({ start: p.start, end: u.start });
-        if (u.end < p.end) next.push({ start: u.end, end: p.end });
-      });
-      parts = next;
-    });
-    const untouched = parts.length === 1 && parts[0] === whole;
-    pieces = pieces.concat(untouched ? parts
-                                     : parts.filter(p => p.end - p.start >= PROPOSAL_MIN_FRAGMENT));
+// [start, start + 3] of the first played segment, or null.
+function openingWindow(list) {
+  const first = (list || []).find(s => +s.end > +s.start);
+  return first ? [+first.start, +first.start + PROPOSAL_OPENING_SECONDS] : null;
+}
+
+// The video's other clips, from otherSegments: grouped by cut, in the order
+// each cut plays them, so a group's first entry is that clip's opening.
+function otherClips() {
+  const byCut = new Map();
+  otherSegments.forEach(s => {
+    if (!byCut.has(s.cut_id)) byCut.set(s.cut_id, { title: s.title || 'another clip', segments: [] });
+    byCut.get(s.cut_id).segments.push({ start: +s.start, end: +s.end });
   });
-  const seconds = pieces.reduce((n, p) => n + (p.end - p.start), 0);
-  if (seconds < PROPOSAL_MIN_REMAINING) return { segments: [], seconds: 0, trimmed: true };
-  return { segments: pieces, seconds, trimmed: seconds < original - 0.05 };
+  return [...byCut.values()];
 }
 
-// The suggestions worth showing right now. A proposal with nothing left after
-// already-clipped material is removed is never offered; it stays pending
-// server-side and resolves on export.
+// Which rule a clip breaks against `clips`: {kind: '' | 'same_opening' |
+// 'duplicate', title}. Mirrors clip_proposals.clip_conflict (the shot-map
+// test is the engine's alone: this page has no shot map).
+function proposalConflict(list, clips) {
+  const mine = openingWindow(list);
+  if (!mine) return { kind: '', title: '' };
+  for (const c of clips) {
+    if (c.segments.length && rangesIou(list, c.segments) > PROPOSAL_DUPLICATE_IOU) {
+      return { kind: 'duplicate', title: c.title };
+    }
+  }
+  for (const c of clips) {
+    const theirs = openingWindow(c.segments);
+    if (theirs && mine[0] < theirs[1] && theirs[0] < mine[1]) {
+      return { kind: 'same_opening', title: c.title };
+    }
+  }
+  return { kind: '', title: '' };
+}
+
+// What a card offers: the suggestion's segments in PLAY order (a suggestion
+// may open on a shot from later in the video), never cut down. A suggestion
+// that is another clip again — or the clip open here — offers nothing (it is
+// hidden); one opening on another clip's shot is offered, flagged.
+// `trimmed` stays for old callers and is always false.
+function visibleProposal(clip) {
+  const shown = (clip.segments || [])
+    .map(s => ({ start: +s.start, end: +s.end }))
+    .filter(s => s.end > s.start);
+  let conflict = proposalConflict(shown, otherClips());
+  if (!conflict.kind && segments.length
+      && rangesIou(shown, segments) > PROPOSAL_DUPLICATE_IOU) {
+    conflict = { kind: 'duplicate', title: 'this clip' };
+  }
+  if (conflict.kind === 'duplicate') {
+    return { segments: [], seconds: 0, trimmed: false, conflict: 'duplicate',
+             conflictWith: conflict.title };
+  }
+  const seconds = shown.reduce((n, p) => n + (p.end - p.start), 0);
+  return { segments: shown, seconds, trimmed: false, conflict: conflict.kind,
+           conflictWith: conflict.title };
+}
+
+// The suggestions worth showing right now. One that is the same clip as an
+// existing one is never offered; it stays pending server-side and resolves
+// on export.
 function proposalsInView() {
   const live = suggestedClips
     .map(clip => ({ clip, shown: visibleProposal(clip) }))
@@ -1989,23 +2041,13 @@ function forgetProposalVideos() {
   }
 }
 
-// Whether the card offers less than the proposal as made: trimmed here as you
-// edit, or already by the server. The page loads with every cut's material
-// taken out (this one's saved segments too), so the browser's own pass over
-// the same claims finds nothing left to take and can't tell by itself.
-function proposalTrimmed(clip, shown) {
-  return !!(shown.trimmed || clip.trimmed);
-}
-
-// What the clip engine's critic made of the clip, on one line — written about
-// the clip as rendered, so it goes once the card offers less than that.
+// What the clip engine's critic made of the clip, on one line.
 function proposalCritic(clip, shown) {
   const e = clip.engine || {};
   if (!e.setup) return '';
   if (!e.reviewed) {
     return '<div class="proposal-critic is-unreviewed">Not reviewed (critic unavailable)</div>';
   }
-  if (proposalTrimmed(clip, shown)) return '';
   const reason = e.stop_reason ? `: ${escapeHtml(e.stop_reason)}` : '';
   let line = (e.stops_scroll ? 'Stops the scroll' : 'Wouldn’t stop the scroll') + reason;
   if (typeof e.bored_at === 'number') line += ` · Gets slow at ${txFmt(e.bored_at)}`;
@@ -2038,10 +2080,9 @@ function proposalWarnings(clip) {
 // first and reading two timestamps is no way to judge one.
 function proposalCard(clip, shown) {
   const e = clip.engine || {};
-  const trimmed = proposalTrimmed(clip, shown);
-  // The engine's own render plays in the card — but only while the card offers
-  // exactly what was rendered; a trimmed suggestion previews in the editor.
-  const playable = !!clip.preview && !trimmed;
+  // The engine's own render plays in the card (the server offers it only
+  // while the card holds exactly what was rendered).
+  const playable = !!clip.preview;
   const archetype = e.archetype && e.archetype !== 'other'
     ? `<span class="proposal-archetype">${escapeHtml(e.archetype)}</span>` : '';
   const feedback = proposalFeedback.get(clip.id);
@@ -2075,7 +2116,7 @@ function proposalCard(clip, shown) {
     ${clip.opening ? `<div class="proposal-line"><span class="proposal-line-k">Opens</span>“${escapeHtml(clip.opening)}”</div>` : ''}
     ${clip.closing ? `<div class="proposal-line"><span class="proposal-line-k">Ends</span>“${escapeHtml(clip.closing)}”</div>` : ''}
     ${clip.why ? `<div class="proposal-why meta">${escapeHtml(clip.why)}</div>` : ''}
-    ${trimmed ? '<div class="proposal-why meta">Shortened around footage your other clips already use.</div>' : ''}
+    ${proposalOpeningWarning(shown)}
     <div class="proposal-actions">
       <button type="button" class="sm ${segments.length ? '' : 'approve'}" data-act="use"
               title="Load these segments into the editor, replacing what's there">Use this clip</button>
@@ -2113,6 +2154,15 @@ function proposalCard(clip, shown) {
     });
   });
   return row;
+}
+
+// Clips may share footage, never an opening shot: say so on a suggestion
+// that opens where another clip (or the one open here) already does.
+function proposalOpeningWarning(shown) {
+  if (shown.conflict !== 'same_opening') return '';
+  const other = shown.conflictWith === 'this clip' ? 'this clip'
+    : `“${escapeHtml(shown.conflictWith || 'another clip')}”`;
+  return `<div class="proposal-warn is-opening" title="Clips from one video can reuse footage, but each needs its own opening shot.">Opens on the same shot as ${other} — give it a different opening</div>`;
 }
 
 // Length, cut count and where it opens — the facts that decide whether it's
@@ -2212,9 +2262,10 @@ function previewClipProposal(id) {
 // Use = these segments BECOME the clip, then the normal tools take over. It
 // replaces rather than appends: one suggestion is one clip, and joining two of
 // them builds a supercut out of two stories that can't share a caption. ⌘Z
-// puts back whatever was there. Only the unclaimed part is loaded, so using a
-// suggestion can never duplicate footage another clip already published.
+// puts back whatever was there. Footage other clips use may come with it
+// (reuse is fine); a suggestion that is another clip again isn't offered.
 function useClipProposal(id) {
+  if (editsLocked()) return;
   const clip = clipProposalById(id);
   if (!clip) return;
   const shown = visibleProposal(clip);
@@ -2490,14 +2541,65 @@ function handleEngineStatus(d) {
 // One instruction against the segments as they are on screen right now. The
 // result lands through pushUndo like any hand edit, so ⌘Z is the diff view —
 // nothing is saved to the cut until "Save clip", same as dragging an edge.
+//
+// A request takes 20-60 s, so while it runs the whole row says so: the field
+// keeps your instruction (disabled, not cleared), a spinner and a running
+// "Revising your clip… 12s" sit right under it, the chips and send are off,
+// and the timeline dims and takes no edits — the model is working from the
+// segments as they were when you asked, and an edit made meanwhile would be
+// silently replaced by its answer.
 let revising = false;
+let reviseTimer = null;
+let reviseStarted = 0;
 
-function setRevising(on, chip) {
+function setRevising(on, chip, label) {
   revising = on;
-  document.getElementById('revise-input').disabled = on;
+  const box = document.getElementById('revise-box');
+  const input = document.getElementById('revise-input');
+  input.disabled = on;   // its value stays: the instruction remains readable
+  input.setAttribute('aria-busy', on ? 'true' : 'false');
   document.getElementById('revise-send').disabled = on;
   document.querySelectorAll('.revise-chip').forEach(b => { b.disabled = on; });
   if (chip) chip.classList.toggle('is-busy', on);
+  if (box) box.classList.toggle('is-busy', on);
+  document.body.classList.toggle('is-revising', on);
+  const status = document.getElementById('revise-status');
+  clearInterval(reviseTimer);
+  reviseTimer = null;
+  if (on) {
+    reviseStarted = Date.now();
+    document.getElementById('revise-status-text').textContent = label || 'Revising your clip…';
+    tickRevise();
+    reviseTimer = setInterval(tickRevise, 1000);
+    status.hidden = false;
+    // The old note (a previous answer) would read as this request's result.
+    document.getElementById('revise-note').hidden = true;
+    if (box && box.scrollIntoView) box.scrollIntoView({ block: 'nearest' });
+  } else {
+    status.hidden = true;
+    status.classList.remove('is-nudged');
+  }
+}
+
+function reviseSeconds() {
+  return Math.max(0, Math.floor((Date.now() - reviseStarted) / 1000));
+}
+
+function tickRevise() {
+  document.getElementById('revise-elapsed').textContent = `${reviseSeconds()}s`;
+}
+
+// Every segment edit asks this first: true (and a nudge on the status line,
+// so the click visibly lands somewhere) while a revision is running.
+function editsLocked() {
+  if (!revising) return false;
+  const status = document.getElementById('revise-status');
+  if (status) {
+    status.classList.remove('is-nudged');
+    void status.offsetWidth;   // restart the animation
+    status.classList.add('is-nudged');
+  }
+  return true;
 }
 
 function reviseNote(text, isError) {
@@ -2527,23 +2629,28 @@ async function submitRevise(ev) {
   const instruction = input.value.trim();
   if (revising || !instruction || !segments.length) return false;
 
-  setRevising(true);
+  setRevising(true, null, 'Revising your clip…');
   send.classList.add('is-loading');
-  reviseNote('Revising…');
+  let d = null, error = '';
   try {
     const r = await fetch('/cut/{{ cut.id }}/revise', {
       method: 'POST',
       body: new URLSearchParams({ instruction, segments_json: JSON.stringify(segments) }),
     });
-    const d = await r.json();
+    d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    applyRevision(d);
-    if (d.changed) input.value = '';
   } catch (e) {
-    reviseNote(e.message || 'Revision failed', true);
+    error = e.message || 'Revision failed';
   }
+  // Unlock first: applying the answer is itself an edit.
   send.classList.remove('is-loading');
   setRevising(false);
+  if (error) {
+    reviseNote(`Couldn’t revise the clip: ${error}`, true);
+  } else {
+    applyRevision(d);
+    if (d.changed) input.value = '';
+  }
   return false;
 }
 
@@ -2553,20 +2660,21 @@ async function submitRevise(ev) {
 async function refineOpening() {
   if (revising || !segments.length) return;
   const chip = document.getElementById('chip-opening');
-  setRevising(true, chip);
-  reviseNote('Looking at the footage…');
+  setRevising(true, chip, 'Looking at the footage for a better opening…');
+  let d = null, error = '';
   try {
     const r = await fetch('/cut/{{ cut.id }}/refine-opening', {
       method: 'POST',
       body: new URLSearchParams({ segments_json: JSON.stringify(segments) }),
     });
-    const d = await r.json();
+    d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    applyRevision(d);
   } catch (e) {
-    reviseNote(e.message || 'Could not check the opening', true);
+    error = e.message || 'Could not check the opening';
   }
   setRevising(false, chip);
+  if (error) reviseNote(`Couldn’t check the opening: ${error}`, true);
+  else applyRevision(d);
 }
 
 function selectSegment(i) {
@@ -2790,7 +2898,7 @@ function redrawDetailWave(resize) {
     editing = true;
     detailHoverX = null;
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic */ }
-    const edge = edgeAt(ev.clientX);
+    const edge = revising ? null : edgeAt(ev.clientX);   // scrub only while revising
     const { t, r, span } = winX(ev.clientX);
     if (edge) {
       pushUndo(); drag = edge;

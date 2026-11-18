@@ -1,7 +1,9 @@
 """Route tests for the clip engine in the dashboard (app/web/main.py): the
 202 + polling contract of "Suggest", the status endpoint, card previews and
-their suppression once a suggestion is trimmed, the archive hand-off, and the
-startup/shutdown wiring.
+their suppression when a card doesn't offer what was rendered, the footage-reuse
+rule (a suggestion may share footage with other clips, never their opening or
+the whole clip), the revise box's routes and its in-progress state, the archive
+hand-off, and the startup/shutdown wiring.
 
 Run with:
   env DATABASE_URL="sqlite://" SCHEDULER_EMBEDDED=false GEMINI_API_KEY= ANTHROPIC_API_KEY= \
@@ -154,9 +156,9 @@ class RouteTestBase(unittest.TestCase):
             s.commit()
             return row.id
 
-    def add_cut(self, cid: int, segments: list[dict]) -> int:
+    def add_cut(self, cid: int, segments: list[dict], title: str = "") -> int:
         with self.Session() as s:
-            cut = Cut(candidate_pk=cid, trim_segments=json.dumps(segments))
+            cut = Cut(candidate_pk=cid, trim_segments=json.dumps(segments), clip_title=title)
             s.add(cut)
             s.commit()
             return cut.id
@@ -331,32 +333,64 @@ class PreviewTest(RouteTestBase):
         with mock.patch.object(self.sidecars, "preview_path", side_effect=OSError("io")):
             self.assertEqual(self.client.get("/clip-proposal/5/preview").status_code, 404)
 
-    def payload(self, pid: int, used: list[dict] | None = None) -> dict:
+    def payload(self, pid: int, others: list[dict] | None = None) -> dict:
         with self.Session() as s:
             row = s.get(ClipProposal, pid)
-            return self.main._proposal_payload(row, used or [])
+            return self.main._proposal_payload(row, others or [])
 
     def test_payload_offers_the_preview_only_while_it_shows_what_the_card_offers(self):
         cid = self.add_candidate()
         segments = [{"start": 10.0, "end": 24.0}, {"start": 40.0, "end": 52.0}]
         cases = [
-            # (description, sidecar segments, file on disk, claimed ranges, preview expected)
+            # (description, sidecar segments, file on disk, other clips, preview expected)
             ("as rendered", segments, True, [], True),
             ("rounding only", [{"start": 10.01, "end": 24.0}, {"start": 40.0, "end": 51.98}],
              True, [], True),
-            ("trimmed around another clip", segments, True, [{"start": 40.0, "end": 45.0}], False),
+            # Footage another clip also uses is no longer cut out: the card
+            # still offers exactly the render.
+            ("sharing footage with another clip", segments, True,
+             [{"title": "Other", "segments": [{"start": 30.0, "end": 45.0}]}], True),
             ("render missing", segments, False, [], False),
             ("different cut", [{"start": 10.0, "end": 24.0}], True, [], False),
             ("different order", list(reversed(segments)), True, [], False),
         ]
-        for label, rendered, with_file, used, expected in cases:
+        for label, rendered, with_file, others, expected in cases:
             with self.subTest(label):
                 pid = self.add_proposal(cid, segments)
                 self.engine_sidecar(pid, rendered, with_file=with_file)
-                p = self.payload(pid, used)
+                p = self.payload(pid, others)
                 self.assertEqual(p["preview"], f"/clip-proposal/{pid}/preview" if expected else "")
                 self.assertEqual(p["engine"]["archetype"], "voice")
                 self.assertIn("confidence", p)
+
+    def test_other_clips_flag_a_shared_opening_and_hide_a_duplicate(self):
+        cid = self.add_candidate()
+        segments = [{"start": 10.0, "end": 24.0}, {"start": 40.0, "end": 52.0}]
+        cases = [
+            # (label, other clips, offered?, same_opening)
+            ("no other clips", [], True, ""),
+            ("shares footage further in", [{"title": "Loom", "segments": [
+                {"start": 40.0, "end": 60.0}]}], True, ""),
+            ("opens on the same shot", [{"title": "Loom", "segments": [
+                {"start": 11.0, "end": 15.0}, {"start": 100.0, "end": 130.0}]}], True, "Loom"),
+            ("opens just after: windows touch, no overlap", [{"title": "Loom", "segments": [
+                {"start": 13.0, "end": 20.0}, {"start": 100.0, "end": 130.0}]}], True, ""),
+            ("the same clip again (IoU > 0.6)", [{"title": "Loom", "segments": [
+                {"start": 12.0, "end": 24.0}, {"start": 40.0, "end": 52.0}]}], False, ""),
+        ]
+        for label, others, offered, same_opening in cases:
+            with self.subTest(label):
+                pid = self.add_proposal(cid, segments)
+                self.engine_sidecar(pid, segments)
+                p = self.payload(pid, others)
+                if not offered:
+                    self.assertIsNone(p)
+                    continue
+                self.assertEqual(p["segments"], segments)        # never cut down
+                self.assertFalse(p["trimmed"])
+                self.assertEqual(p["same_opening"], same_opening)
+                # The flag doesn't touch the preview: the card is still the render.
+                self.assertEqual(p["preview"], f"/clip-proposal/{pid}/preview")
 
     def test_a_cold_open_keeps_its_order_and_its_preview(self):
         cid = self.add_candidate()
@@ -485,32 +519,53 @@ class PageTest(RouteTestBase):
         self.status.return_value = job_status("done", new=[self.pid])
         self.assertIn("let engineJob = null", self.get(f"/cut/{self.cut_id}"))
 
+    def page_value(self, html: str, pattern: str):
+        return json.loads(re.search(pattern, html).group(1))
+
     @unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
-    def test_a_suggestion_the_server_trimmed_loses_its_verdict_on_both_pages(self):
-        # Another clip already holds the proposal's last five seconds.
-        self.add_cut(self.cid, [{"start": 25.0, "end": 30.0}])
+    def test_footage_another_clip_uses_is_offered_whole_on_both_pages(self):
+        # Another clip already holds the proposal's last five seconds: reuse is fine.
+        self.add_cut(self.cid, [{"start": 25.0, "end": 30.0}], title="The loom")
         html = self.get(f"/cut/{self.cut_id}")
-
-        def page_value(pattern: str):
-            return json.loads(re.search(pattern, html).group(1))
-
-        clip = page_value(r"let suggestedClips = (\[.*?\]);\n")[0]
-        self.assertEqual((clip["trimmed"], clip["preview"]), (True, ""))
-        self.assertEqual(clip["segments"], [{"start": 10.0, "end": 25.0}])
-        self.assertTrue(clip["engine"]["reviewed"])
-        card = run_proposal_cards([clip], page_value(r"const otherSegments = (\[.*?\]);\n"),
-                                  page_value(r"let segments = (\[.*?\]);\n"))[0]
-        # The page loaded with the claim already taken out, so the browser's
-        # own pass over the same claims finds nothing to trim...
-        self.assertFalse(card["shown"]["trimmed"])
-        # ...and the card still knows the verdict was about the longer render.
-        self.assertNotIn("proposal-critic", card["html"])
-        self.assertNotIn("Gets slow at", card["html"])
-        self.assertIn("Shortened around footage your other clips already use.", card["html"])
-        self.assertFalse(card["video"])
+        clip = self.page_value(html, r"let suggestedClips = (\[.*?\]);\n")[0]
+        self.assertEqual((clip["trimmed"], clip["preview"], clip["same_opening"]),
+                         (False, f"/clip-proposal/{self.pid}/preview", ""))
+        self.assertEqual(clip["segments"], [{"start": 10.0, "end": 30.0}])
+        card = run_proposal_cards([clip], self.page_value(html, r"const otherSegments = (\[.*?\]);\n"),
+                                  self.page_value(html, r"let segments = (\[.*?\]);\n"))[0]
+        self.assertEqual(card["shown"]["segments"], [{"start": 10, "end": 30}])
+        self.assertIn("Stops the scroll", card["html"])
+        self.assertTrue(card["video"])
+        self.assertNotIn("Shortened", card["html"])
+        self.assertNotIn("same shot", card["html"])
         video_page = self.get(f"/video/{self.cid}")
-        self.assertNotIn("Stops the scroll", video_page)
-        self.assertIn("Shortened around footage your other clips already use.", video_page)
+        self.assertIn("Stops the scroll", video_page)
+        self.assertNotIn("Shortened", video_page)
+
+    @unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
+    def test_a_shared_opening_is_flagged_on_both_pages(self):
+        self.add_cut(self.cid, [{"start": 11.0, "end": 16.0}, {"start": 200.0, "end": 230.0}],
+                     title="The <loom>")
+        html = self.get(f"/cut/{self.cut_id}")
+        clip = self.page_value(html, r"let suggestedClips = (\[.*?\]);\n")[0]
+        self.assertEqual(clip["same_opening"], "The <loom>")
+        card = run_proposal_cards([clip], self.page_value(html, r"const otherSegments = (\[.*?\]);\n"),
+                                  self.page_value(html, r"let segments = (\[.*?\]);\n"))[0]
+        self.assertEqual(card["shown"]["conflict"], "same_opening")
+        self.assertIn("Opens on the same shot as “The &lt;loom&gt;”", card["html"])
+        self.assertIn("Stops the scroll", card["html"])     # still the clip as rendered
+        video_page = self.get(f"/video/{self.cid}")
+        self.assertIn("Opens on the same shot as “The &lt;loom&gt;”", video_page)
+
+    def test_a_duplicate_of_an_existing_clip_is_hidden_on_both_pages(self):
+        self.add_cut(self.cid, [{"start": 9.0, "end": 29.0}], title="Already made")
+        html = self.get(f"/cut/{self.cut_id}")
+        self.assertEqual(self.page_value(html, r"let suggestedClips = (\[.*?\]);\n"), [])
+        self.assertNotIn(f'data-id="{self.pid}"', self.get(f"/video/{self.cid}"))
+        with self.Session() as s:
+            from app import clip_proposals
+
+            self.assertEqual(clip_proposals.pending_summary(s, [self.cid]), {})
 
     def test_cut_page_renders(self):
         html = self.get(f"/cut/{self.cut_id}")
@@ -536,6 +591,372 @@ class PageTest(RouteTestBase):
                     self.assertEqual(result.returncode, 0, result.stderr[-2000:])
 
 
+# ---- the footage-reuse rule in the trim editor's routes ---------------------------------
+
+class ReviseRoutesTest(RouteTestBase):
+    """The revise box and "Better opening shot": the model sees the video's
+    other clips (title, words heard, segments, opening) and may reuse their
+    footage; nothing tells it "already used"; only another clip's opening is
+    off limits to the opening pull-back."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.cid = self.add_candidate(local_video_path=str(self.dir / "vid1.mp4"))
+        self.loom = self.add_cut(self.cid, [{"start": 100.0, "end": 115.0},
+                                            {"start": 40.0, "end": 50.0}], title="The loom")
+        self.cut_id = self.add_cut(self.cid, [{"start": 60.0, "end": 80.0}], title="The dyer")
+
+    def revise(self, answer: dict, current: list[dict], instruction: str = "use the loom setup"):
+        calls = []
+
+        def fake(model, title, instruction, current, transcript, **kw):
+            calls.append(dict(kw, instruction=instruction, current=current))
+            return answer
+
+        with mock.patch.object(self.main, "revise_clip", side_effect=fake):
+            r = self.client.post(f"/cut/{self.cut_id}/revise",
+                                 data={"instruction": instruction,
+                                       "segments_json": json.dumps(current)})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json(), calls
+
+    def test_the_model_sees_the_other_clips_not_used_ranges(self):
+        current = [{"start": 60.0, "end": 80.0}]
+        out, (call,) = self.revise({"segments": [{"start": 60.0, "end": 80.0},
+                                                 {"start": 100.0, "end": 108.0}],
+                                    "note": "Added the loom setup.", "changed": True}, current)
+        self.assertNotIn("used_ranges", call)
+        (other,) = call["other_clips"]                     # this cut is not "another clip"
+        self.assertEqual(other["title"], "The loom")
+        self.assertEqual(other["segments"], [{"start": 100.0, "end": 115.0},
+                                             {"start": 40.0, "end": 50.0}])
+        self.assertEqual(other["opening"], [100.0, 103.0])
+        self.assertIn("line", other["words_heard"])       # the transcript's words, in play order
+        # Reusing the loom's footage further in is fine: no warning, nothing refused.
+        self.assertEqual((out["note"], out["conflict"], out["changed"]),
+                         ("Added the loom setup.", "", True))
+
+    def test_a_revision_onto_another_clips_opening_is_called_out(self):
+        cases = [
+            ({"segments": [{"start": 101.0, "end": 125.0}], "note": "Opened on the loom.",
+              "changed": True}, "Heads up: it opens on the same shot as “The loom”."),
+            ({"segments": [{"start": 100.0, "end": 115.0}, {"start": 40.0, "end": 50.0}],
+              "note": "Rebuilt.", "changed": True},
+             "Heads up: this is now nearly the same clip as “The loom”."),
+        ]
+        for answer, warning in cases:
+            with self.subTest(warning):
+                out, _ = self.revise(answer, [{"start": 60.0, "end": 80.0}])
+                self.assertEqual(out["conflict"], warning)
+                self.assertEqual(out["note"], f"{answer['note']} {warning}")
+                self.assertEqual(out["segments"], answer["segments"])   # still the operator's call
+
+    def test_the_prompt_says_reuse_is_fine(self):
+        from app import llm
+
+        seen = {}
+
+        def fake_chat(model, system, user, max_tokens=0):
+            seen.update(system=system, payload=json.loads(user))
+            return {"segments": [{"start": 60.0, "end": 80.0}], "note": "ok"}
+
+        with mock.patch.object(llm, "_json_chat", side_effect=fake_chat):
+            r = self.client.post(f"/cut/{self.cut_id}/revise",
+                                 data={"instruction": "x",
+                                       "segments_json": json.dumps([{"start": 60, "end": 80}])})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("Reusing their footage is fine and expected", seen["system"])
+        self.assertIn("DIFFERENT OPENING", seen["system"])
+        self.assertIn("DIFFERENT STORY", seen["system"])
+        self.assertNotIn("already used", seen["system"])
+        self.assertNotIn("used_ranges", seen["payload"])
+        self.assertEqual([c["title"] for c in seen["payload"]["other_clips"]], ["The loom"])
+        self.assertEqual(seen["payload"]["other_clips"][0]["opening"], [100.0, 103.0])
+
+    def test_better_opening_may_reach_back_over_other_clips_but_not_their_opening(self):
+        from app import clip_proposals
+
+        Path(self.dir / "vid1.mp4").write_bytes(b"\0" * 16)
+        seen = {}
+
+        def fake_refine(candidate, segments, settings, blocked, story=""):
+            seen.update(blocked=blocked, story=story)
+            return segments, "Kept your opening."
+
+        current = [{"start": 60.0, "end": 80.0}, {"start": 20.0, "end": 30.0}]
+        with mock.patch.object(clip_proposals, "refine_opening_detail", side_effect=fake_refine):
+            r = self.client.post(f"/cut/{self.cut_id}/refine-opening",
+                                 data={"segments_json": json.dumps(current)})
+        self.assertEqual(r.status_code, 200, r.text)
+        # The loom's OPENING window (100-103) and this clip's own later
+        # segment; never the loom's other footage (40-50, 103-115).
+        self.assertEqual(seen["blocked"], [{"start": 20.0, "end": 30.0},
+                                           {"start": 100.0, "end": 103.0}])
+        self.assertEqual(seen["story"], "The dyer")
+        self.assertEqual(r.json()["conflict"], "")
+
+    def test_better_opening_says_when_the_opening_clashes(self):
+        from app import clip_proposals
+
+        Path(self.dir / "vid1.mp4").write_bytes(b"\0" * 16)
+        current = [{"start": 101.0, "end": 125.0}]
+        with mock.patch.object(clip_proposals, "refine_opening_detail",
+                               return_value=(current, "Kept your opening.")):
+            r = self.client.post(f"/cut/{self.cut_id}/refine-opening",
+                                 data={"segments_json": json.dumps(current)})
+        self.assertEqual(r.json()["note"],
+                         "Kept your opening. Heads up: it opens on the same shot as “The loom”.")
+
+
+class MakeCutTest(RouteTestBase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.cid = self.add_candidate()
+        self.add_cut(self.cid, [{"start": 100.0, "end": 115.0}], title="The loom")
+
+    def make(self, segments: list[dict]):
+        pid = self.add_proposal(self.cid, segments)
+        r = self.client.post(f"/clip-proposal/{pid}/make-cut", follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        with self.Session() as s:
+            row = s.get(ClipProposal, pid)
+            cuts = s.execute(select(Cut).where(Cut.candidate_pk == self.cid)
+                             .order_by(Cut.id)).scalars().all()
+            return r.headers["location"], row.verdict, [json.loads(c.trim_segments) for c in cuts]
+
+    def test_shared_footage_is_loaded_whole(self):
+        where, verdict, cuts = self.make([{"start": 60.0, "end": 80.0},
+                                          {"start": 105.0, "end": 112.0}])
+        self.assertIn("?step=trim", where)
+        self.assertEqual(verdict, "accepted")
+        self.assertEqual(cuts[-1], [{"start": 60.0, "end": 80.0}, {"start": 105.0, "end": 112.0}])
+
+    def test_a_shared_opening_is_made_with_a_reminder(self):
+        where, verdict, cuts = self.make([{"start": 101.0, "end": 130.0}])
+        self.assertEqual(verdict, "accepted")
+        self.assertEqual(len(cuts), 2)
+        self.assertIn("same+shot", where.replace("%20", "+"))
+
+    def test_the_same_clip_again_is_refused(self):
+        where, verdict, cuts = self.make([{"start": 100.0, "end": 116.0}])
+        self.assertEqual(verdict, "pending")
+        self.assertEqual(len(cuts), 1)
+        self.assertIn(f"/video/{self.cid}", where)
+
+
+class StrikingFramesTest(RouteTestBase):
+    def test_only_other_clips_openings_are_off_limits(self):
+        from app import vision
+
+        video = self.dir / "vid1.mp4"
+        video.write_bytes(b"\0" * 16)
+        cid = self.add_candidate(local_video_path=str(video))
+        self.add_cut(cid, [{"start": 100.0, "end": 115.0}, {"start": 40.0, "end": 50.0}])
+        seen = {}
+
+        def fake_find(c, settings, *, start, end, used, topic=""):
+            seen["used"] = used
+            return []
+
+        with mock.patch.object(vision, "find_striking_frames", side_effect=fake_find), \
+                mock.patch.object(self.main, "clip_duration", return_value=300.0):
+            r = self.client.post(f"/video/{cid}/striking-frames")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(seen["used"], [{"start": 100.0, "end": 103.0}])
+
+
+# The revise box while a request runs: cut.html's own functions in node, with
+# a fake DOM, clock and fetch. Nothing is posted anywhere.
+REVISE_HARNESS = r"""
+let now = 1000000;
+Date.now = () => now;
+const timers = new Map();
+let nextTimer = 1;
+global.setInterval = (fn, ms) => { const id = nextTimer++; timers.set(id, fn); return id; };
+global.clearInterval = id => { timers.delete(id); };
+function tick(seconds) { for (let i = 0; i < seconds; i++) { now += 1000; [...timers.values()].forEach(fn => fn()); } }
+
+function classList() {
+  const set = new Set();
+  return { add: c => set.add(c), remove: c => set.delete(c), contains: c => set.has(c),
+           toggle: (c, on) => { if (on === undefined) on = !set.has(c); if (on) set.add(c); else set.delete(c); return on; },
+           toArray: () => [...set] };
+}
+function el(id) {
+  return { id, hidden: false, disabled: false, value: '', textContent: '', attrs: {},
+           classList: classList(), offsetWidth: 0, scrolled: 0,
+           setAttribute(k, v) { this.attrs[k] = v; }, getAttribute(k) { return this.attrs[k]; },
+           scrollIntoView() { this.scrolled++; } };
+}
+const ids = {};
+['revise-box', 'revise-input', 'revise-send', 'revise-status', 'revise-status-text',
+ 'revise-elapsed', 'revise-note', 'chip-opening'].forEach(id => { ids[id] = el(id); });
+ids['revise-status'].hidden = true;
+ids['revise-note'].hidden = true;
+const chips = [ids['chip-opening']];
+const body = el('body');
+const document = { getElementById: id => ids[id] || null, querySelectorAll: () => chips, body };
+
+let segments = [{ start: 10, end: 30 }];
+let selectedSeg = null, undoStack = [], renders = 0, pending = { start: null, end: null };
+function renderSegments() { renders++; }
+function renderPending() {}
+function pushUndo() { undoStack.push(JSON.stringify(segments)); }
+function txFmt(t) { return String(t); }
+const player = { currentTime: 0 };
+
+let resolveFetch;
+const posted = [];
+global.fetch = (url, opts) => { posted.push(url); return new Promise(res => { resolveFetch = res; }); };
+function answer(status, body) { resolveFetch({ ok: status < 400, status, json: async () => body }); }
+
+%(functions)s
+%(guarded)s
+
+function snapshot() {
+  return {
+    inputDisabled: ids['revise-input'].disabled, inputValue: ids['revise-input'].value,
+    inputBusy: ids['revise-input'].attrs['aria-busy'],
+    sendDisabled: ids['revise-send'].disabled, sendLoading: ids['revise-send'].classList.contains('is-loading'),
+    chipDisabled: ids['chip-opening'].disabled, chipBusy: ids['chip-opening'].classList.contains('is-busy'),
+    boxBusy: ids['revise-box'].classList.contains('is-busy'),
+    bodyRevising: body.classList.contains('is-revising'),
+    statusHidden: ids['revise-status'].hidden, statusText: ids['revise-status-text'].textContent,
+    elapsed: ids['revise-elapsed'].textContent, nudged: ids['revise-status'].classList.contains('is-nudged'),
+    noteHidden: ids['revise-note'].hidden, note: ids['revise-note'].textContent,
+    noteError: ids['revise-note'].classList.contains('is-error'),
+    timers: timers.size, segments: JSON.parse(JSON.stringify(segments)), scrolled: ids['revise-box'].scrolled,
+  };
+}
+
+(async () => {
+  const out = {};
+  const mode = process.argv[2];
+  ids['revise-input'].value = 'cut the anchor intro';
+  ids['revise-note'].hidden = false;
+  ids['revise-note'].textContent = 'An older answer';
+  if (mode === 'opening') refineOpening(); else submitRevise({ preventDefault() {} });
+  out.start = snapshot();
+  tick(12);
+  out.running = snapshot();
+  // Every edit path is refused while it runs.
+  removeSegment(0); addSegment(); undoEdit(); setStart(); useAsOpener(50); setSegEdge(0, 'start', 12);
+  out.blocked = snapshot();
+  // A second request can't start on top of the first.
+  submitRevise({ preventDefault() {} }); refineOpening();
+  out.posted = posted.length;
+  if (mode === 'error') answer(500, { error: 'model timed out' });
+  else answer(200, { changed: true, note: 'Cut the intro.', segments: [{ start: 14, end: 30 }] });
+  await new Promise(r => setTimeout(r, 0)); await new Promise(r => setTimeout(r, 0));
+  tick(3);
+  out.done = snapshot();
+  removeSegment(0);
+  out.after = snapshot();
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+
+@unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
+class ReviseLoadingStateJsTest(unittest.TestCase):
+    """While a revise or "Better opening shot" request runs, the row says so
+    unmistakably and the timeline takes no edits; when it ends the note says
+    what happened and the counter stops."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        template = (Path(__file__).resolve().parents[1] / "app" / "web" / "templates"
+                    / "cut.html").read_text().replace("{{ cut.id }}", "7")
+
+        def piece(start: str, end: str) -> str:
+            at = template.index(start)
+            return template[at:template.index(end, at)]
+
+        cls.template = template
+        cls.functions = piece("let revising = false;", "function selectSegment(i)")
+        cls.guarded = "\n".join([
+            piece("function undoEdit()", "function seek(t)"),
+            piece("function setStart()", "// ---- Scrollable transcript"),
+            piece("function addSegment()", "// ---- Drag-to-reorder"),
+            piece("function useAsOpener(t)", "function hideFrameStrip()"),
+            piece("function setSegEdge(i, edge, t)", "  const s = segments[i];") + "}\n",
+        ])
+
+    def run_mode(self, mode: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "revise.js"
+            path.write_text(REVISE_HARNESS % {"functions": self.functions, "guarded": self.guarded})
+            result = subprocess.run(["node", str(path), mode], capture_output=True, text=True,
+                                    timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        return json.loads(result.stdout)
+
+    def test_a_typed_revision(self):
+        out = self.run_mode("revise")
+        start, running, blocked = out["start"], out["running"], out["blocked"]
+        # In progress: the instruction stays readable in a disabled field...
+        self.assertEqual((start["inputDisabled"], start["inputValue"], start["inputBusy"]),
+                         (True, "cut the anchor intro", "true"))
+        # ...with a spinner line and a seconds count right under it...
+        self.assertEqual((start["statusHidden"], start["statusText"], start["elapsed"]),
+                         (False, "Revising your clip…", "0s"))
+        self.assertEqual(running["elapsed"], "12s")
+        # ...chips and send off, the timeline marked busy, the old note gone.
+        self.assertTrue(start["sendDisabled"] and start["sendLoading"] and start["chipDisabled"])
+        self.assertTrue(start["boxBusy"] and start["bodyRevising"])
+        self.assertTrue(start["noteHidden"])
+        self.assertEqual(start["scrolled"], 1)
+        # No edits while it runs, and the status line nudges to say why.
+        self.assertEqual(blocked["segments"], [{"start": 10, "end": 30}])
+        self.assertTrue(blocked["nudged"])
+        self.assertEqual(out["posted"], 1)
+        # Done: the model's note, the counter stopped, everything unlocked.
+        done = out["done"]
+        self.assertEqual((done["noteHidden"], done["note"], done["noteError"]),
+                         (False, "Cut the intro. — ⌘Z undoes it", False))
+        self.assertEqual((done["statusHidden"], done["timers"], done["elapsed"]), (True, 0, "12s"))
+        self.assertFalse(done["inputDisabled"] or done["sendDisabled"] or done["chipDisabled"]
+                         or done["sendLoading"] or done["boxBusy"] or done["bodyRevising"])
+        self.assertEqual(done["segments"], [{"start": 14, "end": 30}])
+        self.assertEqual(done["inputValue"], "")          # a change landed: ready for the next
+        self.assertEqual(out["after"]["segments"], [])    # edits work again
+
+    def test_a_failed_revision_says_so_and_keeps_the_instruction(self):
+        out = self.run_mode("error")
+        done = out["done"]
+        self.assertEqual((done["note"], done["noteError"], done["noteHidden"]),
+                         ("Couldn’t revise the clip: model timed out", True, False))
+        self.assertEqual(done["inputValue"], "cut the anchor intro")
+        self.assertEqual((done["statusHidden"], done["timers"]), (True, 0))
+        self.assertFalse(done["inputDisabled"] or done["bodyRevising"])
+        self.assertEqual(done["segments"], [{"start": 10, "end": 30}])
+
+    def test_better_opening_shot(self):
+        out = self.run_mode("opening")
+        start = out["start"]
+        self.assertEqual(start["statusText"], "Looking at the footage for a better opening…")
+        self.assertTrue(start["chipBusy"] and start["inputDisabled"] and start["bodyRevising"])
+        self.assertEqual(start["inputValue"], "cut the anchor intro")
+        self.assertEqual(out["running"]["elapsed"], "12s")
+        self.assertEqual(out["blocked"]["segments"], [{"start": 10, "end": 30}])
+        self.assertFalse(out["done"]["chipBusy"])
+        self.assertEqual(out["done"]["note"], "Cut the intro. — ⌘Z undoes it")
+
+    def test_the_markup_and_styles_exist(self):
+        for needle in ('id="revise-status"', 'class="revise-spinner"', 'id="revise-elapsed"',
+                       'role="status"'):
+            self.assertIn(needle, self.template)
+        css = (Path(__file__).resolve().parents[1] / "app" / "web" / "static"
+               / "style.css").read_text()
+        for needle in (".revise-status[hidden]", ".revise-spinner", "body.is-revising #segments",
+                       ".revise-box.is-busy .revise-input:disabled"):
+            self.assertIn(needle, css)
+        # Every pointer path that can trim checks the lock.
+        self.assertIn("const h = revising ? null : handleAt(e);", self.template)
+        self.assertIn("const edge = revising ? null : edgeAt(ev.clientX);", self.template)
+        self.assertIn("if (editsLocked()) return;   // no reorder or trim", self.template)
+
+
 # cut.html's own card functions, run in node with just enough of a DOM: for
 # each suggestion, what the browser offers (visibleProposal) and the card it
 # draws (proposalCard), against the page's claims.
@@ -559,6 +980,8 @@ otherSegments = other; segments = mine; suggestedClips = clips;
 (open || []).forEach(st => proposalFeedback.set(st.id, st));
 process.stdout.write(JSON.stringify(clips.map(clip => {
   const shown = visibleProposal(clip);
+  // As on the page (proposalsInView): a suggestion offering nothing gets no card.
+  if (!shown.segments.length) return { shown, html: '', video: false };
   const card = proposalCard(clip, shown);
   return { shown, html: card.innerHTML, video: proposalVideos.has(clip.id) };
 })));
@@ -576,7 +999,7 @@ def run_proposal_cards(clips: list[dict], other_segments: list[dict],
     script = "\n".join([
         piece("function txFmt", "function currentTxIndex"),
         piece("function escapeHtml", "function highlightQuery"),
-        piece("const PROPOSAL_MIN_FRAGMENT", "// The suggestions worth showing right now."),
+        piece("const PROPOSAL_OPENING_SECONDS", "// The suggestions worth showing right now."),
         piece("// Its own <video>, reused across re-renders",
               "// Nothing waiting and nothing cut yet"),
     ])
@@ -593,46 +1016,52 @@ def run_proposal_cards(clips: list[dict], other_segments: list[dict],
 
 @unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
 class ProposalCardJsTest(unittest.TestCase):
-    """The critic's verdict is about the clip as rendered: a card that offers
-    less (trimmed here as you edit, or already by the server) drops it and says
-    it was shortened, and plays in the editor instead of its own player."""
+    """A card offers the suggestion as proposed (footage shared with other
+    clips is fine), plays the engine's render in the card, warns when it opens
+    on another clip's opening shot, and isn't drawn at all when it is the same
+    clip as one already made."""
 
     ENGINE = {"setup": "gemini", "archetype": "voice", "reviewed": True, "stops_scroll": True,
               "stop_reason": "Nye pulls his glasses off in the first second", "bored_at": 75.5,
               "about": "A scientist losing patience", "fix": "End on the stare"}
 
-    def clip(self, cid: int, segments: list[dict], *, trimmed: bool, preview: bool,
+    def clip(self, cid: int, segments: list[dict], *, trimmed: bool = False, preview: bool,
              **engine) -> dict:
         return {"id": cid, "story": "Glasses off", "why": "", "segments": segments,
                 "seconds": sum(s["end"] - s["start"] for s in segments), "trimmed": trimmed,
                 "preview": f"/clip-proposal/{cid}/preview" if preview else "",
-                "thumb": "", "flag": "", "opening": "", "closing": "",
+                "thumb": "", "flag": "", "opening": "", "closing": "", "same_opening": "",
                 "engine": dict(self.ENGINE, **engine)}
 
     def test_cards(self):
         whole = [{"start": 10, "end": 30}]
+        loom = lambda *spans: [{"start": a, "end": b, "cut_id": 4, "title": "The loom"}
+                               for a, b in spans]
         cases = [
-            # (label, clip, other clips' segments, this clip's segments,
-            #  verdict shown, shortened note, own player)
-            ("as rendered", self.clip(1, whole, trimmed=False, preview=True), [], [],
-             True, False, True),
-            ("trimmed by the server before the page loaded",
-             self.clip(2, [{"start": 10, "end": 25}], trimmed=True, preview=False),
-             [{"start": 25, "end": 30}], [], False, True, False),
-            ("the server's trim came from this clip's own saved segments",
-             self.clip(3, [{"start": 10, "end": 25}], trimmed=True, preview=False),
-             [], [{"start": 25, "end": 30}], False, True, False),
-            ("trimmed here, by a segment just marked",
-             self.clip(4, whole, trimmed=False, preview=True), [], [{"start": 25, "end": 30}],
-             False, True, False),
+            # (label, other clips' segments, this clip's segments,
+            #  offered segments, warning, own player)
+            ("nothing else on the video", [], [], whole, "", True),
+            ("another clip uses part of its footage", loom((25, 30)), [], whole, "", True),
+            ("this clip uses part of its footage", [], [{"start": 25, "end": 30}],
+             whole, "", True),
+            ("another clip opens on its opening shot", loom((11, 14), (100, 130)), [], whole,
+             "Opens on the same shot as “The loom”", True),
+            ("the clip open here opens on it", [], [{"start": 9, "end": 12},
+                                                    {"start": 100, "end": 140}],
+             whole, "", True),
+            ("another clip is the same clip", loom((10, 28)), [], [], "", False),
+            ("the clip open here is the same clip", [], [{"start": 11, "end": 30}], [], "", False),
         ]
-        for label, clip, other, mine, verdict, note, player in cases:
+        for label, other, mine, offered, warning, player in cases:
             with self.subTest(label):
-                card = run_proposal_cards([clip], other, mine)[0]
+                card = run_proposal_cards([self.clip(1, whole, preview=True)], other, mine)[0]
+                self.assertEqual(card["shown"]["segments"], offered)
+                self.assertFalse(card["shown"]["trimmed"])
+                self.assertEqual(re.findall(r'<div class="proposal-warn is-opening"[^>]*>(.*?) —',
+                                            card["html"]), [warning] if warning else [])
                 self.assertEqual("Stops the scroll: Nye pulls his glasses off" in card["html"],
-                                 verdict)
-                self.assertEqual("Gets slow at 1:15" in card["html"], verdict)
-                self.assertEqual("Shortened around footage" in card["html"], note)
+                                 bool(offered))
+                self.assertNotIn("Shortened", card["html"])
                 self.assertEqual(card["video"], player)
 
     def test_whats_wrong_button_and_panel(self):
@@ -676,9 +1105,8 @@ class ProposalCardJsTest(unittest.TestCase):
                 self.assertEqual(re.findall(r'<div class="proposal-warn">(.*?)</div>', html),
                                  lines)
 
-    def test_a_card_nobody_reviewed_says_so_even_when_trimmed(self):
-        clip = self.clip(5, [{"start": 10, "end": 25}], trimmed=True, preview=False,
-                         reviewed=False)
+    def test_a_card_nobody_reviewed_says_so(self):
+        clip = self.clip(5, [{"start": 10, "end": 25}], preview=False, reviewed=False)
         card = run_proposal_cards([clip], [{"start": 25, "end": 30}], [])[0]
         self.assertIn("Not reviewed (critic unavailable)", card["html"])
         self.assertNotIn("Stops the scroll", card["html"])
@@ -686,64 +1114,72 @@ class ProposalCardJsTest(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")
 class VisibleProposalJsTest(unittest.TestCase):
-    """cut.html's visibleProposal must mirror clip_proposals.subtract_play_order:
-    claimed time is cut out of each segment WITHOUT re-sorting the clip, so a
-    cold open stays first. Runs the template's own functions in node."""
+    """cut.html's visibleProposal / proposalConflict must mirror
+    clip_proposals.visible_segments / clip_conflict: nothing is subtracted,
+    play order is kept, an opening window overlapping another clip's is
+    "same_opening", and IoU above 0.6 is "duplicate" (hidden). Runs the
+    template's own functions in node, against the Python on the same cases."""
 
+    LOOM = "The loom"
     CASES = [
-        # (label, clip segments, other clips' segments, expected segments, trimmed)
-        ("cold open kept first",
-         [{"start": 50, "end": 54}, {"start": 10, "end": 24}], [],
-         [{"start": 50, "end": 54}, {"start": 10, "end": 24}], False),
-        ("a split segment keeps its slot and its pieces in time order",
-         [{"start": 50, "end": 54}, {"start": 10, "end": 24}], [{"start": 15, "end": 17}],
-         [{"start": 50, "end": 54}, {"start": 10, "end": 15}, {"start": 17, "end": 24}], True),
-        ("a claimed segment drops out, the rest keep their order",
-         [{"start": 50, "end": 58}, {"start": 10, "end": 24}, {"start": 30, "end": 40}],
-         [{"start": 9, "end": 25}],
-         [{"start": 50, "end": 58}, {"start": 30, "end": 40}], True),
-        ("slivers under 1.5 s go",
-         [{"start": 10, "end": 30}], [{"start": 11, "end": 29}], [], True),
-        ("under 5 s left is no clip",
-         [{"start": 10, "end": 20}], [{"start": 14, "end": 30}], [], True),
-        ("claims touching only the edges change nothing",
-         [{"start": 40, "end": 50}, {"start": 10, "end": 20}],
-         [{"start": 0, "end": 10}, {"start": 50, "end": 60}],
-         [{"start": 40, "end": 50}, {"start": 10, "end": 20}], False),
-        # The engine keeps deliberate 1-1.5 s shots: only a piece a claim CUT
-        # is a sliver, so an untouched proposal keeps its preview.
-        ("an untouched short segment stays",
-         [{"start": 50, "end": 51.2}, {"start": 10, "end": 24}], [{"start": 30, "end": 40}],
-         [{"start": 50, "end": 51.2}, {"start": 10, "end": 24}], False),
-        ("a short segment a claim cuts into goes",
-         [{"start": 50, "end": 51.2}, {"start": 10, "end": 24}], [{"start": 50.5, "end": 60}],
-         [{"start": 10, "end": 24}], True),
+        # (label, clip segments, other clips [(title, segments)], kind, conflicting title)
+        ("cold open kept first, nothing else on the video",
+         [{"start": 50, "end": 54}, {"start": 10, "end": 24}], [], "", ""),
+        ("footage shared further in is fine",
+         [{"start": 50, "end": 58}, {"start": 10, "end": 24}],
+         [(LOOM, [{"start": 0, "end": 5}, {"start": 9, "end": 25}])], "", ""),
+        ("opens inside another clip's opening window",
+         [{"start": 11, "end": 30}], [(LOOM, [{"start": 10, "end": 12}, {"start": 80, "end": 99}])],
+         "same_opening", LOOM),
+        ("opens just before it: the windows overlap",
+         [{"start": 8, "end": 30}], [(LOOM, [{"start": 10, "end": 12}, {"start": 80, "end": 99}])],
+         "same_opening", LOOM),
+        ("windows that only touch don't clash",
+         [{"start": 13, "end": 30}], [(LOOM, [{"start": 10, "end": 12}, {"start": 80, "end": 99}])],
+         "", ""),
+        ("only the first PLAYED segment is the opening",
+         [{"start": 50, "end": 54}, {"start": 10, "end": 24}],
+         [(LOOM, [{"start": 200, "end": 210}, {"start": 10, "end": 13}])], "", ""),
+        ("the same clip again is a duplicate, whatever its opening",
+         [{"start": 10, "end": 30}], [(LOOM, [{"start": 12, "end": 30}])], "duplicate", LOOM),
+        ("IoU exactly 0.6 is not a duplicate",
+         [{"start": 0, "end": 10}], [("B", [{"start": 4, "end": 10}])], "", ""),
+        ("a duplicate outranks a same-opening clash with another clip",
+         [{"start": 10, "end": 30}],
+         [("A", [{"start": 10, "end": 12}, {"start": 90, "end": 120}]),
+          ("B", [{"start": 40, "end": 41}, {"start": 10, "end": 30}])], "duplicate", "B"),
     ]
 
     def test_python_agrees_on_every_case(self):
-        """The server's visible_segments, on the same cases: the two must not drift."""
+        """The server's visible_segments + clip_conflict, on the same cases."""
         from app import clip_proposals
 
-        for label, clip, claimed, expected, trimmed in self.CASES:
+        for label, clip, others, kind, title in self.CASES:
             with self.subTest(label):
-                got, was_trimmed = clip_proposals.visible_segments(clip, claimed)
-                self.assertEqual([{"start": s["start"], "end": s["end"]} for s in got],
-                                 [{"start": float(s["start"]), "end": float(s["end"])}
-                                  for s in expected])
-                self.assertEqual(was_trimmed, trimmed)
+                got, trimmed = clip_proposals.visible_segments(clip, [{"start": 0, "end": 999}])
+                self.assertEqual(got, [{"start": float(s["start"]), "end": float(s["end"])}
+                                       for s in clip])
+                self.assertFalse(trimmed)
+                found, other = clip_proposals.clip_conflict(
+                    clip, [{"title": t, "segments": segs} for t, segs in others])
+                self.assertEqual(found, kind)
+                self.assertEqual((other or {}).get("title", ""), title)
 
-    def test_order_preserving_subtraction(self):
+    def test_the_page_agrees(self):
         template = (Path(__file__).resolve().parents[1] / "app" / "web" / "templates"
                     / "cut.html").read_text()
-        start = template.index("const PROPOSAL_MIN_FRAGMENT")
+        start = template.index("const PROPOSAL_OPENING_SECONDS")
         end = template.index("// The suggestions worth showing right now.")
         functions = template[start:end]
         self.assertIn("function visibleProposal", functions)
+        self.assertNotIn("PROPOSAL_MIN_FRAGMENT", template)       # nothing is subtracted
         harness = functions + """
 let otherSegments = [], segments = [];
 const cases = JSON.parse(process.argv[2]);
-const out = cases.map(([label, clip, claimed]) => {
-  otherSegments = claimed;
+const out = cases.map(([label, clip, others]) => {
+  otherSegments = [];
+  others.forEach(([title, segs], i) => segs.forEach(s =>
+    otherSegments.push({ start: s.start, end: s.end, cut_id: i + 1, title })));
   return visibleProposal({ segments: clip });
 });
 process.stdout.write(JSON.stringify(out));
@@ -754,11 +1190,13 @@ process.stdout.write(JSON.stringify(out));
             result = subprocess.run(["node", str(path), json.dumps(self.CASES)],
                                     capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
-        for (label, _clip, _claimed, expected, trimmed), got in zip(self.CASES,
-                                                                    json.loads(result.stdout)):
+        for (label, clip, _others, kind, title), got in zip(self.CASES, json.loads(result.stdout)):
             with self.subTest(label):
-                self.assertEqual(got["segments"], expected)
-                self.assertEqual(got["trimmed"], trimmed)
+                self.assertEqual(got["conflict"], kind)
+                self.assertEqual(got["conflictWith"], title)
+                self.assertFalse(got["trimmed"])
+                # A duplicate offers nothing (hidden); anything else is offered whole.
+                self.assertEqual(got["segments"], [] if kind == "duplicate" else clip)
 
 
 @unittest.skipUnless(shutil.which("node"), "node is needed to run the page's JavaScript")

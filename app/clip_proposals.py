@@ -45,11 +45,17 @@ KEPT_IOU = 0.8
 # for a later cut instead, and the miss shows up in the partition numbers.
 _MATCH_FLOOR = 0.05
 
-# After already-clipped material is removed from a proposal: slivers shorter
-# than this aren't a usable shot, and a remainder under the floor isn't a clip
-# worth offering at all.
-_MIN_FRAGMENT = 1.5
-_MIN_REMAINING = 5.0
+# Footage reuse between clips of ONE video. Clips may recycle each other's
+# footage — a video about several artisans can reuse the same setup shots in
+# every clip — so long as each clip opens on its own shot and tells its own
+# story. Mechanically: a clip's OPENING is the first OPENING_SECONDS of its
+# first played segment, and two openings clash when those windows overlap; a
+# clip sharing more than DUPLICATE_IOU of its material with another clip is
+# that clip again, not a new one.
+OPENING_SECONDS = 3.0
+DUPLICATE_IOU = 0.6
+CONFLICT_SAME_OPENING = "same_opening"
+CONFLICT_DUPLICATE = "duplicate"
 
 # Why a dismissal happened — the one-click annotation offered right after
 # dismissing, never required. Slugs are the stable vocabulary (labels live in
@@ -116,29 +122,6 @@ def iou(proposed: list[dict], final: list[dict]) -> float:
     inter = _overlap(a, b)
     union = duration(a) + duration(b) - inter
     return round(inter / union, 4) if union > 0 else 0.0
-
-
-def subtract(segments: list[dict], used: list[dict]) -> list[dict]:
-    """Remove already-claimed time from a proposal's windows."""
-    used = normalize(used)
-    if not used:
-        return normalize(segments)
-    out: list[dict] = []
-    for s in normalize(segments):
-        pieces = [dict(s)]
-        for u in used:
-            nxt: list[dict] = []
-            for p in pieces:
-                if u["end"] <= p["start"] or u["start"] >= p["end"]:
-                    nxt.append(p)
-                    continue
-                if u["start"] > p["start"]:
-                    nxt.append({"start": p["start"], "end": u["start"]})
-                if u["end"] < p["end"]:
-                    nxt.append({"start": u["end"], "end": p["end"]})
-            pieces = nxt
-        out.extend(pieces)
-    return [p for p in out if p["end"] - p["start"] >= _MIN_FRAGMENT]
 
 
 # ---- play order -------------------------------------------------------------
@@ -217,35 +200,6 @@ def clean_play_order(segments: list[dict], *, min_len: float = 0.5,
     return out
 
 
-def subtract_play_order(segments: list[dict], used: list[dict]) -> list[dict]:
-    """``subtract`` that keeps play order: remove already-claimed time from
-    each segment in turn, leaving the list order alone.
-
-    A segment that a used range cuts in two keeps both pieces, in time order,
-    where it stood. Only pieces actually produced by a cut are held to
-    ``_MIN_FRAGMENT`` — a sliver left beside claimed footage isn't a usable
-    shot — while a segment no used range touches passes through whatever its
-    length, so a deliberate one-second reaction shot isn't mistaken for
-    leftovers (and an untouched proposal never reads as "trimmed"). Extra
-    keys are preserved on every piece.
-    """
-    holes = [(u["start"], u["end"]) for u in normalize(used or [])]
-    out: list[dict] = []
-    for segment in segments or []:
-        span = _span(segment)
-        if span is None or span[1] <= span[0]:
-            continue
-        start, end = span
-        pieces = _minus(start, end, holes)
-        if pieces == [(start, end)]:
-            out.append({**segment, "start": start, "end": end})
-            continue
-        for piece_start, piece_end in pieces:
-            if piece_end - piece_start >= _MIN_FRAGMENT:
-                out.append({**segment, "start": piece_start, "end": piece_end})
-    return out
-
-
 def strip_segments(segments: list[dict]) -> list[dict]:
     """``[{start, end}]`` only, in the order given — what the ledger stores.
     Engine-only keys such as ``lead`` stay out of ``proposed_segments``."""
@@ -257,49 +211,180 @@ def strip_segments(segments: list[dict]) -> list[dict]:
     return out
 
 
-def used_ranges(session, candidate_pk: int,
-                exclude_cut_pk: int | None = None) -> list[dict]:
-    """Time on this video already claimed by a clip.
+# ---- other clips of the same video ------------------------------------------
+#
+# The footage-reuse rule. A clip may recycle footage another clip of the same
+# video already uses (shared setup, context, b-roll), but it must (a) OPEN on a
+# different shot and (b) tell a meaningfully different story. (a) and the
+# duplicate test are mechanical and live here; (b) is the model's judgement,
+# which is why every suggester and reviser is shown the other clips' titles and
+# words heard.
 
-    Every cut counts, exported or not — segments saved into a cut are a claim
-    on that material, which is the same rule the trim editor's dashed overlay
-    already draws. ``exclude_cut_pk`` leaves one cut out: when revising a cut's
-    own segments, its material is the thing being edited, not a claim against
-    itself.
-    """
-    spans: list[dict] = []
+def opening_window(segments: list[dict]) -> tuple[float, float] | None:
+    """``(start, start + OPENING_SECONDS)`` of the first PLAYED segment, or
+    None when the clip has no usable segment."""
+    for segment in segments or []:
+        span = _span(segment)
+        if span is not None and span[1] > span[0]:
+            return span[0], span[0] + OPENING_SECONDS
+    return None
+
+
+def opening_windows(clips: list[dict]) -> list[dict]:
+    """Every clip's opening window as ``{start, end}`` — the footage no other
+    clip may open on (and what an opening pull-back may not reach into)."""
+    out: list[dict] = []
+    for clip in clips or []:
+        window = opening_window((clip or {}).get("segments") or [])
+        if window is not None:
+            out.append({"start": window[0], "end": window[1]})
+    return out
+
+
+def words_heard(segments: list[dict], words: list[dict] | None,
+                transcript: list[dict] | None, *, limit: int = 40) -> str:
+    """The words a clip plays, in PLAY order, capped at ``limit`` words: enough
+    for a model to tell what story another clip already tells."""
+    heard: list[str] = []
+    for segment in segments or []:
+        if _span(segment) is None:
+            continue
+        heard.extend(_spoken_in(segment, words or [], transcript or []))
+        if len(heard) > limit:
+            break
+    text = " ".join(heard[:limit])
+    return text + ("…" if len(heard) > limit else "")
+
+
+def clips_from_cuts(cuts, *, words: list[dict] | None = None,
+                    transcript: list[dict] | None = None) -> list[dict]:
+    """``Cut`` rows (or anything with ``id``, ``clip_title``, ``trim_segments``)
+    as plain "other clip" dicts: ``{cut_pk, title, segments (play order),
+    opening: [s, s+3], words_heard}``. Cuts without segments are skipped;
+    ``words_heard`` is "" unless a word stream or transcript is given."""
+    out: list[dict] = []
+    for cut in cuts or []:
+        try:
+            raw = json.loads(getattr(cut, "trim_segments", "") or "[]")
+        except (ValueError, TypeError):
+            continue
+        segments = strip_segments(raw if isinstance(raw, list) else [])
+        window = opening_window(segments)
+        if window is None:
+            continue
+        cut_pk = getattr(cut, "id", None)
+        title = " ".join(str(getattr(cut, "clip_title", "") or "").split())
+        out.append({
+            "cut_pk": cut_pk,
+            "title": title or (f"Clip {cut_pk}" if cut_pk is not None else "Another clip"),
+            "segments": segments,
+            "opening": [round(window[0], 2), round(window[1], 2)],
+            "words_heard": (words_heard(segments, words, transcript)
+                            if (words or transcript) else ""),
+        })
+    return out
+
+
+def other_clips(session, candidate_pk: int, exclude_cut_pk: int | None = None, *,
+                words: list[dict] | None = None,
+                transcript: list[dict] | None = None) -> list[dict]:
+    """The clips already made from this video (every cut with segments,
+    exported or not), oldest first, as ``clips_from_cuts`` dicts.
+    ``exclude_cut_pk`` leaves out the cut being edited: it is not another clip
+    of itself."""
     where = [Cut.candidate_pk == candidate_pk, Cut.trim_segments != ""]
     if exclude_cut_pk is not None:
         where.append(Cut.id != exclude_cut_pk)
-    rows = session.execute(select(Cut).where(*where)).scalars().all()
-    for cut in rows:
-        try:
-            spans.extend(json.loads(cut.trim_segments) or [])
-        except (ValueError, TypeError):
-            continue
-    return normalize(spans)
+    rows = session.execute(select(Cut).where(*where).order_by(Cut.id.asc())).scalars().all()
+    return clips_from_cuts(rows, words=words, transcript=transcript)
 
 
-def visible_segments(proposed: list[dict], used: list[dict]) -> tuple[list[dict], bool]:
-    """What's left of a proposal once already-clipped material is removed.
+# A shot longer than this is a long take (a sit-down interview, a speech): two
+# clips about different things can both open inside it, so only the 3-second
+# opening window keeps them apart there.
+LONG_TAKE_SECONDS = 20.0
 
-    Returns ``(segments, trimmed)``; an empty list means too little survived to
-    be worth offering. This runs when proposals are *served*, not when they're
-    made, because the archive-time pass predates every cut on the video — a
-    proposal goes stale the moment the next clip claims part of it.
 
-    The stored proposal is deliberately left alone. It's the ledger's record of
-    what the model actually asked for, and proposing used material is a miss
-    that the export-time score should keep reflecting.
+def _shot_index(t: float, cut_times: list[float]) -> int:
+    import bisect
 
-    Play order survives: a cold open is served opening-first, exactly as it
-    was proposed (and as its preview render plays).
+    return bisect.bisect_right(cut_times, t)
+
+
+def _shot_length(index: int, cut_times: list[float]) -> float:
+    """Length of the shot ``index`` (between cut_times[index-1] and
+    cut_times[index]); the first and last shots are open-ended -> infinite."""
+    if index <= 0 or index >= len(cut_times):
+        return math.inf
+    return cut_times[index] - cut_times[index - 1]
+
+
+def clip_conflict(segments: list[dict], others: list[dict], *, cuts=None,
+                  min_shot_score: float = 20.0) -> tuple[str, dict | None]:
+    """``(kind, other_clip)`` for the first rule ``segments`` breaks against
+    the video's other clips, or ``("", None)``.
+
+    - ``"duplicate"``: IoU above ``DUPLICATE_IOU`` with another clip — the
+      same clip again. Checked first, against every clip.
+    - ``"same_opening"``: its opening window overlaps another clip's, or —
+      when a shot map is given (``cuts``: ``[{t, score}]``, only cuts scoring
+      at least ``min_shot_score`` count) — the two openings start inside the
+      same shot (between the same pair of cuts).
+
+    Sharing footage further in is fine: that is recycled setup, not a repeat.
     """
-    kept = subtract_play_order(proposed, used)
-    trimmed = duration(kept) < duration(proposed) - 0.05
-    if duration(kept) < _MIN_REMAINING:
-        return [], True
-    return kept, trimmed
+    mine = opening_window(segments)
+    if mine is None:
+        return "", None
+    clips = [c for c in (others or []) if isinstance(c, dict) and c.get("segments")]
+    for other in clips:
+        if iou(segments, other["segments"]) > DUPLICATE_IOU:
+            return CONFLICT_DUPLICATE, other
+    cut_times: list[float] = []
+    for cut in cuts or []:
+        try:
+            t = float(cut["t"]) if isinstance(cut, dict) else float(cut)
+            score = float(cut.get("score", min_shot_score)) if isinstance(cut, dict) else min_shot_score
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(t) and score >= min_shot_score:
+            cut_times.append(t)
+    cut_times.sort()
+    for other in clips:
+        theirs = opening_window(other["segments"])
+        if theirs is None:
+            continue
+        if mine[0] < theirs[1] and theirs[0] < mine[1]:
+            return CONFLICT_SAME_OPENING, other
+        if cut_times:
+            shot = _shot_index(mine[0], cut_times)
+            if (shot == _shot_index(theirs[0], cut_times)
+                    and _shot_length(shot, cut_times) <= LONG_TAKE_SECONDS):
+                return CONFLICT_SAME_OPENING, other
+    return "", None
+
+
+def conflict_with_clips(segments: list[dict], others: list[dict], *, cuts=None,
+                        min_shot_score: float = 20.0) -> str:
+    """``clip_conflict``'s kind alone: "" | "same_opening" | "duplicate"."""
+    return clip_conflict(segments, others, cuts=cuts, min_shot_score=min_shot_score)[0]
+
+
+def visible_segments(proposed: list[dict], used: list[dict] | None = None) -> tuple[list[dict], bool]:
+    """What a card offers of a proposal: its segments as proposed, in PLAY
+    order (unusable entries dropped). Returns ``(segments, trimmed)``;
+    ``trimmed`` is always False now.
+
+    Proposals used to be cut down around footage other clips already use.
+    Clips may now recycle each other's footage (see ``clip_conflict``), so
+    nothing is subtracted: a proposal that opens on another clip's opening is
+    flagged on its card and a duplicate is hidden, but neither is reshaped.
+    ``used`` is accepted for old callers and ignored.
+    """
+    kept = [{**segment, "start": span[0], "end": span[1]}
+            for segment, span in ((s, _span(s)) for s in proposed or [])
+            if span is not None and span[1] > span[0]]
+    return kept, False
 
 
 def span_deltas(proposed: list[dict], final: list[dict]) -> tuple[float | None, float | None]:
@@ -427,14 +512,15 @@ def log_run(session, candidate_pk: int, clips: list[dict], *,
 
 
 def _backstop(start: float, blocked: list[dict]) -> float:
-    """Earliest time an opening may be pulled back to without entering footage
-    another clip has claimed. Returns ``start`` itself when there's no room."""
+    """Earliest time an opening may be pulled back to without entering blocked
+    footage (another clip's opening window, or this clip's own later
+    segments). Returns ``start`` itself when there's no room."""
     floor = 0.0
     for span in blocked:
         if span["end"] <= start:
             floor = max(floor, span["end"])
         elif span["start"] < start:
-            return start  # the start sits inside claimed material
+            return start  # the start sits inside blocked footage
     return floor
 
 
@@ -466,7 +552,8 @@ def refine_opening(candidate, segments: list[dict], settings,
 
     The start only ever moves EARLIER, onto lead-in footage ahead of the
     speech; moving it later would truncate the first sentence. It never crosses
-    into material another clip already claims. Any failure — no local file, no
+    into ``blocked`` footage — another clip's opening window (clips may reuse
+    each other's footage, never each other's opening shot). Any failure — no local file, no
     ffmpeg, no answer — leaves the transcript's start exactly as it was.
     """
     return refine_opening_detail(candidate, segments, settings, blocked, story)[0]
@@ -500,7 +587,7 @@ def refine_opening_detail(candidate, segments: list[dict], settings,
     floor = _backstop(start, normalize(blocked))
     window_start = max(floor, start - lead)
     no_room = ("No lead-in room before this start — the top of the video, or "
-               "footage another clip already uses, is right there.")
+               "another clip's opening shot, is right there.")
     if start - window_start < interval:
         return segments, no_room
 
@@ -606,9 +693,11 @@ def excerpts(segments: list[dict], words: list[dict], transcript: list[dict],
 def pending_summary(session, candidate_pks: list[int]) -> dict[int, dict]:
     """``candidate_pk -> {count, story}`` for still-usable pending proposals.
 
-    "Usable" means the same filter the editor applies: proposals with too
-    little left once existing clips' material is removed aren't counted, so a
-    dashboard badge never promises a suggestion the editor won't show.
+    "Usable" means the same filter the editor applies: a proposal that is the
+    same clip as one already made (``clip_conflict`` "duplicate") isn't
+    counted, so a dashboard badge never promises a suggestion the editor won't
+    show. One that only opens on another clip's shot still counts — its card
+    shows it, flagged.
     """
     if not candidate_pks:
         return {}
@@ -621,24 +710,25 @@ def pending_summary(session, candidate_pks: list[int]) -> dict[int, dict]:
     ).all()
     if not rows:
         return {}
-    claimed: dict[int, list[dict]] = {}
-    for pk, raw in session.execute(
-        select(Cut.candidate_pk, Cut.trim_segments)
+    cuts: dict[int, list] = {}
+    for cut in session.execute(
+        select(Cut)
         .where(Cut.candidate_pk.in_({r.candidate_pk for r in rows}),
                Cut.trim_segments != "")
-    ).all():
-        try:
-            claimed.setdefault(pk, []).extend(json.loads(raw) or [])
-        except (ValueError, TypeError):
-            continue
+        .order_by(Cut.id.asc())
+    ).scalars().all():
+        cuts.setdefault(cut.candidate_pk, []).append(cut)
+    others = {pk: clips_from_cuts(rows_) for pk, rows_ in cuts.items()}
     out: dict[int, dict] = {}
     for r in rows:
         try:
             proposed = json.loads(r.proposed_segments or "[]")
         except (ValueError, TypeError):
             continue
-        kept, _ = visible_segments(proposed, claimed.get(r.candidate_pk, []))
+        kept, _ = visible_segments(proposed)
         if not kept:
+            continue
+        if conflict_with_clips(kept, others.get(r.candidate_pk, [])) == CONFLICT_DUPLICATE:
             continue
         entry = out.setdefault(r.candidate_pk, {"count": 0, "story": r.story or ""})
         entry["count"] += 1
@@ -671,7 +761,9 @@ def propose(session, candidate, settings, transcript_segments: list[dict], *,
     min_seconds = settings.get("clips.min_seconds", 15)
     max_seconds = settings.get("clips.max_seconds", 40)
     opening_hold = settings.get("clips.opening_hold_seconds", 3.0)
-    claimed = used_ranges(session, candidate.id)
+    words = load_words(candidate)
+    others = other_clips(session, candidate.id, words=words,
+                         transcript=transcript_segments)
     # What this account has shipped, thrown back and posted lately — see
     # clip_context. Best-effort by construction; an empty dict is fine.
     from . import clip_context
@@ -682,10 +774,10 @@ def propose(session, candidate, settings, transcript_segments: list[dict], *,
         max_clips=max_clips, max_segments_per_clip=max_segments,
         min_seconds=min_seconds, max_seconds=max_seconds,
         opening_hold=opening_hold,
-        used_ranges=claimed,
+        other_clips=others,
         # The archive-time Whisper word stream, when this video has one:
         # boundaries proposed against it land on word edges.
-        words=load_words(candidate),
+        words=words,
         description=candidate.description,
         window=window, topic=topic,
         context=context,
@@ -693,14 +785,14 @@ def propose(session, candidate, settings, transcript_segments: list[dict], *,
         visual_moments=vision.load_striking(candidate),
     )
 
-    # Put each opening on a frame worth looking at. Sibling clips from this same
-    # run count as blocked too, so two proposals can't reach back onto the same
-    # lead-in footage.
-    blocked = list(claimed)
+    # Put each opening on a frame worth looking at. Another clip's opening
+    # shot is off limits, and so is a sibling's from this same run, so two
+    # proposals can't reach back onto the same opening.
+    blocked = opening_windows(others)
     for clip in clips:
         clip["segments"] = refine_opening(candidate, clip["segments"], settings,
                                           blocked, story=clip.get("story", ""))
-        blocked = blocked + clip["segments"]
+        blocked = blocked + opening_windows([clip])
 
     ids = log_run(session, candidate.id, clips, model=model, window=window,
                   policy=policy_version(

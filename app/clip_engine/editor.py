@@ -8,8 +8,10 @@ miss can later be told apart as "never found" versus "found but cut badly".
 
 What the editor reads is a JSON payload: the shot log (compact, with the
 exact shot changes inside every beat so a picture-led segment can start on a
-cut), word-accurate transcript entries, the account's history and the ranges
-other clips already use. A Gemini editor also watches the WHOLE source proxy
+cut), word-accurate transcript entries, the account's history and the clips
+already made from this video (``other_clips``: title, words heard, segments,
+opening) — their footage may be reused, but a new clip must open on a
+different shot and tell a different story. A Gemini editor also watches the WHOLE source proxy
 when it is short enough (never a window proxy: its clock would start at 0 and
 every time would land in the wrong place), or drafts from the shot log alone
 when the video can't be attached; a Claude editor gets keyframes of the
@@ -17,8 +19,9 @@ strongest shots instead. The payload is always the last part of a Gemini
 request — after the video, as Google recommends, and never dropped.
 
 Segments come back in PLAY order (a cold open plays a later moment first) and
-are kept that way: ``clean_drafts`` clamps and de-overlaps without sorting and
-removes used footage piece by piece.
+are kept that way: ``clean_drafts`` clamps and de-overlaps without sorting.
+Nothing is subtracted for other clips: the engine drops a draft that opens on
+another clip's opening or repeats another clip (``clip_proposals.clip_conflict``).
 
 ``advice`` is the operator's plain-words steer for one pass ("open on the
 disaster footage; no interviews"). It goes into the system prompt above the
@@ -123,8 +126,7 @@ REVISE_SCHEMA: dict = {
 
 class DraftsDropped(RuntimeError):
     """The editor answered with drafts but cleaning dropped every one (bad
-    times, clamped out of the section, inside used footage, or outside the
-    length bounds once that came out). A mechanical loss, not "nothing worth
+    times, clamped out of the section, or outside the length bounds). A mechanical loss, not "nothing worth
     drafting": the run fails and the caller falls back to the transcript
     suggester. ``reasons`` counts the drops by cause."""
 
@@ -349,7 +351,7 @@ def keyframes(source, shotlog, shot_map, *, settings, limit) -> list[tuple[float
 
 def _bounded_segments(raw, *, floor: float, horizon: float | None) -> list[dict]:
     """Model segments -> play-order segments with a lead, clamped to [floor,
-    horizon] and de-overlapped (nothing subtracted yet)."""
+    horizon] and de-overlapped."""
     from .. import clip_proposals
 
     segments = []
@@ -365,12 +367,9 @@ def _bounded_segments(raw, *, floor: float, horizon: float | None) -> list[dict]
                                            horizon=horizon)
 
 
-def _unused_segments(segments: list[dict], *, used, max_segments: int) -> list[dict]:
-    """``_bounded_segments`` output with used footage taken out, rounded, at
-    most ``max_segments``."""
-    from .. import clip_proposals
-
-    segments = clip_proposals.subtract_play_order(segments, list(used or []))
+def _capped_segments(segments: list[dict], *, max_segments: int) -> list[dict]:
+    """``_bounded_segments`` output rounded, at most ``max_segments``. Footage
+    other clips use is NOT taken out: clips may share footage."""
     out = [{"start": round(float(s["start"]), 2), "end": round(float(s["end"]), 2),
             "lead": s.get("lead") if s.get("lead") in LEADS else "word"} for s in segments]
     cap = max(1, int(max_segments or 1))
@@ -381,9 +380,11 @@ def _unused_segments(segments: list[dict], *, used, max_segments: int) -> list[d
     return out
 
 
-def _clean_segments(raw, *, floor: float, horizon: float | None, used, max_segments: int) -> list[dict]:
-    """Model segments -> clean play-order segments with a lead."""
-    return _unused_segments(_bounded_segments(raw, floor=floor, horizon=horizon), used=used,
+def _clean_segments(raw, *, floor: float, horizon: float | None, max_segments: int,
+                    used=None) -> list[dict]:
+    """Model segments -> clean play-order segments with a lead. ``used`` is
+    accepted for old callers and ignored."""
+    return _capped_segments(_bounded_segments(raw, floor=floor, horizon=horizon),
                             max_segments=max_segments)
 
 
@@ -392,17 +393,19 @@ def _within_length(segments: list[dict], min_s: float, max_s: float) -> bool:
     return 0.8 * float(min_s) - 1e-6 <= seconds <= 1.3 * float(max_s) + 1e-6
 
 
-def clean_drafts(raw, *, floor, horizon, min_s, max_s, max_segments, used, archetypes) -> list[dict]:
+def clean_drafts(raw, *, floor, horizon, min_s, max_s, max_segments, archetypes,
+                 used=None) -> list[dict]:
     """The editor's drafts, cleaned, in the editor's own order.
 
     Segments keep PLAY order (clamped to [floor, horizon], overlap with an
-    earlier segment removed, used footage subtracted), each with a lead
+    earlier segment removed; ``used`` is ignored — clips may share footage,
+    and the engine filters same openings and repeats), each with a lead
     ("word" by default), at most ``max_segments``; drafts outside
     0.8·min_s..1.3·max_s are dropped. Ids are d1, d2, ... and ``editor_rank``
     is the position. Unknown archetypes become "other", unknown lenses
     "line"."""
     return _clean_drafts(raw, floor=floor, horizon=horizon, min_s=min_s, max_s=max_s,
-                         max_segments=max_segments, used=used, archetypes=archetypes)[0]
+                         max_segments=max_segments, archetypes=archetypes)[0]
 
 
 def _drop_reason(segments: list[dict], *, min_s: float, max_s: float) -> str:
@@ -414,7 +417,7 @@ def _drop_reason(segments: list[dict], *, min_s: float, max_s: float) -> str:
     return ""
 
 
-def _clean_drafts(raw, *, floor, horizon, min_s, max_s, max_segments, used,
+def _clean_drafts(raw, *, floor, horizon, min_s, max_s, max_segments,
                   archetypes) -> tuple[list[dict], dict[str, int]]:
     """``clean_drafts`` plus how many drafts were dropped, by cause."""
     allowed = {str(a).strip().lower() for a in archetypes or [] if str(a).strip()}
@@ -433,10 +436,7 @@ def _clean_drafts(raw, *, floor, horizon, min_s, max_s, max_segments, used,
         if not bounded:
             drop("no usable segments")    # bad times, or none inside the video / section
             continue
-        segments = _unused_segments(bounded, used=used, max_segments=max_segments)
-        if not segments:
-            drop("inside used footage")
-            continue
+        segments = _capped_segments(bounded, max_segments=max_segments)
         reason = _drop_reason(segments, min_s=min_s, max_s=max_s)
         if reason:
             drop(reason)
@@ -519,7 +519,7 @@ def clip_map(segments) -> list[dict]:
 # ---- drafting -----------------------------------------------------------------------------
 
 def _payload(*, title, description, duration, window, shotlog, shot_map, entries, context,
-             used, settings) -> dict:
+             settings, other_clips=None) -> dict:
     payload: dict[str, Any] = {
         "title": title or "",
         "description": (description or "")[:_DESCRIPTION_CHARS],
@@ -535,8 +535,18 @@ def _payload(*, title, description, duration, window, shotlog, shot_map, entries
     payload["transcript"] = list(entries or [])
     if context:
         payload["account_context"] = context
-    payload["used_ranges"] = list(used or [])
+    others = _other_clips(other_clips)
+    if others:
+        payload["other_clips"] = others
     return payload
+
+
+def _other_clips(other_clips) -> list[dict]:
+    """The video's other clips as the editor reads them: ``[{title,
+    words_heard, segments, opening}]`` (``llm.other_clips_payload``)."""
+    from .. import llm
+
+    return llm.other_clips_payload(other_clips)
 
 
 def _gemini_fps(settings, duration) -> float:
@@ -574,13 +584,15 @@ def _parts_or_payload(source_video, fps: float, payload_text: str, *,
 
 
 def draft(*, role, settings, brand, playbook_text, rules, title, description, duration,
-          shotlog, shot_map, entries, has_words, context, used, window, section_topic, n,
+          shotlog, shot_map, entries, has_words, context, window, section_topic, n,
           min_s, max_s, max_segments, source_video, keyframe_frames, meter,
-          advice: str = "") -> tuple[list[dict], list[dict]]:
+          advice: str = "", other_clips=None, used=None) -> tuple[list[dict], list[dict]]:
     """Draft ``n`` candidate clips. Returns ``(drafts, moments)``.
 
     ``role`` is the editor's provider ("gemini" or "claude"). ``advice`` (the
-    operator's steer for this pass) goes into the system prompt. Provider errors
+    operator's steer for this pass) goes into the system prompt.
+    ``other_clips`` (the clips already made from this video) go into the
+    payload; ``used`` is accepted for old callers and ignored. Provider errors
     propagate (with their usage charged to ``meter`` under "draft"); a video
     that can't be attached is left out and the editor drafts from the shot
     log. An answer with no drafts returns ``([], moments)``; an answer whose
@@ -592,8 +604,8 @@ def draft(*, role, settings, brand, playbook_text, rules, title, description, du
     archetypes = _archetype_keys(playbook_text)
     payload_text = _dumps(_payload(title=title, description=description, duration=duration,
                                    window=section, shotlog=shotlog, shot_map=shot_map,
-                                   entries=entries, context=context, used=used,
-                                   settings=settings))
+                                   entries=entries, context=context,
+                                   other_clips=other_clips, settings=settings))
     schema = _schema_for(DRAFT_SCHEMA, archetypes, max_drafts=n)
     common = dict(n=int(n), min_s=min_s, max_s=max_s, max_segments=int(max_segments),
                   section=section, section_topic=section_topic or "", has_words=bool(has_words),
@@ -623,7 +635,7 @@ def draft(*, role, settings, brand, playbook_text, rules, title, description, du
             label=label, bucket=_bucket(meter)))
     drafts, dropped = _clean_drafts(data.get("drafts"), floor=floor, horizon=horizon,
                                     min_s=min_s, max_s=max_s, max_segments=max_segments,
-                                    used=used, archetypes=archetypes)
+                                    archetypes=archetypes)
     moments = _clean_moments(data.get("moments"), floor=floor, horizon=horizon)
     raw_count = len(data.get("drafts") or []) if isinstance(data.get("drafts"), list) else 0
     why = ", ".join(f"{count} {reason}" for reason, count in dropped.items())
@@ -659,8 +671,9 @@ def _critique_for_prompt(critique: Any) -> dict:
 
 
 def revise(*, role, settings, brand, playbook_text, rules, draft, critique, shotlog,
-           shot_map, entries, has_words, used, window, min_s, max_s, max_segments,
-           source_video, meter, advice: str = "") -> dict | None:
+           shot_map, entries, has_words, window, min_s, max_s, max_segments,
+           source_video, meter, advice: str = "", other_clips=None,
+           used=None) -> dict | None:
     """One revision of ``draft`` from the critic's notes (and the operator's
     ``advice`` for this pass, in the system prompt).
 
@@ -690,8 +703,10 @@ def revise(*, role, settings, brand, playbook_text, rules, draft, critique, shot
         "shot_log": _shotlog.compact_for_prompt(shotlog, window=near, cuts=_cuts(shot_map),
                                                 min_shot_score=_min_shot_score(settings)),
         "transcript": _entries_near(entries, near["start"], near["end"]),
-        "used_ranges": list(used or []),
     }
+    others = _other_clips(other_clips)
+    if others:
+        payload["other_clips"] = others
     if section:
         payload["section"] = section
     payload_text = _dumps(payload)
@@ -719,7 +734,7 @@ def revise(*, role, settings, brand, playbook_text, rules, draft, critique, shot
             content=[claude.text_block(payload_text)], schema=schema,
             effort=opt(settings, "clip_engine.claude.editor_effort", "high"), max_tokens=16000,
             label=label, bucket=_bucket(meter)))
-    segments = _clean_segments(data.get("segments"), floor=floor, horizon=horizon, used=used,
+    segments = _clean_segments(data.get("segments"), floor=floor, horizon=horizon,
                                max_segments=max_segments)
     change = _text(data.get("change"), 300)
     if not segments or not _within_length(segments, min_s, max_s):

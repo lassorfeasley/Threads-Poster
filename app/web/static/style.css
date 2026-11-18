@@ -5437,9 +5437,64 @@ html[data-theme="light"] .suggest-archetype { color: rgb(109, 77, 214); }
 .revise-chip svg { flex: none; }
 
 .revise-note { margin-top: 5px; line-height: 1.4; }
-.revise-note.is-error { color: var(--danger); }
+.revise-note.is-error { color: var(--danger); font-weight: 550; }
 /* display would beat the [hidden] UA rule after JS un-hides it once. */
-.revise-note[hidden], .revise-box[hidden] { display: none; }
+.revise-note[hidden], .revise-box[hidden], .revise-status[hidden] { display: none; }
+
+/* A revision in flight (20-60 s): the field keeps its instruction, greyed but
+   readable, inside a violet frame; a spinner and a running seconds count sit
+   right under it; the timeline above dims and takes no edits until it ends. */
+.revise-box.is-busy .revise-input:disabled {
+  color: var(--text);
+  opacity: 0.8;
+  cursor: progress;
+  border-color: rgba(167, 139, 250, 0.55);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.12);
+}
+.revise-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: rgba(167, 139, 250, 0.95);
+}
+.revise-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.revise-elapsed {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* An edit tried mid-revision: the status line pulses once to say why
+   nothing moved. */
+.revise-status.is-nudged { animation: revise-nudge 0.5s ease-in-out; }
+@keyframes revise-nudge {
+  0%, 100% { transform: none; }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
+body.is-revising #wave-wrap,
+body.is-revising #detail-strip,
+body.is-revising #segments,
+body.is-revising #segments-bar {
+  opacity: 0.55;
+  cursor: progress;
+  transition: opacity 0.15s ease;
+}
+body.is-revising #segments .seg-del,
+body.is-revising #segments .seg-grip { pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+  .revise-spinner { animation-duration: 2.4s; }
+  .revise-status.is-nudged { animation: none; }
+}
 
 /* --- Ship rail: plain action card at the top of the rail stack (primary
    action full-width, alternatives side by side beneath). --- */

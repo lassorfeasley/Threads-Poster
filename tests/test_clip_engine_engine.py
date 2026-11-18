@@ -706,7 +706,9 @@ class RunStagesTest(_SpendSafe):
 
     def test_gemini_editor_watches_the_whole_source(self):
         h = self.three()
-        h.run(used=[{"start": 400.0, "end": 420.0}])
+        others = [{"title": "The weaver", "words_heard": "she weaves",
+                   "segments": [{"start": 400.0, "end": 420.0}]}]
+        h.run(used=[{"start": 400.0, "end": 420.0}], other_clips=others)
         self.assertEqual(h.calls["proxy"], [{"source": Path("/videos/source.mp4")}])
         kw = h.calls["draft"][0]
         self.assertEqual(kw["role"], "gemini")
@@ -716,7 +718,8 @@ class RunStagesTest(_SpendSafe):
         self.assertEqual((kw["min_s"], kw["max_s"], kw["max_segments"]), (12.0, 45.0, 6))
         self.assertEqual(kw["playbook_text"], "PLAYBOOK TEXT")
         self.assertEqual(kw["rules"], "OPERATOR RULES")
-        self.assertEqual(kw["used"], [{"start": 400.0, "end": 420.0}])
+        self.assertNotIn("used", kw)          # clips may share footage: nothing to subtract
+        self.assertEqual(kw["other_clips"], others)
         self.assertEqual(kw["context"], {"shipped_examples": []})
         self.assertEqual(kw["shot_map"]["cuts"], [{"t": 31.0, "score": 45.0}])
         self.assertTrue(kw["has_words"])
@@ -757,7 +760,12 @@ class RunStagesTest(_SpendSafe):
                           make_draft("d3", (250, 270))],
                          {"d1": crit(8), "d2": crit(7), "d3": crit(6)})
         used = [{"start": 150.0, "end": 160.0}]
-        result = h.run(window={"start": 100, "end": 300}, section_topic="Chapter 3", used=used)
+        # Another clip opens at 20 s (before the shot map's cut at 31 s) and
+        # also uses 150-160, which these drafts are free to reuse.
+        others = [{"title": "Earlier clip", "segments": [{"start": 20.0, "end": 30.0},
+                                                         {"start": 150.0, "end": 160.0}]}]
+        result = h.run(window={"start": 100, "end": 300}, section_topic="Chapter 3", used=used,
+                       other_clips=others)
         kw = h.calls["draft"][0]
         self.assertEqual(kw["n"], 6)
         self.assertEqual(kw["window"], {"start": 100.0, "end": 300.0})
@@ -766,7 +774,8 @@ class RunStagesTest(_SpendSafe):
         self.assertEqual(h.calls["proxy"], [{"source": Path("/videos/source.mp4")}])
         for call in h.calls["snap"]:
             self.assertEqual((call["floor"], call["horizon"]), (100.0, 300.0))
-            self.assertEqual(call["blocked"], used)
+            # Only the other clips' OPENING windows are blocked, never their footage.
+            self.assertEqual(call["blocked"], [{"start": 20.0, "end": 23.0}])
         self.assertEqual(len(result.top), 2)               # clips.section_max_clips
         self.assertEqual(result.policy, clip_proposals.policy_version(
             model="engine:gemini:gemini-3.8-flash", max_clips=2, max_segments_per_clip=6,
@@ -1089,6 +1098,107 @@ class RunRankingTest(_SpendSafe):
         result = h.run()
         self.assertNotIn("rank", h.events)
         self.assertEqual(result.orders["rank"], ["d1", "d2", "d3"])
+
+
+class RunFootageReuseTest(_SpendSafe):
+    """Clips of one video may share footage, never an opening shot, and a
+    draft that is another clip again is not offered."""
+
+    OTHERS = [{"title": "The weaver", "words_heard": "she weaves",
+               "segments": [{"start": 100.0, "end": 115.0}, {"start": 300.0, "end": 310.0}]}]
+
+    def test_a_draft_reusing_footage_further_in_is_kept(self):
+        h = self.harness([make_draft("d1", (60, 80), (100, 112))], {"d1": crit(8)},
+                         shot_map={"version": 1, "duration": 600.0, "error": "", "quiet": [],
+                                   "cuts": [{"t": 90.0, "score": 45.0}]})
+        # d1 opens at 60, in another shot than the weaver's opening at 100, and
+        # reuses 100-112 further in.
+        result = h.run(other_clips=self.OTHERS)
+        self.assertEqual([d["id"] for d in result.top], ["d1"])
+        self.assertEqual(result.top[0]["dropped_reason"], "")
+
+    def test_same_opening_and_same_clip_are_dropped(self):
+        h = self.harness(
+            [make_draft("d1", (101, 125)),                # opens inside the weaver's opening
+             make_draft("d2", (98, 120)),                 # its first 3 s overlap 100-103
+             make_draft("d3", (100.5, 115), (300, 310)),  # the weaver again (IoU > 0.6)
+             make_draft("d4", (200, 220)),
+             make_draft("d5", (103, 125))],               # starts as the opening ends: fine
+            {"d1": crit(8), "d2": crit(8), "d3": crit(8), "d4": crit(7), "d5": crit(6)},
+            shot_map={"version": 1, "duration": 600.0, "error": "", "quiet": [], "cuts": []})
+        result = h.run(other_clips=self.OTHERS)
+        drafts = {d["id"]: d for d in result.drafts}
+        self.assertEqual(drafts["d1"]["dropped_reason"], "same opening")
+        self.assertEqual(drafts["d2"]["dropped_reason"], "same opening")
+        self.assertEqual(drafts["d3"]["dropped_reason"], "same clip")
+        self.assertEqual(drafts["d1"]["conflicts_with"], "The weaver")
+        self.assertEqual(sorted(h.rendered()), ["d4", "d5"])
+        self.assertTrue(any("d1 opens on the same shot as “The weaver”" in n for n in result.notes))
+        self.assertTrue(any("d3 is the same clip as “The weaver”" in n for n in result.notes))
+
+    def test_the_shot_map_widens_same_opening_to_the_whole_shot(self):
+        # Cuts at 95 and 112: the weaver opens at 100, inside the 17 s shot 95-112.
+        shot_map = {"version": 1, "duration": 600.0, "error": "", "quiet": [],
+                    "cuts": [{"t": 95.0, "score": 45.0}, {"t": 112.0, "score": 45.0},
+                             {"t": 108.0, "score": 5.0}]}      # too weak to count
+        h = self.harness([make_draft("d1", (105, 125)), make_draft("d2", (113, 133))],
+                         {"d1": crit(8), "d2": crit(7)}, shot_map=shot_map)
+        result = h.run(other_clips=self.OTHERS)
+        drafts = {d["id"]: d for d in result.drafts}
+        self.assertEqual(drafts["d1"]["dropped_reason"], "same opening")
+        self.assertEqual(drafts["d2"]["dropped_reason"], "")
+        # A long take (an interview shot 90-140) isn't one opening: only the 3 s
+        # window keeps clips apart inside it.
+        long_take = {"version": 1, "duration": 600.0, "error": "", "quiet": [],
+                     "cuts": [{"t": 90.0, "score": 45.0}, {"t": 140.0, "score": 45.0}]}
+        h = self.harness([make_draft("d1", (125, 145))], {"d1": crit(8)}, shot_map=long_take)
+        self.assertEqual(h.run(other_clips=self.OTHERS).top[0]["id"], "d1")
+        # No shot map (an ffmpeg failure): only the 3 s window rule applies.
+        h = self.harness([make_draft("d1", (105, 125))], {"d1": crit(8)},
+                         shot_map={"error": "no ffmpeg"})
+        result = h.run(other_clips=self.OTHERS)
+        self.assertEqual(result.top[0]["id"], "d1")
+
+    def test_snapping_keeps_openings_off_other_clips_openings(self):
+        h = self.three()
+        h.run(other_clips=self.OTHERS + [{"title": "x", "segments": [{"start": 400, "end": 420}]}])
+        for call in h.calls["snap"]:
+            self.assertEqual(call["blocked"], [{"start": 100.0, "end": 103.0},
+                                               {"start": 400.0, "end": 403.0}])
+
+    def test_without_other_clips_nothing_is_blocked_or_dropped(self):
+        h = self.three()
+        result = h.run(used=[{"start": 0.0, "end": 600.0}])   # the old argument: ignored
+        self.assertEqual(len(result.top), 3)
+        for call in h.calls["snap"]:
+            self.assertEqual(call["blocked"], [])
+
+    def test_everything_conflicting_is_a_failure(self):
+        h = self.harness([make_draft("d1", (100, 120))], {"d1": crit(8)})
+        with self.assertRaises(engine.EngineError) as caught:
+            h.run(other_clips=self.OTHERS)
+        self.assertIn("same", str(caught.exception))
+
+    def test_a_revision_onto_another_clips_opening_is_not_used(self):
+        h = self.harness([make_draft("d1", (10, 30)), make_draft("d2", (200, 220))],
+                         {"d1": crit(8), "d2": crit(6), "d1r": crit(9)})
+        h.revisions = {"d1": {"id": "d1r", "segments": [seg(100.5, 120)],
+                              "change": "open on the loom", "archetype": "voice"}}
+        result = h.run(other_clips=self.OTHERS)
+        self.assertEqual(result.top[0]["id"], "d1")
+        revision = next(d for d in result.drafts if d["id"] == "d1r")
+        self.assertIn("opens on the same shot as “The weaver”", revision["revision_note"])
+        self.assertNotIn("render:d1r", h.events)
+        self.assertEqual(h.calls["revise"][0]["other_clips"][0]["title"], "The weaver")
+
+    def test_other_clips_are_cleaned(self):
+        self.assertEqual(engine.clean_other_clips([
+            {"title": "  A  clip ", "segments": [{"start": "5", "end": 9}, {"start": 3}],
+             "words_heard": "x", "cut_pk": 4},
+            {"title": "empty", "segments": []}, "junk", None,
+            {"segments": json.dumps([{"start": 1, "end": 2}])}]), [
+            {"title": "A clip", "words_heard": "x", "segments": [{"start": 5.0, "end": 9.0}]},
+            {"title": "another clip", "words_heard": "", "segments": [{"start": 1.0, "end": 2.0}]}])
 
 
 class RunRevisionTest(_SpendSafe):
