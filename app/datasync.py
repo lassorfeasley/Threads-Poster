@@ -197,7 +197,7 @@ class PushResult:
     pending: list[tuple[str, int]] = field(default_factory=list)
 
 
-def _candidates(manifest: _Manifest, now: float):
+def _candidates(manifest: _Manifest, now: float, settle: float = SETTLE_SECONDS):
     root = DATA_DIR
     for folder in MIRRORED:
         base = root / folder
@@ -211,7 +211,7 @@ def _candidates(manifest: _Manifest, now: float):
                 st = p.stat()
             except OSError:
                 continue
-            if manifest.current(rel, st) or now - st.st_mtime < SETTLE_SECONDS:
+            if manifest.current(rel, st) or now - st.st_mtime < settle:
                 continue
             yield rel, p, st
 
@@ -236,14 +236,15 @@ def upload(p: Path, key: str) -> None:
         raise RuntimeError(f"upload refused ({r.status_code}): {r.text[:200]}")
 
 
-def push_sweep(*, dry_run: bool = False, limit: int | None = None) -> PushResult:
+def push_sweep(*, dry_run: bool = False, limit: int | None = None,
+               settle: float = SETTLE_SECONDS) -> PushResult:
     """Upload new or changed mirrored files. Per-file failures are counted and
     retried on the next sweep."""
     manifest = _Manifest.load()
     result = PushResult()
     now = time.time()
     done = 0
-    for rel, p, st in _candidates(manifest, now):
+    for rel, p, st in _candidates(manifest, now, settle):
         if limit is not None and done >= limit:
             break
         done += 1
@@ -281,6 +282,20 @@ def run_push_once(**kwargs) -> PushResult | None:
         _sweep_lock.release()
 
 
+def push_now() -> PushResult | None:
+    """Upload what a finished job just wrote, without waiting for the timer or
+    the settle time (the job is done writing). Waits for a sweep already in
+    progress rather than skipping: a hosted machine may go to sleep as soon as
+    the request that started the job is over. No-op unless sharing is on."""
+    if not enabled():
+        return None
+    with _sweep_lock:
+        res = push_sweep(settle=0)
+    if res.uploaded or res.failed:
+        log.info("Data mirror (after a job): %d uploaded, %d failed", res.uploaded, res.failed)
+    return res
+
+
 def start_mirror_thread(interval: float = 60.0) -> None:
     """Background push for a long-running process. Idempotent; a no-op unless
     SHARED_WORKSPACE is on."""
@@ -305,4 +320,4 @@ def start_mirror_thread(interval: float = 60.0) -> None:
 
 
 __all__ = ["MIRRORED", "enabled", "relative", "key_for", "ensure_file", "ensure_text",
-           "push_sweep", "run_push_once", "start_mirror_thread", "PushResult"]
+           "push_sweep", "push_now", "run_push_once", "start_mirror_thread", "PushResult"]

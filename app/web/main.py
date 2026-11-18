@@ -562,6 +562,10 @@ def _restore_clips_for(kind: str, pk: int) -> None:
 
 @app.middleware("http")
 async def _restore_archived_clips(request: Request, call_next):
+    if request.url.path.startswith("/media/") and not _archives_here():
+        # The hosted dashboard sends players straight to Storage (see
+        # _clip_response) rather than downloading the clip first.
+        return await call_next(request)
     if request.url.path.startswith("/brand-static/"):
         # The uploaded logo may have been uploaded on another machine.
         name = Path(request.url.path).name
@@ -663,9 +667,19 @@ def _in_background(fn, *args) -> None:
         try:
             fn(*args)
         finally:
-            pagecache.invalidate()
+            _after_background_work()
 
     threading.Thread(target=_run, daemon=True, name=getattr(fn, "__name__", "worker")).start()
+
+
+def _after_background_work() -> None:
+    """A job finished: drop the cached reads, and share what it rendered right
+    away (a hosted machine may sleep once nobody is on the page)."""
+    pagecache.invalidate()
+    try:
+        datasync.push_now()
+    except Exception:
+        log.exception("Sharing a finished job's files failed (the timer will retry)")
 
 
 def _retrain_triage_model_in_background() -> None:
@@ -755,7 +769,7 @@ def _queue_clip_engine_after_archive(candidate_id: int) -> None:
                 return
             if clip_proposals.pending_for_candidate(session, candidate_id):
                 return
-        jobs.enqueue(candidate_id, reason="archive", on_done=pagecache.invalidate)
+        jobs.enqueue(candidate_id, reason="archive", on_done=_after_background_work)
     except Exception:
         log.exception("Couldn't queue clip suggestions for candidate %s", candidate_id)
 
@@ -782,7 +796,7 @@ def _resume_clip_engine_runs() -> None:
     try:
         from ..clip_engine import jobs
 
-        jobs.resume_recent(on_done=pagecache.invalidate)
+        jobs.resume_recent(on_done=_after_background_work)
     except Exception:
         log.exception("Couldn't resume clip engine runs")
 
@@ -1951,7 +1965,7 @@ def _suggest_in_background(candidate_id: int, window: dict | None, setup: str, *
 
         result = jobs.enqueue(candidate_id, window=window, topic=topic,
                               reason="section" if window else "reroll",
-                              on_done=pagecache.invalidate, advice=advice)
+                              on_done=_after_background_work, advice=advice)
     except Exception as exc:
         log.exception("Couldn't queue clip suggestions for candidate %s", candidate_id)
         return JSONResponse({"error": f"Couldn't start the clip engine: {exc}", **extra},
@@ -3149,22 +3163,55 @@ def media_cut_thumb(cut_id: int):
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
+def _stored_clip_url(path: str, publish_key: str = "") -> str:
+    """A signed Storage URL for a clip this machine doesn't have on disk: the
+    shared copy (app/datasync.py, same key as the clip archive), else the copy
+    uploaded for publishing. '' when neither exists."""
+    key = datasync.key_for(path) if path else None
+    if key:
+        try:
+            from ..offload import remote_size, signed_source_url
+
+            if remote_size(key) is not None:
+                return signed_source_url(key)
+        except Exception as exc:
+            log.info("No stored copy of %s: %s", Path(path).name, exc)
+    if publish_key:
+        try:
+            from ..storage_supabase import signed_clip_url
+
+            return signed_clip_url(publish_key)
+        except Exception as exc:
+            log.info("No publish copy %s: %s", publish_key, exc)
+    return ""
+
+
+def _clip_response(path: str, missing: str, publish_key: str = ""):
+    """The clip from disk when it's here (the Mac, as always); otherwise send the
+    browser straight to Storage instead of relaying the video through this
+    server (the hosted dashboard keeps no clips of its own)."""
+    if path and Path(path).is_file():
+        return FileResponse(path, media_type="video/mp4")
+    url = _stored_clip_url(path, publish_key)
+    if url:
+        return RedirectResponse(url, status_code=307)
+    return JSONResponse({"error": missing}, status_code=404)
+
+
 @app.get("/media/clip/{cut_id}")
 def media_clip(cut_id: int):
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
-        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
-            return JSONResponse({"error": "no clip"}, status_code=404)
-        return FileResponse(cut.trimmed_clip_path, media_type="video/mp4")
+        path = cut.trimmed_clip_path if cut is not None else ""
+    return _clip_response(path, "no clip")
 
 
 @app.get("/media/subtitled/{cut_id}")
 def media_subtitled(cut_id: int):
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
-        if cut is None or not cut.subtitled_clip_path or not Path(cut.subtitled_clip_path).exists():
-            return JSONResponse({"error": "no subtitled clip"}, status_code=404)
-        return FileResponse(cut.subtitled_clip_path, media_type="video/mp4")
+        path = cut.subtitled_clip_path if cut is not None else ""
+    return _clip_response(path, "no subtitled clip")
 
 
 @app.get("/media/vertical/{cut_id}")
@@ -3172,9 +3219,8 @@ def media_vertical(cut_id: int):
     """The cut's 1080x1920 Instagram Reels composite (hook + clip + captions)."""
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
-        if cut is None or not cut.vertical_clip_path or not Path(cut.vertical_clip_path).exists():
-            return JSONResponse({"error": "no vertical composite"}, status_code=404)
-        return FileResponse(cut.vertical_clip_path, media_type="video/mp4")
+        path = cut.vertical_clip_path if cut is not None else ""
+    return _clip_response(path, "no vertical composite")
 
 
 @app.get("/media/post/{post_id}")
@@ -3190,16 +3236,23 @@ def media_post_clip(post_id: int):
         p = session.get(ThreadsPost, post_id)
         if p is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        path = p.clip_local_path
-        if (not path or not Path(path).exists()) and p.cut:
+        # In order: the post's own file, the cut's captioned variant (when the
+        # cut uses captions), the plain trim.
+        options = [(p.clip_local_path or "", p.clip_object_path or "")]
+        if p.cut:
             cut = p.cut
-            if cut.use_subtitles and cut.subtitled_clip_path and Path(cut.subtitled_clip_path).exists():
-                path = cut.subtitled_clip_path
-            else:
-                path = cut.trimmed_clip_path
-        if not path or not Path(path).exists():
-            return JSONResponse({"error": "no clip"}, status_code=404)
-        return FileResponse(path, media_type="video/mp4")
+            if cut.use_subtitles and cut.subtitled_clip_path:
+                options.append((cut.subtitled_clip_path, ""))
+            options.append((cut.trimmed_clip_path or "", ""))
+    for path, _key in options:
+        if path and Path(path).is_file():
+            return FileResponse(path, media_type="video/mp4")
+    # Nothing on this disk (the hosted dashboard): the same order, from Storage.
+    for path, key in options:
+        url = _stored_clip_url(path, key)
+        if url:
+            return RedirectResponse(url, status_code=307)
+    return JSONResponse({"error": "no clip"}, status_code=404)
 
 
 def _safe_download_stem(text: str, limit: int = 60) -> str:

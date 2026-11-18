@@ -5,9 +5,9 @@
 # - the full web stack, and ffmpeg for trimming, captions, vertical renders
 #   and stills. Not faster-whisper: transcription, like downloading, happens
 #   on a machine with a home connection (ARCHIVE_ON_THIS_MACHINE=off below).
-# - a volume for the workspace's data tree. It is a cache: every file it holds
-#   is in Supabase Storage or can be rebuilt (SHARED_WORKSPACE=on, see
-#   app/datasync.py), so losing it costs downloads, not data.
+# - no volume: Supabase holds every file (SHARED_WORKSPACE=on, see
+#   app/datasync.py). The data tree inside the container is scratch space for
+#   renders and goes when the machine stops.
 FROM python:3.12-slim
 
 RUN apt-get update \
@@ -29,6 +29,5 @@ COPY assets/ ./assets/
 COPY workspaces/ ./workspaces/
 COPY workspaces.yaml run.py ./
 
-# Root on purpose: the Fly volume mounts root-owned, and the VM is this
-# process alone.
+# Root: the VM runs this process alone.
 CMD ["sh", "-c", "exec python run.py dashboard --workspace ${WORKSPACE} --host 0.0.0.0 --port 8080 --no-reload"]

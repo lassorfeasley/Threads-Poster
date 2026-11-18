@@ -8,8 +8,10 @@
 #   THREADS_/INSTAGRAM_/LINKEDIN_/FACEBOOK_/X_ app ids, secrets and
 #   *_REDIRECT_URI values pointing at https://app.continuity.marketing/...
 #
-# First deploy also needs the volume:
-#   fly volumes create climate_data -a throughline-climate -r sea -s 20
+# No volume: Supabase holds every file. Players stream from Storage directly;
+# a render downloads its source into the machine's scratch disk, uploads the
+# result as soon as it finishes, and the scratch copy goes when the machine
+# stops. So the machine can sleep whenever nobody is using it.
 
 app = "throughline-climate"
 # Next to the database (Supabase, AWS us-west-2): pages make dozens of
@@ -32,11 +34,11 @@ primary_region = "sea"
 [http_service]
   internal_port = 8080
   force_https = true
-  # Background work (clip engine runs, exports, the file mirror) lives in
-  # this process, so keep one machine up rather than scaling to zero.
-  auto_stop_machines = "off"
+  # Sleep when idle, wake on the next visit (a few seconds). Posting doesn't
+  # depend on this app: the scheduler app (fly.toml) stays up on its own.
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
 
   [[http_service.checks]]
     grace_period = "60s"
@@ -45,10 +47,7 @@ primary_region = "sea"
     path = "/healthz"
     timeout = "5s"
 
-[mounts]
-  source = "climate_data"
-  destination = "/app/workspaces/climate/data"
-
 [[vm]]
-  size = "shared-cpu-2x"
-  memory = "2gb"
+  size = "shared-cpu-1x"
+  # The web app plus an ffmpeg render of a short clip.
+  memory = "1gb"

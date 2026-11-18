@@ -201,7 +201,7 @@ class SuggestRouteTest(RouteTestBase):
         self.assertEqual(kwargs["window"], None)
         self.assertEqual(kwargs["topic"], "")
         self.assertEqual(kwargs["reason"], "reroll")
-        self.assertIs(kwargs["on_done"], self.main.pagecache.invalidate)
+        self.assertIs(kwargs["on_done"], self.main._after_background_work)
 
     def test_a_section_pass_carries_its_window_and_chapter(self):
         chapters = [{"start": 0, "end": 100, "topic": "Intro", "summary": "the anchor"},
@@ -1620,7 +1620,7 @@ class FeedbackRouteTest(NotesRouteBase):
                          (None, "reroll", ""))
         self.assertEqual(kwargs["advice"], self.notes.advice_from(
             ["other", "wrong_language", "monologue"], "open on the floods"))
-        self.assertIs(kwargs["on_done"], self.main.pagecache.invalidate)
+        self.assertIs(kwargs["on_done"], self.main._after_background_work)
         self.propose_soon.assert_called_once_with()
 
     def test_dismiss_reason_mapping(self):
@@ -1965,7 +1965,7 @@ class ArchiveThreadTest(RouteTestBase):
             self.main._scrape_in_thread(cid)
         self.assertEqual(seen["status"], STATUS_ARCHIVED)          # committed first
         self.assertEqual(seen["reason"], "archive")
-        self.assertIs(seen["on_done"], self.main.pagecache.invalidate)
+        self.assertIs(seen["on_done"], self.main._after_background_work)
 
     def test_when_nothing_is_queued(self):
         cases = ["transcript setup", "pending suggestions", "already archived",
@@ -2048,7 +2048,7 @@ class WiringTest(RouteTestBase):
     def test_startup_resumes_interrupted_runs(self):
         with mock.patch.object(self.jobs, "resume_recent", return_value=2) as resume:
             self.main._resume_clip_engine_runs()
-        resume.assert_called_once_with(on_done=self.main.pagecache.invalidate)
+        resume.assert_called_once_with(on_done=self.main._after_background_work)
         with mock.patch.object(self.jobs, "resume_recent", side_effect=RuntimeError("x")):
             self.main._resume_clip_engine_runs()       # never raises
 
