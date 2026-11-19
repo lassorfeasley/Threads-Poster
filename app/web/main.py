@@ -44,7 +44,7 @@ from ..config import (
     load_brand, load_brand_rules, load_caption_rules, load_first_reply, load_keywords,
     load_settings, load_workspaces, render_caption_guide, save_brand,
     save_brand_rules, save_caption_rules, save_first_reply, save_keywords,
-    save_timezone, timezone_editable, timezone_saved,
+    save_timezone,
 )
 from ..db import (
     SessionLocal,
@@ -7277,8 +7277,6 @@ def schedule_page(request: Request, msg: str = ""):
          "plan_waking": (posting_plan.WAKING_FIRST, posting_plan.WAKING_LAST),
          "tz_city": tz_name.split("/")[-1].replace("_", " "),
          "now_label": now_tz.strftime("%-I:%M %p"),
-         "tz_editable": timezone_editable(),
-         "tz_saved": timezone_saved(),
          "tz_choices": _timezone_choices(utcnow()),
          "tz_common": [k for _, zones in _COMMON_TIMEZONES for k, _ in zones],
          "tz_all": _all_timezones(),
