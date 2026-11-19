@@ -107,29 +107,12 @@ def load_settings() -> Settings:
 DEFAULT_TIMEZONE = "America/New_York"
 TIMEZONE_TOKEN = f"timezone:{WORKSPACE}"
 
-# Rollout guard for choosing a time zone in the app: one switch for the whole
-# release, the same for every account, never a per-account setting. Only code
-# from this release on reads the zone an account saves. A machine that posts
-# while still on older code (the Fly worker's image, the GitHub Actions cron on
-# main) would keep posting on settings.yaml's zone while the others moved, and
-# the account would post on both clocks. Once every one of them runs this
-# code, delete the guard: this constant, the check in save_timezone, and the
-# locked branch on the Posting schedule page.
-TIMEZONE_CHOICE_OPEN = False
-
 # scheduler_timezone() runs hundreds of times per calendar build and on every
 # scheduler tick: the saved zone is read from the database at most once a
 # minute (a failed read is retried after a few seconds, not every call).
 _TIMEZONE_CACHE_TTL = 60.0
 _TIMEZONE_RETRY_AFTER = 5.0
 _timezone_cache: tuple[float, str | None] | None = None  # (expires, zone)
-
-
-def timezone_editable() -> bool:
-    """Whether accounts may choose their own time zone in the app yet (see
-    TIMEZONE_CHOICE_OPEN). Gates only the choosing: a zone already saved is in
-    force either way (scheduler_timezone)."""
-    return TIMEZONE_CHOICE_OPEN
 
 
 def _timezone_from_db() -> str | None:
@@ -192,8 +175,7 @@ def timezone_saved() -> bool:
 
 def save_timezone(name: str) -> str:
     """Save the account's time zone (an IANA name such as ``Europe/Berlin``).
-    Returns the name saved. Raises ValueError for anything that isn't a zone,
-    and while choosing is closed (TIMEZONE_CHOICE_OPEN)."""
+    Returns the name saved. Raises ValueError for anything that isn't a zone."""
     global _timezone_cache
     import time
     from zoneinfo import available_timezones
@@ -204,8 +186,6 @@ def save_timezone(name: str) -> str:
     name = (name or "").strip()
     if len(TIMEZONE_TOKEN) > 40:  # AppToken.name is String(40)
         raise ValueError(f"workspace slug too long to save a time zone: {TIMEZONE_TOKEN!r}")
-    if not timezone_editable():
-        raise ValueError("This account's time zone can't be changed here yet.")
     if name not in available_timezones():
         raise ValueError(f"“{name}” isn't a time zone the app knows.")
     with session_scope() as session:

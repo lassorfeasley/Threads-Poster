@@ -111,14 +111,7 @@ class ScheduleRoutesTest(unittest.TestCase):
         self.assertIn('value="waking" checked', page.text)
         self.assertNotIn("custom schedule", page.text)
 
-    def test_choosing_a_time_zone_stays_closed_until_the_rollout(self):
-        page = self.client.get("/schedule")
-        self.assertIn("ask your account manager", page.text)
-        self.assertNotIn('id="tz-select"', page.text)
-        r = self.client.post("/schedule/timezone", data={"tz": "Europe/Berlin"}, follow_redirects=False)
-        self.assertIn("be%20changed%20here%20yet", r.headers["location"])
-
-    def test_a_saved_zone_shows_and_counts_while_choosing_is_closed(self):
+    def test_a_saved_zone_shows_as_chosen(self):
         from app.models import AppToken
 
         with self.Session() as s:
@@ -126,12 +119,9 @@ class ScheduleRoutesTest(unittest.TestCase):
             s.commit()
         page = self.client.get("/schedule")
         self.assertIn("<strong>Berlin</strong>", page.text)
-        self.assertNotIn('id="tz-select"', page.text)
+        self.assertIn('<option value="Europe/Berlin" selected>', page.text)
 
-    def test_choosing_a_time_zone_once_open(self):
-        patcher = mock.patch.object(self.config, "TIMEZONE_CHOICE_OPEN", True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    def test_choosing_a_time_zone(self):
         page = self.client.get("/schedule")
         self.assertIn('id="tz-select"', page.text)
         self.assertIn('<option value="America/New_York" selected>', page.text)

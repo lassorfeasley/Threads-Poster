@@ -41,7 +41,6 @@
       <p class="set-section-desc">Posts are timed for <strong>{{ tz_city }}</strong> ({{ tz_abbr }}). It's {{ now_label }} there now.</p>
     </div>
   </div>
-  {% if tz_editable %}
   <form method="post" action="/schedule/timezone" id="tz-form" data-savebar>
     <input type="hidden" name="tz" id="tz-value" value="{{ tz_name }}">
     <div class="set-section-body" style="padding-top: 12px;">
@@ -73,21 +72,8 @@
       <button class="btn-primary" type="submit">Save</button>
     </div>
   </form>
-  {% else %}
-  <div class="set-section-body" style="padding-top: 8px;">
-    <p class="set-help">Choosing your own time zone here is almost ready. Until then, ask your account manager if you need a different one.</p>
-    <details class="set-more">
-      <summary>For admins</summary>
-      <div class="set-more-body">
-        <p>Choosing a time zone opens for every account at once, after each machine that posts runs this release: the Fly worker (<code>fly deploy</code>) and the GitHub Actions cron (merge to main). One left on older code would keep posting on {{ tz_name }} time while the rest moved to the new zone. Then delete the rollout guard, <code>TIMEZONE_CHOICE_OPEN</code> in app/config.py.</p>
-      </div>
-    </details>
-    {{ admin_notes() }}
-  </div>
-  {% endif %}
 </section>
 
-{% if tz_editable %}
 <script>
   (function () {
     const form = document.getElementById('tz-form');
@@ -124,7 +110,6 @@
     sync();
   })();
 </script>
-{% endif %}
 
 {# ---- When posts go out ---- #}
 <form method="post" action="/schedule/plan" data-savebar
