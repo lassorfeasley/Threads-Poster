@@ -1,32 +1,58 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{{ ui.pagebar("Keywords", count=keywords|length,
-              sub="Case-insensitive whole-word/phrase filter on every new upload's title and description. Hits are then LLM-scored for genuine climate relevance, so it's fine to keep this list inclusive. Changes apply on the next monitor run.") }}
+{# Keywords — the first filter on new videos (POST /keywords/add,
+   /keywords/delete). Admin. The search-as-you-type script is unchanged. #}
+{{ ui.pagebar("Keywords",
+              sub="Words and phrases the app looks for in new videos' titles and descriptions. A match only gets a video considered — each one is still checked to be truly on topic, so it's fine to cast a wide net.") }}
 
-<div class="card tight">
-  <form method="post" action="/keywords/add" id="add-form" style="display: flex; gap: 10px; align-items: center;">
-    <input type="text" name="keyword" id="kw-input" required autocomplete="off"
-           placeholder="Type to search or add… (e.g. microgrid)" style="max-width: 320px;"
-           oninput="filterKeywords()">
-    <button class="primary" id="add-btn">Add keyword</button>
-    <span class="meta" id="kw-status"></span>
-  </form>
-</div>
-
-<div class="card" style="display: flex; flex-wrap: wrap; gap: 8px;" id="kw-list">
-  {% for kw in keywords %}
-  <span class="kw-pill" data-term="{{ kw|lower }}">
-    <span class="term">{{ kw }}</span>
-    {% if hits.get(kw) %}<span class="hits" title="candidates matched">×{{ hits[kw] }}</span>{% endif %}
-    <form class="inline" method="post" action="/keywords/delete"
-          data-confirm="Remove keyword: {{ kw }}?" data-confirm-ok="Remove" data-confirm-variant="danger">
-      <input type="hidden" name="keyword" value="{{ kw }}">
-      <button type="submit" title="Remove">✕</button>
+<div class="set-page">
+<section class="set-section" id="add">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Add a keyword</h2>
+      <p class="set-section-desc">Type to search the list; if it isn't there yet, add it. New keywords apply from the next check for new videos.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    <form method="post" action="/keywords/add" id="add-form" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+      <input type="text" name="keyword" id="kw-input" required autocomplete="off"
+             placeholder="e.g. microgrid" style="max-width: 360px;" oninput="filterKeywords()"
+             aria-label="Keyword">
+      <button class="btn-primary" id="add-btn">Add keyword</button>
+      <span class="meta" id="kw-status"></span>
     </form>
-  </span>
-  {% endfor %}
-  <span class="meta" id="kw-empty" style="display: none;">No existing keyword matches — this will be added as new.</span>
+  </div>
+</section>
+
+<section class="set-section" id="list">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Your keywords <span class="set-status is-plain">{{ keywords|length }}</span></h2>
+      <p class="set-section-desc">The number on each is how many videos it has matched so far — a quick way to spot words that never fire.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    <div class="set-chips" id="kw-list">
+      {% for kw in keywords %}
+      <span class="set-chip kw-pill" data-term="{{ kw|lower }}">
+        <span class="term">{{ kw }}</span>
+        {% if hits.get(kw) %}<span class="set-chip-count" title="videos matched">{{ "{:,}".format(hits[kw]) }}</span>{% endif %}
+        <form class="inline" method="post" action="/keywords/delete"
+              data-confirm="Remove the keyword “{{ kw }}”?" data-confirm-ok="Remove" data-confirm-variant="danger">
+          <input type="hidden" name="keyword" value="{{ kw }}">
+          <button type="submit" title="Remove {{ kw }}" aria-label="Remove {{ kw }}">✕</button>
+        </form>
+      </span>
+      {% endfor %}
+      <span class="meta" id="kw-empty" style="display: none;">Not in the list yet — press Add keyword to add it.</span>
+    </div>
+    <details class="set-more">
+      <summary>For admins</summary>
+      <div class="set-more-body"><p>The list is stored in <code>config/keywords.yaml</code> if you'd rather edit it by hand.</p></div>
+    </details>
+  </div>
+</section>
 </div>
 
 <script>
@@ -46,15 +72,12 @@
     const btn = document.getElementById('add-btn');
     const status = document.getElementById('kw-status');
     if (exact) {
-      btn.disabled = true; btn.textContent = 'Already in list';
+      btn.disabled = true; btn.textContent = 'Already in the list';
       status.textContent = '“' + q + '” is already a keyword.';
     } else {
       btn.disabled = false; btn.textContent = 'Add keyword';
-      status.textContent = (q && visible) ? (visible + ' existing match' + (visible === 1 ? '' : 'es')) : '';
+      status.textContent = (q && visible) ? (visible + ' similar keyword' + (visible === 1 ? '' : 's') + ' below') : '';
     }
   }
 </script>
-<p class="meta">×N = how many stored candidates matched that term so far — a quick read on which
-terms are pulling weight and which never fire. The list lives in <code>config/keywords.yaml</code>
-if you'd rather edit it by hand.</p>
 {% endblock %}

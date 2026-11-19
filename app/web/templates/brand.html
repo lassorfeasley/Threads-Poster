@@ -1,136 +1,174 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set br_sub %}What this account covers, and the rules it never breaks. Everything else — how captions sound, which footage works — is learned from what you post and how it performs.{% endset %}
-{{ ui.pagebar("Brand & audience", sub=br_sub) }}
+{#
+  Brand & audience — who the account is and the rules it never breaks.
+  Customer-facing: plain words, the essentials first, the prompt-tuning
+  fields folded away under Fine-tuning. Field names and the rules JSON are
+  unchanged (POST /brand); the rules list is built by the script below.
+#}
+{{ ui.pagebar("Brand & audience", sub="Tell the app who you are and what you stand for. Every video it picks, every clip it cuts and every caption it writes follows what you set here.") }}
 
-<form method="post" action="/brand" id="brand-form" onsubmit="return packRules()">
+<div class="set-page">
+<form method="post" action="/brand" id="brand-form" onsubmit="return packRules()" data-savebar>
   <input type="hidden" name="rules_json" id="rules-json">
 
-  <div class="card">
-    <label for="brand-topic" class="card-title" style="display:block; margin-bottom: 4px;">What this account is about</label>
-    <p class="meta" style="margin: 0 0 10px;">A short phrase. It keeps every pick on topic, so the account doesn't drift and draws the audience you want.</p>
-    <input type="text" id="brand-topic" name="topic" value="{{ brand.topic }}" required
-           placeholder="e.g. climate change" style="max-width: 460px;">
-  </div>
-
-  <div class="card" style="margin-top: 14px;">
-    <div class="card-title" style="margin-bottom: 4px;">Rules</div>
-    <p class="meta" style="margin: 0 0 12px;">
-      Hard constraints, not suggestions: every enabled rule applies, every time.
-      <strong>Everything</strong> rules also shape which videos get picked up and how
-      clips are chosen — a stance belongs here. <strong>Captions</strong> rules apply only
-      to what gets written. A clip that challenges your rules is never treated as
-      credible, and is flagged for you to check its framing. You can also add a rule
-      straight from the caption editor.
-    </p>
-    <div id="rules-list"></div>
-    <div class="btn-group" style="margin-top: 12px;">
-      <button type="button" class="btn ghost sm" onclick="addRule()">＋ Add rule</button>
-    </div>
-    <p class="meta" style="margin: 10px 0 0;">
-      <strong>Clips</strong> rules shape only which clips get picked and how they're cut.
-      New and edited rules are tidied into the house style when you save (spelling and
-      grammar fixed, your meaning kept) — hover a rule to see how you first wrote it.
-    </p>
-  </div>
-
-  {# Rules the clip engine proposes: drawn from your "What's wrong?" notes and
-     advice, or learned from your past edits. One queue, one kind of rule. #}
-  <div class="card rule-proposals" id="rule-proposals" style="margin-top: 14px;"{% if not rule_proposals %} hidden{% endif %}>
-    <div class="card-title" style="margin-bottom: 4px;">Suggested rules</div>
-    <p class="meta" style="margin: 0 0 12px;">
-      Drawn from your notes on clip suggestions and from your past edits. Nothing applies
-      until you add it; an added rule joins the list above as a <strong>Clips</strong> rule.
-    </p>
-    <div id="rule-proposals-list"></div>
-  </div>
-
-  <details class="card brand-advanced" style="margin-top: 14px;"{% if brand.voice_notes %} open{% endif %}>
-    <summary class="card-title">Advanced</summary>
-    <p class="meta" style="margin: 8px 0 14px;">
-      Fine-tuning for the prompts. Every field is optional — leave one blank and the
-      built-in default applies.
-    </p>
-
-    {% if brand.voice_notes %}
-    <div class="brand-retired">
-      <strong>Voice notes are no longer used.</strong> Move what matters into a rule:
-      <q>{{ brand.voice_notes }}</q>
-      <input type="hidden" name="voice_notes" value="{{ brand.voice_notes }}">
-    </div>
-    {% endif %}
-
-    <div class="brand-adv-grid">
+  {# ---- The essentials ---- #}
+  <section class="set-section" id="about">
+    <div class="set-section-head">
       <div>
-        <label for="brand-name" class="field-label">Account name</label>
-        <input type="text" id="brand-name" name="name" value="{{ brand.name }}" placeholder="e.g. Renewables.org">
-      </div>
-      <div>
-        <label for="brand-cta-url" class="field-label">Call-to-action link</label>
-        <input type="text" id="brand-cta-url" name="cta_url" value="{{ brand.cta_url }}" placeholder="e.g. renewables.org">
-        <p class="meta field-hint">Only used in captions for your own promo footage.</p>
+        <h2 class="set-section-title">About your account</h2>
+        <p class="set-section-desc">The basics. A sentence or two in each is plenty.</p>
       </div>
     </div>
+    <div class="set-section-body">
+      <div class="set-field">
+        <label class="set-label" for="brand-topic">What your account is about</label>
+        <p class="set-help">A short phrase, like “climate change” or “home cooking”. Every video is checked against it.</p>
+        <input type="text" id="brand-topic" name="topic" value="{{ brand.topic }}" required placeholder="e.g. climate change">
+      </div>
 
-    <label for="brand-mission" class="field-label">Mission</label>
-    <textarea id="brand-mission" name="mission" rows="2"
-              placeholder="What the account exists to do. Read by caption drafting.">{{ brand.mission }}</textarea>
+      <div class="set-grid-2">
+        <div class="set-field">
+          <label class="set-label" for="brand-name">Account name</label>
+          <p class="set-help">How you refer to yourselves.</p>
+          <input type="text" id="brand-name" name="name" value="{{ brand.name }}" placeholder="e.g. Renewables.org">
+        </div>
+        <div class="set-field">
+          <label class="set-label" for="brand-cta-url">Your website <span class="set-optional">optional</span></label>
+          <p class="set-help">Added to captions on your own promo videos.</p>
+          <input type="text" id="brand-cta-url" name="cta_url" value="{{ brand.cta_url }}" placeholder="e.g. renewables.org">
+        </div>
+      </div>
 
-    <label for="brand-audience" class="field-label">Audience</label>
-    <textarea id="brand-audience" name="audience" rows="2"
-              placeholder="Who captions should land with.">{{ brand.audience }}</textarea>
+      <div class="set-field">
+        <label class="set-label" for="brand-mission">Mission <span class="set-optional">optional</span></label>
+        <p class="set-help">What the account exists to do.</p>
+        <textarea id="brand-mission" name="mission" rows="2" placeholder="e.g. Show what climate change looks like on the ground, and what people are doing about it.">{{ brand.mission }}</textarea>
+      </div>
 
-    <label for="brand-positioning" class="field-label">Positioning</label>
-    <textarea id="brand-positioning" name="positioning" rows="3"
-              placeholder="What this account's clips should be known for, and the angle it takes. E.g. 'Real people and places dealing with climate change — on the ground, not in the studio; solutions over doom.' Read by positioning fit (Settings > Automatic triage).">{{ brand.positioning }}</textarea>
+      <div class="set-field">
+        <label class="set-label" for="brand-audience">Audience <span class="set-optional">optional</span></label>
+        <p class="set-help">Who you're trying to reach. Captions are written for them.</p>
+        <textarea id="brand-audience" name="audience" rows="2" placeholder="e.g. Curious people who don't follow climate news closely.">{{ brand.audience }}</textarea>
+      </div>
 
-    <label for="brand-source-kind" class="field-label">Source footage</label>
-    <input type="text" id="brand-source-kind" name="source_kind" value="{{ brand.source_kind }}"
-           placeholder="Default: TV news footage" style="max-width: 460px;">
+      <div class="set-field">
+        <label class="set-label" for="brand-positioning">What your clips should be known for <span class="set-optional">optional</span></label>
+        <p class="set-help">Your angle — what you favour and what you pass over. The app uses it to decide which videos suit your account.</p>
+        <textarea id="brand-positioning" name="positioning" rows="4" placeholder="e.g. Real places and people dealing with climate change — on the ground, not in the studio; solutions over doom.">{{ brand.positioning }}</textarea>
+      </div>
+    </div>
+  </section>
 
-    <label for="brand-relevance-rules" class="field-label">On topic when…</label>
-    <textarea id="brand-relevance-rules" name="relevance_rules" rows="2"
-              placeholder="Completes 'A video is relevant if …'. Default: it substantively covers the topic.">{{ brand.relevance_rules }}</textarea>
+  {# ---- House rules ---- #}
+  <section class="set-section" id="rules">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">House rules</h2>
+        <p class="set-section-desc">Things that must always hold. Every rule that's switched on is followed, every time. Switch one off to pause it without losing it.</p>
+      </div>
+      <div class="set-section-aside">
+        <button type="button" class="btn sm" onclick="addRule()">＋ Add a rule</button>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div id="rules-list"></div>
+      <details class="set-more">
+        <summary>How rules work</summary>
+        <div class="set-more-body">
+          <p><strong>Everything</strong> rules shape which videos are picked, how clips are cut and what captions say — your stance belongs here. <strong>Clips</strong> rules only shape which moments are picked and how they're cut. <strong>Captions</strong> rules only shape what gets written.</p>
+          <p>A clip that challenges your rules is never presented as credible, and is flagged so you can check how it's framed. When you save, new and edited rules are tidied up — spelling and grammar fixed, your meaning kept.</p>
+        </div>
+      </details>
+    </div>
+  </section>
 
-    <label for="brand-false-positives" class="field-label">Off topic when…</label>
-    <textarea id="brand-false-positives" name="false_positives" rows="2"
-              placeholder="Completes 'It is NOT relevant if …' — the false positives your keywords attract.">{{ brand.false_positives }}</textarea>
+  {# ---- Rules suggested from notes and past edits ---- #}
+  <section class="set-section" id="rule-proposals"{% if not rule_proposals %} hidden{% endif %}>
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Suggested rules <span class="set-status is-info is-plain" id="rule-proposals-count"></span></h2>
+        <p class="set-section-desc">Patterns spotted in your notes and in clips you've edited. Nothing changes until you add one.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div id="rule-proposals-list"></div>
+    </div>
+  </section>
 
-    <label for="brand-strong-openings" class="field-label">Strong opening shots</label>
-    <textarea id="brand-strong-openings" name="strong_openings" rows="2"
-              placeholder="Default: action in progress, people doing something concrete, movement, a person visibly reacting.">{{ brand.strong_openings }}</textarea>
+  {# ---- Prompt fine-tuning ---- #}
+  <details class="set-section" id="fine-tuning"{% if brand.voice_notes %} open{% endif %}>
+    <summary class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Fine-tuning <span class="set-optional">optional</span></h2>
+        <p class="set-section-desc">Extra guidance for picking videos and moments. Leave any of these blank to use the sensible defaults.</p>
+      </div>
+      <span class="set-fold-hint"></span>
+    </summary>
+    <div class="set-section-body">
+      {% if brand.voice_notes %}
+      <div class="set-callout is-warn">
+        <span class="set-callout-title">“Voice notes” are no longer used</span>
+        Move anything that still matters into a house rule: <q>{{ brand.voice_notes }}</q>
+        <input type="hidden" name="voice_notes" value="{{ brand.voice_notes }}">
+      </div>
+      {% endif %}
 
-    <label for="brand-weak-openings" class="field-label">Weak opening shots</label>
-    <textarea id="brand-weak-openings" name="weak_openings" rows="2"
-              placeholder="Default: static graphics, title cards, logos, text-heavy frames.">{{ brand.weak_openings }}</textarea>
-
-    <label for="brand-clip-guidance" class="field-label">Clip selection guidance</label>
-    <textarea id="brand-clip-guidance" name="clip_guidance" rows="2"
-              placeholder="Anything else the clip picker should know about this footage.">{{ brand.clip_guidance }}</textarea>
+      <div class="set-field">
+        <label class="set-label" for="brand-source-kind">Kind of videos you clip from</label>
+        <input type="text" id="brand-source-kind" name="source_kind" value="{{ brand.source_kind }}" placeholder="Default: TV news footage">
+      </div>
+      <div class="set-field">
+        <label class="set-label" for="brand-relevance-rules">A video is on topic when…</label>
+        <textarea id="brand-relevance-rules" name="relevance_rules" rows="2" placeholder="Default: it substantively covers the topic.">{{ brand.relevance_rules }}</textarea>
+      </div>
+      <div class="set-field">
+        <label class="set-label" for="brand-false-positives">…and off topic when</label>
+        <p class="set-help">The near-misses your keywords attract, like “political climate” for a climate account.</p>
+        <textarea id="brand-false-positives" name="false_positives" rows="2" placeholder="Default: the topic is only incidental to the video.">{{ brand.false_positives }}</textarea>
+      </div>
+      <div class="set-grid-2">
+        <div class="set-field">
+          <label class="set-label" for="brand-strong-openings">Good opening shots</label>
+          <textarea id="brand-strong-openings" name="strong_openings" rows="3" placeholder="Default: action in progress, people doing something concrete, movement, a person visibly reacting.">{{ brand.strong_openings }}</textarea>
+        </div>
+        <div class="set-field">
+          <label class="set-label" for="brand-weak-openings">Weak opening shots</label>
+          <textarea id="brand-weak-openings" name="weak_openings" rows="3" placeholder="Default: static graphics, title cards, logos, text-heavy frames.">{{ brand.weak_openings }}</textarea>
+        </div>
+      </div>
+      <div class="set-field">
+        <label class="set-label" for="brand-clip-guidance">Anything else about picking moments</label>
+        <textarea id="brand-clip-guidance" name="clip_guidance" rows="2" placeholder="Anything the clip picker should know about this footage.">{{ brand.clip_guidance }}</textarea>
+      </div>
+    </div>
   </details>
 
-  <div class="btn-group" style="margin-top: 16px;">
-    <button class="primary" type="submit">Save</button>
+  <div class="set-savebar">
+    <span class="set-savebar-note">The app's name and logo are under <a href="/appearance">Appearance</a>.</span>
+    <button class="btn-primary" type="submit">Save changes</button>
   </div>
 </form>
-
-<p class="meta" style="margin-top: 12px;">Stored in <code>config/brand.yaml</code>. The app's name and logo are on <a href="/appearance">Appearance</a>.</p>
+</div>
 
 <script>
   let rules = {{ rules|tojson }};
   let ruleProposals = {{ (rule_proposals or [])|tojson }};
-  const SOURCE_LABELS = { manual: 'Yours', notes: 'From your notes', handbook: 'From past edits' };
+  const SOURCE_LABELS = { manual: 'Added by you', notes: 'From your notes', handbook: 'Learned from your edits' };
+  const GROUPS = [
+    ['everything', 'Everything', 'Videos, clips and captions'],
+    ['clips', 'Clips', 'Which moments are picked and how they’re cut'],
+    ['captions', 'Captions', 'What gets written'],
+  ];
+  const SHOWN_PER_GROUP = 6;
+  const editing = new Set();      // rule indexes open for editing
+  const expanded = new Set();     // groups showing every rule
+  const form = document.getElementById('brand-form');
 
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  // The formatter's markdown, escaped first; only **bold** and line breaks
-  // become markup.
-  function ruleMarkdown(md) {
-    return escapeHtml(md).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
   }
 
   // What the engine reads for a formatted rule (mirrors notes.rule_text).
@@ -142,102 +180,149 @@
     return `When ${when.charAt(0).toLowerCase()}${when.slice(1)}: ${rule}`;
   }
 
-  function sourceBadge(r) {
-    const source = SOURCE_LABELS[r.source] ? r.source : 'manual';
-    const badge = document.createElement('span');
-    badge.className = `rule-source is-${source}`;
-    badge.textContent = SOURCE_LABELS[source];
-    if (r.evidence) badge.title = r.evidence;
-    return badge;
+  function scopeOf(r) { return ['captions', 'clips'].includes(r.applies_to) ? r.applies_to : 'everything'; }
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
   }
+
   const RULE_EXAMPLES = [
     ['Write as "we" — the account speaks in the first person plural.', 'captions'],
     ['Never present climate denial or misinformation as credible.', 'everything'],
     ['No emojis or hashtags.', 'captions'],
   ];
-  const TRASH_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
 
-  function renderRules() {
-    const box = document.getElementById('rules-list');
-    box.textContent = '';
-    if (!rules.length) {
-      const empty = document.createElement('div');
-      empty.className = 'brand-rules-empty';
-      empty.innerHTML = '<p class="meta" style="margin:0 0 8px;">No rules yet. Some starting points:</p>';
-      RULE_EXAMPLES.forEach(([text, scope]) => {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'reason-pill';
-        b.textContent = text;
-        b.addEventListener('click', () => addRule(text, scope));
-        empty.appendChild(b);
-      });
-      box.appendChild(empty);
-      return;
-    }
-    rules.forEach((r, i) => {
-      const row = document.createElement('div');
-      row.className = 'rule-row' + (r.enabled ? '' : ' is-off');
+  function changed() { if (window.markSettingsDirty) window.markSettingsDirty(form); }
 
-      const sw = document.createElement('label');
-      sw.className = 'switch';
-      sw.title = r.enabled ? 'On — click to pause' : 'Paused — click to turn on';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !!r.enabled;
-      cb.addEventListener('change', () => { rules[i].enabled = cb.checked; renderRules(); });
-      const track = document.createElement('span');
-      track.className = 'switch-track';
-      track.innerHTML = '<span class="switch-thumb"></span>';
-      sw.append(cb, track);
+  function ruleRow(r, i) {
+    const row = el('div', 'set-rule' + (r.enabled ? '' : ' is-off'));
 
+    const sw = el('label', 'switch');
+    sw.title = r.enabled ? 'On — click to pause' : 'Paused — click to turn on';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!r.enabled;
+    cb.setAttribute('aria-label', 'Rule on');
+    cb.addEventListener('change', () => { rules[i].enabled = cb.checked; changed(); renderRules(); });
+    const track = el('span', 'switch-track');
+    track.innerHTML = '<span class="switch-thumb"></span>';
+    sw.append(cb, track);
+
+    const body = el('div', 'set-rule-body');
+    if (editing.has(i)) {
+      const box = el('div', 'set-rule-edit');
       const text = document.createElement('input');
       text.type = 'text';
       text.className = 'rule-text';
       text.maxLength = 400;
       text.placeholder = 'e.g. Never present climate denial as credible.';
       text.value = r.text || '';
-      // The formatted rendering, while the text is still what was formatted;
-      // the operator's first wording on hover.
-      const main = document.createElement('div');
-      main.className = 'rule-main';
-      main.appendChild(text);
-      if (r.markdown && formattedText(r) === (r.text || '')) {
-        const md = document.createElement('div');
-        md.className = 'rule-md meta';
-        md.innerHTML = ruleMarkdown(r.markdown);
-        if (r.original && r.original !== r.text) md.title = `You wrote: ${r.original}`;
-        main.appendChild(md);
-        text.addEventListener('input', () => { md.hidden = true; });
-      }
       text.addEventListener('input', () => { rules[i].text = text.value; });
-
+      text.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); editing.delete(i); renderRules(); } });
+      const line = el('div', 'set-rule-edit-row');
+      const lab = el('label', '', 'Applies to');
       const scope = document.createElement('select');
-      scope.className = 'rule-priority';
-      scope.title = 'Everything: also shapes which videos and clips get picked. Captions: only what gets written.';
-      scope.title = 'Everything: also shapes which videos and clips get picked. Captions: only what gets written. Clips: only which clips get picked and how they are cut.';
-      scope.innerHTML = '<option value="everything">Everything</option><option value="captions">Captions</option><option value="clips">Clips</option>';
-      scope.value = ['captions', 'clips'].includes(r.applies_to) ? r.applies_to : 'everything';
+      scope.innerHTML = GROUPS.map(([v, name, help]) => `<option value="${v}">${name} — ${help}</option>`).join('');
+      scope.value = scopeOf(r);
       scope.addEventListener('change', () => { rules[i].applies_to = scope.value; });
+      const done = el('button', 'btn sm', 'Done');
+      done.type = 'button';
+      done.addEventListener('click', () => { editing.delete(i); renderRules(); });
+      line.append(lab, scope, done);
+      box.append(text, line);
+      body.appendChild(box);
+      setTimeout(() => text.focus(), 0);
+    } else {
+      const structured = r.markdown && formattedText(r) === (r.text || '');
+      if (structured && r.when && r.when !== 'Always') body.appendChild(el('span', 'set-rule-when', 'Only when ' + r.when.charAt(0).toLowerCase() + r.when.slice(1)));
+      const shown = structured ? r.rule : (r.text || '');
+      const text = el('div', 'set-rule-text' + (shown ? '' : ' is-empty'), shown || 'Empty rule — click Edit to write it');
+      if (r.original && r.original !== r.text) text.title = `You first wrote: ${r.original}`;
+      body.appendChild(text);
+      const meta = el('div', 'set-rule-meta');
+      const source = SOURCE_LABELS[r.source] ? r.source : 'manual';
+      meta.appendChild(el('span', '', SOURCE_LABELS[source]));
+      // The condition is already shown above the rule; don't repeat it here.
+      if (r.evidence) meta.appendChild(el('span', '', r.evidence.replace(/\s*\(when:[^)]*\)\s*$/i, '')));
+      if (!r.enabled) meta.appendChild(el('span', '', 'Paused'));
+      body.appendChild(meta);
+    }
 
-      const del = document.createElement('button');
-      del.type = 'button';
-      del.className = 'reject sm icon-btn';
-      del.title = 'Delete rule';
-      del.setAttribute('aria-label', 'Delete rule');
-      del.innerHTML = TRASH_SVG;
-      del.addEventListener('click', () => { rules.splice(i, 1); renderRules(); });
+    const actions = el('div', 'set-rule-actions');
+    if (!editing.has(i)) {
+      const edit = el('button', 'set-link-btn', 'Edit');
+      edit.type = 'button';
+      edit.addEventListener('click', () => { editing.add(i); renderRules(); });
+      actions.appendChild(edit);
+    }
+    const del = el('button', 'set-link-btn is-danger', 'Remove');
+    del.type = 'button';
+    del.addEventListener('click', () => {
+      rules.splice(i, 1);
+      const shifted = [...editing].filter(x => x !== i).map(x => x > i ? x - 1 : x);
+      editing.clear(); shifted.forEach(x => editing.add(x));
+      changed();
+      renderRules();
+    });
+    actions.appendChild(del);
 
-      row.append(sw, main, sourceBadge(r), scope, del);
-      box.appendChild(row);
+    row.append(sw, body, actions);
+    return row;
+  }
+
+  function renderRules() {
+    const box = document.getElementById('rules-list');
+    box.textContent = '';
+    if (!rules.length) {
+      const empty = el('div', 'set-callout is-info');
+      empty.appendChild(el('span', 'set-callout-title', 'No house rules yet'));
+      empty.appendChild(el('p', '', 'Add your own, or start from one of these:'));
+      const chips = el('div', 'set-callout-actions');
+      RULE_EXAMPLES.forEach(([text, scope]) => {
+        const b = el('button', 'btn sm', text);
+        b.type = 'button';
+        b.addEventListener('click', () => addRule(text, scope));
+        chips.appendChild(b);
+      });
+      empty.appendChild(chips);
+      box.appendChild(empty);
+      return;
+    }
+    GROUPS.forEach(([key, name, help]) => {
+      const members = rules.map((r, i) => [r, i]).filter(([r]) => scopeOf(r) === key);
+      if (!members.length) return;
+      const group = el('div', 'set-rule-group');
+      const head = el('div', 'set-rule-group-head', name);
+      const on = members.filter(([r]) => r.enabled).length;
+      head.appendChild(el('span', 'meta', `${help} · ${on} on${members.length > on ? `, ${members.length - on} paused` : ''}`));
+      group.appendChild(head);
+      const limit = expanded.has(key) ? members.length : SHOWN_PER_GROUP;
+      members.forEach(([r, i], n) => {
+        if (n < limit || editing.has(i)) group.appendChild(ruleRow(r, i));
+      });
+      if (members.length > SHOWN_PER_GROUP) {
+        const more = el('button', 'set-link-btn set-show-more',
+          expanded.has(key) ? 'Show fewer' : `Show all ${members.length} ${name.toLowerCase()} rules`);
+        more.type = 'button';
+        more.addEventListener('click', () => {
+          expanded.has(key) ? expanded.delete(key) : expanded.add(key);
+          renderRules();
+        });
+        group.appendChild(more);
+      }
+      box.appendChild(group);
     });
   }
 
   function addRule(text, scope) {
-    rules.push({ text: text || '', applies_to: scope || 'everything', enabled: true });
+    rules.push({ text: text || '', applies_to: scope || 'everything', enabled: true, source: 'manual' });
+    if (!text) editing.add(rules.length - 1);
+    expanded.add(scope || 'everything');
+    changed();
     renderRules();
-    const inputs = document.querySelectorAll('#rules-list .rule-text');
-    if (inputs.length && !text) inputs[inputs.length - 1].focus();
   }
 
   function packRules() {
@@ -252,29 +337,35 @@
     const box = document.getElementById('rule-proposals-list');
     if (!card || !box) return;
     card.hidden = !ruleProposals.length;
+    document.getElementById('rule-proposals-count').textContent = ruleProposals.length || '';
     box.textContent = '';
     ruleProposals.forEach(p => {
-      const row = document.createElement('div');
-      row.className = 'rule-proposal';
-      const examples = (p.examples || []).map(e => `<li>${escapeHtml(e)}</li>`).join('');
-      const original = p.original && p.original !== p.text && p.original !== p.rule
-        ? `<div class="meta rule-proposal-original">Originally: “${escapeHtml(p.original)}”</div>` : '';
-      const body = p.markdown ? ruleMarkdown(p.markdown) : escapeHtml(p.text);
-      row.innerHTML = `
-        <div class="rule-proposal-main">
-          <div class="rule-md">${body}</div>
-          ${original}
-          <div class="meta rule-proposal-evidence">${escapeHtml(p.summary || '')}</div>
-          ${examples ? `<ul class="rule-proposal-examples meta">${examples}</ul>` : ''}
-        </div>
-        <div class="rule-proposal-actions">
-          <button type="button" class="sm approve" data-act="add">Add rule</button>
-          <button type="button" class="sm ghost" data-act="dismiss">Dismiss</button>
-        </div>`;
-      row.querySelector('.rule-proposal-main').prepend(sourceBadge(p));
-      row.querySelectorAll('[data-act]').forEach(btn => {
-        btn.addEventListener('click', () => decideProposal(p, btn.dataset.act, row));
-      });
+      const row = el('div', 'set-rule');
+      row.style.gridTemplateColumns = 'minmax(0, 1fr) auto';
+      const body = el('div', 'set-rule-body');
+      if (p.when && p.when !== 'Always') body.appendChild(el('span', 'set-rule-when', 'Only when ' + p.when.charAt(0).toLowerCase() + p.when.slice(1)));
+      body.appendChild(el('div', 'set-rule-text', p.rule || p.text || ''));
+      const meta = el('div', 'set-rule-meta');
+      meta.appendChild(el('span', '', SOURCE_LABELS[p.source] || 'Suggested'));
+      if (p.summary) meta.appendChild(el('span', '', p.summary));
+      body.appendChild(meta);
+      if ((p.examples || []).length) {
+        const more = el('details', 'set-more');
+        more.appendChild(el('summary', '', `Examples (${p.examples.length})`));
+        const list = el('ul', 'set-more-body');
+        p.examples.forEach(e => list.appendChild(el('li', '', e)));
+        more.appendChild(list);
+        body.appendChild(more);
+      }
+      const actions = el('div', 'set-rule-actions');
+      const add = el('button', 'btn sm', 'Add rule');
+      add.type = 'button';
+      add.addEventListener('click', () => decideProposal(p, 'add', row));
+      const dismiss = el('button', 'set-link-btn', 'Dismiss');
+      dismiss.type = 'button';
+      dismiss.addEventListener('click', () => decideProposal(p, 'dismiss', row));
+      actions.append(add, dismiss);
+      row.append(body, actions);
       box.appendChild(row);
     });
   }

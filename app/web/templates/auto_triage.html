@@ -2,440 +2,534 @@
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
 {#
-  Automatic triage (app/web/auto_triage.py, logic in app/auto_triage.py).
-  Admin-only by intent: a customer-facing dashboard never shows this page.
+  Automation (app/web/auto_triage.py; logic in app/auto_triage.py,
+  app/auto_select.py, app/inbox.py). Admin-only by intent.
+
+  Three steps, each with its own switch and form, posting to the same routes
+  as before (/auto-triage/settings, /auto-select/settings, /inbox/settings).
   Approve / Back to queue reuse /video/{id}/approve and /video/{id}/unreject,
   so every operator decision goes through the same gate and the same log.
 #}
 {% set current = policy.cutoff %}
 {% set would_reject = preview.below.get(current, 0) %}
-{% set state_badge %}
-  {% if state == "on" and not ready %}<span class="badge info at-pill">On — waiting</span>
-  {% elif state == "on" %}<span class="badge score-hi at-pill">On</span>
-  {% elif state == "paused" %}<span class="badge hostile at-pill">Paused</span>
-  {% else %}<span class="badge at-pill">Off</span>{% endif %}
-{% endset %}
-{{ ui.pagebar("Automatic triage", title_extra=state_badge,
-              sub="Rejects the waiting videos least worth your time, before they reach your queue — judged by your own approval history, or by fit with the Brand & audience profile. Nothing is downloaded or posted, and every rejection can be undone, one video or a whole pass at a time.") }}
+{% set sp = select.policy %}
+{% set ip = inbox_policy %}
+{% macro state_pill(s, is_ready=true) -%}
+  {%- if s == "paused" %}<span class="set-status is-error">Paused</span>
+  {%- elif s == "on" and not is_ready %}<span class="set-status is-warn">On — waiting</span>
+  {%- elif s == "on" %}<span class="set-status is-on">On</span>
+  {%- else %}<span class="set-status is-off">Off</span>{% endif -%}
+{%- endmacro %}
+{{ ui.pagebar("Automation", sub="Let the app do the busywork, in three steps. Each step is off until you switch it on, and everything it does can be undone. Nothing is ever posted without someone approving it.") }}
 
-<style>
-  .at-pill { vertical-align: middle; font-size: 12px; }
-  .at-banner { border-left: 3px solid var(--danger); }
-  .at-banner.is-waiting { border-left-color: var(--border-strong); }
-  .at-form { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center; }
-  .at-form label.field { display: flex; gap: 8px; align-items: center; }
-  .at-form select { width: auto; }
-  .at-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
-  .at-section { margin: 26px 0 8px; font-size: 15px; display: flex; gap: 10px; align-items: baseline; }
-  .at-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .at-table td { vertical-align: top; }
-  .at-table tr.is-current td { background: var(--surface-2, rgba(127,127,127,0.08)); font-weight: 600; }
-  .at-spot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 22px 16px; margin-top: 12px; }
-  .at-spot .btn-group { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
-  .at-spot.is-done { opacity: 0.45; pointer-events: none; }
-  .at-row-thumb { width: 96px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); display: block; }
-  .at-row.is-done td { opacity: 0.45; }
-  .at-pager { display: flex; gap: 12px; align-items: center; margin-top: 10px; }
-</style>
+<div class="set-page">
 
-<div class="canvas canvas-wide">
+{# ---- Where each step stands ---- #}
+<div class="set-overview">
+  <a class="set-overview-card" href="#skip">
+    <div class="set-overview-top"><span class="set-overview-step">Step 1</span>{{ state_pill(state, ready) }}</div>
+    <div class="set-overview-title">Skip unlikely videos</div>
+    <div class="set-overview-line">
+      {% if state == "paused" %}Stopped itself — needs a look.
+      {% elif state == "on" and ready %}Would skip {{ would_reject }} of the waiting videos now.
+      {% elif state == "on" %}Waiting until it's able to judge.
+      {% else %}Off — every video waits for you.{% endif %}
+    </div>
+  </a>
+  <a class="set-overview-card" href="#approval">
+    <div class="set-overview-top"><span class="set-overview-step">Step 2</span>{{ state_pill("on" if sp.enabled else "off") }}</div>
+    <div class="set-overview-title">Approve promising videos</div>
+    <div class="set-overview-line">
+      {% if sp.enabled %}{{ select.picked_today }} of {{ sp.per_day }} approved today.
+      {% else %}Off — you approve every video yourself.{% endif %}
+    </div>
+  </a>
+  <a class="set-overview-card" href="#inbox">
+    <div class="set-overview-top"><span class="set-overview-step">Step 3</span>{{ state_pill("on" if ip.enabled else "off") }}</div>
+    <div class="set-overview-title">Make finished clips</div>
+    <div class="set-overview-line">
+      {% if ip.enabled %}{{ inbox_counts.get("ready", 0) }} waiting in the Inbox.
+      {% else %}Off — you cut and caption clips yourself.{% endif %}
+    </div>
+  </a>
+</div>
 
-{% if state == "paused" %}
-  <div class="card tight at-banner" role="alert">
-    <strong>Paused{% if policy.paused_at %} {{ policy.paused_at[:10] }}{% endif %}.</strong> {{ policy.paused_reason }}
-    <div class="at-actions">
-      <form method="post" action="/auto-triage/resume" class="inline"
-            data-confirm="Resume automatic triage? It starts a fresh spot-check count and rejects again from the next pass."
-            data-confirm-ok="Resume">
-        <button class="btn primary sm">Resume</button>
-      </form>
-      <form method="post" action="/auto-triage/settings" class="inline">
-        <button class="btn sm">Turn it off</button>
-      </form>
+{# ====================== Step 1 — skip ====================== #}
+<form method="post" action="/auto-triage/run" id="run-now-form"
+      {% if would_reject %}data-confirm="Skip {{ would_reject }} waiting video{{ 's' if would_reject != 1 }} now? Each one can be brought back from this page, and Undo puts a whole round back."
+      data-confirm-ok="Skip {{ would_reject }}" data-confirm-variant="danger"{% endif %}></form>
+
+<form method="post" action="/auto-triage/settings" id="at-settings" data-savebar>
+<section class="set-section" id="skip">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">1 · Skip unlikely videos {{ state_pill(state, ready) }}</h2>
+      <p class="set-section-desc">Turns down new videos that are very unlikely to be worth clipping, before they reach your queue. Nothing is deleted — any of them can be brought back.</p>
     </div>
   </div>
-{% elif state == "on" and not ready %}
-  <div class="card tight at-banner is-waiting" role="status">
-    <strong>Waiting.</strong> {{ not_ready_why }} Nothing is rejected until that's fixed; it picks up on its own.
-  </div>
-{% endif %}
-
-{# ---- The switch ---- #}
-<div class="card">
-  <form method="post" action="/auto-triage/settings" class="at-form" id="at-settings">
-    <label class="switch" style="gap: 10px;">
-      <input type="checkbox" name="enabled" value="on" {% if policy.enabled %}checked{% endif %}>
-      <span class="switch-track"><span class="switch-thumb"></span></span>
-      <span style="margin-left: 10px;">Reject automatically</span>
-    </label>
-    <span class="field">Judge by</span>
-    <label class="field">
-      <input type="radio" name="signal" value="approval" {% if signal == "approval" %}checked{% endif %}>
-      your approval history — under
-      <select name="reject_below">
-        {% for c in cutoff_choices %}
-        <option value="{{ c }}" {% if c == policy.reject_below %}selected{% endif %}>{{ pct(c) }}</option>
-        {% endfor %}
-      </select>
-      approve chance
-    </label>
-    <label class="field">
-      <input type="radio" name="signal" value="fit" {% if signal == "fit" %}checked{% endif %}>
-      positioning fit — under
-      <select name="fit_below">
-        {% for c in fit_choices %}
-        <option value="{{ c }}" {% if c == policy.fit_below %}selected{% endif %}>{{ "%.1f"|format(c) }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="field">Spot-check
-      <select name="audit_rate">
-        {% for r in audit_choices %}
-        <option value="{{ r }}" {% if r == policy.audit_rate %}selected{% endif %}>{{ pct(r) }}</option>
-        {% endfor %}
-      </select>
-      of its rejections
-    </label>
-    <button class="btn primary sm" type="submit">Save</button>
-  </form>
-
-  <div class="at-actions">
-    <form method="post" action="/auto-triage/run" class="inline"
-          {% if would_reject %}data-confirm="Reject {{ would_reject }} waiting video{{ 's' if would_reject != 1 }} now? Each can be approved or sent back to your queue from this page, and Undo puts the whole pass back."
-          data-confirm-ok="Reject {{ would_reject }}" data-confirm-variant="danger"{% endif %}>
-      <button class="btn sm" {% if state != "on" or not ready %}disabled{% endif %}
-              title="Otherwise it runs at the end of every monitor pass">
-        Run now{% if state == "on" and ready %} — rejects {{ would_reject }} waiting{% endif %}
-      </button>
-    </form>
-    <span class="meta">
-      {% if model_view.model %}
-        Model #{{ model_view.model.id }} · learned from {{ "{:,}".format(model_view.model.n_decisions) }} decisions
-        ({{ model_view.model.n_approved }} approved)
-        {% if model_view.model.auc is not none %}· grades {{ "%.2f"|format(model_view.model.auc) }} AUC on {{ "{:,}".format(model_view.model.graded_on or 0) }} decisions it hadn't seen{% endif %}
-        {% if not model_view.model.rolling %}· <button type="button" class="linklike" id="retrain-btn" onclick="retrainModel()">retrain to grade every cut-off</button>{% endif %}
-      {% else %}
-        {{ model_view.why }}
-      {% endif %}
-      {% if preview.unscored %}· {{ preview.unscored }} waiting videos without a current {{ "fit" if signal == "fit" else "score from this model" }} (a pass scores them first{% if signal == "fit" %}, up to 200 at a time{% endif %}){% endif %}
-    </span>
-  </div>
-  {% if profile.missing %}
-  <p class="hint">Positioning fit reads the <a href="/brand">Brand &amp; audience</a> profile. Its
-    {{ profile.missing|join(", ") }} {{ "is" if profile.missing|length == 1 else "are" }} empty, so fit can only judge the topic —
-    fill {{ "it" if profile.missing|length == 1 else "them" }} in for it to judge the account's angle.</p>
-  {% endif %}
-  <p class="hint">Runs at the end of every monitor pass — here and on GitHub Actions — or now with Run now.
-    It only judges videos the dashboard shows (relevance at or above the threshold; the rest are off topic already), and never
-    a video you've decided, one it already rejected once (even if you restored it), or a first-party channel.
-    By approval history it waits while the model has learned from fewer than {{ guard.min_model_decisions }} decisions or grades under {{ "%.2f"|format(guard.min_backtest_auc) }};
-    either way it pauses itself if one pass would reject more than {{ pct(guard.max_reject_share) }} of the waiting videos.</p>
-</div>
-
-{# ---- Automatic approval (app/auto_select.py) ---- #}
-{% set sp = select.policy %}
-<h2 class="at-section" id="approval">Automatic approval
-  <span class="badge {{ 'score-hi' if sp.enabled else '' }}">{{ "On" if sp.enabled else "Off" }}</span></h2>
-<div class="card">
-  <p class="hint" style="margin-top: 0;">Approves the day's most promising videos for you. Each one is downloaded on the home machine
-    and watched by the clip engine (about $0.40–0.75 a video), which drafts its clips. Never your decision on record, so the
-    approve predictor doesn't learn from it; picks you'd undo, reject on the video page.</p>
-  {% if not archives_here %}
-  <div class="card tight at-banner is-waiting">This machine doesn't download (<code>ARCHIVE_ON_THIS_MACHINE</code> is off).
-    Picks made here are downloaded by the home machine on its next round.</div>
-  {% endif %}
-  <form method="post" action="/auto-select/settings" class="at-form">
-    <label class="switch" style="gap: 10px;">
-      <input type="checkbox" name="enabled" value="on" {% if sp.enabled %}checked{% endif %}>
-      <span class="switch-track"><span class="switch-thumb"></span></span>
-      <span style="margin-left: 10px;">Approve automatically</span>
-    </label>
-    <label class="field">up to
-      <select name="per_day">{% for n in select_choices.per_day %}<option value="{{ n }}" {% if n == sp.per_day %}selected{% endif %}>{{ n }}</option>{% endfor %}</select>
-      videos a day</label>
-    <label class="field">approve chance at least
-      <select name="min_prob">{% for v in select_choices.min_prob %}<option value="{{ v }}" {% if v == sp.min_prob %}selected{% endif %}>{{ pct(v) }}</option>{% endfor %}</select></label>
-    <label class="field">fit at least
-      <select name="fit_floor">{% for v in select_choices.fit_floor %}<option value="{{ v }}" {% if v == sp.fit_floor %}selected{% endif %}>{{ "%.1f"|format(v) }}</option>{% endfor %}</select></label>
-    <label class="field">published in the last
-      <select name="fresh_days">{% for v in select_choices.fresh_days %}<option value="{{ v }}" {% if v == sp.fresh_days %}selected{% endif %}>{{ v }}</option>{% endfor %}</select>
-      days</label>
-    <label class="field">explore
-      <select name="explore">{% for v in select_choices.explore %}<option value="{{ v }}" {% if v == sp.explore %}selected{% endif %}>{{ pct(v) }}</option>{% endfor %}</select>
-      of picks</label>
-    <button class="btn primary sm" type="submit">Save</button>
-  </form>
-  <div class="at-actions">
-    <form method="post" action="/auto-select/run" class="inline"
-          {% if select.picks %}data-confirm="Approve {{ select.picks|length }} video{{ 's' if select.picks|length != 1 }} now? Each is downloaded and watched by the clip engine." data-confirm-ok="Approve {{ select.picks|length }}"{% endif %}>
-      <button class="btn sm" {% if not sp.enabled or not select.picks %}disabled{% endif %}
-              title="Otherwise the home machine runs it every ten minutes">Approve now{% if sp.enabled and select.picks %} — {{ select.picks|length }}{% endif %}</button>
-    </form>
-    <span class="meta">Today: {{ select.picked_today }} of {{ sp.per_day }} picked · the pace allows {{ select.allowed }} more now ·
-      {{ select.pool }} in the pool, ranked by {{ "your approval history" if select.signal == "approval" else "positioning fit" }}.
-      The clip engine's cap for unattended runs is ${{ "%.2f"|format(engine_cap) }} a day; past it, the cheaper transcript suggester takes over.</span>
-  </div>
-  {% if select.picks %}
-  <p class="meta" style="margin: 14px 0 6px;">{{ "Would approve now:" if sp.enabled else "Would approve now, if it were on:" }}</p>
-  <ul class="meta" style="margin: 0; padding-left: 18px;">
-    {% for p in select.picks %}
-    <li><a href="/video/{{ p.c.id }}">{{ p.c.title }}</a> — {{ p.c.channel.call_sign if p.c.channel else "" }} ·
-      {% if select.signal == "approval" %}{{ "%.0f"|format((p.score or 0) * 100) }}% chance{% else %}fit {{ "%.1f"|format(p.score or 0) }}{% endif %}
-      {% if p.explore %}<span class="badge info">exploring</span>{% endif %}</li>
-    {% endfor %}
-  </ul>
-  {% endif %}
-  {% if select_recent %}
-  <div class="table-wrap" style="margin-top: 14px;">
-    <table class="at-table">
-      <thead><tr><th>Picked</th><th>Video</th><th>Why</th><th>Now</th><th>Drafted</th><th>Cut</th><th>Posted</th></tr></thead>
-      <tbody>
-      {% for r in select_recent %}
-        <tr>
-          <td class="at-num">{{ r.action.created_at.strftime("%b %-d %H:%M") }}</td>
-          <td><a class="item-title" href="/video/{{ r.c.id }}">{{ r.c.title }}</a>
-            <div class="meta">{{ r.c.channel.call_sign if r.c.channel else "" }}{% if r.action.explore %} · <span class="badge info">exploring</span>{% endif %}</div></td>
-          <td class="at-num">{% if r.action.signal == "fit" %}fit {{ "%.1f"|format(r.action.fit_score or 0) }}{% else %}{{ "%.0f"|format((r.action.approve_prob or 0) * 100) }}%{% endif %}</td>
-          <td>{{ {"approved": "downloading", "archived": "ready", "failed": "download failed", "rejected": "rejected", "new": "back in queue"}.get(r.c.status, r.c.status) }}</td>
-          <td class="at-num">{{ r.drafted }}</td>
-          <td class="at-num">{{ r.cuts }}</td>
-          <td class="at-num">{{ r.posted }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% endif %}
-</div>
-
-{# ---- The inbox (app/inbox.py) ---- #}
-{% set ip = inbox_policy %}
-<h2 class="at-section" id="inbox">Inbox
-  <span class="badge {{ 'score-hi' if ip.enabled else '' }}">{{ "On" if ip.enabled else "Off" }}</span>
-  <span class="meta"><a href="/inbox">{{ inbox_counts.get("ready", 0) }} waiting</a></span></h2>
-<div class="card">
-  <p class="hint" style="margin-top: 0;">Turns the clip engine's best drafts into finished clips — cut, rendered, subtitled and captioned in
-    the account's voice, with the caption gut-checked — and holds them in the <a href="/inbox">Inbox</a> for one click. Made on the
-    home machine, paced through the day. Nothing posts until someone approves it.</p>
-  <form method="post" action="/inbox/settings" class="at-form">
-    <label class="switch" style="gap: 10px;">
-      <input type="checkbox" name="enabled" value="on" {% if ip.enabled %}checked{% endif %}>
-      <span class="switch-track"><span class="switch-thumb"></span></span>
-      <span style="margin-left: 10px;">Make inbox clips</span>
-    </label>
-    <label class="field">up to
-      <select name="per_day">{% for n in inbox_choices.per_day %}<option value="{{ n }}" {% if n == ip.per_day %}selected{% endif %}>{{ n }}</option>{% endfor %}</select>
-      a day</label>
-    <label class="field">critic score at least
-      <select name="min_score">{% for v in inbox_choices.min_score %}<option value="{{ v }}" {% if v == ip.min_score %}selected{% endif %}>{{ "%.0f"|format(v * 10) }}/10</option>{% endfor %}</select></label>
-    <label class="field">at most
-      <select name="per_video">{% for n in inbox_choices.per_video %}<option value="{{ n }}" {% if n == ip.per_video %}selected{% endif %}>{{ n }}</option>{% endfor %}</select>
-      per video</label>
-    <label class="field">from
-      <select name="source">
-        <option value="auto" {% if ip.source == "auto" %}selected{% endif %}>videos automatic approval picked</option>
-        <option value="all" {% if ip.source == "all" %}selected{% endif %}>any downloaded video</option>
-      </select></label>
-    <label class="field"><input type="checkbox" name="subtitles" value="on" {% if ip.subtitles %}checked{% endif %}> burn in subtitles</label>
-    <button class="btn primary sm" type="submit">Save</button>
-  </form>
-  <p class="meta">All time: {{ inbox_counts.get("ready", 0) }} waiting · {{ inbox_counts.get("queued", 0) + inbox_counts.get("approved", 0) }} approved ·
-    {{ inbox_counts.get("rejected", 0) }} rejected · {{ inbox_counts.get("failed", 0) }} couldn't be made ·
-    {{ inbox_counts.get("drafting", 0) }} being made. The critic is generous — most drafts score 7–9 — so the bar only drops the weakest;
-    what you approve and reject here is what will teach it more.</p>
-  {% if inbox_recent %}
-  <div class="table-wrap">
-    <table class="at-table">
-      <thead><tr><th>Made</th><th>Clip</th><th>Score</th><th>Now</th></tr></thead>
-      <tbody>
-      {% for it in inbox_recent %}
-        <tr>
-          <td class="at-num">{{ it.created_at.strftime("%b %-d %H:%M") }}</td>
-          <td>{% if it.cut_pk %}<a href="/cut/{{ it.cut_pk }}">{{ it.story or "Clip" }}</a>{% else %}{{ it.story or "Clip" }}{% endif %}
-            {% if it.error %}<div class="meta">{{ it.error }}</div>{% endif %}
-            {% if it.reject_tags or it.reject_note %}<div class="meta">{{ it.reject_tags.replace(",", ", ") }}{% if it.reject_note %} — {{ it.reject_note }}{% endif %}</div>{% endif %}</td>
-          <td class="at-num">{% if it.score is not none %}{{ "%.1f"|format(it.score * 10) }}{% endif %}</td>
-          <td>{{ it.state }}{% if it.post_pk %} · <a href="/post/{{ it.post_pk }}">post</a>{% endif %}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% endif %}
-</div>
-
-{# ---- Choosing the cut-off: one table per signal, the one in use first ---- #}
-{% for sig in ([signal] + (["fit"] if signal == "approval" else ["approval"])) %}
-{% set rows = tables[sig] %}
-<h2 class="at-section">{{ "Positioning fit" if sig == "fit" else "Approval history" }} cut-offs
-  <span class="meta">{% if sig == signal %}in use{% else %}for comparison{% endif %}
-  {% if rows and rows[0].history_auc is not none %} · grades {{ "%.2f"|format(rows[0].history_auc) }} AUC against {{ "{:,}".format(rows[0].history_n or 0) }} of your decisions{% endif %}</span></h2>
-<div class="table-wrap">
-  <table class="at-table">
-    <thead>
-      <tr>
-        <th>Cut-off</th>
-        <th>Videos it rejects</th>
-        <th>Waiting now</th>
-        <th>Approvals it would have cost you</th>
-        <th>…of those, posted</th>
-      </tr>
-    </thead>
-    <tbody>
-    {% for r in rows %}
-      {% set is_current = sig == signal and r.cutoff == current %}
-      <tr class="{{ 'is-current' if is_current }}">
-        <td class="at-num">under {{ r.label }}{% if is_current %} <span class="meta">(current)</span>{% endif %}</td>
-        <td class="at-num">≈ {{ "%.1f"|format(r.per_day) }} a day{% if r.share_of_arrivals is not none %} ({{ "%.0f"|format(r.share_of_arrivals * 100) }}%){% endif %}</td>
-        <td class="at-num">{{ "{:,}".format(r.waiting_now) }}</td>
-        <td class="at-num">
-          {% if r.approvals_lost is not none and r.approvals %}
-            {{ r.approvals_lost }} of {{ r.approvals }} ({{ "%.1f"|format(100 * r.approvals_lost / r.approvals) }}%)
-          {% else %}<span class="meta">—</span>{% endif %}
-        </td>
-        <td class="at-num">
-          {% if r.posted_lost is not none and r.posted %}
-            {{ r.posted_lost }} of {{ r.posted }}
-          {% else %}<span class="meta">—</span>{% endif %}
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-<p class="meta">
-  {% if sig == "fit" %}
-    Fit is scored from the Brand &amp; audience profile and never sees your decisions, so the cost column is a fair test of it —
-    once your past decisions are scored: <code>python run.py auto-triage grade-fit</code> (about $0.0005 a video).
-    “Videos it rejects” counts the last 28 days of videos that have a fit score.
-  {% else %}
-    “Videos it rejects” is the last 28 days of videos the dashboard showed. “Approvals it would have cost you” replays your own decisions,
-    each scored by a model trained only on the decisions before it{% if rows and rows[0].history_n %} ({{ "{:,}".format(rows[0].history_n) }} decisions, {{ rows[0].approvals }} approvals){% endif %}.
-  {% endif %}
-  The posted column counts lost approvals that went on to a published post. Small counts — read them as a range, not a promise.
-</p>
-{% endfor %}
-
-{# ---- Spot-checks ---- #}
-<h2 class="at-section" id="spot-checks">Spot-checks <span class="meta"><span id="spot-pending">{{ spot.pending }}</span> waiting</span></h2>
-<div class="card tight">
-  <p style="margin: 0;">
-  {% if spot.answered %}
-    Since {{ policy.watch_since[:10] if policy.watch_since else "the start" }}: you've answered {{ spot.answered }} —
-    you'd have approved {{ spot.approved }} ({{ "%.0f"|format(spot.rate * 100) }}%, likely between {{ "%.0f"|format(spot.low * 100) }}% and {{ "%.0f"|format(spot.high * 100) }}%).
-    {% if rejected_since %}Of the {{ "{:,}".format(rejected_since) }} it rejected in that time, that's roughly {{ "%.0f"|format(spot.rate * rejected_since) }} you'd have wanted.{% endif %}
-  {% else %}
-    No spot-checks answered{% if policy.watch_since %} since {{ policy.watch_since[:10] }}{% endif %} yet.
-  {% endif %}
-  It pauses itself once at least {{ guard.pause_min_audits }} answers show you'd approve clearly more than {{ pct(guard.pause_above_rate) }}.
-  {% if spot_all.answered and spot_all.answered != spot.answered %}<span class="meta">All time: {{ spot_all.approved }} of {{ spot_all.answered }}.</span>{% endif %}
-  </p>
-  <p class="hint">A random {{ pct(policy.audit_rate) }} of what it rejects waits here for your verdict. Judge them as you would in triage —
-    because they're a random sample, your answers are what measure what it throws away. Rescuing a video from the list further down
-    doesn't count: that one was picked by eye.</p>
-</div>
-{% if pending %}
-<div class="at-spot-grid" id="spot-grid">
-  {% for v in pending %}
-  <div class="at-spot media-card" id="spot-{{ v.action_id }}">
-    <a class="thumb-wrap{{ '' if thumb_for(v.c) else ' is-empty' }}" href="{{ v.url }}" target="_blank" rel="noopener" title="Watch on YouTube">
-      {% if thumb_for(v.c) %}<img src="{{ thumb_for(v.c) }}" alt="" loading="lazy">{% endif %}
-      {% if v.duration %}<span class="thumb-dur">{{ v.duration }}</span>{% endif %}
-    </a>
-    <div class="mc-body">
-      <a class="item-title" href="/video/{{ v.id }}">{{ v.title }}</a>
-      <div class="meta">{{ v.channel }} · {{ v.published }}</div>
-      <div class="btn-group">
-        <button class="btn sm" onclick="spotAgree({{ v.action_id }}, this)">Agree — reject</button>
-        <button class="btn sm approve" onclick="approveVideo({{ v.id }}, this, 'spot-{{ v.action_id }}')">Approve &amp; download</button>
+  <div class="set-section-body">
+    {% if state == "paused" %}
+    <div class="set-callout is-danger" role="alert">
+      <span class="set-callout-title">It stopped itself{% if policy.paused_at %} on {{ policy.paused_at[:10] }}{% endif %}</span>
+      <p>{{ policy.paused_reason }}</p>
+      <div class="set-callout-actions">
+        <button class="btn sm" type="submit" form="resume-form">Resume</button>
+        <button class="btn sm ghost" type="submit" form="turn-off-form">Turn it off</button>
       </div>
     </div>
+    {% elif state == "on" and not ready %}
+    <div class="set-callout is-warn" role="status">
+      <span class="set-callout-title">Waiting</span>
+      {{ not_ready_why }} Nothing is skipped until then; it starts on its own.
+    </div>
+    {% endif %}
+
+    <label class="set-toggle">
+      <span class="set-item-text">
+        <span class="set-item-label" style="display: block;">Skip videos automatically</span>
+        <span class="set-item-help" style="display: block;">Runs every time the app checks for new videos.</span>
+      </span>
+      <span class="switch">
+        <input type="checkbox" name="enabled" value="on" {% if policy.enabled %}checked{% endif %}>
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </span>
+    </label>
+
+    <div class="set-subhead">How it decides</div>
+    <div class="set-choices">
+      <label class="set-choice">
+        <input type="radio" name="signal" value="approval" {% if signal == "approval" %}checked{% endif %}>
+        <span>
+          <span class="set-choice-title">Your past decisions</span>
+          <span class="set-choice-help">Learned from the videos you approved and turned down{% if model_view.model %} — {{ "{:,}".format(model_view.model.n_decisions) }} so far{% endif %}. The more history, the better.</span>
+          <span class="set-choice-help" style="margin-top: 10px;">Skip when the chance you'd approve it is under
+            <select name="reject_below" style="width: auto; display: inline-block; margin-top: 6px;">
+              {% for c in cutoff_choices %}<option value="{{ c }}" {% if c == policy.reject_below %}selected{% endif %}>{{ pct(c) }}</option>{% endfor %}
+            </select></span>
+        </span>
+      </label>
+      <label class="set-choice">
+        <input type="radio" name="signal" value="fit" {% if signal == "fit" %}checked{% endif %}>
+        <span>
+          <span class="set-choice-title">Fit with your brand</span>
+          <span class="set-choice-help">Judged against your <a href="/brand">Brand &amp; audience</a> description. Works from day one, with no history needed.</span>
+          <span class="set-choice-help" style="margin-top: 10px;">Skip when brand fit is under
+            <select name="fit_below" style="width: auto; display: inline-block; margin-top: 6px;">
+              {% for c in fit_choices %}<option value="{{ c }}" {% if c == policy.fit_below %}selected{% endif %}>{{ "%.1f"|format(c) }}</option>{% endfor %}
+            </select></span>
+        </span>
+      </label>
+    </div>
+
+    {% if profile.missing %}
+    <p class="set-help" style="margin-top: 12px;">Your Brand &amp; audience page has no {{ profile.missing|join(", ") }} yet, so “Fit with your brand” can only judge the topic. Filling {{ "it" if profile.missing|length == 1 else "them" }} in makes it sharper.</p>
+    {% endif %}
+
+    <div class="set-list" style="margin-top: 18px;">
+      <div class="set-item">
+        <div class="set-item-text">
+          <div class="set-item-label">Spot-checks</div>
+          <div class="set-item-help">A random share of what it skips is set aside for you to double-check, so you can see it isn't throwing away good videos.</div>
+        </div>
+        <div class="set-item-control">
+          <select name="audit_rate" aria-label="Share set aside for spot-checks">
+            {% for r in audit_choices %}<option value="{{ r }}" {% if r == policy.audit_rate %}selected{% endif %}>{{ pct(r) }} of skipped videos</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    {% if model_view.model %}
+    <p class="set-help" style="margin-top: 14px;">
+      What it has learned: {{ "{:,}".format(model_view.model.n_decisions) }} of your decisions ({{ model_view.model.n_approved }} approvals){% if model_view.model.auc is not none %}. Given two videos, it picks the one you'd prefer {{ "%.0f"|format(model_view.model.auc * 100) }}% of the time{% endif %}.
+      {% if not model_view.model.rolling %}<button type="button" class="set-link-btn" id="retrain-btn" onclick="retrainModel()">Update its numbers</button>{% endif %}
+      {% if preview.unscored %}{{ preview.unscored }} waiting video{{ 's' if preview.unscored != 1 }} haven't been scored yet; that happens before it next runs.{% endif %}
+    </p>
+    {% endif %}
+
+    <details class="set-more">
+      <summary>What it never does</summary>
+      <div class="set-more-body">
+        <p>It only looks at videos the dashboard shows you. It never touches a video you've already decided on, a video it skipped before (even if you brought it back), or anything from your own channel.</p>
+        <p>Using your past decisions, it waits until it has learned from at least {{ guard.min_model_decisions }} of them. Either way, it stops itself if one round would skip more than {{ pct(guard.max_reject_share) }} of the waiting videos, or if your spot-checks show it's skipping too many good ones.</p>
+      </div>
+    </details>
   </div>
-  {% endfor %}
-</div>
-{% if spot.pending > pending|length %}<p class="meta">Showing the newest {{ pending|length }} of {{ spot.pending }}.</p>{% endif %}
-{% endif %}
+  <div class="set-section-foot set-savebar">
+    <button class="btn" type="submit" form="run-now-form" {% if state != "on" or not ready %}disabled{% endif %}
+            title="Otherwise it runs every time the app checks for new videos">
+      Run now{% if state == "on" and ready %} — would skip {{ would_reject }}{% endif %}
+    </button>
+    <span class="set-savebar-note">Changes apply from the next round.</span>
+    <button class="btn-primary" type="submit">Save</button>
+  </div>
+</section>
+</form>
+<form method="post" action="/auto-triage/resume" id="resume-form"
+      data-confirm="Resume skipping? It starts a fresh spot-check count." data-confirm-ok="Resume"></form>
+<form method="post" action="/auto-triage/settings" id="turn-off-form"></form>
 
-{# ---- Passes ---- #}
-<h2 class="at-section">Passes</h2>
-{% if runs %}
-<div class="table-wrap">
-  <table class="at-table">
-    <thead>
-      <tr><th>When</th><th>From</th><th>Model</th><th>Cut-off</th><th>Judged</th><th>Rejected</th><th>Spot-checks</th><th>What happened</th><th></th></tr>
-    </thead>
-    <tbody>
-    {% for r in runs %}
-      <tr>
-        <td class="at-num">{{ r.started_at.strftime("%b %-d %H:%M") }}</td>
-        <td>{{ {"monitor": "monitor", "monitor:actions": "monitor (GitHub)", "manual": "Run now", "cli": "terminal"}.get(r.trigger, r.trigger) }}</td>
-        <td class="at-num">{% if r.model_pk %}#{{ r.model_pk }}{% endif %}</td>
-        <td class="at-num">{% if r.reject_below is not none %}{{ "fit " if r.signal == "fit" }}{{ cutoff_label(r.signal or "approval", r.reject_below) }}{% endif %}</td>
-        <td class="at-num">{{ "{:,}".format(r.considered) }}</td>
-        <td class="at-num">{% if r.rejected %}<a href="/auto-triage?run={{ r.id }}#rejected">{{ "{:,}".format(r.rejected) }}</a>{% else %}0{% endif %}</td>
-        <td class="at-num">{{ r.audited }}</td>
-        <td>
-          {% if r.undone_at %}<span class="badge">undone {{ r.undone_at.strftime("%b %-d") }}</span>
-          {% elif r.outcome == "paused" %}<span class="badge hostile">paused</span>
-          {% elif r.outcome == "waiting" %}<span class="badge">waiting</span>
-          {% else %}<span class="badge score-hi">done</span>{% endif %}
-          {% if r.note %}<span class="meta">{{ r.note }}</span>{% endif %}
-        </td>
-        <td>
-          {% if r.outcome == "done" and r.rejected and not r.undone_at %}
-          <form method="post" action="/auto-triage/runs/{{ r.id }}/undo" class="inline"
-                data-confirm="Undo pass #{{ r.id }}? Its rejections that still stand go back to your queue, and automatic triage won't reject those videos again. Videos you've approved or agreed with since stay as they are."
-                data-confirm-ok="Undo pass">
-            <button class="btn sm">Undo</button>
-          </form>
-          {% endif %}
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% else %}
-<p class="meta">No passes yet.</p>
-{% endif %}
-
-{# ---- Everything it rejected ---- #}
-<h2 class="at-section" id="rejected">Rejected automatically
-  <span class="meta">{{ "{:,}".format(rejected_total) }} standing{% if run_filter %} · showing pass #{{ run_filter }} · <a href="/auto-triage#rejected">show all</a>{% endif %}</span></h2>
-{% if rejected %}
-<div class="table-wrap">
-  <table class="at-table">
-    <thead><tr><th></th><th>Video</th><th>Judged</th><th>Rejected</th><th></th></tr></thead>
-    <tbody>
-    {% for v in rejected %}
-      <tr class="at-row" id="row-{{ v.id }}">
-        <td>{% if thumb_for(v.c) %}<a href="{{ v.url }}" target="_blank" rel="noopener"><img class="at-row-thumb" src="{{ thumb_for(v.c) }}" alt="" loading="lazy"></a>{% endif %}</td>
-        <td>
+{# ---- Spot-checks ---- #}
+<section class="set-section" id="spot-checks">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Spot-checks <span class="set-status {{ 'is-warn' if spot.pending else 'is-plain' }}"><span id="spot-pending">{{ spot.pending }}</span>&nbsp;waiting</span></h2>
+      <p class="set-section-desc">A random sample of what was skipped. Would you have turned it down too? Because the sample is random, your answers show how often it skips something good.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    <div class="set-callout {{ 'is-good' if spot.answered and spot.rate is not none and spot.rate <= guard.pause_above_rate else 'is-info' }}" style="margin-bottom: 14px;">
+      {% if spot.answered %}
+        Since {{ policy.watch_since[:10] if policy.watch_since else "the start" }} you've checked {{ spot.answered }}, and you'd have approved {{ spot.approved }}
+        ({{ "%.0f"|format(spot.rate * 100) }}% — realistically between {{ "%.0f"|format(spot.low * 100) }}% and {{ "%.0f"|format(spot.high * 100) }}%).
+        {% if rejected_since %}Of the {{ "{:,}".format(rejected_since) }} skipped in that time, that's roughly {{ "%.0f"|format(spot.rate * rejected_since) }} you'd have wanted.{% endif %}
+      {% else %}
+        No spot-checks answered{% if policy.watch_since %} since {{ policy.watch_since[:10] }}{% endif %} yet.
+      {% endif %}
+      It stops itself if, after at least {{ guard.pause_min_audits }} answers, you'd clearly approve more than {{ pct(guard.pause_above_rate) }}.
+      {% if spot_all.answered and spot_all.answered != spot.answered %}All time: {{ spot_all.approved }} of {{ spot_all.answered }}.{% endif %}
+    </div>
+    {% if pending %}
+    <div class="at-spot-grid" id="spot-grid">
+      {% for v in pending %}
+      <div class="at-spot media-card" id="spot-{{ v.action_id }}">
+        <a class="thumb-wrap{{ '' if thumb_for(v.c) else ' is-empty' }}" href="{{ v.url }}" target="_blank" rel="noopener" title="Watch on YouTube">
+          {% if thumb_for(v.c) %}<img src="{{ thumb_for(v.c) }}" alt="" loading="lazy">{% endif %}
+          {% if v.duration %}<span class="thumb-dur">{{ v.duration }}</span>{% endif %}
+        </a>
+        <div class="mc-body">
           <a class="item-title" href="/video/{{ v.id }}">{{ v.title }}</a>
-          <div class="meta">{{ v.channel }} · {{ v.published }}{% if v.duration %} · {{ v.duration }}{% endif %}{% if v.audit %} · <a href="#spot-checks">spot-check</a>{% endif %}</div>
-        </td>
-        <td class="at-num">{% if v.signal == "fit" %}fit {{ "%.1f"|format(v.fit or 0) }}{% if v.fit_reason %}<div class="meta">{{ v.fit_reason }}</div>{% endif %}{% else %}{{ "%.1f"|format((v.prob or 0) * 100) }}%{% endif %}</td>
-        <td class="at-num">{{ v.rejected_at.strftime("%b %-d") }} · pass #{{ v.run_pk }}</td>
-        <td>
-          <div class="btn-group" style="display: flex; gap: 6px; flex-wrap: wrap;">
-            <button class="btn sm approve" onclick="approveVideo({{ v.id }}, this, 'row-{{ v.id }}')">Approve</button>
-            <button class="btn sm" onclick="restoreVideo({{ v.id }}, this)" title="Back to your triage queue, undecided">Back to queue</button>
+          <div class="meta">{{ v.channel }} · {{ v.published }}</div>
+          <div class="btn-group">
+            <button class="btn sm" onclick="spotAgree({{ v.action_id }}, this)">Agree — skip it</button>
+            <button class="btn sm approve" onclick="approveVideo({{ v.id }}, this, 'spot-{{ v.action_id }}')">Approve &amp; download</button>
           </div>
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-<div class="at-pager">
-  {% set base = "/auto-triage?" ~ ("run=" ~ run_filter ~ "&" if run_filter else "") %}
-  {% if page > 1 %}<a class="btn sm" href="{{ base }}page={{ page - 1 }}#rejected">← Newer</a>{% endif %}
-  {% if rejected|length == page_size %}<a class="btn sm" href="{{ base }}page={{ page + 1 }}#rejected">Older →</a>{% endif %}
-</div>
-{% else %}
-<p class="meta">Nothing rejected automatically{% if run_filter %} in this pass is still standing{% endif %}.</p>
-{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% if spot.pending > pending|length %}<p class="set-help" style="margin-top: 12px;">Showing the newest {{ pending|length }} of {{ spot.pending }}.</p>{% endif %}
+    {% else %}
+    <p class="set-help">Nothing to check right now.</p>
+    {% endif %}
+  </div>
+</section>
 
+{# ====================== Step 2 — approve ====================== #}
+<form method="post" action="/auto-select/run" id="approve-now-form"
+      {% if select.picks %}data-confirm="Approve {{ select.picks|length }} video{{ 's' if select.picks|length != 1 }} now? Each is downloaded and the clip finder watches it." data-confirm-ok="Approve {{ select.picks|length }}"{% endif %}></form>
+<form method="post" action="/auto-select/settings" data-savebar>
+<section class="set-section" id="approval">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">2 · Approve promising videos {{ state_pill("on" if sp.enabled else "off") }}</h2>
+      <p class="set-section-desc">Approves the day's most promising videos for you. Each one is downloaded and the clip finder watches it for good moments (about $0.40–0.75 a video). It never posts anything.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    {% if not archives_here %}
+    <div class="set-callout is-info">This computer doesn't download videos. Videos approved here are downloaded by the home computer on its next round.</div>
+    {% endif %}
+    <label class="set-toggle">
+      <span class="set-item-text">
+        <span class="set-item-label" style="display: block;">Approve videos automatically</span>
+        <span class="set-item-help" style="display: block;">Spread through the day, best first.</span>
+      </span>
+      <span class="switch">
+        <input type="checkbox" name="enabled" value="on" {% if sp.enabled %}checked{% endif %}>
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </span>
+    </label>
+    <div class="set-list">
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">Videos a day</div>
+          <div class="set-item-help">The most it approves in one day.</div></div>
+        <div class="set-item-control"><select name="per_day" aria-label="Videos a day">{% for n in select_choices.per_day %}<option value="{{ n }}" {% if n == sp.per_day %}selected{% endif %}>Up to {{ n }}</option>{% endfor %}</select></div>
+      </div>
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">Lowest approval chance</div>
+          <div class="set-item-help">It never approves a video below this, even on a slow day.</div></div>
+        <div class="set-item-control"><select name="min_prob" aria-label="Lowest approval chance">{% for v in select_choices.min_prob %}<option value="{{ v }}" {% if v == sp.min_prob %}selected{% endif %}>{{ pct(v) }}</option>{% endfor %}</select></div>
+      </div>
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">Lowest brand fit</div>
+          <div class="set-item-help">Videos that fit your brand less than this are left alone.</div></div>
+        <div class="set-item-control"><select name="fit_floor" aria-label="Lowest brand fit">{% for v in select_choices.fit_floor %}<option value="{{ v }}" {% if v == sp.fit_floor %}selected{% endif %}>{{ "%.1f"|format(v) }}{{ " (any)" if v == 0 }}</option>{% endfor %}</select></div>
+      </div>
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">How recent</div>
+          <div class="set-item-help">Only videos published in this many days.</div></div>
+        <div class="set-item-control"><select name="fresh_days" aria-label="How recent">{% for v in select_choices.fresh_days %}<option value="{{ v }}" {% if v == sp.fresh_days %}selected{% endif %}>Last {{ v }} day{{ 's' if v != 1 }}</option>{% endfor %}</select></div>
+      </div>
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">Try something different</div>
+          <div class="set-item-help">A share of picks goes to videos just below the top, so the app learns where its ranking is wrong.</div></div>
+        <div class="set-item-control"><select name="explore" aria-label="Share of exploring picks">{% for v in select_choices.explore %}<option value="{{ v }}" {% if v == sp.explore %}selected{% endif %}>{{ pct(v) }} of picks</option>{% endfor %}</select></div>
+      </div>
+    </div>
+
+    <p class="set-help" style="margin-top: 16px;">
+      Today: {{ select.picked_today }} of {{ sp.per_day }} approved{% if sp.enabled %}; {{ select.allowed }} more allowed right now{% endif %}. {{ select.pool }} waiting video{{ 's' if select.pool != 1 }} qualif{{ 'y' if select.pool != 1 else 'ies' }}, ranked by {{ "your past decisions" if select.signal == "approval" else "brand fit" }}.
+      The clip finder spends at most ${{ "%.2f"|format(engine_cap) }} a day on its own; past that it uses a cheaper, simpler method.
+    </p>
+    {% if select.picks %}
+    <div class="set-subhead">{{ "Would approve next" if sp.enabled else "Would approve next, if it were on" }}</div>
+    <div class="set-list">
+      {% for p in select.picks %}
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label"><a href="/video/{{ p.c.id }}">{{ p.c.title }}</a></div>
+          <div class="set-item-help">{{ p.c.channel.call_sign if p.c.channel else "" }}{% if p.explore %} · trying something different{% endif %}</div></div>
+        <div class="set-item-control meta">{% if select.signal == "approval" %}{{ "%.0f"|format((p.score or 0) * 100) }}% chance{% else %}fit {{ "%.1f"|format(p.score or 0) }}{% endif %}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if select_recent %}
+    <details class="set-more">
+      <summary>Recently approved ({{ select_recent|length }})</summary>
+      <div class="set-more-body">
+        <div class="set-table-wrap">
+          <table class="set-table">
+            <tr><th>Approved</th><th>Video</th><th class="num">Chance</th><th>Now</th><th class="num">Clips found</th><th class="num">Cut</th><th class="num">Posted</th></tr>
+            {% for r in select_recent %}
+            <tr>
+              <td class="meta" style="white-space: nowrap;">{{ r.action.created_at.strftime("%b %-d, %H:%M") }}</td>
+              <td><a href="/video/{{ r.c.id }}">{{ r.c.title }}</a>
+                <span class="set-cell-sub">{{ r.c.channel.call_sign if r.c.channel else "" }}{% if r.action.explore %} · trying something different{% endif %}</span></td>
+              <td class="num">{% if r.action.signal == "fit" %}fit {{ "%.1f"|format(r.action.fit_score or 0) }}{% else %}{{ "%.0f"|format((r.action.approve_prob or 0) * 100) }}%{% endif %}</td>
+              <td>{{ {"approved": "Downloading", "archived": "Ready", "failed": "Download failed", "rejected": "Turned down", "new": "Back in queue"}.get(r.c.status, r.c.status) }}</td>
+              <td class="num">{{ r.drafted }}</td>
+              <td class="num">{{ r.cuts }}</td>
+              <td class="num">{{ r.posted }}</td>
+            </tr>
+            {% endfor %}
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+  </div>
+  <div class="set-section-foot set-savebar">
+    <button class="btn" type="submit" form="approve-now-form" {% if not sp.enabled or not select.picks %}disabled{% endif %}
+            title="Otherwise it runs every ten minutes on the home computer">Approve now{% if sp.enabled and select.picks %} — {{ select.picks|length }}{% endif %}</button>
+    <span class="set-savebar-note">Undo a pick by turning the video down on its page.</span>
+    <button class="btn-primary" type="submit">Save</button>
+  </div>
+</section>
+</form>
+
+{# ====================== Step 3 — finished clips ====================== #}
+<form method="post" action="/inbox/settings" data-savebar>
+<section class="set-section" id="inbox">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">3 · Make finished clips {{ state_pill("on" if ip.enabled else "off") }}</h2>
+      <p class="set-section-desc">Turns the best moments the clip finder found into finished clips — cut, subtitled and captioned in your voice — and puts them in the <a href="/inbox">Inbox</a> for one-click approval. Nothing posts until someone approves it.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    <label class="set-toggle">
+      <span class="set-item-text">
+        <span class="set-item-label" style="display: block;">Make inbox clips automatically</span>
+        <span class="set-item-help" style="display: block;">Made on the home computer, spread through the day.</span>
+      </span>
+      <span class="switch">
+        <input type="checkbox" name="enabled" value="on" {% if ip.enabled %}checked{% endif %}>
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </span>
+    </label>
+    <div class="set-list">
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">Clips a day</div>
+          <div class="set-item-help">The most it adds to the Inbox in one day.</div></div>
+        <div class="set-item-control"><select name="per_day" aria-label="Clips a day">{% for n in inbox_choices.per_day %}<option value="{{ n }}" {% if n == ip.per_day %}selected{% endif %}>Up to {{ n }}</option>{% endfor %}</select></div>
+      </div>
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">Lowest reviewer score</div>
+          <div class="set-item-help">Every draft is reviewed and scored out of 10. Most score 7–9, so this mainly drops the weakest.</div></div>
+        <div class="set-item-control"><select name="min_score" aria-label="Lowest reviewer score">{% for v in inbox_choices.min_score %}<option value="{{ v }}" {% if v == ip.min_score %}selected{% endif %}>{{ "%.0f"|format(v * 10) }} out of 10</option>{% endfor %}</select></div>
+      </div>
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">Clips from one video</div>
+          <div class="set-item-help">The most it makes from any single video.</div></div>
+        <div class="set-item-control"><select name="per_video" aria-label="Clips from one video">{% for n in inbox_choices.per_video %}<option value="{{ n }}" {% if n == ip.per_video %}selected{% endif %}>Up to {{ n }}</option>{% endfor %}</select></div>
+      </div>
+      <div class="set-item">
+        <div class="set-item-text"><div class="set-item-label">Use videos from</div>
+          <div class="set-item-help">Only the ones step 2 approved, or any video that's been downloaded.</div></div>
+        <div class="set-item-control"><select name="source" aria-label="Use videos from">
+          <option value="auto" {% if ip.source == "auto" %}selected{% endif %}>Step 2's approvals</option>
+          <option value="all" {% if ip.source == "all" %}selected{% endif %}>Any downloaded video</option>
+        </select></div>
+      </div>
+      <label class="set-item" style="cursor: pointer; margin: 0;">
+        <span class="set-item-text"><span class="set-item-label" style="display: block;">Burn in subtitles</span>
+          <span class="set-item-help" style="display: block;">Captions on the video itself, positioned to avoid on-screen text.</span></span>
+        <span class="set-item-control switch">
+          <input type="checkbox" name="subtitles" value="on" {% if ip.subtitles %}checked{% endif %}>
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </span>
+      </label>
+    </div>
+
+    <div class="set-stats" style="margin-top: 18px;">
+      <div class="set-stat"><div class="set-stat-value">{{ inbox_counts.get("ready", 0) }}</div><div class="set-stat-label">Waiting in the Inbox</div></div>
+      <div class="set-stat"><div class="set-stat-value">{{ inbox_counts.get("queued", 0) + inbox_counts.get("approved", 0) }}</div><div class="set-stat-label">Approved</div></div>
+      <div class="set-stat"><div class="set-stat-value">{{ inbox_counts.get("rejected", 0) }}</div><div class="set-stat-label">Turned down</div></div>
+      <div class="set-stat"><div class="set-stat-value">{{ inbox_counts.get("drafting", 0) }}</div><div class="set-stat-label">Being made{% if inbox_counts.get("failed", 0) %} · {{ inbox_counts.get("failed") }} couldn't be made{% endif %}</div></div>
+    </div>
+
+    {% if inbox_recent %}
+    <details class="set-more">
+      <summary>Recently made ({{ inbox_recent|length }})</summary>
+      <div class="set-more-body">
+        <div class="set-table-wrap">
+          <table class="set-table">
+            <tr><th>Made</th><th>Clip</th><th class="num">Score</th><th>Now</th></tr>
+            {% for it in inbox_recent %}
+            <tr>
+              <td class="meta" style="white-space: nowrap;">{{ it.created_at.strftime("%b %-d, %H:%M") }}</td>
+              <td>{% if it.cut_pk %}<a href="/cut/{{ it.cut_pk }}">{{ it.story or "Clip" }}</a>{% else %}{{ it.story or "Clip" }}{% endif %}
+                {% if it.error %}<span class="set-cell-sub">{{ it.error }}</span>{% endif %}
+                {% if it.reject_tags or it.reject_note %}<span class="set-cell-sub">{{ it.reject_tags.replace(",", ", ").replace("_", " ") }}{% if it.reject_note %} — {{ it.reject_note }}{% endif %}</span>{% endif %}</td>
+              <td class="num">{% if it.score is not none %}{{ "%.1f"|format(it.score * 10) }}{% endif %}</td>
+              <td>{{ {"drafting": "Being made", "ready": "In the Inbox", "approved": "Approved", "queued": "Approved — scheduled", "rejected": "Turned down", "failed": "Couldn't be made"}.get(it.state, it.state) }}{% if it.post_pk %} · <a href="/post/{{ it.post_pk }}">post</a>{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+  </div>
+  <div class="set-section-foot set-savebar">
+    <a class="btn" href="/inbox">Open the Inbox{% if inbox_counts.get("ready", 0) %} ({{ inbox_counts.get("ready") }}){% endif %}</a>
+    <span class="set-savebar-note">The Inbox learns from what you approve and turn down.</span>
+    <button class="btn-primary" type="submit">Save</button>
+  </div>
+</section>
+</form>
+
+{# ====================== What step 1 has done ====================== #}
+<section class="set-section" id="rejected">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Skipped videos <span class="set-status is-plain">{{ "{:,}".format(rejected_total) }}</span></h2>
+      <p class="set-section-desc">Everything step 1 has turned down that's still turned down. Approve one to download it, or send it back to your queue to decide later.{% if run_filter %} Showing round #{{ run_filter }} — <a href="/auto-triage#rejected">show all</a>.{% endif %}</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    {% if rejected %}
+    <div class="set-table-wrap">
+      <table class="set-table">
+        <tr><th></th><th>Video</th><th class="num">Judged</th><th>Skipped</th><th></th></tr>
+        {% for v in rejected %}
+        <tr class="at-row" id="row-{{ v.id }}">
+          <td style="width: 112px;">{% if thumb_for(v.c) %}<a href="{{ v.url }}" target="_blank" rel="noopener"><img class="at-row-thumb" src="{{ thumb_for(v.c) }}" alt="" loading="lazy"></a>{% endif %}</td>
+          <td>
+            <a href="/video/{{ v.id }}"><strong>{{ v.title }}</strong></a>
+            <span class="set-cell-sub">{{ v.channel }} · {{ v.published }}{% if v.duration %} · {{ v.duration }}{% endif %}{% if v.audit %} · <a href="#spot-checks">in spot-checks</a>{% endif %}</span>
+          </td>
+          <td class="num">{% if v.signal == "fit" %}fit {{ "%.1f"|format(v.fit or 0) }}{% if v.fit_reason %}<span class="set-cell-sub" style="white-space: normal; text-align: left;">{{ v.fit_reason }}</span>{% endif %}{% else %}{{ "%.1f"|format((v.prob or 0) * 100) }}% chance{% endif %}</td>
+          <td class="meta" style="white-space: nowrap;">{{ v.rejected_at.strftime("%b %-d") }} · round #{{ v.run_pk }}</td>
+          <td>
+            <div class="set-row-actions">
+              <button class="set-link-btn" onclick="approveVideo({{ v.id }}, this, 'row-{{ v.id }}')">Approve</button>
+              <button class="set-link-btn" onclick="restoreVideo({{ v.id }}, this)" title="Back to your queue, undecided">Back to queue</button>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    <div style="display: flex; gap: 10px; margin-top: 12px;">
+      {% set base = "/auto-triage?" ~ ("run=" ~ run_filter ~ "&" if run_filter else "") %}
+      {% if page > 1 %}<a class="btn sm" href="{{ base }}page={{ page - 1 }}#rejected">← Newer</a>{% endif %}
+      {% if rejected|length == page_size %}<a class="btn sm" href="{{ base }}page={{ page + 1 }}#rejected">Older →</a>{% endif %}
+    </div>
+    {% else %}
+    <p class="set-help">Nothing skipped{% if run_filter %} in this round is still turned down{% endif %}.</p>
+    {% endif %}
+
+    {% if runs %}
+    <details class="set-more">
+      <summary>Rounds ({{ runs|length }} most recent)</summary>
+      <div class="set-more-body">
+        <div class="set-table-wrap">
+          <table class="set-table">
+            <tr><th>When</th><th>Started by</th><th>Rule</th><th class="num">Looked at</th><th class="num">Skipped</th><th class="num">Spot-checks</th><th>Result</th><th></th></tr>
+            {% for r in runs %}
+            <tr>
+              <td class="meta" style="white-space: nowrap;">{{ r.started_at.strftime("%b %-d, %H:%M") }}</td>
+              <td>{{ {"monitor": "New-video check", "monitor:actions": "New-video check (cloud)", "manual": "Run now", "cli": "Terminal"}.get(r.trigger, r.trigger) }}</td>
+              <td class="meta">{% if r.reject_below is not none %}{{ "fit under " if r.signal == "fit" else "chance under " }}{{ cutoff_label(r.signal or "approval", r.reject_below) }}{% endif %}</td>
+              <td class="num">{{ "{:,}".format(r.considered) }}</td>
+              <td class="num">{% if r.rejected %}<a href="/auto-triage?run={{ r.id }}#rejected">{{ "{:,}".format(r.rejected) }}</a>{% else %}0{% endif %}</td>
+              <td class="num">{{ r.audited }}</td>
+              <td>
+                {% if r.undone_at %}<span class="set-status is-off">Undone {{ r.undone_at.strftime("%b %-d") }}</span>
+                {% elif r.outcome == "paused" %}<span class="set-status is-error">Stopped itself</span>
+                {% elif r.outcome == "waiting" %}<span class="set-status is-warn">Waited</span>
+                {% else %}<span class="set-status is-on">Done</span>{% endif %}
+                {% if r.note %}<span class="set-cell-sub" style="white-space: normal;">{{ r.note }}</span>{% endif %}
+              </td>
+              <td>
+                {% if r.outcome == "done" and r.rejected and not r.undone_at %}
+                <form method="post" action="/auto-triage/runs/{{ r.id }}/undo" class="inline"
+                      data-confirm="Undo round #{{ r.id }}? Its skipped videos go back to your queue, and step 1 won't skip them again. Videos you've decided since stay as they are."
+                      data-confirm-ok="Undo round">
+                  <button class="set-link-btn">Undo</button>
+                </form>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+  </div>
+</section>
+
+{# ====================== The numbers ====================== #}
+<details class="set-section" id="numbers">
+  <summary class="set-section-head">
+    <div>
+      <h2 class="set-section-title">The numbers behind step 1</h2>
+      <p class="set-section-desc">For each setting: how many videos it would skip, and how many you'd actually have approved among them, replayed on your own past decisions.</p>
+    </div>
+    <span class="set-fold-hint"></span>
+  </summary>
+  <div class="set-section-body">
+    {% for sig in ([signal] + (["fit"] if signal == "approval" else ["approval"])) %}
+    {% set rows = tables[sig] %}
+    <div class="set-subhead">{{ "Brand fit" if sig == "fit" else "Your past decisions" }} {% if sig == signal %}<span class="set-status is-on is-plain">in use</span>{% endif %}
+      {% if rows and rows[0].history_auc is not none %}<span class="meta">picks the one you'd prefer {{ "%.0f"|format(rows[0].history_auc * 100) }}% of the time, over {{ "{:,}".format(rows[0].history_n or 0) }} decisions</span>{% endif %}</div>
+    <div class="set-table-wrap" style="margin-bottom: 8px;">
+      <table class="set-table">
+        <tr><th>Skip when under</th><th class="num">Skipped a day</th><th class="num">Waiting now</th><th class="num">Approvals it would have cost</th><th class="num">…of those, posted</th></tr>
+        {% for r in rows %}
+        {% set is_current = sig == signal and r.cutoff == current %}
+        <tr class="{{ 'is-current' if is_current }}">
+          <td>{{ r.label }}{% if is_current %} <span class="meta">(current)</span>{% endif %}</td>
+          <td class="num">≈ {{ "%.1f"|format(r.per_day) }}{% if r.share_of_arrivals is not none %} ({{ "%.0f"|format(r.share_of_arrivals * 100) }}%){% endif %}</td>
+          <td class="num">{{ "{:,}".format(r.waiting_now) }}</td>
+          <td class="num">{% if r.approvals_lost is not none and r.approvals %}{{ r.approvals_lost }} of {{ r.approvals }} ({{ "%.1f"|format(100 * r.approvals_lost / r.approvals) }}%){% else %}<span class="meta">—</span>{% endif %}</td>
+          <td class="num">{% if r.posted_lost is not none and r.posted %}{{ r.posted_lost }} of {{ r.posted }}{% else %}<span class="meta">—</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    <p class="set-help" style="margin-bottom: 18px;">
+      {% if sig == "fit" %}Brand fit never sees your decisions, so this is a fair test once past videos are scored (<code>run.py auto-triage grade-fit</code>, about $0.0005 a video).
+      {% else %}Each past decision was scored by a version of the model that hadn't seen it{% if rows and rows[0].history_n %} ({{ "{:,}".format(rows[0].history_n) }} decisions, {{ rows[0].approvals }} approvals){% endif %}.{% endif %}
+      “Skipped a day” is the last 28 days of videos you'd have seen. Small counts — read them as a range, not a promise.
+    </p>
+    {% endfor %}
+  </div>
+</details>
 </div>
 
 <script>
@@ -466,7 +560,7 @@ async function spotAgree(actionId, btn) {
   btn.disabled = true;
   try {
     const out = await postJSON(`/auto-triage/spot-checks/${actionId}/agree`);
-    settle(document.getElementById(`spot-${actionId}`), 'Agreed — stays rejected');
+    settle(document.getElementById(`spot-${actionId}`), 'Agreed — stays skipped');
     bumpPending();
     if (out.state === 'paused') location.reload();
   } catch (e) {
@@ -494,20 +588,26 @@ async function restoreVideo(id, btn) {
     settle(document.getElementById(`row-${id}`), 'Back in your queue');
   } catch (e) {
     btn.disabled = false;
-    alert('Could not restore: ' + e.message);
+    alert('Could not bring it back: ' + e.message);
   }
 }
 
 async function retrainModel() {
   const btn = document.getElementById('retrain-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'retraining…'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
   try {
     await postJSON('/triage/model/retrain');
     location.reload();
   } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = 'retrain to grade every cut-off'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Update its numbers'; }
     alert(e.message);
   }
 }
 </script>
+<style>
+  .at-spot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 22px 16px; }
+  .at-spot .btn-group { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .at-spot.is-done, .at-row.is-done td { opacity: 0.45; pointer-events: none; }
+  .at-row-thumb { width: 96px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); display: block; }
+</style>
 {% endblock %}

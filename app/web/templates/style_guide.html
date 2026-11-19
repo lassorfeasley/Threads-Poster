@@ -1,237 +1,247 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set sg_sub %}Rules the AI follows when it drafts a post caption, plus patterns learned from how your posts actually perform. You still review and edit every caption before posting.{% endset %}
-{{ ui.pagebar("Style guide", sub=sg_sub) }}
+{#
+  Caption style — how drafted captions should sound. Customer-facing.
+  The rules form (POST /style-guide, rules_json) and the suggestion
+  endpoints are unchanged; the lists are built by the script below.
+#}
+{{ ui.pagebar("Caption style", sub="How your captions should sound. The app drafts a caption for every clip; these rules steer it. You can always edit a caption before it posts.") }}
 
-<form method="post" action="/style-guide" id="rules-form">
+<div class="set-page">
+<form method="post" action="/style-guide" id="rules-form" data-savebar>
   <input type="hidden" name="rules_json" id="rules-json">
-
-  <div class="card">
-    <div class="card-title" style="margin-bottom: 4px;">Your rules</div>
-    <p class="meta" style="margin: 0 0 14px;">Short instructions on tone, voice, and formatting. These are a menu, not a checklist — the AI picks the one that suits each clip rather than applying them all. Toggle any off to pause it; High-priority rules are offered first.</p>
-
-    <div id="rules-list"></div>
-
-    <div class="btn-group" style="margin-top: 14px; justify-content: space-between;">
-      <button type="button" class="btn ghost sm" onclick="addRule()">＋ Add rule</button>
-      <button type="submit" class="primary">Save rules</button>
+  <section class="set-section" id="caption-rules">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Caption rules</h2>
+        <p class="set-section-desc">Short instructions on tone and format. For each clip the app picks the one rule that fits best, rather than piling them all on. Rules marked <strong>Try first</strong> are considered before the rest.</p>
+      </div>
+      <div class="set-section-aside">
+        <button type="button" class="btn sm" onclick="addRule()">＋ Add a rule</button>
+      </div>
     </div>
-  </div>
+    <div class="set-section-body">
+      <div id="rules-list"></div>
+    </div>
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Changes apply to the next captions drafted.</span>
+      <button type="submit" class="btn-primary">Save rules</button>
+    </div>
+  </section>
 </form>
 
-<div class="card" style="margin-top: 14px;">
-  <div class="sg-learned-head">
+<section class="set-section" id="ideas">
+  <div class="set-section-head">
     <div>
-      <div class="card-title" style="margin-bottom: 4px;">Learned from your posts</div>
-      <p class="meta" style="margin: 0;">Editorial &amp; formatting patterns distilled from your own captions — weighted toward your best-performing posts (engagement = likes + replies + reposts per view). Advisory: promote the ones that ring true.</p>
+      <h2 class="set-section-title">Ideas from your best posts</h2>
+      <p class="set-section-desc">Patterns found in your own captions, leaning toward the posts people engaged with most. Add the ones that ring true.</p>
     </div>
-    <button type="button" class="btn ghost sm" id="refresh-suggestions" onclick="refreshSuggestions()">✨ Suggest rules</button>
-  </div>
-  <div id="suggestions-list" style="margin-top: 12px;"></div>
-</div>
-
-<div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 4px;">Caption length &amp; what you keep</div>
-  <p class="meta" style="margin: 0 0 12px;">
-    Every draft the AI writes is recorded along with what you did with it. Dismissing a draft and writing your own is the strongest correction you can give — this is where it lands.
-  </p>
-
-  <div class="sg-loop-grid">
-    <div class="sg-loop-stat">
-      <div class="sg-loop-value">
-        {% if target_words %}{{ target_words }} words{% else %}—{% endif %}
-      </div>
-      <div class="meta">
-        Length target the AI is given
-        {% if not target_words %}<br>Not enough captions you wrote yourself yet — using the generic short-caption instruction.{% endif %}
-      </div>
-    </div>
-    <div class="sg-loop-stat">
-      <div class="sg-loop-value">
-        {% if caption_loop.total %}{{ caption_loop.total }}{% else %}0{% endif %}
-      </div>
-      <div class="meta">Drafts written{% if caption_loop.total %} · {{ caption_loop.resolved or 0 }} posted{% endif %}</div>
-    </div>
-    <div class="sg-loop-stat">
-      <div class="sg-loop-value">
-        {% if caption_loop.kept_rate is not none %}{{ (caption_loop.kept_rate * 100)|round|int }}%{% else %}—{% endif %}
-      </div>
-      <div class="meta">
-        Drafts you kept largely intact
-        {% if caption_loop.recent_kept_rate is not none and caption_loop.recent_n %}<br>Last {{ caption_loop.recent_n }}: {{ (caption_loop.recent_kept_rate * 100)|round|int }}%{% endif %}
-      </div>
-    </div>
-    <div class="sg-loop-stat">
-      <div class="sg-loop-value">
-        {% if caption_loop.median_draft_words and caption_loop.median_posted_words %}
-          {{ caption_loop.median_draft_words|round|int }} → {{ caption_loop.median_posted_words|round|int }}
-        {% else %}—{% endif %}
-      </div>
-      <div class="meta">Median words: drafted → posted{% if caption_loop.median_draft_words and caption_loop.median_posted_words and caption_loop.median_posted_words < caption_loop.median_draft_words %}<br>You are still cutting length out of every draft.{% endif %}</div>
+    <div class="set-section-aside">
+      <button type="button" class="btn sm" id="refresh-suggestions" onclick="refreshSuggestions()">Find new ideas</button>
     </div>
   </div>
+  <div class="set-section-body">
+    <div id="suggestions-list"></div>
+  </div>
+</section>
 
-  {% if pairs %}
-  <details style="margin-top: 14px;">
-    <summary class="meta" style="cursor: pointer;">Recent drafts vs. what you posted ({{ pairs|length }})</summary>
-    <div style="margin-top: 10px;">
-      {% for p in pairs %}
-      <div class="insight-row">
-        <div class="insight-body">
-          <div class="meta" style="margin-bottom: 4px;">
-            AI draft · {{ p.proposed_words }} words
-            {% if p.kept %}<span class="badge supportive">kept</span>{% else %}<span class="badge">rewritten</span>{% endif %}
+<section class="set-section" id="drafts">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">How the drafts are doing</h2>
+      <p class="set-section-desc">Every caption the app drafts is compared with what was actually posted. Rewriting a draft is the strongest feedback you can give.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    <div class="set-stats">
+      <div class="set-stat">
+        <div class="set-stat-value">{% if target_words %}{{ target_words }} words{% else %}—{% endif %}</div>
+        <div class="set-stat-label">{% if target_words %}The length drafts aim for, based on captions you wrote yourself{% else %}Length target — not enough of your own captions yet{% endif %}</div>
+      </div>
+      <div class="set-stat">
+        <div class="set-stat-value">{% if caption_loop.kept_rate is not none %}{{ (caption_loop.kept_rate * 100)|round|int }}%{% else %}—{% endif %}</div>
+        <div class="set-stat-label">Drafts posted mostly as written{% if caption_loop.recent_kept_rate is not none and caption_loop.recent_n %} · last {{ caption_loop.recent_n }}: {{ (caption_loop.recent_kept_rate * 100)|round|int }}%{% endif %}</div>
+      </div>
+      <div class="set-stat">
+        <div class="set-stat-value">{{ caption_loop.total or 0 }}</div>
+        <div class="set-stat-label">Drafts written{% if caption_loop.total %} · {{ caption_loop.resolved or 0 }} posted{% endif %}</div>
+      </div>
+      <div class="set-stat">
+        <div class="set-stat-value">{% if caption_loop.median_draft_words and caption_loop.median_posted_words %}{{ caption_loop.median_draft_words|round|int }} → {{ caption_loop.median_posted_words|round|int }}{% else %}—{% endif %}</div>
+        <div class="set-stat-label">Typical words, drafted → posted{% if caption_loop.median_draft_words and caption_loop.median_posted_words and caption_loop.median_posted_words < caption_loop.median_draft_words %} · you're still trimming drafts{% endif %}</div>
+      </div>
+    </div>
+
+    {% if pairs %}
+    <details class="set-more">
+      <summary>Recent drafts next to what was posted ({{ pairs|length }})</summary>
+      <div class="set-more-body">
+        {% for p in pairs %}
+        <div class="set-rule" style="grid-template-columns: minmax(0, 1fr);">
+          <div class="set-rule-body">
+            <span class="set-rule-when">Draft · {{ p.proposed_words }} words · {{ "kept" if p.kept else "rewritten" }}</span>
+            <div class="set-rule-text" style="color: var(--text-dim);">{{ p.proposed }}</div>
+            <span class="set-rule-when" style="margin-top: 8px; color: var(--accent);">Posted · {{ p.final_words }} words</span>
+            <div class="set-rule-text">{{ p.final }}</div>
           </div>
-          <div class="meta" style="opacity: .75;">{{ p.proposed }}</div>
-          <div class="insight-label" style="margin-top: 8px;">{{ p.final }}</div>
-          <div class="meta">You posted · {{ p.final_words }} words</div>
         </div>
+        {% endfor %}
       </div>
-      {% endfor %}
-    </div>
-  </details>
-  {% elif caption_loop.total %}
-  <p class="meta" style="margin: 12px 0 0;">Drafts are being recorded — the comparison fills in once those clips post.</p>
-  {% endif %}
+    </details>
+    {% elif caption_loop.total %}
+    <p class="set-help" style="margin-top: 14px;">Drafts are being recorded — the comparison fills in once those clips post.</p>
+    {% endif %}
+  </div>
+</section>
 
-  <p class="meta" style="margin: 12px 0 0;">
-    The target is the median length of captions you wrote yourself, over your most recent ones — so it tightens on its own as you keep writing short. Hard ceiling is {{ max_chars }} characters, set in <code>config/settings.yaml</code>.
-  </p>
-</div>
-
-<div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 4px;">Instagram Reel hooks</div>
-  <p class="meta" style="margin: 0 0 12px;">
-    The on-video hook has no review card — a draft lands straight in the field and you type over it. Those rewrites are now recorded too, and the ones you write yourself become the examples the next draft learns from.
-  </p>
-
-  <div class="sg-loop-grid">
-    <div class="sg-loop-stat">
-      <div class="sg-loop-value">{{ hook_loop.total or 0 }}</div>
-      <div class="meta">Hooks drafted{% if hook_loop.total %} · {{ hook_loop.resolved or 0 }} on posted reels{% endif %}</div>
-    </div>
-    <div class="sg-loop-stat">
-      <div class="sg-loop-value">
-        {% if hook_loop.kept_rate is not none %}{{ (hook_loop.kept_rate * 100)|round|int }}%{% else %}—{% endif %}
-      </div>
-      <div class="meta">Hooks you kept largely intact</div>
-    </div>
-    <div class="sg-loop-stat">
-      <div class="sg-loop-value">
-        {% if hook_loop.median_draft_words and hook_loop.median_posted_words %}
-          {{ hook_loop.median_draft_words|round|int }} → {{ hook_loop.median_posted_words|round|int }}
-        {% else %}—{% endif %}
-      </div>
-      <div class="meta">Median words: drafted → used</div>
+<section class="set-section" id="hooks">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Instagram hooks</h2>
+      <p class="set-section-desc">The short line shown on top of a reel. The app drafts one; whatever you change is remembered for next time.</p>
     </div>
   </div>
-
-  {% if hook_pairs %}
-  <details style="margin-top: 14px;">
-    <summary class="meta" style="cursor: pointer;">Recent hooks: drafted vs. used ({{ hook_pairs|length }})</summary>
-    <div style="margin-top: 10px;">
-      {% for p in hook_pairs %}
-      <div class="insight-row">
-        <div class="insight-body">
-          <div class="meta" style="margin-bottom: 4px;">
-            AI draft · {{ p.proposed_words }} words
-            {% if p.kept %}<span class="badge supportive">kept</span>{% else %}<span class="badge">rewritten</span>{% endif %}
-          </div>
-          <div class="meta" style="opacity: .75;">{{ p.proposed }}</div>
-          <div class="insight-label" style="margin-top: 8px;">{{ p.final }}</div>
-          <div class="meta">You used · {{ p.final_words }} words</div>
-        </div>
+  <div class="set-section-body">
+    <div class="set-stats">
+      <div class="set-stat">
+        <div class="set-stat-value">{% if hook_loop.kept_rate is not none %}{{ (hook_loop.kept_rate * 100)|round|int }}%{% else %}—{% endif %}</div>
+        <div class="set-stat-label">Hooks used mostly as written</div>
       </div>
-      {% endfor %}
+      <div class="set-stat">
+        <div class="set-stat-value">{{ hook_loop.total or 0 }}</div>
+        <div class="set-stat-label">Hooks drafted{% if hook_loop.total %} · {{ hook_loop.resolved or 0 }} on posted reels{% endif %}</div>
+      </div>
+      <div class="set-stat">
+        <div class="set-stat-value">{% if hook_loop.median_draft_words and hook_loop.median_posted_words %}{{ hook_loop.median_draft_words|round|int }} → {{ hook_loop.median_posted_words|round|int }}{% else %}—{% endif %}</div>
+        <div class="set-stat-label">Typical words, drafted → used</div>
+      </div>
     </div>
-  </details>
-  {% endif %}
+    {% if hook_pairs %}
+    <details class="set-more">
+      <summary>Recent hooks next to what was used ({{ hook_pairs|length }})</summary>
+      <div class="set-more-body">
+        {% for p in hook_pairs %}
+        <div class="set-rule" style="grid-template-columns: minmax(0, 1fr);">
+          <div class="set-rule-body">
+            <span class="set-rule-when">Draft · {{ p.proposed_words }} words · {{ "kept" if p.kept else "rewritten" }}</span>
+            <div class="set-rule-text" style="color: var(--text-dim);">{{ p.proposed }}</div>
+            <span class="set-rule-when" style="margin-top: 8px; color: var(--accent);">Used · {{ p.final_words }} words</span>
+            <div class="set-rule-text">{{ p.final }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </details>
+    {% endif %}
+  </div>
+</section>
 
-  <p class="meta" style="margin: 12px 0 0;">
-    Hooks are already capped at 3–12 words, so there's no length target here. Note that Instagram performance isn't tracked yet — unlike Threads posts, reels have no metrics coming back, so this measures what you keep, not what works.
-  </p>
+<details class="set-more" style="margin: 4px 0 24px;">
+  <summary>How captions are written</summary>
+  <div class="set-more-body">
+    <p>The rules you switch on go to the caption writer as a menu of moves you like, with <strong>Try first</strong> rules at the top. It also learns your voice from the captions you've posted. It picks the single rule that suits the clip — stacking several is what makes captions read like a template.</p>
+    <p>Two things always hold, whatever the rules say: it never adds facts that aren't in the clip, and it keeps to the length target (at most {{ max_chars }} characters). A rule that would need an extra sentence gets skipped instead.</p>
+    <p>If drafts come back too wordy, switching rules off works better than adding more — rules like “…then explain it” or “end with a question” each add a sentence.</p>
+  </div>
+</details>
 </div>
-
-<div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 6px;">How this is used</div>
-  <p class="meta" style="margin: 0 0 8px;">Enabled rules go into the caption-drafting prompt as a menu of moves you like (High-priority first), on top of the voice the AI already learns from your published captions. It chooses the single rule that fits the clip — stacking several is what makes a caption read like a template.</p>
-  <p class="meta" style="margin: 0 0 8px;">Hard rules always hold regardless of what you write: the AI won't invent facts that aren't in the clip's transcript, and length outranks every rule here — a move that costs an extra sentence gets skipped rather than stretching the caption.</p>
-  <p class="meta" style="margin: 0;">Watch the length cost of your own rules. Anything phrased as “…then explain it” or “end with a question” mandates a second sentence, and a few of those enabled together are what produce a long, template-shaped caption. If drafts are coming back too wordy, turning rules off works better than adding more.</p>
-</div>
-
-<p class="meta" style="margin-top: 12px;">Stored in <code>config/caption_style.yaml</code> if you'd rather edit it by hand.</p>
 
 <script>
   let rules = {{ rules|tojson }};
-  const TRASH_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+  const form = document.getElementById('rules-form');
+  const editing = new Set();
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+  function changed() { if (window.markSettingsDirty) window.markSettingsDirty(form); }
 
   function renderRules() {
     const box = document.getElementById('rules-list');
     box.textContent = '';
     if (!rules.length) {
-      const p = document.createElement('p');
-      p.className = 'meta';
-      p.style.margin = '0';
-      p.textContent = 'No rules yet. Add one below, or promote a suggestion from “Learned from your posts”.';
-      box.appendChild(p);
+      const empty = el('div', 'set-callout is-info');
+      empty.appendChild(el('span', 'set-callout-title', 'No caption rules yet'));
+      empty.appendChild(el('p', '', 'Add one, or add an idea from “Ideas from your best posts” below.'));
+      box.appendChild(empty);
       return;
     }
     rules.forEach((r, i) => {
-      const row = document.createElement('div');
-      row.className = 'rule-row' + (r.enabled ? '' : ' is-off');
+      const row = el('div', 'set-rule' + (r.enabled ? '' : ' is-off'));
 
-      // Enable/disable switch
-      const sw = document.createElement('label');
-      sw.className = 'switch';
-      sw.title = r.enabled ? 'Enabled — click to pause' : 'Paused — click to enable';
+      const sw = el('label', 'switch');
+      sw.title = r.enabled ? 'On — click to pause' : 'Paused — click to turn on';
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = !!r.enabled;
-      cb.addEventListener('change', () => { rules[i].enabled = cb.checked; renderRules(); });
-      const track = document.createElement('span');
-      track.className = 'switch-track';
+      cb.setAttribute('aria-label', 'Rule on');
+      cb.addEventListener('change', () => { rules[i].enabled = cb.checked; changed(); renderRules(); });
+      const track = el('span', 'switch-track');
       track.innerHTML = '<span class="switch-thumb"></span>';
-      sw.appendChild(cb); sw.appendChild(track);
+      sw.append(cb, track);
 
-      // Rule text
-      const text = document.createElement('input');
-      text.type = 'text';
-      text.className = 'rule-text';
-      text.maxLength = 300;
-      text.placeholder = 'e.g. Lead with a one-line pull quote from the transcript.';
-      text.value = r.text || '';
-      text.addEventListener('input', () => { rules[i].text = text.value; });
+      const body = el('div', 'set-rule-body');
+      if (editing.has(i)) {
+        const text = document.createElement('input');
+        text.type = 'text';
+        text.className = 'rule-text';
+        text.maxLength = 300;
+        text.placeholder = 'e.g. Lead with a one-line quote from the clip.';
+        text.value = r.text || '';
+        text.addEventListener('input', () => { rules[i].text = text.value; });
+        text.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); editing.delete(i); renderRules(); } });
+        text.addEventListener('blur', () => { if ((rules[i].text || '').trim()) { editing.delete(i); renderRules(); } });
+        body.appendChild(text);
+        setTimeout(() => text.focus(), 0);
+      } else {
+        const shown = r.text || '';
+        body.appendChild(el('div', 'set-rule-text' + (shown ? '' : ' is-empty'), shown || 'Empty rule — click Edit to write it'));
+        if (!r.enabled) body.appendChild(el('div', 'set-rule-meta', 'Paused'));
+      }
 
-      // Priority
-      const pri = document.createElement('select');
-      pri.className = 'rule-priority';
-      pri.innerHTML = '<option value="normal">Normal</option><option value="high">High priority</option>';
-      pri.value = r.priority === 'high' ? 'high' : 'normal';
-      pri.addEventListener('change', () => { rules[i].priority = pri.value; });
-
-      // Delete
-      const del = document.createElement('button');
+      const actions = el('div', 'set-rule-actions');
+      const first = el('label', 'set-pill-toggle');
+      first.title = 'Considered before the other rules';
+      const fcb = document.createElement('input');
+      fcb.type = 'checkbox';
+      fcb.checked = r.priority === 'high';
+      fcb.addEventListener('change', () => { rules[i].priority = fcb.checked ? 'high' : 'normal'; changed(); });
+      first.append(fcb, document.createTextNode('★ Try first'));
+      actions.appendChild(first);
+      if (!editing.has(i)) {
+        const edit = el('button', 'set-link-btn', 'Edit');
+        edit.type = 'button';
+        edit.addEventListener('click', () => { editing.add(i); renderRules(); });
+        actions.appendChild(edit);
+      }
+      const del = el('button', 'set-link-btn is-danger', 'Remove');
       del.type = 'button';
-      del.className = 'reject sm icon-btn';
-      del.title = 'Delete rule';
-      del.setAttribute('aria-label', 'Delete rule');
-      del.innerHTML = TRASH_SVG;
-      del.addEventListener('click', () => { rules.splice(i, 1); renderRules(); });
+      del.addEventListener('click', () => {
+        rules.splice(i, 1);
+        const shifted = [...editing].filter(x => x !== i).map(x => x > i ? x - 1 : x);
+        editing.clear(); shifted.forEach(x => editing.add(x));
+        changed();
+        renderRules();
+      });
+      actions.appendChild(del);
 
-      row.append(sw, text, pri, del);
+      row.append(sw, body, actions);
       box.appendChild(row);
     });
   }
 
   function addRule(text, priority) {
     rules.push({ text: text || '', enabled: true, priority: priority || 'normal' });
+    if (!text) editing.add(rules.length - 1);
+    changed();
     renderRules();
-    const inputs = document.querySelectorAll('#rules-list .rule-text');
-    if (inputs.length) inputs[inputs.length - 1].focus();
   }
 
-  // ---- Learned suggestions (LLM-distilled editorial rules) ----
+  // ---- Ideas (patterns distilled from the account's captions) ----
   let suggestions = {{ suggestions|tojson }};
   let hasGenerated = {{ 'true' if has_generated else 'false' }};
 
@@ -239,43 +249,26 @@
     const box = document.getElementById('suggestions-list');
     box.textContent = '';
     if (!suggestions.length) {
-      const p = document.createElement('p');
-      p.className = 'meta';
-      p.style.margin = '0';
-      p.textContent = hasGenerated
-        ? 'No suggestions right now — add more posts (or refresh) to distill new patterns.'
-        : 'Click “Suggest rules” to analyze your posts and propose editorial rules you can promote.';
-      box.appendChild(p);
+      box.appendChild(el('p', 'set-help', hasGenerated
+        ? 'No new ideas right now. Check back after more posts go out.'
+        : 'Click “Find new ideas” to look through your posts for patterns worth keeping.'));
       return;
     }
     suggestions.forEach((s) => {
-      const row = document.createElement('div');
-      row.className = 'insight-row';
+      const row = el('div', 'set-rule');
+      row.style.gridTemplateColumns = 'minmax(0, 1fr) auto';
       row.dataset.key = s.key;
-
-      const body = document.createElement('div');
-      body.className = 'insight-body';
-      const label = document.createElement('div');
-      label.className = 'insight-label';
-      label.textContent = s.rule;
-      body.appendChild(label);
-      if (s.why) {
-        const why = document.createElement('div');
-        why.className = 'meta';
-        why.textContent = s.why;
-        body.appendChild(why);
-      }
-
-      const actions = document.createElement('div');
-      actions.className = 'insight-actions';
-      const add = document.createElement('button');
-      add.type = 'button'; add.className = 'btn sm'; add.textContent = 'Add as rule';
+      const body = el('div', 'set-rule-body');
+      body.appendChild(el('div', 'set-rule-text', s.rule));
+      if (s.why) body.appendChild(el('div', 'set-rule-meta', s.why));
+      const actions = el('div', 'set-rule-actions');
+      const add = el('button', 'btn sm', 'Add as a rule');
+      add.type = 'button';
       add.addEventListener('click', () => promoteSuggestion(s));
-      const dis = document.createElement('button');
-      dis.type = 'button'; dis.className = 'btn ghost sm'; dis.textContent = 'Dismiss';
+      const dis = el('button', 'set-link-btn', 'Dismiss');
+      dis.type = 'button';
       dis.addEventListener('click', () => dismissSuggestion(s));
       actions.append(add, dis);
-
       row.append(body, actions);
       box.appendChild(row);
     });
@@ -290,11 +283,11 @@
     addRule(s.rule, 'high');
     sendDismiss(s.key);            // it's a rule now; don't keep suggesting it
     removeSuggestion(s.key);
-    document.getElementById('rules-list').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    document.getElementById('caption-rules').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   async function dismissSuggestion(s) {
-    if (!(await confirmDialog('Hide this suggestion? It won\'t show up here again.', { okText: 'Dismiss' }))) return;
+    if (!(await confirmDialog('Hide this idea? It won\'t be suggested again.', { okText: 'Dismiss' }))) return;
     sendDismiss(s.key);
     removeSuggestion(s.key);
   }
@@ -308,7 +301,7 @@
   async function refreshSuggestions() {
     const btn = document.getElementById('refresh-suggestions');
     const label = btn.textContent;
-    btn.disabled = true; btn.textContent = 'Analyzing your posts…';
+    btn.disabled = true; btn.textContent = 'Looking through your posts…';
     try {
       const r = await fetch('/style-guide/suggestions/refresh', { method: 'POST' });
       const d = await r.json();
@@ -317,14 +310,14 @@
       suggestions = d.items || [];
       renderSuggestions();
       if (!suggestions.length)
-        alertDialog("No new rules to suggest — either there aren't enough posts yet, or your current rules already cover the patterns.");
+        alertDialog("No new ideas — either there aren't enough posts yet, or your rules already cover what's working.");
     } catch (e) {
-      alertDialog('Could not generate suggestions: ' + e.message);
+      alertDialog('Could not find ideas: ' + e.message);
     }
     btn.disabled = false; btn.textContent = label;
   }
 
-  document.getElementById('rules-form').addEventListener('submit', () => {
+  form.addEventListener('submit', () => {
     const cleaned = rules
       .map(r => ({ text: (r.text || '').trim(), enabled: !!r.enabled, priority: r.priority === 'high' ? 'high' : 'normal' }))
       .filter(r => r.text);

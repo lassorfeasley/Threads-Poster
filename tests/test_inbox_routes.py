@@ -236,6 +236,32 @@ class InboxRoutesTest(unittest.TestCase):
         r = self.client.post(f"/inbox/{item_id}/reject", headers={"Accept": "application/json"})
         self.assertEqual(r.status_code, 409)
 
+    def test_sharing_a_jobs_files_never_blocks_the_job(self):
+        import threading
+
+        release = threading.Event()
+        calls = []
+
+        def slow_push():
+            calls.append(1)
+            release.wait(5)
+
+        with mock.patch.object(self.main.datasync, "push_now", side_effect=slow_push), \
+                mock.patch.object(self.main.pagecache, "invalidate"):
+            self.main._push_soon()
+            self.main._push_soon()     # one already waiting: no second thread
+            for _ in range(50):
+                if calls:
+                    break
+                threading.Event().wait(0.01)
+            self.assertEqual(len(calls), 1)
+            release.set()
+            for _ in range(100):
+                if not self.main._push_pending:
+                    break
+                threading.Event().wait(0.01)
+            self.assertFalse(self.main._push_pending)
+
     def test_settings_switch(self):
         r = self.client.post("/inbox/settings",
                              data={"enabled": "on", "per_day": "5", "min_score": "0.7",

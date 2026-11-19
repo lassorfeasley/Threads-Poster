@@ -18,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
@@ -43,6 +44,7 @@ from ..config import (
     load_brand, load_brand_rules, load_caption_rules, load_first_reply, load_keywords,
     load_settings, load_workspaces, render_caption_guide, save_brand,
     save_brand_rules, save_caption_rules, save_first_reply, save_keywords,
+    save_timezone, timezone_editable, timezone_saved,
 )
 from ..db import (
     SessionLocal,
@@ -123,7 +125,7 @@ from ..publishing import (
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_clauses, sort_candidates
-from .. import auto_triage, labels, llm, posting_schedule, rerun_review, triage_model
+from .. import auto_triage, labels, llm, posting_plan, posting_schedule, rerun_review, triage_model
 from ..config import scheduler_timezone
 from ..scheduler import (
     PIN_HORIZON_DAYS,
@@ -816,13 +818,40 @@ def _in_background(fn, *args) -> None:
 
 
 def _after_background_work() -> None:
-    """A job finished: drop the cached reads, and share what it rendered right
-    away (a hosted machine may sleep once nobody is on the page)."""
+    """A job finished: drop the cached reads, and share what it rendered soon
+    (a hosted machine may sleep once nobody is on the page)."""
     pagecache.invalidate()
-    try:
-        datasync.push_now()
-    except Exception:
-        log.exception("Sharing a finished job's files failed (the timer will retry)")
+    _push_soon()
+
+
+# Sharing a job's files must never hold the job's own thread: a mirror sweep
+# can take minutes, and with a file the store keeps refusing it took an hour —
+# during which the clip engine's queue (it calls this when a run ends), the
+# home worker and the inbox all stood still. One push at a time waits behind a
+# sweep in progress; anything written meanwhile goes with it or with the
+# mirror's next timed sweep.
+_push_lock = threading.Lock()
+_push_pending = False
+
+
+def _push_soon() -> None:
+    global _push_pending
+    with _push_lock:
+        if _push_pending:
+            return
+        _push_pending = True
+
+    def _run() -> None:
+        global _push_pending
+        try:
+            datasync.push_now()
+        except Exception:
+            log.exception("Sharing a finished job's files failed (the timer will retry)")
+        finally:
+            with _push_lock:
+                _push_pending = False
+
+    threading.Thread(target=_run, daemon=True, name="push-after-job").start()
 
 
 def _retrain_triage_model_in_background() -> None:
@@ -1017,6 +1046,14 @@ def _home_worker_tick() -> dict:
         inbox_round = _inbox_tick()
     except Exception:
         log.exception("Inbox round failed")
+    # The posting plan grows with the archive (a rerun per 60 posts): keep the
+    # schedule from tomorrow on in step. One count query when nothing changed.
+    try:
+        with session_scope() as session:
+            if posting_plan.ensure(session, today=_schedule_today()):
+                pagecache.invalidate()
+    except Exception:
+        log.exception("Posting plan check failed")
     return {"approved": picked.get("approved", 0), "downloads": downloaded,
             "inbox_made": inbox_round.get("made", 0), "inbox_queued": inbox_round.get("queued", 0)}
 
@@ -7166,6 +7203,56 @@ def _schedule_today() -> dt.date:
     return utcnow().astimezone(scheduler_timezone()).date()
 
 
+# The time zones the Posting schedule page offers first, by region. Any other
+# IANA zone can be typed in ("Somewhere else…").
+_COMMON_TIMEZONES = (
+    ("North America", (
+        ("America/New_York", "Eastern — New York"), ("America/Chicago", "Central — Chicago"),
+        ("America/Denver", "Mountain — Denver"), ("America/Phoenix", "Arizona — Phoenix"),
+        ("America/Los_Angeles", "Pacific — Los Angeles"), ("America/Anchorage", "Alaska — Anchorage"),
+        ("Pacific/Honolulu", "Hawaii — Honolulu"), ("America/Toronto", "Toronto"),
+        ("America/Vancouver", "Vancouver"), ("America/Mexico_City", "Mexico City"),
+    )),
+    ("South America", (
+        ("America/Sao_Paulo", "São Paulo"), ("America/Argentina/Buenos_Aires", "Buenos Aires"),
+        ("America/Bogota", "Bogotá"), ("America/Lima", "Lima"),
+    )),
+    ("Europe and Africa", (
+        ("Europe/London", "London"), ("Europe/Dublin", "Dublin"), ("Europe/Lisbon", "Lisbon"),
+        ("Europe/Paris", "Paris"), ("Europe/Berlin", "Berlin"), ("Europe/Madrid", "Madrid"),
+        ("Europe/Rome", "Rome"), ("Europe/Amsterdam", "Amsterdam"), ("Europe/Stockholm", "Stockholm"),
+        ("Europe/Warsaw", "Warsaw"), ("Europe/Athens", "Athens"), ("Europe/Istanbul", "Istanbul"),
+        ("Africa/Lagos", "Lagos"), ("Africa/Cairo", "Cairo"), ("Africa/Nairobi", "Nairobi"),
+        ("Africa/Johannesburg", "Johannesburg"),
+    )),
+    ("Asia and the Pacific", (
+        ("Asia/Dubai", "Dubai"), ("Asia/Karachi", "Karachi"), ("Asia/Kolkata", "India"),
+        ("Asia/Dhaka", "Dhaka"), ("Asia/Bangkok", "Bangkok"), ("Asia/Jakarta", "Jakarta"),
+        ("Asia/Singapore", "Singapore"), ("Asia/Manila", "Manila"), ("Asia/Hong_Kong", "Hong Kong"),
+        ("Asia/Shanghai", "China"), ("Asia/Seoul", "Seoul"), ("Asia/Tokyo", "Tokyo"),
+        ("Australia/Perth", "Perth"), ("Australia/Sydney", "Sydney"), ("Pacific/Auckland", "Auckland"),
+    )),
+)
+
+
+def _utc_offset(zone: str, now: dt.datetime) -> str:
+    minutes = int(now.astimezone(ZoneInfo(zone)).utcoffset().total_seconds() // 60)
+    hours, rest = divmod(abs(minutes), 60)
+    return f"UTC{'+' if minutes >= 0 else '−'}{hours}" + (f":{rest:02d}" if rest else "")
+
+
+def _timezone_choices(now: dt.datetime) -> list[tuple[str, list[tuple[str, str]]]]:
+    return [(group, [(key, f"{label} ({_utc_offset(key, now)})") for key, label in zones])
+            for group, zones in _COMMON_TIMEZONES]
+
+
+def _all_timezones() -> list[str]:
+    from zoneinfo import available_timezones
+
+    return sorted(z for z in available_timezones()
+                  if "/" in z and not z.startswith(("Etc/", "SystemV/", "posix/", "right/")))
+
+
 @app.get("/schedule", response_class=HTMLResponse)
 def schedule_page(request: Request, msg: str = ""):
     """Posts per day and their times (app/posting_schedule.py)."""
@@ -7175,11 +7262,26 @@ def schedule_page(request: Request, msg: str = ""):
     now_tz = utcnow().astimezone(scheduler_timezone())
     with session_scope(read_only=True) as session:
         outlook = recycle_overview(session)
+        archive = posting_plan.archive_size(session)
+        mode = posting_plan.load_mode(session)
     library = {"size": len(outlook),
                "ready": sum(1 for f in outlook.values() if f["next_eligible"] <= today)}
+    tz_name = str(scheduler_timezone())
     return templates.TemplateResponse(
         request, "schedule.html",
         {"current": current, "latest": latest,
+         "plan_mode": mode,
+         "plan_progress": posting_plan.progress(archive),
+         "plan_tiers": posting_plan.tiers(),
+         "plan_preview": {m: posting_plan.plan(archive, m) for m in posting_plan.MODES},
+         "plan_waking": (posting_plan.WAKING_FIRST, posting_plan.WAKING_LAST),
+         "tz_city": tz_name.split("/")[-1].replace("_", " "),
+         "now_label": now_tz.strftime("%-I:%M %p"),
+         "tz_editable": timezone_editable(),
+         "tz_saved": timezone_saved(),
+         "tz_choices": _timezone_choices(utcnow()),
+         "tz_common": [k for _, zones in _COMMON_TIMEZONES for k, _ in zones],
+         "tz_all": _all_timezones(),
          "notes": posting_schedule.notes(latest["windows"], latest["reruns"]),
          "rerun_library": library,
          "rerun_hours": load_settings().get("scheduler.placement.reruns.stage_ahead_hours", 24),
@@ -7219,6 +7321,36 @@ def save_schedule(windows: list[str] = Form(default=[]), kinds: list[str] = Form
         msg += (f" — moved {result['moved']} pinned post{'' if result['moved'] == 1 else 's'}"
                 + (f", unpinned {result['unpinned']}" if result["unpinned"] else ""))
     return _flash("/schedule", msg)
+
+
+@app.post("/schedule/timezone")
+def save_schedule_timezone(tz: str = Form("")):
+    """The account's own time zone (config.save_timezone). Takes effect at once:
+    today's remaining posts move to the same local times in the new zone."""
+    try:
+        name = save_timezone(tz)
+    except ValueError as exc:
+        return _flash("/schedule", str(exc))
+    city = name.split("/")[-1].replace("_", " ")
+    return _flash("/schedule", f"Saved — posts are now timed for {city}. "
+                               f"The rest of today's posts move to {city} times.")
+
+
+@app.post("/schedule/plan")
+def save_schedule_plan(mode: str = Form("")):
+    """Choose when the plan's posts go out (app/posting_plan.py). The schedule
+    follows from tomorrow; posts already lined up for today stay put."""
+    today = _schedule_today()
+    try:
+        with session_scope() as session:
+            posting_plan.save_mode(session, mode)
+            result = posting_plan.ensure(session, today=today)
+    except ValueError as exc:
+        return _flash("/schedule", str(exc))
+    label = "during waking hours" if mode == "waking" else "around the clock"
+    if result is None:
+        return _flash("/schedule", f"Saved — your posts already go out {label}")
+    return _flash("/schedule", f"Saved — from tomorrow, {result['per_day']} posts a day, {label}")
 
 
 @app.post("/schedule/cancel")

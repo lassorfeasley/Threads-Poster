@@ -1,161 +1,216 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set ta_sub %}Connect the accounts this app posts to — Threads for every post, Instagram for the optional paired reel, LinkedIn, X and Facebook for automatic mirrors.{% endset %}
-{{ ui.pagebar("Connected accounts", sub=ta_sub) }}
+{#
+  Connected accounts — where posts go. Customer-facing: each platform is one
+  row with a status and one action; the code-paste fallback and the server
+  setup steps (environment variables) are folded away. Every form posts to the
+  same routes as before.
+#}
+{{ ui.pagebar("Connected accounts", sub="The accounts your clips are posted to. Threads gets every post; the others are optional and get a copy automatically.") }}
 
-<div class="card">
-  <div class="card-title" style="margin-bottom: 8px;">Threads</div>
-  {% if authenticated %}
-    <p class="meta"><span class="badge supportive">Connected</span> Posts are published to this account.</p>
-  {% else %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
-    <p class="meta">1. <a href="{{ auth_url }}" target="_blank">Authorize with Threads ↗</a> using the account you post from.<br>
-       2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
-       Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
-    <form method="post" action="/threads/connect">
-      <input type="hidden" name="next" value="/connections">
-      <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
-      <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
-    </form>
-  {% endif %}
-</div>
+{% macro code_form(action, placeholder) %}
+  <details class="set-more">
+    <summary>Didn't come back here on its own? Paste the code</summary>
+    <div class="set-more-body">
+      <p>After you approve access you land on a page whose address contains <code>code=…</code>. Copy everything after <code>code=</code> (or the whole address) and paste it here.</p>
+      <form method="post" action="{{ action }}" class="set-code-form">
+        <input type="hidden" name="next" value="/connections">
+        <input type="text" name="code" placeholder="{{ placeholder }}" required aria-label="Code">
+        <button class="btn">Connect</button>
+      </form>
+    </div>
+  </details>
+{% endmacro %}
 
-<div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 8px;">Instagram</div>
-  {% if ig_authenticated %}
-    <p class="meta"><span class="badge supportive">Connected</span>
-      Reels publish to {% if ig_username %}<strong>@{{ ig_username }}</strong>{% else %}this account{% endif %}
-      when you tick “Include Instagram Reel” on a clip's Post step.</p>
-  {% elif not ig_configured %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not configured</span></p>
-    <p class="meta">To publish Reels, add the <strong>Instagram API with Instagram Login</strong> product to
-      your Meta app at developers.facebook.com (your Instagram account must be a
-      <em>professional</em> account, added as an Instagram Tester), then set
-      <code>INSTAGRAM_APP_ID</code>, <code>INSTAGRAM_APP_SECRET</code> and
-      <code>INSTAGRAM_REDIRECT_URI</code> in <code>.env</code> and restart.</p>
-  {% else %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
-    <p class="meta">1. <a href="{{ ig_auth_url }}" target="_blank">Authorize with Instagram ↗</a> using the account you post reels from.<br>
-       2. After approving you'll land on your redirect URI with <code>?code=...</code> in the URL.
-       Paste that code here (everything after <code>code=</code>, minus any trailing <code>#_</code>).</p>
-    <form method="post" action="/instagram/connect">
-      <input type="hidden" name="next" value="/connections">
-      <input type="text" name="code" placeholder="AQB..." required style="max-width: 460px;">
-      <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
-    </form>
-  {% endif %}
-</div>
+<div class="set-page">
 
-<div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 8px;">LinkedIn</div>
-  {% if li_authenticated %}
-    <p class="meta"><span class="badge supportive">Connected</span>
-      Every published Threads post is mirrored to
-      {% if li_info.organization_name %}<strong>{{ li_info.organization_name }}</strong>{% else %}<code>{{ li_info.organization_urn or "the company page" }}</code>{% endif %}
-      with the same caption and clip.
-      {% if not li_enabled %}<span class="badge hostile">Paused</span> <code>linkedin.enabled</code> is off in settings.yaml.{% endif %}</p>
-    {% if li_info.reconnect_in_days is not none %}
-    <p class="meta">{% if li_info.auto_refresh %}Token refreshes automatically; reconnect within {{ li_info.reconnect_in_days }} days.{% else %}Token expires in {{ li_info.reconnect_in_days }} days — reconnect before then.{% endif %}</p>
-    {% endif %}
-  {% elif not li_configured %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not configured</span></p>
-    <p class="meta">Set <code>LINKEDIN_CLIENT_ID</code>, <code>LINKEDIN_CLIENT_SECRET</code> and
-      <code>LINKEDIN_REDIRECT_URI</code> (a redirect URL registered on the LinkedIn app's Auth tab)
-      in <code>.env</code> and restart.</p>
-  {% else %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
-  {% endif %}
-  {% if li_configured and (not li_authenticated or li_info.reconnect_in_days is not none and li_info.reconnect_in_days <= 14) %}
-    <p class="meta">1. <a href="{{ li_auth_url }}" target="_blank">{{ 'Reconnect' if li_authenticated else 'Authorize' }} with LinkedIn ↗</a> as an admin of the company page.<br>
-       2. If you land on this dashboard you're done. Otherwise copy the <code>?code=...</code>
-       from the redirect URL (or the whole URL) and paste it here.</p>
-    <form method="post" action="/linkedin/connect">
-      <input type="hidden" name="next" value="/connections">
-      <input type="text" name="code" placeholder="AQT..." required style="max-width: 460px;">
-      <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
-    </form>
-  {% endif %}
-</div>
+<section class="set-section" id="accounts">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Your accounts</h2>
+      <p class="set-section-desc">Connect an account once; it stays connected. If one ever stops working, it shows here in red.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
 
-<div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 8px;">X</div>
-  {% if x_authenticated %}
-    <p class="meta"><span class="badge supportive">Connected</span>
-      Every published Threads post is mirrored to
-      {% if x_info.username %}<strong>@{{ x_info.username }}</strong>{% else %}the connected account{% endif %}
-      with the same caption and clip. No first comment, and captions containing a link are skipped.
-      {% if not x_enabled %}<span class="badge hostile">Paused</span> <code>x.enabled</code> is off in settings.yaml.{% endif %}</p>
-  {% elif not x_configured %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not configured</span></p>
-    <p class="meta">Set <code>X_CLIENT_ID</code>, <code>X_CLIENT_SECRET</code> and
-      <code>X_REDIRECT_URI</code> (this dashboard's <code>/x/callback</code>, registered as a
-      callback URL on the X app) in <code>.env</code> and restart.</p>
-  {% else %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
-  {% endif %}
-  {% if x_configured %}
-    <p class="meta"><a href="{{ x_auth_url }}">{{ 'Reconnect' if x_authenticated else 'Authorize' }} with X ↗</a>
-      while signed in to the account you want to post as. X sends you back here to finish.</p>
-  {% endif %}
-</div>
+    {# ---- Threads ---- #}
+    <div class="set-account" id="threads">
+      <div class="set-account-mark" aria-hidden="true">@</div>
+      <div>
+        <div class="set-account-name">Threads
+          {% if authenticated %}<span class="set-status is-on">Connected</span>{% else %}<span class="set-status is-error">Not connected</span>{% endif %}</div>
+        <div class="set-account-line">
+          {% if authenticated %}Every post is published to this account.
+          {% else %}Every post goes to Threads, so this one has to be connected before anything can post. Sign in with the account you post from.{% endif %}
+        </div>
+        {% if not authenticated %}{{ code_form("/threads/connect", "AQB…") }}{% endif %}
+      </div>
+      <div class="set-account-actions">
+        {% if not authenticated %}<a class="btn-primary btn" href="{{ auth_url }}" target="_blank" rel="noopener">Connect Threads ↗</a>{% endif %}
+      </div>
+    </div>
 
-<div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 8px;">Facebook Page</div>
-  {% if fb_pause %}
-    <p class="meta"><span class="badge hostile">Paused for copyright</span>
-      {{ fb_pause.reason }}
-      {% if fb_pause.threads_post_pk %}<a href="/post/{{ fb_pause.threads_post_pk }}">Open the post</a>.{% endif %}
-      Nothing goes to Facebook until you resume. Check the Page's Support Inbox for the claim first.</p>
-    <form method="post" action="/facebook/resume"
-          data-confirm="Resume posting to the Facebook Page? Every published Threads post will be mirrored again."
-          data-confirm-ok="Resume">
-      <input type="hidden" name="next" value="/connections">
-      <div style="margin: 4px 0 12px;"><button class="sm">Resume Facebook mirror</button></div>
-    </form>
-  {% endif %}
-  {% if fb_authenticated %}
-    <p class="meta"><span class="badge supportive">Connected</span>
-      Every published Threads post is mirrored to
-      {% if fb_info.page_name %}<strong>{{ fb_info.page_name }}</strong>{% else %}the Page{% endif %}
-      with the same caption and clip, as a regular Page video. The first reply Threads got is posted as a Page comment once the video is ready.
-      A copyright match pauses the mirror automatically.
-      {% if not fb_enabled %}<span class="badge hostile">Off</span> <code>facebook.enabled</code> is off in settings.yaml.{% endif %}</p>
-  {% elif not fb_configured %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not configured</span></p>
-    <p class="meta">Add the <strong>Facebook Login for Business</strong> product (Page permissions
-      <code>pages_show_list</code>, <code>pages_manage_posts</code>, <code>pages_read_engagement</code>,
-      <code>pages_manage_engagement</code>)
-      to a Meta app, then set <code>FACEBOOK_APP_ID</code>, <code>FACEBOOK_APP_SECRET</code> and
-      <code>FACEBOOK_REDIRECT_URI</code> in <code>.env</code> and restart.</p>
-  {% else %}
-    <p class="meta" style="margin-bottom: 10px;"><span class="badge hostile">Not connected</span></p>
-  {% endif %}
-  {% if fb_configured and fb_authenticated %}
-    <p class="meta">The Page token doesn't expire.
-      <a href="{{ fb_auth_url }}" target="_blank">Reconnect with Facebook ↗</a> only if posts start
-      failing with a token error, or to switch Pages.</p>
-  {% elif fb_configured %}
-    <p class="meta">1. <a href="{{ fb_auth_url }}" target="_blank">Authorize with Facebook ↗</a>
-      as someone who manages the Page, and tick the Page on the consent screen.<br>
-       2. If you land on this dashboard you're done. Otherwise copy the <code>?code=...</code>
-       from the redirect URL (or the whole URL) and paste it here.</p>
-    <form method="post" action="/facebook/connect">
-      <input type="hidden" name="next" value="/connections">
-      <input type="text" name="code" placeholder="AQD..." required style="max-width: 460px;">
-      <div style="margin-top: 12px;"><button class="primary">Connect</button></div>
-    </form>
-  {% endif %}
-</div>
+    {# ---- Instagram ---- #}
+    <div class="set-account" id="instagram">
+      <div class="set-account-mark" aria-hidden="true">IG</div>
+      <div>
+        <div class="set-account-name">Instagram
+          {% if ig_authenticated %}<span class="set-status is-on">Connected</span>
+          {% elif not ig_configured %}<span class="set-status is-off">Not set up</span>
+          {% else %}<span class="set-status is-off">Not connected</span>{% endif %}</div>
+        <div class="set-account-line">
+          {% if ig_authenticated %}Reels go to {% if ig_username %}<strong>@{{ ig_username }}</strong>{% else %}this account{% endif %} whenever “Include Instagram Reel” is ticked on a clip.
+          {% else %}Optional. Post a clip as an Instagram Reel too, with its caption on top.{% endif %}
+        </div>
+        {% if not ig_configured %}
+        <details class="set-more">
+          <summary>Setup for admins</summary>
+          <div class="set-more-body">
+            <p>Add the <strong>Instagram API with Instagram Login</strong> product to your Meta app at developers.facebook.com. The Instagram account must be a professional account, added as an Instagram Tester. Then set <code>INSTAGRAM_APP_ID</code>, <code>INSTAGRAM_APP_SECRET</code> and <code>INSTAGRAM_REDIRECT_URI</code> in <code>.env</code> and restart.</p>
+          </div>
+        </details>
+        {% elif not ig_authenticated %}{{ code_form("/instagram/connect", "AQB…") }}{% endif %}
+      </div>
+      <div class="set-account-actions">
+        {% if ig_configured and not ig_authenticated %}<a class="btn" href="{{ ig_auth_url }}" target="_blank" rel="noopener">Connect Instagram ↗</a>{% endif %}
+      </div>
+    </div>
 
-<div class="card" style="margin-top: 14px;">
-  <div class="card-title" style="margin-bottom: 6px;">Import history</div>
-  <p class="meta" style="margin: 0 0 12px;">Fetch posts you made directly on Threads (outside this app) and pull them in so Analytics can include them. This does not post anything.</p>
-  <form method="post" action="/threads/import-history"
-        data-confirm="Import your account's existing Threads posts (made outside this app) so analytics can include them? This does not post anything."
-        data-confirm-ok="Import">
-    <input type="hidden" name="next" value="/connections">
-    <button class="sm">Import Threads history</button>
-  </form>
+    {# ---- LinkedIn ---- #}
+    {% set li_soon = li_info.reconnect_in_days is not none and li_info.reconnect_in_days <= 14 %}
+    <div class="set-account" id="linkedin">
+      <div class="set-account-mark" aria-hidden="true">in</div>
+      <div>
+        <div class="set-account-name">LinkedIn
+          {% if li_authenticated and not li_enabled %}<span class="set-status is-warn">Paused</span>
+          {% elif li_authenticated and li_soon %}<span class="set-status is-warn">Reconnect soon</span>
+          {% elif li_authenticated %}<span class="set-status is-on">Connected</span>
+          {% elif not li_configured %}<span class="set-status is-off">Not set up</span>
+          {% else %}<span class="set-status is-off">Not connected</span>{% endif %}</div>
+        <div class="set-account-line">
+          {% if li_authenticated %}Every Threads post is copied to
+            {% if li_info.organization_name %}<strong>{{ li_info.organization_name }}</strong>{% else %}your company page{% endif %} with the same caption and clip.
+            {% if li_info.reconnect_in_days is not none %}
+              {% if li_info.auto_refresh %}Stays connected on its own; reconnect within {{ li_info.reconnect_in_days }} days.
+              {% else %}The connection ends in {{ li_info.reconnect_in_days }} days — reconnect before then.{% endif %}
+            {% endif %}
+            {% if not li_enabled %}Copies are switched off for now (<code>linkedin.enabled</code> in settings).{% endif %}
+          {% else %}Optional. Copy every Threads post to your LinkedIn company page.{% endif %}
+        </div>
+        {% if not li_configured %}
+        <details class="set-more">
+          <summary>Setup for admins</summary>
+          <div class="set-more-body">
+            <p>Set <code>LINKEDIN_CLIENT_ID</code>, <code>LINKEDIN_CLIENT_SECRET</code> and <code>LINKEDIN_REDIRECT_URI</code> (a redirect address registered on the LinkedIn app's Auth tab) in <code>.env</code> and restart.</p>
+          </div>
+        </details>
+        {% elif not li_authenticated or li_soon %}{{ code_form("/linkedin/connect", "AQT…") }}{% endif %}
+      </div>
+      <div class="set-account-actions">
+        {% if li_configured and (not li_authenticated or li_soon) %}<a class="btn" href="{{ li_auth_url }}" target="_blank" rel="noopener">{{ 'Reconnect' if li_authenticated else 'Connect' }} LinkedIn ↗</a>{% endif %}
+      </div>
+    </div>
+
+    {# ---- X ---- #}
+    <div class="set-account" id="x">
+      <div class="set-account-mark" aria-hidden="true">X</div>
+      <div>
+        <div class="set-account-name">X
+          {% if x_authenticated and not x_enabled %}<span class="set-status is-warn">Paused</span>
+          {% elif x_authenticated %}<span class="set-status is-on">Connected</span>
+          {% elif not x_configured %}<span class="set-status is-off">Not set up</span>
+          {% else %}<span class="set-status is-off">Not connected</span>{% endif %}</div>
+        <div class="set-account-line">
+          {% if x_authenticated %}Every Threads post is copied to {% if x_info.username %}<strong>@{{ x_info.username }}</strong>{% else %}the connected account{% endif %} with the same caption and clip. Posts whose caption has a link are skipped.
+            {% if not x_enabled %}Copies are switched off for now (<code>x.enabled</code> in settings).{% endif %}
+          {% else %}Optional. Copy every Threads post to X.{% endif %}
+        </div>
+        {% if not x_configured %}
+        <details class="set-more">
+          <summary>Setup for admins</summary>
+          <div class="set-more-body">
+            <p>Set <code>X_CLIENT_ID</code>, <code>X_CLIENT_SECRET</code> and <code>X_REDIRECT_URI</code> (this dashboard's <code>/x/callback</code>, registered as a callback on the X app) in <code>.env</code> and restart.</p>
+          </div>
+        </details>
+        {% elif x_authenticated %}
+        <details class="set-more">
+          <summary>When to reconnect</summary>
+          <div class="set-more-body"><p>Only if posts to X start failing, or to post as a different account. Sign in to that account on X first, then <a href="{{ x_auth_url }}">reconnect X</a> — X sends you back here.</p></div>
+        </details>
+        {% endif %}
+      </div>
+      <div class="set-account-actions">
+        {% if x_configured and not x_authenticated %}<a class="btn" href="{{ x_auth_url }}" title="Sign in to the X account you want to post as first; X sends you back here.">Connect X</a>{% endif %}
+      </div>
+    </div>
+
+    {# ---- Facebook ---- #}
+    <div class="set-account" id="facebook">
+      <div class="set-account-mark" aria-hidden="true">f</div>
+      <div>
+        <div class="set-account-name">Facebook Page
+          {% if fb_pause %}<span class="set-status is-error">Paused — copyright claim</span>
+          {% elif fb_authenticated and not fb_enabled %}<span class="set-status is-warn">Paused</span>
+          {% elif fb_authenticated %}<span class="set-status is-on">Connected</span>
+          {% elif not fb_configured %}<span class="set-status is-off">Not set up</span>
+          {% else %}<span class="set-status is-off">Not connected</span>{% endif %}</div>
+        {% if fb_pause %}
+        <div class="set-callout is-danger" style="margin: 10px 0 0;">
+          <span class="set-callout-title">Copies to Facebook are paused</span>
+          {{ fb_pause.reason }}
+          {% if fb_pause.threads_post_pk %}<a href="/post/{{ fb_pause.threads_post_pk }}">Open the post</a>.{% endif %}
+          Check the Page's Support Inbox for the claim before resuming.
+          <form method="post" action="/facebook/resume" class="set-callout-actions"
+                data-confirm="Resume copying to the Facebook Page? Every published Threads post will be copied again."
+                data-confirm-ok="Resume">
+            <input type="hidden" name="next" value="/connections">
+            <button class="btn sm">Resume copies to Facebook</button>
+          </form>
+        </div>
+        {% endif %}
+        <div class="set-account-line">
+          {% if fb_authenticated %}Every Threads post is copied to {% if fb_info.page_name %}<strong>{{ fb_info.page_name }}</strong>{% else %}the Page{% endif %} as a video, and its first reply is added as a comment. A copyright claim pauses copies automatically.
+            {% if not fb_enabled %}Copies are switched off for now (<code>facebook.enabled</code> in settings).{% endif %}
+          {% else %}Optional. Copy every Threads post to your Facebook Page as a video.{% endif %}
+        </div>
+        {% if not fb_configured %}
+        <details class="set-more">
+          <summary>Setup for admins</summary>
+          <div class="set-more-body">
+            <p>Add the <strong>Facebook Login for Business</strong> product to a Meta app with the Page permissions <code>pages_show_list</code>, <code>pages_manage_posts</code>, <code>pages_read_engagement</code> and <code>pages_manage_engagement</code>. Then set <code>FACEBOOK_APP_ID</code>, <code>FACEBOOK_APP_SECRET</code> and <code>FACEBOOK_REDIRECT_URI</code> in <code>.env</code> and restart.</p>
+          </div>
+        </details>
+        {% elif fb_authenticated %}
+        <details class="set-more">
+          <summary>When to reconnect</summary>
+          <div class="set-more-body"><p>Facebook's connection doesn't expire. Only if posts start failing with a sign-in error, or to switch to a different Page, <a href="{{ fb_auth_url }}" target="_blank" rel="noopener">reconnect Facebook ↗</a>.</p></div>
+        </details>
+        {% else %}{{ code_form("/facebook/connect", "AQD…") }}{% endif %}
+      </div>
+      <div class="set-account-actions">
+        {% if fb_configured and not fb_authenticated %}<a class="btn" href="{{ fb_auth_url }}" target="_blank" rel="noopener" title="Sign in as someone who manages the Page, and tick the Page on the consent screen.">Connect Facebook ↗</a>{% endif %}
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="set-section" id="import">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Bring in older posts</h2>
+      <p class="set-section-desc">Pull in posts you made directly on Threads, outside this app, so your analytics include them. Nothing is posted.</p>
+    </div>
+    <div class="set-section-aside">
+      <form method="post" action="/threads/import-history"
+            data-confirm="Bring in your account's existing Threads posts (made outside this app) so analytics can include them? Nothing is posted."
+            data-confirm-ok="Bring them in">
+        <input type="hidden" name="next" value="/connections">
+        <button class="btn sm">Import from Threads</button>
+      </form>
+    </div>
+  </div>
+  <div class="set-section-body" style="padding-top: 6px;"></div>
+</section>
 </div>
 {% endblock %}

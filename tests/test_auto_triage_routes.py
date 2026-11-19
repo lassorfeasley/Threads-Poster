@@ -145,9 +145,9 @@ class AutoTriageRoutesTest(unittest.TestCase):
         self.video(0.01)
         r = self.client.get("/auto-triage")
         self.assertEqual(r.status_code, 200)
-        self.assertIn("Automatic triage", r.text)
-        self.assertIn("Approval history cut-offs", r.text)
-        self.assertIn("Positioning fit cut-offs", r.text)
+        self.assertIn("Automation", r.text)
+        self.assertIn("Your past decisions", r.text)
+        self.assertIn("Brand fit", r.text)
         self.assertIn(">Off<", r.text)
 
     def test_switching_to_positioning_fit(self):
@@ -169,7 +169,7 @@ class AutoTriageRoutesTest(unittest.TestCase):
         high = [self.video(0.3) for _ in range(2)]
         self.switch_on()
         page = self.client.get("/auto-triage")
-        self.assertIn("rejects 3 waiting", page.text)
+        self.assertIn("would skip 3", page.text)
 
         r = self.client.post("/auto-triage/run", headers={"Accept": "application/json"})
         self.assertEqual(r.status_code, 200)
@@ -239,7 +239,7 @@ class AutoTriageRoutesTest(unittest.TestCase):
         from app import auto_select
 
         page = self.client.get("/auto-triage")
-        self.assertIn("Automatic approval", page.text)
+        self.assertIn("Approve promising videos", page.text)
         r = self.client.post("/auto-select/settings",
                              data={"enabled": "on", "per_day": "5", "min_prob": "0.05",
                                    "fit_floor": "0.2", "explore": "0.1", "fresh_days": "2"},

@@ -104,13 +104,120 @@ def load_settings() -> Settings:
     return settings
 
 
+DEFAULT_TIMEZONE = "America/New_York"
+TIMEZONE_TOKEN = f"timezone:{WORKSPACE}"
+
+# Rollout guard for choosing a time zone in the app: one switch for the whole
+# release, the same for every account, never a per-account setting. Only code
+# from this release on reads the zone an account saves. A machine that posts
+# while still on older code (the Fly worker's image, the GitHub Actions cron on
+# main) would keep posting on settings.yaml's zone while the others moved, and
+# the account would post on both clocks. Once every one of them runs this
+# code, delete the guard: this constant, the check in save_timezone, and the
+# locked branch on the Posting schedule page.
+TIMEZONE_CHOICE_OPEN = False
+
+# scheduler_timezone() runs hundreds of times per calendar build and on every
+# scheduler tick: the saved zone is read from the database at most once a
+# minute (a failed read is retried after a few seconds, not every call).
+_TIMEZONE_CACHE_TTL = 60.0
+_TIMEZONE_RETRY_AFTER = 5.0
+_timezone_cache: tuple[float, str | None] | None = None  # (expires, zone)
+
+
+def timezone_editable() -> bool:
+    """Whether accounts may choose their own time zone in the app yet (see
+    TIMEZONE_CHOICE_OPEN). Gates only the choosing: a zone already saved is in
+    force either way (scheduler_timezone)."""
+    return TIMEZONE_CHOICE_OPEN
+
+
+def _timezone_from_db() -> str | None:
+    """The zone saved from the Posting schedule page, or None when none is.
+
+    When the database can't be read, the zone from the last good read stands
+    (a blip mustn't put this machine back on settings.yaml's clock while the
+    others keep the saved one); with no good read yet, None."""
+    global _timezone_cache
+    import time
+
+    now = time.monotonic()
+    cached = _timezone_cache
+    if cached is not None and now < cached[0]:
+        return cached[1]
+    try:
+        from .db import session_scope
+        from .models import AppToken
+
+        name: str | None = None
+        with session_scope(read_only=True) as session:
+            row = session.get(AppToken, TIMEZONE_TOKEN)
+            if row is not None and row.value:
+                name = str(row.value).strip() or None
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("Could not read the saved time zone: %s", exc)
+        last = cached[1] if cached is not None else None
+        _timezone_cache = (now + _TIMEZONE_RETRY_AFTER, last)
+        return last
+    _timezone_cache = (now + _TIMEZONE_CACHE_TTL, name)
+    return name
+
+
 def scheduler_timezone() -> ZoneInfo:
-    """The zone posting windows are defined in (``scheduler.timezone``).
+    """The account's time zone: posting windows are defined in it.
 
     Also the zone each post's weekday/hour analytics are recorded in, so those
     numbers mean the same thing no matter which machine did the publishing.
-    """
-    return ZoneInfo(str(load_settings().get("scheduler.timezone", "America/New_York")))
+
+    The zone chosen on the Posting schedule page (kept in the shared database,
+    so every machine agrees), else ``scheduler.timezone`` from settings.yaml."""
+    settings = load_settings()
+    for name in (_timezone_from_db(), str(settings.get("scheduler.timezone", DEFAULT_TIMEZONE)),
+                 DEFAULT_TIMEZONE):
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            continue
+    return ZoneInfo(DEFAULT_TIMEZONE)
+
+
+def timezone_saved() -> bool:
+    """A zone has been chosen in the app (and is in force)."""
+    return _timezone_from_db() is not None
+
+
+def save_timezone(name: str) -> str:
+    """Save the account's time zone (an IANA name such as ``Europe/Berlin``).
+    Returns the name saved. Raises ValueError for anything that isn't a zone,
+    and while choosing is closed (TIMEZONE_CHOICE_OPEN)."""
+    global _timezone_cache
+    import time
+    from zoneinfo import available_timezones
+
+    from .db import session_scope
+    from .models import AppToken, utcnow
+
+    name = (name or "").strip()
+    if len(TIMEZONE_TOKEN) > 40:  # AppToken.name is String(40)
+        raise ValueError(f"workspace slug too long to save a time zone: {TIMEZONE_TOKEN!r}")
+    if not timezone_editable():
+        raise ValueError("This account's time zone can't be changed here yet.")
+    if name not in available_timezones():
+        raise ValueError(f"“{name}” isn't a time zone the app knows.")
+    with session_scope() as session:
+        row = session.get(AppToken, TIMEZONE_TOKEN)
+        if row is None:
+            row = AppToken(name=TIMEZONE_TOKEN)
+            session.add(row)
+        row.value = name
+        row.updated_at = utcnow()
+    # This machine follows at once; the others within a minute (their cache).
+    _timezone_cache = (time.monotonic() + _TIMEZONE_CACHE_TTL, name)
+    return name
 
 
 def load_keywords() -> list[str]:

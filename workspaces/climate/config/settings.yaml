@@ -690,6 +690,8 @@ scheduler:
   # Disable to pause automatic publishing.
   enabled: true
   # All window times are interpreted in this zone (DST handled automatically).
+  # A zone the account chooses on the Posting schedule page is kept in the
+  # shared database and wins over this one on every machine.
   timezone: America/New_York
   # Active hours in the scheduler timezone (24h HH:MM). Outside this range the
   # scheduler never publishes.

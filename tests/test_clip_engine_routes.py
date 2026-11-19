@@ -1788,14 +1788,14 @@ class RuleProposalRoutesTest(NotesRouteBase):
         self.assertEqual(r.status_code, 200)
         html = r.text
         self.assertIn("Suggested rules", html)
-        self.assertNotIn('id="rule-proposals" style="margin-top: 14px;" hidden', html)
+        self.assertNotIn('id="rule-proposals" hidden', html)
         proposals = json.loads(re.search(r"let ruleProposals = (\[.*?\]);\n", html).group(1))
         self.assertEqual([p["source"] for p in proposals], ["notes", "notes", "handbook", "notes"])
         self.assertNotIn("</script><b>", html)          # tojson escapes it
         rules = json.loads(re.search(r"let rules = (\[.*?\]);\n", html).group(1))
         self.assertEqual(rules[0]["source"], "handbook")
-        self.assertIn('<option value="clips">Clips</option>', html)
-        self.assertIn("From past edits", html)
+        self.assertIn("['clips', 'Clips'", html)               # the scope groups
+        self.assertIn("Learned from your edits", html)
         if shutil.which("node"):
             for i, script in enumerate(re.findall(r"<script>(.*?)</script>", html, flags=re.S)):
                 path = self.dir / f"brand-{i}.js"
@@ -1807,7 +1807,7 @@ class RuleProposalRoutesTest(NotesRouteBase):
     def test_brand_page_without_proposals(self):
         self.notes.util.atomic_write_json(self.notes.proposals_path(), {"proposals": []})
         html = self.client.get("/brand").text
-        self.assertIn('id="rule-proposals" style="margin-top: 14px;" hidden', html)
+        self.assertIn('id="rule-proposals" hidden', html)
         with mock.patch.object(self.notes, "pending_proposals", side_effect=OSError("x")):
             self.assertEqual(self.client.get("/brand").status_code, 200)
 
