@@ -16,8 +16,15 @@ and metadata. It then assists with publishing your own trimmed/captioned clips t
 Threads, composing replies on your own posts (each approved before posting),
 and analyzing what's performing and why.
 
-**Hard rule throughout: you approve every outbound action.** Nothing downloads,
-posts, or replies automatically.
+**Hard rule: nothing posts or replies without you.** By default nothing downloads
+without you either. Two automations change that only when you switch them on
+(both off by default; [docs/auto-triage.md](docs/auto-triage.md)):
+
+- **Automatic triage** rejects the waiting videos your approval history or the
+  Brand & audience profile rate least worth your time. Every rejection can be undone.
+- **Automatic approval** approves up to a set number of the day's best videos.
+  The home machine downloads them, and the clip engine watches them and drafts
+  clips. Posting still always waits for you.
 
 ## Operating context
 
@@ -193,6 +200,18 @@ python run.py digest           # print the analytics digest
 python run.py cleanup          # apply retention (only if you set it; default keeps everything)
 python run.py offload --dry-run  # which source videos would move to Supabase (drop --dry-run to do it)
 
+# Automatic triage (docs/auto-triage.md) — also on Settings > Automatic triage
+python run.py auto-triage status          # the switch, the model, each cut-off's cost, recent passes
+python run.py auto-triage on --cutoff 0.02  # switch on (it rejects at the next monitor pass)
+python run.py auto-triage on --signal fit --fit-cutoff 0.4  # ...judging by positioning fit instead
+python run.py auto-triage grade-fit       # grade positioning fit against your past decisions
+python run.py auto-triage run             # run a pass now
+python run.py auto-triage undo <pass>     # put a pass's rejections back in the queue
+python run.py auto-triage off             # switch off
+python run.py triage-train                # retrain the approve predictor and print its grades
+python run.py auto-select status          # automatic approval: today's pace and what it would pick
+python run.py auto-select on --per-day 10 # switch it on (the home machine's dashboard downloads)
+
 # Clip engine (docs/clip-engine.md)
 python run.py clip-engine try <id>        # run the engine on one video, print every draft (writes nothing)
 python run.py clip-engine try <id> --log  # ...and save its top picks as suggestions
@@ -278,7 +297,10 @@ Channels / Keywords / Traits) guides each video through four breadcrumbed steps:
    from YouTube storyboard stills (metadata-only — nothing downloaded): a flat
    vocabulary of labels with no good/bad score. The Dashboard lists new matches
    ranked by climate relevance (later nudged by learned trait verdicts once
-   unlocked), with detected traits shown as badges.
+   unlocked), with detected traits shown as badges. With **automatic triage**
+   switched on, the end of each pass also rejects the waiting videos the approve
+   predictor gives less than the chosen cut-off, so they never reach the queue
+   (docs/auto-triage.md).
 2. **Review** (step 1): embedded player, matched keywords, score + rationale.
    Approve or Reject. Approve is the hard gate — nothing downloads before it.
 3. **Scrape & Transcribe** (step 2): on approval the tool fetches the transcript

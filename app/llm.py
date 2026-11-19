@@ -48,7 +48,7 @@ def _brand() -> dict:
         if value:
             out[key] = value
     # No generic default makes sense for these; empty just omits the context.
-    for key in ("mission", "audience", "voice_notes", "cta_url"):
+    for key in ("name", "mission", "audience", "positioning", "voice_notes", "cta_url"):
         out[key] = str(raw.get(key) or "").strip()
     return out
 
@@ -183,6 +183,72 @@ def score_relevance(model: str, title: str, description: str, matched_keywords: 
     return {
         "score": max(0.0, min(1.0, float(data.get("score", 0.0)))),
     }
+
+
+FIT_PROMPT_VERSION = 1
+
+
+def fit_profile() -> dict:
+    """The parts of the Brand & audience profile positioning fit reads — also
+    what app/positioning.py fingerprints, so an edit to any of them marks
+    every fit score stale."""
+    b = _brand()
+    return {
+        "name": b["name"], "topic": b["topic"], "mission": b["mission"],
+        "audience": b["audience"], "positioning": b["positioning"],
+        "source_kind": b["source_kind"], "relevance_rules": b["relevance_rules"],
+        "false_positives": b["false_positives"],
+        "rules": _operator_rules("screening"),
+    }
+
+
+def score_fit(model: str, title: str, description: str) -> dict:
+    """Return {fit: 0-1, reason: str}: how well a video suits THIS account's
+    positioning, from its title and description alone.
+
+    Relevance (``score_relevance``) asks "is this about the topic?". Fit asks
+    the account's question: would a clip from this video serve what the
+    account stands for and interest the people it's for? It reads the whole
+    profile — mission, audience, positioning, the on/off-topic notes and the
+    rules — so it works for a workspace with no decision history at all.
+    """
+    p = fit_profile()
+    lines = [f"Account: {p['name'] or 'this account'}", f"Topic: {p['topic']}"]
+    for key, label in (("mission", "Mission"), ("audience", "Audience"),
+                       ("positioning", "Positioning — what its clips should be known for")):
+        if p[key]:
+            lines.append(f"{label}: {p[key]}")
+    lines.append(f"On topic when: {p['relevance_rules']}")
+    lines.append(f"Off topic when: {p['false_positives']}")
+    system = (
+        f"You decide which {p['source_kind']} videos are worth clipping for one "
+        "specific social media account. You see only a video's title and "
+        "description, never the footage.\n\n"
+        + "\n".join(lines)
+        + (p["rules"] and ("\n\nThe account's rules:\n" + p["rules"][:2500]))
+        + "\n\nScore fit from 0.0 to 1.0: how likely a short clip from this video "
+        "would suit this account's positioning and interest its audience.\n"
+        "- 0.9-1.0: squarely what the account is about, from the angle it takes.\n"
+        "- 0.6-0.8: on topic and a reasonable match for the account.\n"
+        "- 0.3-0.5: on topic but generic, or off the account's angle.\n"
+        "- 0.0-0.2: off topic, or something the account would not want on its feed.\n"
+        "Judge the subject and angle, not production quality, which you can't see. "
+        "Material that challenges the account's premise can still fit if it's "
+        "worth responding to; never score it as credible.\n"
+        "reason: the deciding factor in at most 15 words, written for the account "
+        "owner (no score, no 'this video').\n"
+        "JSON shape: {\"fit\": 0.0-1.0, \"reason\": \"...\"}"
+    )
+    user = json.dumps({"title": title, "description": (description or "")[:2000]})
+    data = _json_chat(model, system, user, max_tokens=200)
+    try:
+        fit = float(data.get("fit", 0.0))
+    except (TypeError, ValueError):
+        raise ValueError(f"fit was not a number: {data.get('fit')!r}")
+    if fit != fit:  # NaN
+        raise ValueError("fit was NaN")
+    reason = " ".join(str(data.get("reason") or "").split())[:200]
+    return {"fit": max(0.0, min(1.0, fit)), "reason": reason}
 
 
 def suggest_channel_fields(model: str, url: str, title: str = "", description: str = "",
@@ -1370,6 +1436,26 @@ def rank_striking_frames(model: str, frames: list[tuple[float, bytes]], *,
     return out
 
 
+def image_media_type(data: bytes) -> str:
+    """The image's real format, from its first bytes. YouTube's storyboard
+    sheets have been WebP since late 2026; declaring them JPEG makes the API
+    reject the whole request."""
+    head = bytes(data[:12])
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"
+
+
+def image_block(data: bytes) -> dict:
+    return {"type": "image", "source": {
+        "type": "base64", "media_type": image_media_type(data),
+        "data": base64.standard_b64encode(bytes(data)).decode("ascii")}}
+
+
 def tag_footage(model: str, images: list[bytes], traits: list[str],
                 title: str = "") -> dict:
     """Tag which traits from the vocabulary are visibly present in footage stills.
@@ -1394,14 +1480,7 @@ def tag_footage(model: str, images: list[bytes], traits: list[str],
         + "Tag the footage in these stills.",
     }]
     for img in images:
-        blocks.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": base64.standard_b64encode(img).decode("ascii"),
-            },
-        })
+        blocks.append(image_block(img))
     resp = _create(model, system + "\nRespond with a single JSON object only — no prose, no code fences.",
                    blocks, max_tokens=500, temperature=0.2)
     data = _parse_json(_text_from(resp))

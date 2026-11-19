@@ -209,6 +209,17 @@ class Candidate(Base):
     approve_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
     approve_model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Positioning fit (app/positioning.py): how well the video suits THIS
+    # account's positioning (0-1), judged from its title and description
+    # against the Brand & audience profile, with the deciding factor in a few
+    # words. Needs no decision history, so it works for a new workspace from
+    # its first video. ``fit_basis`` fingerprints the profile and prompt that
+    # produced it: a profile edit makes the score stale and it's redone.
+    fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fit_reason: Mapped[str] = mapped_column(Text, default="")
+    fit_basis: Mapped[str] = mapped_column(String(16), default="")
+    fit_scored_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     channel: Mapped[Channel] = relationship(back_populates="candidates")
@@ -721,6 +732,11 @@ class TriageDecision(Base):
     # be backfilled from a model that has since seen the decision.
     predicted_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
     model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The operator's verdict on a video that automatic triage rejected and drew
+    # into its random spot-check sample (app/auto_triage.py). Only these calls
+    # measure what automatic rejection throws away; a video rescued while
+    # browsing the rejected list was picked by eye, so it isn't one.
+    audit: Mapped[bool] = mapped_column(Boolean, default=False)
     undone: Mapped[bool] = mapped_column(Boolean, default=False)
     decided_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -743,6 +759,87 @@ class TriageModel(Base):
     backtest: Mapped[str] = mapped_column(Text, default="")
     params: Mapped[str] = mapped_column(Text, default="")
     trained_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AutoTriageRun(Base):
+    """One pass of automatic triage (app/auto_triage.py), including passes that
+    rejected nothing or paused, so the admin page can say when it last looked
+    and why it held back. A pass is also the unit of undo."""
+
+    __tablename__ = "auto_triage_runs"
+
+    OUTCOME_DONE = "done"
+    OUTCOME_PAUSED = "paused"      # a safety check tripped; nothing rejected
+    OUTCOME_WAITING = "waiting"    # no model good enough to act on yet
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stage: Mapped[str] = mapped_column(String(20), default="metadata")
+    # What it judged by: "approval" (the approve predictor's chance) or "fit"
+    # (positioning fit). ``reject_below`` is that signal's cut-off.
+    signal: Mapped[str] = mapped_column(String(10), default="approval")
+    # What started it: "monitor" (a dashboard monitor pass), "monitor:actions"
+    # (GitHub Actions), "manual" (the admin page), "cli".
+    trigger: Mapped[str] = mapped_column(String(30), default="")
+    model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reject_below: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Waiting videos the pass was allowed to judge (scored by the current
+    # model, never decided by the operator, never auto-triaged before).
+    considered: Mapped[int] = mapped_column(Integer, default=0)
+    rejected: Mapped[int] = mapped_column(Integer, default=0)
+    # Automatic approval (stage "select", app/auto_select.py) approves instead.
+    approved: Mapped[int] = mapped_column(Integer, default=0)
+    audited: Mapped[int] = mapped_column(Integer, default=0)
+    outcome: Mapped[str] = mapped_column(String(20), default=OUTCOME_DONE)
+    note: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    undone_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AutoTriageAction(Base):
+    """One automatic triage call on one video. Never training data: the model
+    must not learn from its own calls, so these live apart from
+    ``TriageDecision``, which only ever holds what the operator decided.
+
+    ``undone`` marks a call that no longer stands: the operator approved or
+    restored the video, or the whole pass was undone. A video gets one
+    automatic call per stage, ever — an undone call still blocks another.
+    """
+
+    __tablename__ = "auto_triage_actions"
+
+    AUDIT_APPROVE = "approve"   # spot-check: the operator would have approved it
+    AUDIT_AGREE = "agree"       # spot-check: the operator agrees it's a reject
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_pk: Mapped[int] = mapped_column(ForeignKey("auto_triage_runs.id"))
+    candidate_pk: Mapped[int] = mapped_column(ForeignKey("candidates.id"))
+    video_id: Mapped[str] = mapped_column(String(20), default="")
+    stage: Mapped[str] = mapped_column(String(20), default="metadata")
+    action: Mapped[str] = mapped_column(String(10), default="reject")
+    # The evidence at the time: which signal it judged by, the approve chance
+    # and which model gave it, the positioning fit and why, and the cut-off it
+    # fell under (on the signal's own scale).
+    signal: Mapped[str] = mapped_column(String(10), default="approval")
+    fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fit_reason: Mapped[str] = mapped_column(Text, default="")
+    approve_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reject_below: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Drawn into the random spot-check sample, at what rate, and the
+    # operator's verdict once given ("" while waiting).
+    audit: Mapped[bool] = mapped_column(Boolean, default=False)
+    audit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audit_verdict: Mapped[str] = mapped_column(String(10), default="")
+    # Automatic approval only: picked at random from below the top on purpose,
+    # so the system learns where its ranking is wrong (app/auto_select.py).
+    explore: Mapped[bool] = mapped_column(Boolean, default=False)
+    audited_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    undone: Mapped[bool] = mapped_column(Boolean, default=False)
+    # "approved" | "restored" (operator overrode it) | "pass undone"
+    undone_reason: Mapped[str] = mapped_column(String(30), default="")
+    undone_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class DraftProposal(Base):

@@ -42,7 +42,11 @@
     {{ c.channel.call_sign }}{% if c.channel.market %} · {{ c.channel.market }}{% endif %}
     · {{ c.published_at.strftime("%b %-d, %Y") if c.published_at else "?" }}
     {% if c.duration_seconds %} · {{ c.duration_seconds // 60 }}m {{ c.duration_seconds % 60 }}s{% endif %}
-    {% if c.status == "rejected" %} · <span class="badge hostile">rejected</span>
+    {% if c.status == "rejected" and auto_call and auto_call.signal == "fit" %} · <a class="badge hostile" href="/auto-triage"
+        title="Rejected by automatic triage on {{ auto_call.created_at.strftime('%b %-d') }}: positioning fit {{ '%.2f'|format(auto_call.fit_score or 0) }}, under the {{ '%.1f'|format(auto_call.reject_below or 0) }} cut-off{% if auto_call.fit_reason %} — {{ auto_call.fit_reason }}{% endif %}. Approve it or Un-reject it to override.">rejected automatically · fit {{ '%.1f'|format(auto_call.fit_score or 0) }}</a>
+    {% elif c.status == "rejected" and auto_call %} · <a class="badge hostile" href="/auto-triage"
+        title="Rejected by automatic triage on {{ auto_call.created_at.strftime('%b %-d') }}: the approve predictor (model #{{ auto_call.model_pk }}) gave it {{ '%.1f'|format((auto_call.approve_prob or 0) * 100) }}% — under the {{ '%g'|format((auto_call.reject_below or 0) * 100) }}% cut-off. Approve it or Un-reject it to override.">rejected automatically · {{ '%.1f'|format((auto_call.approve_prob or 0) * 100) }}%</a>
+    {% elif c.status == "rejected" %} · <span class="badge hostile">rejected</span>
     {% else %} · <span class="badge">{{ c.status }}</span>{% endif %}
     {% if c.relevance_score is not none %}
       · <span class="badge score-hi" title="Climate relevance">score {{ "%.2f"|format(c.relevance_score) }}</span>

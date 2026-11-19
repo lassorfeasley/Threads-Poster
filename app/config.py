@@ -280,7 +280,8 @@ BRAND_HEADER = """\
 # White-label defaults: what the sidebar/title show when brand.yaml is unset.
 DEFAULT_APP_NAME = "Clip Monitor"
 
-_BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "voice_notes",
+_BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "positioning",
+                      "voice_notes",
                       "topic", "app_name", "logo_file",
                       # Prompt-framing fields consumed by app/llm.py. Blank
                       # fields fall back to generic phrasing there.

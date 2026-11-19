@@ -53,6 +53,19 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual((last["n"], last["approved"]), (1, 1))
         under_5 = next(h for h in out["handoff"] if h["threshold"] == 0.05)
         self.assertEqual((under_5["below"], under_5["approvals_lost"]), (2, 0))
+        self.assertNotIn("posted", out)
+
+    def test_custom_thresholds_and_posted_losses(self):
+        labels = [True, True, False, True]
+        probs = [0.004, 0.012, 0.001, 0.5]
+        posted = [True, False, False, True]
+        out = triage_model.evaluate(labels, probs, thresholds=(0.005, 0.02), posted=posted)
+        self.assertEqual(out["posted"], 2)
+        by_t = {h["threshold"]: h for h in out["handoff"]}
+        self.assertEqual((by_t[0.005]["below"], by_t[0.005]["approvals_lost"],
+                          by_t[0.005]["posted_lost"]), (2, 1, 1))
+        self.assertEqual((by_t[0.02]["below"], by_t[0.02]["approvals_lost"],
+                          by_t[0.02]["posted_lost"]), (3, 2, 1))
 
 
 class TrainAndScoreTest(unittest.TestCase):
@@ -116,6 +129,22 @@ class TrainAndScoreTest(unittest.TestCase):
         self.assertIsNone(done.approve_prob)
         # Already scored by this model: the monitor's pass skips them.
         self.assertEqual(triage_model.score_new_candidates(self.session, only_missing=True), 0)
+
+    def test_training_also_grades_on_a_rolling_split(self):
+        self.seed()
+        row = triage_model.train(self.session, SETTINGS)
+        rolling = json.loads(row.backtest)["rolling"]
+        # Everything after the first 40% gets an out-of-sample prediction.
+        self.assertEqual(rolling["n"], 24 - int(24 * triage_model.ROLLING_START))
+        self.assertEqual([h["threshold"] for h in rolling["handoff"]],
+                         list(triage_model.CUTOFF_CHOICES))
+        self.assertIn("posted_lost", rolling["handoff"][0])
+        self.assertEqual(rolling["posted"], 0)
+
+    def test_rolling_split_skips_slices_with_one_outcome_behind_them(self):
+        ex = [triage_model._Example(False, triage_model._term_counts("a", ""), 0.5, 60)
+              for _ in range(10)]
+        self.assertEqual(triage_model._rolling_predictions(ex), [])
 
     def test_undone_decisions_are_not_training_data(self):
         self.seed()

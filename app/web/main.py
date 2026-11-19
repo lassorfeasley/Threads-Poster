@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
@@ -121,7 +122,7 @@ from ..publishing import (
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_clauses, sort_candidates
-from .. import labels, llm, posting_schedule, rerun_review, triage_model
+from .. import auto_triage, labels, llm, posting_schedule, rerun_review, triage_model
 from ..config import scheduler_timezone
 from ..scheduler import (
     PIN_HORIZON_DAYS,
@@ -487,6 +488,19 @@ else:
     for _route in clip_handbook_router.routes:
         if "POST" in (getattr(_route, "methods", None) or ()):
             _WRITE_SCOPE[_route.path_format] = ()
+
+# Automatic triage (app/web/auto_triage.py): the same pattern and guard. Its
+# writes move videos between new and rejected, which only the dashboard lists
+# and the library's Videos section show — the same scope as a triage click.
+try:
+    from .auto_triage import router as auto_triage_router
+except Exception:
+    log.exception("Automatic triage page unavailable")
+else:
+    app.include_router(auto_triage_router)
+    for _route in auto_triage_router.routes:
+        if "POST" in (getattr(_route, "methods", None) or ()):
+            _WRITE_SCOPE[_route.path_format] = ("dashboard", "library")
 
 # Rule proposals live in a file under the engine directory; adding one writes
 # brand.yaml. Neither is part of any cached page.
@@ -947,6 +961,66 @@ def _start_background_work() -> None:
         log.exception("Couldn't resume stalled downloads")
     _resume_clip_engine_runs()                 # never raises
     _retrain_triage_model_in_background()      # its own thread, its own try
+    _start_home_worker()
+
+
+# --- The home worker ------------------------------------------------------------
+# On the machine that downloads (ARCHIVE_ON_THIS_MACHINE on: a home connection),
+# a loop runs automatic approval (app/auto_select.py; off until switched on)
+# and then downloads every approved video one at a time — including approvals
+# made on the hosted dashboard, which used to wait for this process to restart.
+
+_home_worker_started = threading.Event()
+
+
+def _home_worker_tick() -> dict:
+    """One round: approve what today's pace allows (if switched on), then
+    download every approved video that isn't already downloading, in turn.
+    Downloads go through scrape's machine-wide pacing, never in parallel."""
+    from .. import auto_select
+
+    picked: dict = {}
+    try:
+        with session_scope() as session:
+            picked = auto_select.run(session, load_settings(), trigger="worker")
+    except Exception:
+        log.exception("Automatic approval failed")
+    if picked.get("approved"):
+        pagecache.invalidate()
+    with session_scope(read_only=True) as session:
+        waiting = session.execute(
+            select(Candidate.id).where(Candidate.status == STATUS_APPROVED)
+            .order_by(Candidate.approved_at.asc().nullsfirst(), Candidate.id)
+        ).scalars().all()
+    downloaded = 0
+    for cid in waiting:
+        with _scrape_inflight_lock:
+            busy = cid in _scrape_inflight
+        if busy:
+            continue
+        _scrape_in_thread(cid)   # blocking: one at a time
+        downloaded += 1
+        _after_background_work()
+    return {"approved": picked.get("approved", 0), "downloads": downloaded}
+
+
+def _start_home_worker() -> None:
+    if not _archives_here() or _home_worker_started.is_set():
+        return
+    _home_worker_started.set()
+    interval = float(load_settings().get("auto_select.worker_interval_seconds", 600))
+
+    def _loop() -> None:
+        # Let startup's own resumes claim their videos first.
+        time.sleep(60)
+        while True:
+            try:
+                _home_worker_tick()
+            except Exception:
+                log.exception("Home worker round failed")
+            time.sleep(max(60.0, interval))
+
+    threading.Thread(target=_loop, daemon=True, name="home-worker").start()
 
 
 # Not ``@app.on_event``: deprecated on this FastAPI, and these are the same hooks.
@@ -1772,10 +1846,13 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
         # of them into a clip, which is far less work than an empty editor.
         suggested_clips = (_pending_proposals(session, c.id)
                            if c.status == STATUS_ARCHIVED else [])
+        auto_call = (auto_triage.standing_call(session, c.id)
+                     if c.status == STATUS_REJECTED else None)
 
     return templates.TemplateResponse(
         request, "video.html",
         {"c": c, "state": state, "step": step,
+         "auto_call": auto_call,
          "cut_rows": cut_rows, "posts": posts,
          "suggested_clips": suggested_clips,
          "engine_job": _active_engine_job(c.id),
@@ -3095,18 +3172,10 @@ def upload_url(urls: str = Form(...)):
 
 
 def _log_triage_decision(session, c: Candidate, action: str) -> None:
-    """Record what the operator decided given the signals on screen. This is
-    the training record for eventual AI-assisted triage."""
-    session.add(TriageDecision(
-        candidate_pk=c.id,
-        video_id=c.video_id,
-        action=action,
-        relevance_score=c.relevance_score,
-        visual_score=c.visual_score,
-        visual_traits=c.visual_traits or "",
-        predicted_prob=c.approve_prob,
-        model_pk=c.approve_model_pk,
-    ))
+    """Record what the operator decided given the signals on screen — the
+    approve predictor's training record — and settle any automatic-triage call
+    on the video (a spot-check verdict, or approving over its rejection)."""
+    auto_triage.record_operator_decision(session, c, action)
 
 
 @app.post("/video/{candidate_id}/approve")
@@ -3165,21 +3234,28 @@ def reset_to_new(candidate_id: int):
         ).scalar_one_or_none()
         if last is not None:
             last.undone = True
+            auto_triage.record_operator_undo(session, last)
     return {"ok": True}
 
 
 @app.post("/video/{candidate_id}/unreject")
-def unreject(candidate_id: int):
+def unreject(request: Request, candidate_id: int):
     """Restore a rejected clip. If it was already downloaded, return it to the
     archived state (ready to trim); otherwise send it back to the review gate.
-    Never re-downloads."""
+    Never re-downloads. An automatic rejection restored this way is never
+    made again."""
+    wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c is None:
-            return _flash("/", "Video not found")
+            return (JSONResponse({"error": "not found"}, status_code=404)
+                    if wants_json else _flash("/", "Video not found"))
         downloaded = _has_source(c)
         c.status = STATUS_ARCHIVED if downloaded else STATUS_NEW
         dest = STATUS_ARCHIVED if downloaded else STATUS_NEW
+        auto_triage.record_operator_restore(session, c)
+    if wants_json:
+        return JSONResponse({"ok": True, "status": dest})
     return _flash(f"/video/{candidate_id}", f"Restored — status is now {dest}")
 
 
@@ -6690,7 +6766,7 @@ def _pending_rule_proposals() -> list[dict]:
 # Fields the Brand & audience form may send. A field the form doesn't post is
 # left alone — never blanked — so moving a field off the page can't erase it.
 _BRAND_FORM_FIELDS = ("topic", "name", "cta_url", "mission", "audience",
-                      "voice_notes", "source_kind", "relevance_rules",
+                      "positioning", "voice_notes", "source_kind", "relevance_rules",
                       "false_positives", "strong_openings", "weak_openings",
                       "clip_guidance")
 

@@ -81,6 +81,10 @@
     <textarea id="brand-audience" name="audience" rows="2"
               placeholder="Who captions should land with.">{{ brand.audience }}</textarea>
 
+    <label for="brand-positioning" class="field-label">Positioning</label>
+    <textarea id="brand-positioning" name="positioning" rows="3"
+              placeholder="What this account's clips should be known for, and the angle it takes. E.g. 'Real people and places dealing with climate change — on the ground, not in the studio; solutions over doom.' Read by positioning fit (Settings > Automatic triage).">{{ brand.positioning }}</textarea>
+
     <label for="brand-source-kind" class="field-label">Source footage</label>
     <input type="text" id="brand-source-kind" name="source_kind" value="{{ brand.source_kind }}"
            placeholder="Default: TV news footage" style="max-width: 460px;">
