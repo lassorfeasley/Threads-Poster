@@ -119,15 +119,51 @@ Built 2026-11-19 (`app/auto_select.py`), and off until you switch it on in the *
 - **Cost.** The clip engine's cap for unattended runs (`clip_engine.daily_usd`) is now $9. That covers 10 a day at the $0.83 reserved per run, which is priced at 2027 Gemini rates; the real bill until then is about half. Past the cap, the cheaper transcript suggester takes over.
 - **Records.** Picks are logged in `auto_triage_actions` (stage `select`), never as your decisions. The page lists recent picks with what came of each: download state, clips drafted, cut, posted. "Drafted 0" on many picks is the signal to revisit the cheap look.
 
+## The inbox
+
+Built 2026-11-19 (`app/inbox.py`, page `/inbox`). It's off until switched on in the **Inbox** section of the Automatic triage page.
+
+The inbox holds finished clips the system made on its own, each waiting for one click:
+
+- **Approve** queues the clip for the next open slot, with the caption as you leave it.
+- **Edit** the caption in place first, if you want.
+- **Reject**, optionally with the "What's wrong?" chips, which go into the clip-engine notes and feed the rule proposals like any dismissed suggestion.
+
+The page shows nothing else, because it's the screen a customer gets.
+
+**What gets made.** A pending clip-engine draft qualifies when:
+
+- the critic reviewed it, and it scores at least 7/10 (the score after the engine's own penalties);
+- it isn't flagged as challenging the brand rules, and the engine has no topic or language doubt about it;
+- it's from the last 3 days;
+- it comes from a video automatic approval picked (or from any downloaded video, if you choose).
+
+At most 2 come from one video, and up to 5 a day, paced through the day like automatic approval. Ranking is by critic score, then the video's approve chance.
+
+**How it's made.** The home machine's worker round does it, one clip at a time:
+
+1. Cut the draft.
+2. Render it (the export the cut page uses, including title and footage tags).
+3. Burn in subtitles, unless the footage already has them, at the position its traits suggest.
+4. Draft a caption in the account's voice and gut-check it, redrafting once if flagged, as re-airs do.
+
+A clip whose draft duplicates an existing clip, or has no speech to caption, is marked failed and not retried. A render or model failure is retried once on a later round. The drafting steps are the same functions the cut page calls, pulled out of their routes (`_burn_subtitles`, `_draft_caption_for_cut`).
+
+**Nothing posts on its own.** An inbox item isn't a post: anything `queued` publishes, so the post is only created when you approve, through the same `queue_clip` the cut page uses. The AI caption is a caption draft (`DraftProposal`). `Cut.draft_caption` holds only what you approved, so edits are learned exactly as on the cut page.
+
+An approval made where the clip file isn't (the hosted dashboard) is queued by the home machine's next round. A rejected clip keeps its cut row (the ledgers point at it, and its footage won't be suggested again), loses its rendered files, and drops out of the Content Library.
+
+**The critic is generous.** Of 481 reviewed drafts, most score 7–9, and the score barely separated the drafts you used from the ones you didn't (about 1 in 7 used, all the way from 7 to 10). The bar drops only the weakest. Your approvals and rejections in the inbox are the record that will teach it more.
+
 ## What's next
 
 Stage 1 judges metadata only, and metadata tops out: the approval model grades 0.76 AUC, and positioning fit 0.66 even with the positioning drafted from your own decisions. You decide by watching, so the real judgment has to come from the footage.
 
-Automatic approval (above) now sends the top ~10 videos a day to the clip engine. Next:
+Automatic approval sends the top videos a day to the clip engine, and the inbox turns the best drafts into finished clips for one click. Next:
 
-1. Let the engine's critic gate what reaches you, so a video whose drafts don't clear the critic produces nothing.
-2. Automatic render, captions and subtitles for the drafts that pass.
-3. The inbox: the best 5 a day, with one-click approve, reject and caption edits.
+1. The admin/customer split: a customer login that sees the inbox, the schedule, past posts, analytics and account connections, and none of this.
+2. Learning from the inbox: which critic scores, archetypes and captions get approved, and how the approved posts perform, feeding the ranking.
+3. Instagram reels from inbox approvals (the vertical render exists; it isn't automated yet).
 
 ### Shelved: the cheap look (2026-11-19)
 

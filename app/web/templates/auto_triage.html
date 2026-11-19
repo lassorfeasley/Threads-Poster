@@ -208,6 +208,62 @@
   {% endif %}
 </div>
 
+{# ---- The inbox (app/inbox.py) ---- #}
+{% set ip = inbox_policy %}
+<h2 class="at-section" id="inbox">Inbox
+  <span class="badge {{ 'score-hi' if ip.enabled else '' }}">{{ "On" if ip.enabled else "Off" }}</span>
+  <span class="meta"><a href="/inbox">{{ inbox_counts.get("ready", 0) }} waiting</a></span></h2>
+<div class="card">
+  <p class="hint" style="margin-top: 0;">Turns the clip engine's best drafts into finished clips — cut, rendered, subtitled and captioned in
+    the account's voice, with the caption gut-checked — and holds them in the <a href="/inbox">Inbox</a> for one click. Made on the
+    home machine, paced through the day. Nothing posts until someone approves it.</p>
+  <form method="post" action="/inbox/settings" class="at-form">
+    <label class="switch" style="gap: 10px;">
+      <input type="checkbox" name="enabled" value="on" {% if ip.enabled %}checked{% endif %}>
+      <span class="switch-track"><span class="switch-thumb"></span></span>
+      <span style="margin-left: 10px;">Make inbox clips</span>
+    </label>
+    <label class="field">up to
+      <select name="per_day">{% for n in inbox_choices.per_day %}<option value="{{ n }}" {% if n == ip.per_day %}selected{% endif %}>{{ n }}</option>{% endfor %}</select>
+      a day</label>
+    <label class="field">critic score at least
+      <select name="min_score">{% for v in inbox_choices.min_score %}<option value="{{ v }}" {% if v == ip.min_score %}selected{% endif %}>{{ "%.0f"|format(v * 10) }}/10</option>{% endfor %}</select></label>
+    <label class="field">at most
+      <select name="per_video">{% for n in inbox_choices.per_video %}<option value="{{ n }}" {% if n == ip.per_video %}selected{% endif %}>{{ n }}</option>{% endfor %}</select>
+      per video</label>
+    <label class="field">from
+      <select name="source">
+        <option value="auto" {% if ip.source == "auto" %}selected{% endif %}>videos automatic approval picked</option>
+        <option value="all" {% if ip.source == "all" %}selected{% endif %}>any downloaded video</option>
+      </select></label>
+    <label class="field"><input type="checkbox" name="subtitles" value="on" {% if ip.subtitles %}checked{% endif %}> burn in subtitles</label>
+    <button class="btn primary sm" type="submit">Save</button>
+  </form>
+  <p class="meta">All time: {{ inbox_counts.get("ready", 0) }} waiting · {{ inbox_counts.get("queued", 0) + inbox_counts.get("approved", 0) }} approved ·
+    {{ inbox_counts.get("rejected", 0) }} rejected · {{ inbox_counts.get("failed", 0) }} couldn't be made ·
+    {{ inbox_counts.get("drafting", 0) }} being made. The critic is generous — most drafts score 7–9 — so the bar only drops the weakest;
+    what you approve and reject here is what will teach it more.</p>
+  {% if inbox_recent %}
+  <div class="table-wrap">
+    <table class="at-table">
+      <thead><tr><th>Made</th><th>Clip</th><th>Score</th><th>Now</th></tr></thead>
+      <tbody>
+      {% for it in inbox_recent %}
+        <tr>
+          <td class="at-num">{{ it.created_at.strftime("%b %-d %H:%M") }}</td>
+          <td>{% if it.cut_pk %}<a href="/cut/{{ it.cut_pk }}">{{ it.story or "Clip" }}</a>{% else %}{{ it.story or "Clip" }}{% endif %}
+            {% if it.error %}<div class="meta">{{ it.error }}</div>{% endif %}
+            {% if it.reject_tags or it.reject_note %}<div class="meta">{{ it.reject_tags.replace(",", ", ") }}{% if it.reject_note %} — {{ it.reject_note }}{% endif %}</div>{% endif %}</td>
+          <td class="at-num">{% if it.score is not none %}{{ "%.1f"|format(it.score * 10) }}{% endif %}</td>
+          <td>{{ it.state }}{% if it.post_pk %} · <a href="/post/{{ it.post_pk }}">post</a>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
 {# ---- Choosing the cut-off: one table per signal, the one in use first ---- #}
 {% for sig in ([signal] + (["fit"] if signal == "approval" else ["approval"])) %}
 {% set rows = tables[sig] %}

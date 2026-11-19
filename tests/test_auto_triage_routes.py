@@ -262,10 +262,11 @@ class AutoTriageRoutesTest(unittest.TestCase):
         self.main._scrape_inflight.add(busy)
         self.addCleanup(self.main._scrape_inflight.discard, busy)
         with mock.patch.object(self.main, "_scrape_in_thread", side_effect=order.append), \
-                mock.patch.object(self.main, "_after_background_work"):
+                mock.patch.object(self.main, "_after_background_work"), \
+                mock.patch.object(self.main, "_inbox_tick", return_value={"made": 1, "queued": 0}):
             out = self.main._home_worker_tick()
         self.assertEqual(order, [first, second])
-        self.assertEqual(out, {"approved": 0, "downloads": 2})
+        self.assertEqual(out, {"approved": 0, "downloads": 2, "inbox_made": 1, "inbox_queued": 0})
 
     def test_video_page_names_an_automatic_rejection(self):
         pk, _ = self.spot_check(prob=0.012)

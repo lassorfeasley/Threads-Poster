@@ -842,6 +842,55 @@ class AutoTriageAction(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class InboxItem(Base):
+    """One finished clip the system made on its own and is holding for the
+    operator's one-click call (app/inbox.py): picked from a clip-engine draft
+    that cleared the critic, cut, rendered, subtitled and captioned without
+    anyone touching it. Not a post yet — anything ``queued`` publishes, so a
+    post exists only once the operator approves. The AI caption is a
+    ``DraftProposal`` like every other draft; ``Cut.draft_caption`` is only
+    written with what the operator approved.
+    """
+
+    __tablename__ = "inbox_items"
+
+    STATE_DRAFTING = "drafting"   # being cut / rendered / captioned on the home machine
+    STATE_READY = "ready"         # waiting for the operator
+    STATE_APPROVED = "approved"   # approved; the post is created where the file is
+    STATE_QUEUED = "queued"       # in the posting queue (post_pk)
+    STATE_REJECTED = "rejected"
+    STATE_FAILED = "failed"       # couldn't be made (``error`` says why)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    candidate_pk: Mapped[int] = mapped_column(ForeignKey("candidates.id"))
+    proposal_pk: Mapped[int] = mapped_column(ForeignKey("clip_proposals.id"))
+    cut_pk: Mapped[int | None] = mapped_column(ForeignKey("cuts.id"), nullable=True)
+    state: Mapped[str] = mapped_column(String(12), default=STATE_DRAFTING)
+    # The critic's verdict that got it here: its score (0-1, as on the
+    # proposal) and the line the card shows ("Stops the scroll: ...").
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    critic_line: Mapped[str] = mapped_column(Text, default="")
+    story: Mapped[str] = mapped_column(Text, default="")
+    # The machine's caption, its DraftProposal row, and the gut check on it
+    # (None = the check couldn't run).
+    caption: Mapped[str] = mapped_column(Text, default="")
+    caption_proposal_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    caption_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    caption_note: Mapped[str] = mapped_column(Text, default="")
+    use_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
+    # What the operator approved (possibly edited) and the post it became.
+    final_caption: Mapped[str] = mapped_column(Text, default="")
+    post_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reject_tags: Mapped[str] = mapped_column(String(200), default="")
+    reject_note: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ready_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DraftProposal(Base):
     """Every AI-written draft and what the operator did with it.
 

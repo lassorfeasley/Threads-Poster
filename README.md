@@ -25,6 +25,9 @@ without you either. Two automations change that only when you switch them on
 - **Automatic approval** approves up to a set number of the day's best videos.
   The home machine downloads them, and the clip engine watches them and drafts
   clips. Posting still always waits for you.
+- **The inbox** turns the best drafts into finished clips (rendered, subtitled,
+  captioned) and holds them on the Inbox page. Nothing is posted until you
+  click Approve.
 
 ## Operating context
 

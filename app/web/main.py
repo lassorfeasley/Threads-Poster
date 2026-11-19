@@ -96,6 +96,7 @@ from ..models import (
     Trait,
     TraitWeight,
     TriageDecision,
+    InboxItem,
     XPost,
     utcnow,
 )
@@ -501,6 +502,16 @@ else:
     for _route in auto_triage_router.routes:
         if "POST" in (getattr(_route, "methods", None) or ()):
             _WRITE_SCOPE[_route.path_format] = ("dashboard", "library")
+
+# The inbox (app/web/inbox.py). Approving creates a queued post, which the
+# calendar, library and notifications all show, so its writes keep the
+# default: drop every cached page.
+try:
+    from .inbox import router as inbox_router
+except Exception:
+    log.exception("Inbox page unavailable")
+else:
+    app.include_router(inbox_router)
 
 # Rule proposals live in a file under the engine directory; adding one writes
 # brand.yaml. Neither is part of any cached page.
@@ -1001,7 +1012,169 @@ def _home_worker_tick() -> dict:
         _scrape_in_thread(cid)   # blocking: one at a time
         downloaded += 1
         _after_background_work()
-    return {"approved": picked.get("approved", 0), "downloads": downloaded}
+    inbox_round: dict = {}
+    try:
+        inbox_round = _inbox_tick()
+    except Exception:
+        log.exception("Inbox round failed")
+    return {"approved": picked.get("approved", 0), "downloads": downloaded,
+            "inbox_made": inbox_round.get("made", 0), "inbox_queued": inbox_round.get("queued", 0)}
+
+
+class _InboxSkip(Exception):
+    """The draft can't become an inbox clip, and retrying won't change that."""
+
+
+def _inbox_draft_item(item_id: int) -> None:
+    """Make one inbox clip end to end: cut the engine's draft, render it, burn
+    in subtitles, draft a caption in the account's voice and gut-check it —
+    one redraft if the check flags it, as re-airs do. Blocking (ffmpeg,
+    Whisper, model calls); the home worker runs these one at a time. Sessions
+    are opened per step, never held across the slow parts."""
+    from .. import inbox as inbox_mod
+    from ..caption_check import run as check_caption, vetted_airing
+    from ..subtitles import NoSpeechError
+
+    settings = load_settings()
+    try:
+        with session_scope() as session:
+            item = session.get(InboxItem, item_id)
+            if item is None or item.state != InboxItem.STATE_DRAFTING:
+                return
+            item.attempts = (item.attempts or 0) + 1
+            item.started_at = utcnow()
+            want_subs = inbox_mod.load_policy(session).subtitles
+            if item.cut_pk is None:
+                row = session.get(ClipProposal, item.proposal_pk)
+                c = session.get(Candidate, item.candidate_pk)
+                if (row is None or c is None or c.status != STATUS_ARCHIVED
+                        or row.verdict != ClipProposal.VERDICT_PENDING):
+                    raise _InboxSkip("The draft or its video changed before the clip was made")
+                try:
+                    segments, _ = clip_proposals.visible_segments(
+                        json.loads(row.proposed_segments or "[]"))
+                except (TypeError, ValueError):
+                    segments = []
+                if not segments:
+                    raise _InboxSkip("The draft has nothing left to cut")
+                conflict, clash = clip_proposals.clip_conflict(
+                    segments, clip_proposals.other_clips(session, c.id))
+                if conflict == clip_proposals.CONFLICT_DUPLICATE:
+                    raise _InboxSkip(f"Same clip as {clash or 'an existing one'}")
+                cut = Cut(candidate_pk=c.id, trim_segments=json.dumps(segments))
+                session.add(cut)
+                session.flush()
+                clip_proposals.accept(session, row.id, cut.id)
+                clip_proposals.resolve_for_cut(session, cut.id, c.id, segments)
+                cut.export_status = "exporting"
+                item.cut_pk = cut.id
+            cut = session.get(Cut, item.cut_pk)
+            cut_id = cut.id
+            exported = bool(cut.trimmed_clip_path) and Path(cut.trimmed_clip_path).exists()
+            if not exported:
+                cut.export_status = "exporting"
+
+        # 1. Render (title, calendar name and footage tags come with it).
+        if not exported:
+            _export_cut_in_thread(cut_id)
+        with session_scope(read_only=True) as session:
+            cut = session.get(Cut, cut_id)
+            if cut.export_status == "failed" or not cut.trimmed_clip_path:
+                raise RuntimeError(cut.export_error or "The clip didn't render")
+            traits = cut.footage_traits or (cut.candidate.visual_traits if cut.candidate else "")
+            has_subs = bool(cut.subtitled_clip_path) and Path(cut.subtitled_clip_path).exists()
+
+        # 2. Subtitles, unless the footage already has them burned in.
+        position = vision.suggest_subs_position(traits)
+        if want_subs and position != "none" and not has_subs:
+            try:
+                _burn_subtitles(cut_id, position)
+                has_subs = True
+            except NoSpeechError:
+                has_subs = False
+        use_subs = want_subs and has_subs
+
+        # 3. Caption: drafted, checked, redrafted once if flagged.
+        with session_scope() as session:
+            cut = session.get(Cut, cut_id)
+            draft, verdict = None, None
+            for _ in range(2):
+                draft = _draft_caption_for_cut(session, cut, settings)
+                verdict = check_caption(session, cut, draft["caption"], source="inbox",
+                                        reference=vetted_airing(session, cut))
+                if verdict.ok is not False:
+                    break
+            item = session.get(InboxItem, item_id)
+            item.caption = draft["caption"]
+            item.caption_proposal_pk = draft["proposal_id"]
+            item.caption_ok = verdict.ok
+            item.caption_note = (verdict.reason or verdict.error or "")[:1000]
+            item.use_subtitles = use_subs
+            item.state = InboxItem.STATE_READY
+            item.ready_at = utcnow()
+            item.error = ""
+        log.info("Inbox clip %s ready (cut %s)", item_id, cut_id)
+    except (_InboxSkip, CaptionDraftError) as exc:
+        _inbox_fail(item_id, str(exc), retry=False)
+    except Exception as exc:
+        log.exception("Inbox clip %s failed", item_id)
+        _inbox_fail(item_id, str(exc), retry=True)
+
+
+def _inbox_fail(item_id: int, error: str, *, retry: bool) -> None:
+    """Record why an inbox clip couldn't be made. A retryable failure stays
+    ``drafting`` (stalled() retries it later) until attempts run out."""
+    from .. import inbox as inbox_mod
+
+    with session_scope() as session:
+        item = session.get(InboxItem, item_id)
+        if item is None:
+            return
+        item.error = error[:1000]
+        if not retry or (item.attempts or 0) >= inbox_mod.MAX_ATTEMPTS:
+            item.state = InboxItem.STATE_FAILED
+
+
+def _inbox_discard_render(session, cut: Cut) -> None:
+    """A rejected inbox clip keeps its cut row (its caption drafts and the
+    clip ledger point at it, and its footage must not be suggested again) but
+    not its rendered files."""
+    files = [cut.trimmed_clip_path, cut.subtitled_clip_path, cut.vertical_clip_path]
+    cut.trimmed_clip_path = cut.subtitled_clip_path = cut.vertical_clip_path = ""
+    cut.use_subtitles = False
+    cut.updated_at = utcnow()
+    session.flush()
+    _delete_if_unreferenced(session, [f for f in files if f])
+
+
+def _inbox_tick() -> dict:
+    """The inbox's round on the home worker: retry drafts a restart cut off,
+    make what today's pace allows, and queue approvals made where the files
+    aren't (the hosted dashboard)."""
+    from .. import inbox as inbox_mod
+
+    with session_scope() as session:
+        retry = inbox_mod.stalled(session)
+        fresh = inbox_mod.claim(session, load_settings())
+    made = 0
+    for item_id in retry + fresh:
+        _inbox_draft_item(item_id)
+        made += 1
+        _after_background_work()
+    queued = 0
+    with session_scope() as session:
+        approved = session.execute(
+            select(InboxItem).where(InboxItem.state == InboxItem.STATE_APPROVED)
+        ).scalars().all()
+        for item in approved:
+            try:
+                if inbox_mod.queue_approved(session, item):
+                    queued += 1
+            except Exception:
+                log.exception("Couldn't queue approved inbox clip %s", item.id)
+    if queued:
+        pagecache.invalidate()
+    return {"made": made, "queued": queued}
 
 
 def _start_home_worker() -> None:
@@ -3869,6 +4042,42 @@ def set_subs_mode(cut_id: int, mode: str = Form("")):
     return JSONResponse({"ok": True, "mode": mode})
 
 
+def _burn_subtitles(cut_id: int, position: str = "", force: bool = False) -> str:
+    """Burn the stylized captions into the exported clip and record the new
+    file on the cut; returns its path. Blocking (Whisper + ffmpeg), so the
+    route and the inbox pipeline both call it off the event loop.
+
+    Raises LookupError when there's no exported clip yet, and subtitles'
+    NoSpeechError / SubtitleError as they come.
+    """
+    from ..subtitles import clip_transcript_path_for, create_subtitled_clip
+
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+            raise LookupError("Export a clip first")
+        clip_path = cut.trimmed_clip_path
+        previous_subs = cut.subtitled_clip_path
+    # Version each render so regenerating captions never overwrites the file a
+    # queued post is already pointing at.
+    stamp = utcnow().strftime("%Y%m%dT%H%M%S")
+    out_path = Path(clip_path).with_name(f"{Path(clip_path).stem}_subs_{stamp}.mp4")
+    out = create_subtitled_clip(clip_path, position=position or None,
+                                out_path=out_path, force_transcribe=force)
+    transcript_path = clip_transcript_path_for(clip_path)
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is not None:
+            cut.subtitled_clip_path = str(out)
+            if transcript_path.exists():
+                cut.clip_transcript_path = str(transcript_path)
+            _delete_if_unreferenced(session, [previous_subs])
+            cut.use_subtitles = True
+            cut.subs_position = "top" if (position or "").lower() == "top" else "bottom"
+            cut.updated_at = utcnow()
+    return str(out)
+
+
 @app.post("/cut/{cut_id}/subtitles")
 def generate_subtitles(cut_id: int, position: str = Form(""), force: str = Form("")):
     """Generate the stylized-caption variant of the exported clip (AJAX).
@@ -3881,23 +4090,12 @@ def generate_subtitles(cut_id: int, position: str = Form(""), force: str = Form(
     ``force`` (the UI's "Try again" after a no-speech failure) skips the cached
     word sidecar and re-runs Whisper at its strongest tier.
     """
-    from ..subtitles import (
-        NoSpeechError, SubtitleError, clip_transcript_path_for, create_subtitled_clip,
-    )
+    from ..subtitles import NoSpeechError, SubtitleError
 
-    with session_scope() as session:
-        cut = session.get(Cut, cut_id)
-        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
-            return JSONResponse({"error": "Export a clip first"}, status_code=404)
-        clip_path = cut.trimmed_clip_path
-        previous_subs = cut.subtitled_clip_path
-    # Version each render so regenerating captions never overwrites the file a
-    # queued post is already pointing at.
-    stamp = utcnow().strftime("%Y%m%dT%H%M%S")
-    out_path = Path(clip_path).with_name(f"{Path(clip_path).stem}_subs_{stamp}.mp4")
     try:
-        out = create_subtitled_clip(clip_path, position=position or None,
-                                    out_path=out_path, force_transcribe=bool(force))
+        _burn_subtitles(cut_id, position, bool(force))
+    except LookupError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     except NoSpeechError as exc:
         # Not a server fault: every Whisper tier heard nothing. The UI offers
         # a "Try again" that re-posts with force=1.
@@ -3907,17 +4105,6 @@ def generate_subtitles(cut_id: int, position: str = Form(""), force: str = Form(
     except Exception as exc:
         log.exception("Caption generation failed for cut %s", cut_id)
         return JSONResponse({"error": f"Caption generation failed: {exc}"}, status_code=500)
-    transcript_path = clip_transcript_path_for(clip_path)
-    with session_scope() as session:
-        cut = session.get(Cut, cut_id)
-        if cut is not None:
-            cut.subtitled_clip_path = str(out)
-            if transcript_path.exists():
-                cut.clip_transcript_path = str(transcript_path)
-            _delete_if_unreferenced(session, [previous_subs])
-            cut.use_subtitles = True
-            cut.subs_position = "top" if (position or "").lower() == "top" else "bottom"
-            cut.updated_at = utcnow()
     return {"url": f"/media/subtitled/{cut_id}"}
 
 
@@ -4188,6 +4375,94 @@ def _caption_scene_context(cut: Cut, lead_in_seconds: float = 60.0) -> tuple[str
     return lead_in, chapter
 
 
+class CaptionDraftError(Exception):
+    """A caption couldn't be drafted for a reason the operator can act on;
+    ``status`` is the HTTP code the route answers with."""
+
+    def __init__(self, message: str, status: int = 409):
+        super().__init__(message)
+        self.status = status
+
+
+def _draft_caption_for_cut(session, cut: Cut, settings) -> dict:
+    """Draft a voice-matched caption for an exported clip and log it as a
+    pending caption proposal. Never writes ``cut.draft_caption``: a draft is a
+    proposal until the operator accepts it. Returns {caption, proposal_id,
+    voice_examples, target_words, transcript}; raises CaptionDraftError."""
+    c = cut.candidate
+    # Draft from the Whisper transcript of the exported clip — the same
+    # source burned-in captions use. Transcribe on demand if captions
+    # haven't been generated yet. Never fall back to the full-video
+    # YouTube captions (those describe parts that aren't in the clip).
+    if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+        raise CaptionDraftError("Export the clip first — the caption is drafted "
+                                "from what is said in the trimmed clip.")
+    _lines, clip_text = _ensure_whisper_clip_transcript(cut)
+    if not clip_text.strip():
+        raise CaptionDraftError("No speech detected in the clip — nothing to draft "
+                                "a caption from.")
+    excerpt = " ".join(clip_text.split())[:3000]
+    seconds = clip_duration(cut.trimmed_clip_path) if cut.trimmed_clip_path else None
+    # Voice matching from past captions — never let it break drafting.
+    try:
+        voice = voice_context(session, settings)
+    except Exception as exc:
+        log.warning("Voice context failed (drafting generic): %s", exc)
+        voice = {"examples": [], "style_guide": "", "target_words": None}
+    model = settings.get("engagement.draft_model", "claude-sonnet-5")
+    max_chars = int(settings.get("engagement.caption_max_chars", 220))
+    operator_guide = render_caption_guide()
+    target_words = voice.get("target_words")
+    # Promo captions carry the call-to-action URL themselves, because those
+    # posts get no first reply to put it in.
+    first_party = is_first_party(c)
+    # What the scene means rarely lives in its few seconds of dialogue —
+    # extra context only, so a failure here drafts without it.
+    try:
+        lead_in, chapter = _caption_scene_context(cut)
+    except Exception as exc:
+        log.warning("Caption scene context failed for cut %s: %s", cut.id, exc)
+        lead_in, chapter = "", None
+    contact_sheet = (vision.clip_contact_sheet(cut.trimmed_clip_path)
+                     if settings.get("vision.enabled", True) else None)
+    try:
+        caption = suggest_post_caption(
+            model,
+            c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
+            examples=voice["examples"], style_guide=voice["style_guide"],
+            operator_guide=operator_guide,
+            max_chars=max_chars,
+            target_words=target_words,
+            description=c.description,
+            first_party=first_party,
+            contact_sheet=contact_sheet,
+            lead_in=lead_in,
+            chapter=chapter,
+        )
+    except Exception as exc:
+        raise CaptionDraftError(str(exc), status=500) from exc
+    # The caption field itself is left untouched — this is a proposal until
+    # the operator accepts it (/cut/{id}/caption, or Approve in the inbox).
+    # The DRAFT is persisted here regardless, so dismissing it records a
+    # rejection instead of discarding the most informative event in the loop.
+    proposal_id = log_draft_proposal(
+        session, cut.id, caption, kind=KIND_CAPTION,
+        model=model,
+        policy=draft_policy_version(
+            model=model, max_chars=max_chars, target_words=target_words,
+            style_guide=voice["style_guide"], operator_guide=operator_guide,
+            examples=len(voice["examples"]), first_party=first_party,
+            scene_context=bool(contact_sheet or lead_in or chapter),
+        ),
+        max_chars=max_chars,
+        target_words=target_words,
+        voice_examples=len(voice["examples"]),
+    )
+    return {"caption": caption, "voice_examples": len(voice["examples"]),
+            "proposal_id": proposal_id, "target_words": target_words,
+            "transcript": clip_text}
+
+
 @app.post("/cut/{cut_id}/suggest-caption")
 def suggest_caption(cut_id: int):
     settings = load_settings()
@@ -4195,80 +4470,10 @@ def suggest_caption(cut_id: int):
         cut = session.get(Cut, cut_id)
         if cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        c = cut.candidate
-        # Draft from the Whisper transcript of the exported clip — the same
-        # source burned-in captions use. Transcribe on demand if captions
-        # haven't been generated yet. Never fall back to the full-video
-        # YouTube captions (those describe parts that aren't in the clip).
-        if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
-            return JSONResponse(
-                {"error": "Export the clip first — the caption is drafted "
-                          "from what is said in the trimmed clip."},
-                status_code=409)
-        _lines, clip_text = _ensure_whisper_clip_transcript(cut)
-        if not clip_text.strip():
-            return JSONResponse(
-                {"error": "No speech detected in the clip — nothing to draft "
-                          "a caption from."},
-                status_code=409)
-        excerpt = " ".join(clip_text.split())[:3000]
-        seconds = clip_duration(cut.trimmed_clip_path) if cut.trimmed_clip_path else None
-        # Voice matching from past captions — never let it break drafting.
         try:
-            voice = voice_context(session, settings)
-        except Exception as exc:
-            log.warning("Voice context failed (drafting generic): %s", exc)
-            voice = {"examples": [], "style_guide": "", "target_words": None}
-        model = settings.get("engagement.draft_model", "claude-sonnet-5")
-        max_chars = int(settings.get("engagement.caption_max_chars", 220))
-        operator_guide = render_caption_guide()
-        target_words = voice.get("target_words")
-        # Promo captions carry the call-to-action URL themselves, because those
-        # posts get no first reply to put it in.
-        first_party = is_first_party(c)
-        # What the scene means rarely lives in its few seconds of dialogue —
-        # extra context only, so a failure here drafts without it.
-        try:
-            lead_in, chapter = _caption_scene_context(cut)
-        except Exception as exc:
-            log.warning("Caption scene context failed for cut %s: %s", cut_id, exc)
-            lead_in, chapter = "", None
-        contact_sheet = (vision.clip_contact_sheet(cut.trimmed_clip_path)
-                         if settings.get("vision.enabled", True) else None)
-        try:
-            caption = suggest_post_caption(
-                model,
-                c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
-                examples=voice["examples"], style_guide=voice["style_guide"],
-                operator_guide=operator_guide,
-                max_chars=max_chars,
-                target_words=target_words,
-                description=c.description,
-                first_party=first_party,
-                contact_sheet=contact_sheet,
-                lead_in=lead_in,
-                chapter=chapter,
-            )
-            # The caption field itself is left untouched — this is a proposal
-            # until the operator accepts it (/cut/{id}/caption). The DRAFT is
-            # persisted here regardless, so dismissing it records a rejection
-            # instead of discarding the most informative event in the loop.
-            proposal_id = log_draft_proposal(
-                session, cut_id, caption, kind=KIND_CAPTION,
-                model=model,
-                policy=draft_policy_version(
-                    model=model, max_chars=max_chars, target_words=target_words,
-                    style_guide=voice["style_guide"], operator_guide=operator_guide,
-                    examples=len(voice["examples"]), first_party=first_party,
-                    scene_context=bool(contact_sheet or lead_in or chapter),
-                ),
-                max_chars=max_chars,
-                target_words=target_words,
-                voice_examples=len(voice["examples"]),
-            )
-            return {"caption": caption, "voice_examples": len(voice["examples"]),
-                    "proposal_id": proposal_id, "target_words": target_words,
-                    "transcript": clip_text}
+            return _draft_caption_for_cut(session, cut, settings)
+        except CaptionDraftError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status)
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -5449,10 +5654,16 @@ def _library_dataset() -> dict:
         ]
 
         # --- Cuts (first-class trimmed clips) ---
+        # Inbox clips the operator rejected (or that couldn't be made) keep
+        # their row for the ledgers, not a place in the library.
+        discarded = select(InboxItem.id).where(
+            InboxItem.cut_pk == Cut.id,
+            InboxItem.state.in_((InboxItem.STATE_REJECTED, InboxItem.STATE_FAILED)))
         cuts = session.execute(
             select(Cut)
             .options(selectinload(Cut.candidate).options(
                 selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY))
+            .where(~discarded.exists())
             .order_by(Cut.created_at.desc())
         ).scalars().all()
         published_cut_pks = {

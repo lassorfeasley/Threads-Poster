@@ -19,7 +19,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy.orm import selectinload
 
-from .. import auto_select, auto_triage, triage_model
+from .. import auto_select, auto_triage, inbox, triage_model
 from ..config import env, load_settings
 from ..db import session_scope
 from ..models import STATUS_REJECTED, AutoTriageAction, Candidate
@@ -142,6 +142,12 @@ def auto_triage_page(request: Request, run: int = 0, page: int = 1, msg: str = "
                 "fit_floor": auto_select.FIT_FLOOR_CHOICES, "explore": auto_select.EXPLORE_CHOICES,
                 "fresh_days": auto_select.FRESH_DAYS_CHOICES},
             "engine_cap": settings.get("clip_engine.daily_usd", 5.0),
+            "inbox_policy": inbox.load_policy(session),
+            "inbox_counts": inbox.counts(session),
+            "inbox_recent": inbox.recent(session, limit=15),
+            "inbox_choices": {"per_day": inbox.PER_DAY_CHOICES,
+                              "min_score": inbox.MIN_SCORE_CHOICES,
+                              "per_video": inbox.PER_VIDEO_CHOICES},
             "archives_here": env("ARCHIVE_ON_THIS_MACHINE", "on").strip().lower()
             not in ("0", "off", "false", "no"),
             "spot": spot,

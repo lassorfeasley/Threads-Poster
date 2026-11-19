@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "52"
+SCHEMA_VERSION = "53"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -184,6 +184,7 @@ _SCHEMA_SENTINELS = (
     "SELECT fit_reason FROM auto_triage_actions LIMIT 0",
     "SELECT explore FROM auto_triage_actions LIMIT 0",
     "SELECT approved FROM auto_triage_runs LIMIT 0",
+    "SELECT caption_ok FROM inbox_items LIMIT 0",
 )
 
 
@@ -538,6 +539,8 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_auto_triage_actions_candidate_pk "
         "ON auto_triage_actions (candidate_pk)",
         "CREATE INDEX IF NOT EXISTS ix_auto_triage_actions_run_pk ON auto_triage_actions (run_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_inbox_items_state ON inbox_items (state)",
+        "CREATE INDEX IF NOT EXISTS ix_inbox_items_proposal_pk ON inbox_items (proposal_pk)",
     )
     with engine.begin() as conn:
         for stmt in statements:
