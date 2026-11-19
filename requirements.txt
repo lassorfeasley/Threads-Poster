@@ -9,6 +9,10 @@ sqlalchemy>=2.0
 pyyaml>=6.0
 python-dotenv>=1.0
 requests>=2.32
+# Imported directly (Storage uploads, file sharing, the dashboard login).
+# Declared rather than left to arrive with another package: the anthropic
+# SDK stopped depending on it in 2.x.
+httpx>=0.27
 # YouTube is running an experiment that makes PO tokens mandatory on the
 # android_vr client, which 403s every download. The `visionos` client is the
 # escape hatch and only exists in builds after the 2026.07.04 stable, so a

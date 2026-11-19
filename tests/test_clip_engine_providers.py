@@ -3,8 +3,8 @@ streamed, schema-constrained Claude calls.
 
 No network. Gemini's HTTP goes through a scripted stand-in for
 ``gemini._send``. Claude runs the real ``anthropic`` SDK against an in-memory
-httpx transport, so request serialization and the SDK's own stream
-accumulator are exercised for real. Spend goes to a temp ledger.
+httpx transport (httpx2 from SDK 2.x), so request serialization and the SDK's
+own stream accumulator are exercised for real. Spend goes to a temp ledger.
 
 Run with:  python -m unittest tests.test_clip_engine_providers -v
 """
@@ -24,12 +24,36 @@ from pathlib import Path
 from unittest import mock
 
 import anthropic
-import httpx
 import requests
 from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from app import config, llm, spend
 from app.clip_engine import claude, gemini, util
+
+
+def _sdk_http():
+    """The HTTP package this anthropic SDK speaks: httpx up to 0.x, httpx2 (the
+    same API) from 2.x. The fake transport must come from the same package, or
+    the SDK refuses the client."""
+    try:
+        import httpx2
+    except ImportError:
+        import httpx
+
+        return httpx
+    probe = httpx2.Client()
+    try:
+        anthropic.Anthropic(api_key="probe", http_client=probe)
+    except TypeError:
+        import httpx
+
+        return httpx
+    finally:
+        probe.close()
+    return httpx2
+
+
+httpx = _sdk_http()
 
 SCHEMA = {
     "type": "object",
