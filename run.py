@@ -12,8 +12,8 @@ Usage:
   python run.py workspace list     # show the workspace registry
   python run.py config status       # shared workspace documents: database vs this machine
   python run.py datasync push --dry-run  # files the hosted dashboard needs, not yet in Storage
-  python run.py user hash <email>  # make a DASHBOARD_USERS login entry (prompts for the password)
-  python run.py user secret        # make an AUTH_SECRET for the login cookie
+  python run.py user list          # dashboard accounts (Supabase Auth) and their workspaces
+  python run.py user invite <email> # email an invitation to this workspace's dashboard
   python run.py workspace create <slug>         # scaffold a new workspace
   python run.py monitor            # one discovery pass over all channels
   python run.py monitor --loop     # poll forever at the configured interval
@@ -142,20 +142,44 @@ def cmd_datasync(args) -> None:
 
 
 def cmd_user(args) -> None:
+    """Dashboard accounts (Supabase Auth). Access is per workspace: the one
+    selected with --workspace (default: climate)."""
     import getpass
     import secrets
 
+    from app.config import WORKSPACE
     from app.web import auth
 
-    if args.user_command == "secret":
-        print(secrets.token_urlsafe(48))
-        return
-    password = getpass.getpass("Password (12+ characters): ")
-    if len(password) < 12:
-        raise SystemExit("Use at least 12 characters.")
-    if getpass.getpass("Again: ") != password:
-        raise SystemExit("Passwords didn't match.")
-    print(f"{args.email.strip().lower()}:{auth.hash_password(password)}")
+    try:
+        if args.user_command == "list":
+            for u in sorted(auth.list_users(), key=lambda u: u.email):
+                mark = "*" if u.can_use(WORKSPACE) else " "
+                print(f" {mark} {u.email:40} {u.role or '-':8} {', '.join(u.workspaces) or '(no workspaces)'}")
+            print(f"\n* = can use the {WORKSPACE!r} dashboard")
+        elif args.user_command == "add":
+            password = args.password or ""
+            if args.generate:
+                password = secrets.token_urlsafe(15)
+            elif not password:
+                password = getpass.getpass("Password (12+ characters): ")
+                if getpass.getpass("Again: ") != password:
+                    raise SystemExit("Passwords didn't match.")
+            if len(password) < 12:
+                raise SystemExit("Use at least 12 characters.")
+            user = auth.add_user(args.email, password, WORKSPACE, args.role)
+            print(f"{user.email} can sign in to the {WORKSPACE!r} dashboard.")
+            if args.generate:
+                print(f"Password: {password}")
+        elif args.user_command == "invite":
+            user = auth.invite(args.email, WORKSPACE, args.url.rstrip("/") + "/auth/callback",
+                               args.role)
+            print(f"Invitation emailed to {user.email} for the {WORKSPACE!r} dashboard.")
+        elif args.user_command == "remove":
+            user = auth.revoke(args.email, WORKSPACE)
+            print(f"{user.email} can no longer use the {WORKSPACE!r} dashboard "
+                  f"(the account itself remains).")
+    except auth.AuthError as exc:
+        raise SystemExit(str(exc)) from None
 
 
 def _run_single_dashboard(args) -> None:
@@ -2222,7 +2246,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="disable auto-reload on source changes")
     p.add_argument("--host", default="127.0.0.1",
                    help="interface to listen on (single-workspace mode). Anything but "
-                        "loopback requires DASHBOARD_USERS and AUTH_SECRET")
+                        "loopback requires DASHBOARD_AUTH=supabase")
     p.set_defaults(func=cmd_dashboard, reload=True)
 
     p = sub.add_parser("config", parents=[common],
@@ -2244,11 +2268,22 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--limit", type=int, default=None, help="stop after this many files")
     p.set_defaults(func=cmd_datasync)
 
-    p = sub.add_parser("user", help="dashboard logins (DASHBOARD_USERS / AUTH_SECRET)")
+    p = sub.add_parser("user", help="dashboard accounts (Supabase Auth, per workspace)")
     usub = p.add_subparsers(dest="user_command", required=True)
-    up = usub.add_parser("hash", help="prompt for a password; print the DASHBOARD_USERS entry")
+    usub.add_parser("list", parents=[common], help="accounts and the workspaces they can use")
+    up = usub.add_parser("add", parents=[common],
+                         help="create an account with a password (or give one access)")
     up.add_argument("email")
-    up = usub.add_parser("secret", help="print a fresh AUTH_SECRET value")
+    up.add_argument("--password", default="", help="(else prompted)")
+    up.add_argument("--generate", action="store_true", help="make up a strong password and print it")
+    up.add_argument("--role", default="member", choices=["owner", "member"])
+    up = usub.add_parser("invite", parents=[common], help="email an invitation (they choose a password)")
+    up.add_argument("email")
+    up.add_argument("--url", default="https://app.continuity.marketing",
+                    help="the dashboard's public address (where the email link lands)")
+    up.add_argument("--role", default="member", choices=["owner", "member"])
+    up = usub.add_parser("remove", parents=[common], help="take away access to this workspace")
+    up.add_argument("email")
     p.set_defaults(func=cmd_user)
 
     p = sub.add_parser("workspace", help="manage the workspace registry")
@@ -2356,7 +2391,7 @@ def main() -> None:
     # The registry commands and the supervisor must work without any existing
     # workspace (fresh clone), so they never import app.*; everything else gets
     # the workspace's file logging.
-    if args.command in ("workspace", "user") or (
+    if args.command == "workspace" or (
         args.command == "dashboard" and not getattr(args, "workspace", None)
     ):
         logging.basicConfig(level=logging.INFO,

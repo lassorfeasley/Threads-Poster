@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 
+import httpx
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -587,14 +588,23 @@ async def _restore_archived_clips(request: Request, call_next):
 async def _require_login(request: Request, call_next):
     if not auth.enabled() or auth.is_public(request.url.path):
         return await call_next(request)
-    email = auth.read_session(request.cookies.get(auth.COOKIE_NAME))
-    if email is None:
+    try:
+        user, renewed = await run_in_threadpool(
+            auth.resolve, request.cookies.get(auth.COOKIE_NAME))
+    except (auth.AuthError, httpx.HTTPError) as exc:
+        log.warning("Sign-in check failed: %s", exc)
+        return HTMLResponse("Sign-in is unavailable right now. Try again in a minute.",
+                            status_code=503)
+    if user is None:
         if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
             target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
             return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=303)
         return JSONResponse({"error": "not signed in"}, status_code=401)
-    request.state.user = email
-    return await call_next(request)
+    request.state.user = user.email
+    response = await call_next(request)
+    if renewed is not None:
+        _set_session_cookie(response, request, renewed)
+    return response
 
 
 def _client_ip(request: Request) -> str:
@@ -606,19 +616,42 @@ def _is_https(request: Request) -> bool:
     return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
 
 
+def _set_session_cookie(response, request: Request, session: "auth.Session") -> None:
+    response.set_cookie(auth.COOKIE_NAME, auth.make_cookie(session),
+                        max_age=auth.SESSION_SECONDS, httponly=True, samesite="lax",
+                        secure=_is_https(request), path="/")
+
+
+def _public_origin(request: Request) -> str:
+    """Where emailed links should land: PUBLIC_URL when set, else this request's
+    own origin (https behind Fly's proxy)."""
+    configured = env("PUBLIC_URL").rstrip("/")
+    if configured:
+        return configured
+    scheme = "https" if _is_https(request) else request.url.scheme
+    return f"{scheme}://{request.url.netloc}"
+
+
+def _auth_page(request: Request, name: str, **ctx):
+    return templates.TemplateResponse(request, name, ctx)
+
+
 @app.get("/healthz")
 def healthz():
     return JSONResponse({"ok": True})
 
 
 @app.get("/login", response_class=HTMLResponse)
-def login_form(request: Request, next: str = "/", error: str = ""):
+def login_form(request: Request, next: str = "/", error: str = "", msg: str = ""):
     if not auth.enabled():
         return RedirectResponse("/", status_code=303)
-    if auth.read_session(request.cookies.get(auth.COOKIE_NAME)):
+    try:
+        user, _ = auth.resolve(request.cookies.get(auth.COOKIE_NAME))
+    except (auth.AuthError, httpx.HTTPError):
+        user = None
+    if user is not None:
         return RedirectResponse(auth.safe_next(next), status_code=303)
-    return templates.TemplateResponse(request, "login.html", {
-        "next": auth.safe_next(next), "error": error})
+    return _auth_page(request, "login.html", next=auth.safe_next(next), error=error, msg=msg)
 
 
 @app.post("/login")
@@ -627,29 +660,114 @@ async def login_submit(request: Request, email: str = Form(""), password: str = 
     if not auth.enabled():
         return RedirectResponse("/", status_code=303)
     target = auth.safe_next(next)
+    back = f"/login?next={quote(target, safe='')}"
     keys = (f"ip:{_client_ip(request)}", f"email:{email.strip().lower()}")
     if any(auth.throttled(k) for k in keys):
-        return RedirectResponse(
-            f"/login?next={quote(target, safe='')}&error=throttled", status_code=303)
-    user = await run_in_threadpool(auth.authenticate, email, password)
-    if user is None:
+        return RedirectResponse(f"{back}&error=throttled", status_code=303)
+    try:
+        result = await run_in_threadpool(auth.sign_in, email, password)
+    except (auth.AuthError, httpx.HTTPError) as exc:
+        log.warning("Sign-in unavailable: %s", exc)
+        return RedirectResponse(f"{back}&error=unavailable", status_code=303)
+    if result is None:
         for k in keys:
             auth.record_failure(k)
         log.warning("Failed dashboard login for %r from %s", email, _client_ip(request))
-        return RedirectResponse(
-            f"/login?next={quote(target, safe='')}&error=invalid", status_code=303)
+        return RedirectResponse(f"{back}&error=invalid", status_code=303)
+    session, user = result
+    if not user.can_use(WORKSPACE):
+        log.warning("Login by %s refused: no access to workspace %s", user.email, WORKSPACE)
+        await run_in_threadpool(auth.sign_out, session.access_token)
+        return RedirectResponse(f"{back}&error=noaccess", status_code=303)
     for k in keys:
         auth.clear_failures(k)
-    log.info("Dashboard login: %s", user)
+    log.info("Dashboard login: %s", user.email)
     response = RedirectResponse(target, status_code=303)
-    response.set_cookie(auth.COOKIE_NAME, auth.make_session(user), max_age=auth.SESSION_SECONDS,
-                        httponly=True, samesite="lax", secure=_is_https(request), path="/")
+    _set_session_cookie(response, request, session)
     return response
 
 
+@app.get("/forgot", response_class=HTMLResponse)
+def forgot_form(request: Request, error: str = ""):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    return _auth_page(request, "auth_forgot.html", error=error)
+
+
+@app.post("/forgot")
+async def forgot_submit(request: Request, email: str = Form("")):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    key = f"reset:{_client_ip(request)}"
+    if auth.throttled(key):
+        return RedirectResponse("/forgot?error=throttled", status_code=303)
+    auth.record_failure(key)  # every request counts: this sends email
+    try:
+        await run_in_threadpool(auth.send_reset, email,
+                                _public_origin(request) + "/auth/callback")
+    except (auth.AuthError, httpx.HTTPError) as exc:
+        log.warning("Password reset for %r failed: %s", email, exc)
+        return RedirectResponse("/forgot?error=unavailable", status_code=303)
+    return RedirectResponse("/login?msg=reset_sent", status_code=303)
+
+
+@app.get("/auth/callback", response_class=HTMLResponse)
+def auth_callback(request: Request):
+    """Where emailed links (password reset, invitation) land. Supabase puts the
+    session in the URL fragment, which never reaches a server, so this page's
+    script posts it to /auth/session."""
+    return _auth_page(request, "auth_callback.html")
+
+
+@app.post("/auth/session")
+async def auth_session(request: Request, access_token: str = Form(""),
+                       refresh_token: str = Form(""), type: str = Form("")):
+    try:
+        user = await run_in_threadpool(auth.user_for, access_token)
+    except (auth.AuthError, httpx.HTTPError):
+        return RedirectResponse("/login?error=unavailable", status_code=303)
+    if user is None:
+        return RedirectResponse("/login?error=expired", status_code=303)
+    if not user.can_use(WORKSPACE):
+        return RedirectResponse("/login?error=noaccess", status_code=303)
+    target = "/account/password?welcome=1" if type in ("recovery", "invite", "signup") else "/"
+    response = RedirectResponse(target, status_code=303)
+    _set_session_cookie(response, request, auth.Session(access_token, refresh_token))
+    return response
+
+
+@app.get("/account/password", response_class=HTMLResponse)
+def password_form(request: Request, welcome: int = 0, error: str = "", msg: str = ""):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    return _auth_page(request, "auth_password.html", welcome=bool(welcome), error=error, msg=msg)
+
+
+@app.post("/account/password")
+async def password_submit(request: Request, password: str = Form(""), confirm: str = Form("")):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    if len(password) < 12:
+        return RedirectResponse("/account/password?error=short", status_code=303)
+    if password != confirm:
+        return RedirectResponse("/account/password?error=mismatch", status_code=303)
+    session = auth.read_cookie(request.cookies.get(auth.COOKIE_NAME))
+    try:
+        await run_in_threadpool(auth.set_password, session.access_token if session else "", password)
+    except (auth.AuthError, httpx.HTTPError) as exc:
+        log.warning("Password change for %s failed: %s", getattr(request.state, "user", "?"), exc)
+        return RedirectResponse("/account/password?error=refused", status_code=303)
+    log.info("Password changed: %s", getattr(request.state, "user", "?"))
+    return RedirectResponse("/?msg=Password+saved", status_code=303)
+
+
 @app.post("/logout")
-def logout():
-    response = RedirectResponse("/login" if auth.enabled() else "/", status_code=303)
+async def logout(request: Request):
+    session = auth.read_cookie(request.cookies.get(auth.COOKIE_NAME))
+    if auth.enabled() and session is not None:
+        await run_in_threadpool(auth.sign_out, session.access_token)
+    response = RedirectResponse("/login?msg=signed_out" if auth.enabled() else "/",
+                                status_code=303)
     response.delete_cookie(auth.COOKIE_NAME, path="/")
     return response
 

@@ -2,7 +2,6 @@
 # https://app.continuity.marketing. Deploy: fly deploy -c fly.dashboard.toml
 #
 # Secrets (fly secrets set -a throughline-climate ...), none in this file:
-#   DASHBOARD_USERS, AUTH_SECRET          the login (python run.py user hash/secret)
 #   DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY
 #   ANTHROPIC_API_KEY, GEMINI_API_KEY, YOUTUBE_API_KEY, GIPHY_API_KEY
 #   THREADS_/INSTAGRAM_/LINKEDIN_/FACEBOOK_/X_ app ids, secrets and
@@ -30,6 +29,9 @@ primary_region = "sjc"
   ARCHIVE_ON_THIS_MACHINE = "off"
   # The scheduler app (fly.toml) publishes; don't tick twice.
   SCHEDULER_EMBEDDED = "false"
+  # Sign-in with Supabase Auth; accounts: python run.py user add/invite.
+  DASHBOARD_AUTH = "supabase"
+  PUBLIC_URL = "https://app.continuity.marketing"
 
 [http_service]
   internal_port = 8080

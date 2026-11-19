@@ -107,6 +107,7 @@
       <span class="label" id="theme-label">Light mode</span>
     </button>
     <div class="foot">{% if request is defined and request.state.user %}Signed in as {{ request.state.user }}<br>
+      <a href="/account/password">Change password</a> ·
       <form method="post" action="/logout" style="display:inline"><button type="submit" class="linklike">Sign out</button></form><br>
       {% else %}Single-operator, local.<br>You approve every action.<br>{% endif %}
       <a href="/product-roadmap">Product roadmap</a></div>
