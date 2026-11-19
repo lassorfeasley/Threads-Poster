@@ -1,0 +1,14 @@
+{% extends "auth_base.html" %}
+{% block title %}Reset password{% endblock %}
+{% block body %}
+<form class="login-card" method="post" action="/forgot">
+  <h1>Reset your password</h1>
+  <p class="sub">We'll email you a link to choose a new one.</p>
+  {% if error == "throttled" %}<p class="login-err">Too many requests. Try again in 15 minutes.</p>
+  {% elif error == "unavailable" %}<p class="login-err">Couldn't send the email right now. Try again in a minute.</p>{% endif %}
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+  <button type="submit">Email me a link</button>
+  <p class="alt"><a href="/login">Back to sign in</a></p>
+</form>
+{% endblock %}

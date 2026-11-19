@@ -201,7 +201,7 @@ class SuggestRouteTest(RouteTestBase):
         self.assertEqual(kwargs["window"], None)
         self.assertEqual(kwargs["topic"], "")
         self.assertEqual(kwargs["reason"], "reroll")
-        self.assertIs(kwargs["on_done"], self.main.pagecache.invalidate)
+        self.assertIs(kwargs["on_done"], self.main._after_background_work)
 
     def test_a_section_pass_carries_its_window_and_chapter(self):
         chapters = [{"start": 0, "end": 100, "topic": "Intro", "summary": "the anchor"},
@@ -1620,7 +1620,7 @@ class FeedbackRouteTest(NotesRouteBase):
                          (None, "reroll", ""))
         self.assertEqual(kwargs["advice"], self.notes.advice_from(
             ["other", "wrong_language", "monologue"], "open on the floods"))
-        self.assertIs(kwargs["on_done"], self.main.pagecache.invalidate)
+        self.assertIs(kwargs["on_done"], self.main._after_background_work)
         self.propose_soon.assert_called_once_with()
 
     def test_dismiss_reason_mapping(self):
@@ -1788,14 +1788,14 @@ class RuleProposalRoutesTest(NotesRouteBase):
         self.assertEqual(r.status_code, 200)
         html = r.text
         self.assertIn("Suggested rules", html)
-        self.assertNotIn('id="rule-proposals" style="margin-top: 14px;" hidden', html)
+        self.assertNotIn('id="rule-proposals" hidden', html)
         proposals = json.loads(re.search(r"let ruleProposals = (\[.*?\]);\n", html).group(1))
         self.assertEqual([p["source"] for p in proposals], ["notes", "notes", "handbook", "notes"])
         self.assertNotIn("</script><b>", html)          # tojson escapes it
         rules = json.loads(re.search(r"let rules = (\[.*?\]);\n", html).group(1))
         self.assertEqual(rules[0]["source"], "handbook")
-        self.assertIn('<option value="clips">Clips</option>', html)
-        self.assertIn("From past edits", html)
+        self.assertIn("['clips', 'Clips'", html)               # the scope groups
+        self.assertIn("Learned from your edits", html)
         if shutil.which("node"):
             for i, script in enumerate(re.findall(r"<script>(.*?)</script>", html, flags=re.S)):
                 path = self.dir / f"brand-{i}.js"
@@ -1807,7 +1807,7 @@ class RuleProposalRoutesTest(NotesRouteBase):
     def test_brand_page_without_proposals(self):
         self.notes.util.atomic_write_json(self.notes.proposals_path(), {"proposals": []})
         html = self.client.get("/brand").text
-        self.assertIn('id="rule-proposals" style="margin-top: 14px;" hidden', html)
+        self.assertIn('id="rule-proposals" hidden', html)
         with mock.patch.object(self.notes, "pending_proposals", side_effect=OSError("x")):
             self.assertEqual(self.client.get("/brand").status_code, 200)
 
@@ -1965,7 +1965,7 @@ class ArchiveThreadTest(RouteTestBase):
             self.main._scrape_in_thread(cid)
         self.assertEqual(seen["status"], STATUS_ARCHIVED)          # committed first
         self.assertEqual(seen["reason"], "archive")
-        self.assertIs(seen["on_done"], self.main.pagecache.invalidate)
+        self.assertIs(seen["on_done"], self.main._after_background_work)
 
     def test_when_nothing_is_queued(self):
         cases = ["transcript setup", "pending suggestions", "already archived",
@@ -2048,7 +2048,7 @@ class WiringTest(RouteTestBase):
     def test_startup_resumes_interrupted_runs(self):
         with mock.patch.object(self.jobs, "resume_recent", return_value=2) as resume:
             self.main._resume_clip_engine_runs()
-        resume.assert_called_once_with(on_done=self.main.pagecache.invalidate)
+        resume.assert_called_once_with(on_done=self.main._after_background_work)
         with mock.patch.object(self.jobs, "resume_recent", side_effect=RuntimeError("x")):
             self.main._resume_clip_engine_runs()       # never raises
 

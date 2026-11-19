@@ -1,162 +1,250 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{{ ui.pagebar("Posting schedule", count=current.windows|length,
-              sub="How many times a day to post, and when. Times are in " ~ tz_name ~ ", the zone the scheduler runs in. Changes start on a future day, so today's posts are never renumbered.") }}
-
-<div class="card">
-  <div class="card-title">Now</div>
-  <p style="margin: 6px 0 4px;">
-    {{ current.windows|length }} post{{ 's' if current.windows|length != 1 }} a day at
-    {% for w in current.windows %}<strong>{{ w }}</strong>{% if w in current.reruns %} <span class="badge">rerun</span>{% endif %}{{ ", " if not loop.last }}{% endfor %}
-    <span class="meta">({{ tz_abbr }})</span>
-  </p>
-  <p class="meta" style="margin: 0;">
-    {% if current.source == 'saved' %}Saved here, in effect since {{ current.since.strftime("%b %-d") }}.
-    {% else %}From <code>scheduler.windows</code> in settings.yaml — nothing saved here yet.{% endif %}
-    Your local time: {{ local_labels|join(", ") }}.
-  </p>
-
-  {% if current.upcoming %}
-  <hr style="margin: 16px 0; border: none; border-top: 1px solid var(--line);">
-  <div class="card-title">Coming up</div>
-  {% for u in current.upcoming %}
-  <div style="display:flex; align-items:center; gap:12px; margin-top: 8px; flex-wrap: wrap;">
-    <span>From <strong>{{ u.effective_from.strftime("%a %b %-d") }}</strong>:
-      {{ u.windows|length }} a day at
-      {% for w in u.windows %}{{ w }}{% if w in u.reruns %} <span class="badge">rerun</span>{% endif %}{{ ", " if not loop.last }}{% endfor %}</span>
-    <form class="inline" method="post" action="/schedule/cancel">
-      <input type="hidden" name="effective_from" value="{{ u.effective_from.isoformat() }}">
-      <button class="sm reject" data-confirm="Cancel the change starting {{ u.effective_from.strftime('%b %-d') }}? Posts pinned to those days move back to the matching slots."
-              data-confirm-ok="Cancel change" data-confirm-variant="danger">Cancel</button></form>
+{#
+  Posting schedule — the one plan (app/posting_plan.py): three new clips a day,
+  plus a rerun for every 60 posts in the archive, up to six a day. The account
+  only chooses waking hours or around the clock (POST /schedule/plan); the
+  times follow. Customer-facing.
+#}
+{% macro clock(w) -%}
+  {%- set h = w[:2]|int -%}{{ (h % 12) or 12 }}:{{ w[3:5] }} {{ 'AM' if h < 12 else 'PM' }}
+{%- endmacro %}
+{% macro chips(windows, reruns) -%}
+  <div class="set-times-now">
+    {% for w in windows %}
+    <span class="set-time-chip{{ ' is-rerun' if w in reruns }}"><strong>{{ clock(w) }}</strong><span>{{ "Rerun" if w in reruns else "New clip" }}</span></span>
+    {% endfor %}
   </div>
-  {% endfor %}
-  {% endif %}
-
+{%- endmacro %}
+{% macro admin_notes() -%}
   {% if notes %}
-  <ul class="meta" style="margin: 14px 0 0; padding-left: 18px;">
-    {% for n in notes %}<li>{{ n }}</li>{% endfor %}
-  </ul>
+  <details class="set-more">
+    <summary>Schedule notes for admins ({{ notes|length }})</summary>
+    <div class="set-more-body">
+      {% for n in notes %}<p>{{ n }}</p>{% endfor %}
+    </div>
+  </details>
   {% endif %}
-</div>
+{%- endmacro %}
+{% set pg = plan_progress %}
+{{ ui.pagebar("Posting schedule", sub="Every account posts three new clips a day. As your archive of posts grows, the app adds reruns of your best clips — up to six posts a day.") }}
 
-<div class="card">
-  <form method="post" action="/schedule" id="schedule-form">
-    <div class="card-title">Change it</div>
+<div class="set-page">
 
-    <div class="form-row" style="align-items: flex-end; margin: 10px 0 6px;">
-      <div class="field" style="min-width: 130px;"><label>Post every</label>
-        <select id="every">
-          {% for h in [2.5, 3, 4, 5, 6, 8, 12, 24] %}
-          <option value="{{ h }}" {{ 'selected' if h == 4 }}>{{ h|string|replace('.5', '½')|replace('.0', '') }} hours</option>
-          {% endfor %}
-        </select></div>
-      <div class="field" style="min-width: 130px;"><label>Starting at</label>
-        <input type="time" id="first" value="02:00" step="900"></div>
-      <div class="field" style="min-width: 130px;"><label>Until</label>
-        <input type="time" id="last" value="23:59" step="900"></div>
-      <button type="button" class="sm" id="fill">Fill in times</button>
+{# ---- Time zone ---- #}
+{% set in_common = tz_name in tz_common %}
+<section class="set-section" id="time-zone">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Your time zone</h2>
+      <p class="set-section-desc">Posts are timed for <strong>{{ tz_city }}</strong> ({{ tz_abbr }}). It's {{ now_label }} there now.</p>
     </div>
-    <p class="hint" style="margin-top: 0;">Fills the list below; adjust any time by hand afterwards.</p>
-
-    <label class="card-title" style="display:block; margin: 16px 0 8px;">Posting times ({{ tz_abbr }})</label>
-    <div id="times" style="display:flex; flex-wrap: wrap; gap: 8px;">
-      {% for w in latest.windows %}
-      <span class="time-row" style="display:inline-flex; gap:4px; align-items:center;">
-        <input type="time" name="windows" value="{{ w }}" step="300" required style="width: 120px;">
-        <select name="kinds" style="width: auto;">
-          <option value="new">New clip</option>
-          <option value="rerun" {{ 'selected' if w in latest.reruns }}>Rerun</option>
-        </select>
-        <button type="button" class="sm reject" title="Remove" onclick="this.parentElement.remove(); summarize()">✕</button>
-      </span>
-      {% endfor %}
+  </div>
+  {% if tz_editable %}
+  <form method="post" action="/schedule/timezone" id="tz-form" data-savebar>
+    <input type="hidden" name="tz" id="tz-value" value="{{ tz_name }}">
+    <div class="set-section-body" style="padding-top: 12px;">
+      <div class="set-field">
+        <label class="set-label" for="tz-select">Time zone</label>
+        <p class="set-help">Choose where most of your audience lives. Your posting times, calendar and analytics all follow it.</p>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+          <select id="tz-select" style="max-width: 420px;" aria-label="Time zone">
+            {% for group, zones in tz_choices %}
+            <optgroup label="{{ group }}">
+              {% for key, label in zones %}<option value="{{ key }}" {% if key == tz_name %}selected{% endif %}>{{ label }}</option>{% endfor %}
+            </optgroup>
+            {% endfor %}
+            <option value="__other" {% if not in_common %}selected{% endif %}>Somewhere else…</option>
+          </select>
+          <button type="button" class="btn sm" id="tz-detect" hidden>Use my time zone</button>
+        </div>
+        <div id="tz-other" style="margin-top: 10px;" {% if in_common %}hidden{% endif %}>
+          <input type="text" id="tz-other-input" list="tz-all" autocomplete="off" style="max-width: 420px;"
+                 placeholder="Start typing a city, e.g. Lisbon or Nairobi" value="{{ '' if in_common else tz_name }}"
+                 aria-label="Time zone name">
+          <datalist id="tz-all">{% for z in tz_all %}<option value="{{ z }}">{% endfor %}</datalist>
+        </div>
+      </div>
+      {{ admin_notes() }}
     </div>
-    <div style="margin-top: 8px;">
-      <button type="button" class="sm" id="add-time">＋ Add a time</button>
-      <span class="meta" id="summary" style="margin-left: 10px;"></span>
-    </div>
-
-    <div class="form-row" style="margin-top: 16px; align-items: flex-end;">
-      <div class="field" style="min-width: 170px;"><label>Starting on</label>
-        <input type="date" name="effective_from" value="{{ tomorrow.isoformat() }}"
-               min="{{ today.isoformat() }}" required></div>
-    </div>
-    <p class="hint" style="margin-top: 0;">
-      Up to {{ max_windows }} posts a day, at least {{ spacing_floor }} minutes apart (including
-      the last post of the day to the first of the next). Posts already pinned to those days
-      move to the nearest new time. If only the new clip / rerun choices change, the change
-      can start today.
-    </p>
-    <p class="hint">
-      <strong>Rerun</strong> slots never take new clips. About {{ rerun_hours }} hours ahead, each one
-      gets a rerun from the library, with a freshly written caption, pinned on the calendar where
-      you can edit, swap or delete it. If no rerun is available, a new clip goes out instead.
-      Rerun library: {{ rerun_library.size }} clip{{ 's' if rerun_library.size != 1 }},
-      {{ rerun_library.ready }} ready to air now.
-    </p>
-
-    <div class="btn-group" style="margin-top: 14px;">
-      <button class="primary" type="submit">Save schedule</button>
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Takes effect right away — the rest of today's posts move to the new times.</span>
+      <button class="btn-primary" type="submit">Save</button>
     </div>
   </form>
-</div>
+  {% else %}
+  <div class="set-section-body" style="padding-top: 8px;">
+    <p class="set-help">Choosing your own time zone here is almost ready. Until then, ask your account manager if you need a different one.</p>
+    <details class="set-more">
+      <summary>For admins</summary>
+      <div class="set-more-body">
+        <p>Choosing a time zone opens for every account at once, after each machine that posts runs this release: the Fly worker (<code>fly deploy</code>) and the GitHub Actions cron (merge to main). One left on older code would keep posting on {{ tz_name }} time while the rest moved to the new zone. Then delete the rollout guard, <code>TIMEZONE_CHOICE_OPEN</code> in app/config.py.</p>
+      </div>
+    </details>
+    {{ admin_notes() }}
+  </div>
+  {% endif %}
+</section>
 
-<template id="time-tpl">
-  <span class="time-row" style="display:inline-flex; gap:4px; align-items:center;">
-    <input type="time" name="windows" step="300" required style="width: 120px;">
-    <select name="kinds" style="width: auto;">
-      <option value="new">New clip</option>
-      <option value="rerun">Rerun</option>
-    </select>
-    <button type="button" class="sm reject" title="Remove" onclick="this.parentElement.remove(); summarize()">✕</button>
-  </span>
-</template>
-
+{% if tz_editable %}
 <script>
-  const MAX = {{ max_windows }};
-  const times = document.getElementById('times');
-  const tpl = document.getElementById('time-tpl');
-  const toMin = (v) => { const [h, m] = v.split(':').map(Number); return h * 60 + m; };
-  const toHHMM = (n) => String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0');
-
-  function addTime(value) {
-    const node = tpl.content.firstElementChild.cloneNode(true);
-    node.querySelector('input').value = value || '';
-    times.appendChild(node);
-    return node;
-  }
-
-  function summarize() {
-    const vals = [...times.querySelectorAll('input')].map(i => i.value).filter(Boolean)
-      .map(toMin).sort((a, b) => a - b);
-    const reruns = [...times.querySelectorAll('select')].filter(s => s.value === 'rerun').length;
-    const out = document.getElementById('summary');
-    if (!vals.length) { out.textContent = ''; return; }
-    const gaps = vals.slice(1).map((v, i) => v - vals[i]);
-    if (vals.length > 1) gaps.push(vals[0] + 1440 - vals[vals.length - 1]);
-    const tight = gaps.length ? Math.min(...gaps) : null;
-    out.textContent = vals.length + ' post' + (vals.length === 1 ? '' : 's') + ' a day'
-      + (reruns ? ' (' + reruns + ' rerun' + (reruns === 1 ? '' : 's') + ')' : '')
-      + (tight !== null ? ' · closest gap ' + Math.floor(tight / 60) + 'h' + (tight % 60 ? ' ' + (tight % 60) + 'm' : '') : '')
-      + (vals.length > MAX ? ' · too many (max ' + MAX + ')' : '');
-    out.style.color = (vals.length > MAX || (tight !== null && tight < {{ spacing_floor }})) ? 'var(--danger)' : '';
-  }
-
-  document.getElementById('fill').addEventListener('click', () => {
-    const step = Math.round(parseFloat(document.getElementById('every').value) * 60);
-    const first = toMin(document.getElementById('first').value || '00:00');
-    const last = toMin(document.getElementById('last').value || '23:59');
-    times.innerHTML = '';
-    for (let t = first, n = 0; t <= last && t < 1440 && n < MAX; t += step, n++) addTime(toHHMM(t));
-    summarize();
-  });
-  document.getElementById('add-time').addEventListener('click', () => {
-    addTime('').querySelector('input').focus();
-    summarize();
-  });
-  times.addEventListener('input', summarize);
-  times.addEventListener('change', summarize);
-  summarize();
+  (function () {
+    const form = document.getElementById('tz-form');
+    const select = document.getElementById('tz-select');
+    const other = document.getElementById('tz-other');
+    const otherInput = document.getElementById('tz-other-input');
+    const value = document.getElementById('tz-value');
+    const detect = document.getElementById('tz-detect');
+    const common = new Set({{ tz_common|tojson }});
+    function sync() {
+      const isOther = select.value === '__other';
+      other.hidden = !isOther;
+      value.value = isOther ? otherInput.value.trim() : select.value;
+    }
+    select.addEventListener('change', () => { sync(); if (select.value === '__other') otherInput.focus(); });
+    otherInput.addEventListener('input', sync);
+    form.addEventListener('submit', (e) => {
+      sync();
+      if (!value.value) { e.preventDefault(); otherInput.focus(); }
+    });
+    // Offer the browser's own zone when it differs from the saved one.
+    let mine = '';
+    try { mine = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { /* old browser */ }
+    if (mine && mine !== value.value) {
+      detect.hidden = false;
+      detect.textContent = 'Use my time zone (' + mine.split('/').pop().replace(/_/g, ' ') + ')';
+      detect.addEventListener('click', () => {
+        if (common.has(mine)) { select.value = mine; otherInput.value = ''; }
+        else { select.value = '__other'; otherInput.value = mine; }
+        sync();
+        if (window.markSettingsDirty) window.markSettingsDirty(form);
+      });
+    }
+    sync();
+  })();
 </script>
+{% endif %}
+
+{# ---- When posts go out ---- #}
+<form method="post" action="/schedule/plan" data-savebar
+      {% if not plan_mode %}data-confirm="Switch to the standard plan from tomorrow? You'll post {{ pg.per_day }} times a day: 3 new clips{% if pg.reruns %} and {{ pg.reruns }} rerun{{ 's' if pg.reruns != 1 }}{% endif %}." data-confirm-ok="Switch"{% endif %}>
+<section class="set-section" id="when">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">When your posts go out</h2>
+      <p class="set-section-desc">Pick what suits your audience. The app spreads your posts evenly across the hours you choose, putting new clips at the busiest times.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    {% if not plan_mode %}
+    <div class="set-callout is-info">
+      <span class="set-callout-title">You're on a custom schedule</span>
+      {{ current.windows|length }} post{{ 's' if current.windows|length != 1 }} a day{% if current.reruns %} ({{ current.reruns|length }} rerun{{ 's' if current.reruns|length != 1 }}){% endif %}, at {% for w in current.windows %}{{ clock(w) }}{{ ", " if not loop.last }}{% endfor %}.
+      Choosing an option below switches you to the standard plan from tomorrow.
+    </div>
+    {% else %}
+    <div class="set-subhead">Today</div>
+    {{ chips(current.windows, current.reruns) }}
+    {% endif %}
+
+    <div class="set-subhead">Choose one</div>
+    <div class="set-choices">
+      {% for mode, title, help in [
+          ("waking", "During waking hours", "Between " ~ clock("%02d:%02d"|format(plan_waking[0] // 60, plan_waking[0] % 60)) ~ " and " ~ clock("%02d:%02d"|format(plan_waking[1] // 60, plan_waking[1] % 60)) ~ ". Best when most of your audience lives in or near this time zone."),
+          ("always", "Around the clock", "Spread evenly over 24 hours. Best when your audience is spread around the world.")] %}
+      {% set pv = plan_preview[mode] %}
+      <label class="set-choice">
+        <input type="radio" name="mode" value="{{ mode }}" {% if plan_mode == mode %}checked{% endif %} required>
+        <span>
+          <span class="set-choice-title">{{ title }}</span>
+          <span class="set-choice-help">{{ help }}</span>
+          <span class="set-choice-help" style="margin-top: 10px;">Your {{ pv.per_day }} posts a day would go out at:</span>
+          <span style="display: block; margin-top: 6px;">{{ chips(pv.windows, pv.reruns) }}</span>
+        </span>
+      </label>
+      {% endfor %}
+    </div>
+
+    {% if current.upcoming %}
+    <div class="set-subhead">Coming up</div>
+    <div class="set-list">
+      {% for u in current.upcoming %}
+      <div class="set-item">
+        <div class="set-item-text">
+          <div class="set-item-label">From {{ u.effective_from.strftime("%A, %B %-d") }}</div>
+          <div class="set-item-help">{{ u.windows|length }} a day at
+            {% for w in u.windows %}{{ clock(w) }}{% if w in u.reruns %} (rerun){% endif %}{{ ", " if not loop.last }}{% endfor %}</div>
+        </div>
+        <div class="set-item-control">
+          <button class="btn sm" type="submit" form="cancel-{{ loop.index }}">Cancel this change</button>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="set-section-foot set-savebar">
+    <span class="set-savebar-note">Changes start tomorrow, so today's posts stay where they are.</span>
+    <button class="btn-primary" type="submit">Save</button>
+  </div>
+</section>
+</form>
+{% for u in current.upcoming %}
+<form method="post" action="/schedule/cancel" id="cancel-{{ loop.index }}"
+      data-confirm="Cancel the change starting {{ u.effective_from.strftime('%b %-d') }}? Posts lined up for those days move back to the current times."
+      data-confirm-ok="Cancel change" data-confirm-variant="danger">
+  <input type="hidden" name="effective_from" value="{{ u.effective_from.isoformat() }}">
+</form>
+{% endfor %}
+
+{# ---- Reruns ---- #}
+<section class="set-section" id="reruns">
+  <div class="set-section-head">
+    <div>
+      <h2 class="set-section-title">Reruns</h2>
+      <p class="set-section-desc">Every 60 posts in your archive adds one daily rerun of a past clip that did well — up to three, for six posts a day.</p>
+    </div>
+  </div>
+  <div class="set-section-body">
+    <div class="set-stats" style="margin-bottom: 16px;">
+      <div class="set-stat"><div class="set-stat-value">{{ "{:,}".format(pg.archive) }}</div><div class="set-stat-label">Posts in your archive</div></div>
+      <div class="set-stat"><div class="set-stat-value">{{ pg.per_day }} a day</div><div class="set-stat-label">3 new clips{% if pg.reruns %} + {{ pg.reruns }} rerun{{ 's' if pg.reruns != 1 }}{% endif %}</div></div>
+    </div>
+
+    {% if pg.maxed %}
+    <div class="set-callout is-good"><span class="set-callout-title">Every rerun unlocked</span>Your account posts the most the plan allows: six a day.</div>
+    {% else %}
+    {% set nth = {4: "4th", 5: "5th", 6: "6th"}[pg.per_day + 1] %}
+    <div class="set-label">{{ pg.to_go }} more post{{ 's' if pg.to_go != 1 }} until your {{ nth }} daily post</div>
+    <div class="set-progress" role="progressbar" aria-valuemin="0" aria-valuemax="60" aria-valuenow="{{ 60 - pg.to_go }}">
+      <span style="width: {{ (pg.share * 100)|round(1) }}%;"></span>
+    </div>
+    <p class="set-help">{{ pg.archive }} of {{ pg.next_at }} posts.</p>
+    {% endif %}
+
+    <div class="set-list" style="margin-top: 16px;">
+      {% for t in plan_tiers %}
+      {% set reached = pg.archive >= t.posts %}
+      {% set here = reached and (loop.last or pg.archive < plan_tiers[loop.index].posts) %}
+      <div class="set-item">
+        <div class="set-item-text">
+          <div class="set-item-label" style="{{ '' if reached else 'color: var(--text-dim);' }}">{{ t.per_day }} posts a day{% if here %} <span class="set-status is-on is-plain">You're here</span>{% endif %}</div>
+          <div class="set-item-help">3 new clips{% if t.reruns %} + {{ t.reruns }} rerun{{ 's' if t.reruns != 1 }}{% endif %}</div>
+        </div>
+        <div class="set-item-control meta">{% if t.posts %}from {{ t.posts }} posts{% else %}from the start{% endif %}{% if reached %} ✓{% endif %}</div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <details class="set-more">
+      <summary>How reruns work</summary>
+      <div class="set-more-body">
+        <p>About {{ rerun_hours }} hours before a rerun slot, the app picks a past clip that did well, writes it a fresh caption, and puts it on your calendar — where you can edit, swap or delete it. If there's nothing suitable to rerun, a new clip goes out instead.</p>
+        <p>Your archive counts posts that went out as new clips; reruns themselves don't count. {{ rerun_library.size }} clip{{ 's are' if rerun_library.size != 1 else ' is' }} in the rerun library, {{ rerun_library.ready }} ready to air now.</p>
+      </div>
+    </details>
+  </div>
+</section>
+</div>
 {% endblock %}

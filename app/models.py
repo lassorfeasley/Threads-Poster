@@ -15,6 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 
 def utcnow() -> dt.datetime:
@@ -23,6 +24,38 @@ def utcnow() -> dt.datetime:
 
 class Base(DeclarativeBase):
     pass
+
+
+class DataPath(TypeDecorator):
+    """A file path under a workspace's data tree, readable on any machine.
+
+    Rows store the absolute path of whichever machine wrote them (the
+    operator's Mac, the hosted dashboard, the home worker). Reading one maps
+    ``<anything>/workspaces/<this workspace>/data/<rest>`` onto THIS machine's
+    data directory, so every caller can keep treating it as a local path.
+    Writes are stored as given. Paths outside a workspace data tree, and empty
+    values, pass through untouched.
+
+    Comparing paths inside SQL would still see the writer's form; match on the
+    file name instead (names are versioned and unique).
+    """
+    impl = Text
+    cache_ok = True
+
+    def process_result_value(self, value, dialect):
+        return localize_data_path(value)
+
+
+def localize_data_path(value: str | None) -> str | None:
+    if not value:
+        return value
+    from .config import DATA_DIR, WORKSPACE
+
+    marker = f"/workspaces/{WORKSPACE}/data/"
+    head, sep, rest = value.replace("\\", "/").partition(marker)
+    if not sep or not rest:
+        return value
+    return str(DATA_DIR / rest)
 
 
 class Channel(Base):
@@ -123,20 +156,20 @@ class Candidate(Base):
     archived_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     scrape_error: Mapped[str] = mapped_column(Text, default="")
 
-    local_video_path: Mapped[str] = mapped_column(Text, default="")
+    local_video_path: Mapped[str] = mapped_column(DataPath, default="")
     # Key of the source video's copy in the private source-video bucket, once
     # it has one (see app/offload.py). Set before the local file is deleted,
     # and kept when the file is restored, so the local file may or may not
     # exist alongside it; ``local_video_path`` stays the restore destination.
     source_object_key: Mapped[str] = mapped_column(Text, default="")
     source_uploaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    transcript_path: Mapped[str] = mapped_column(Text, default="")
+    transcript_path: Mapped[str] = mapped_column(DataPath, default="")
     transcript_text: Mapped[str] = mapped_column(Text, default="")
     transcription_method: Mapped[str] = mapped_column(String(20), default="")  # captions | whisper | captions+whisper | "" (none)
     # Full-video Whisper word stream ([{word, start, end}] JSON sidecar),
     # written at archive time. Clip suggestions cut against it and exports
     # slice it by trim windows instead of re-running Whisper per clip.
-    word_transcript_path: Mapped[str] = mapped_column(Text, default="")
+    word_transcript_path: Mapped[str] = mapped_column(DataPath, default="")
 
     # Topical chapters over the whole video, as JSON [{start, end, topic,
     # summary}] covering the timeline end to end with no gaps. Navigation
@@ -176,6 +209,17 @@ class Candidate(Base):
     approve_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
     approve_model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Positioning fit (app/positioning.py): how well the video suits THIS
+    # account's positioning (0-1), judged from its title and description
+    # against the Brand & audience profile, with the deciding factor in a few
+    # words. Needs no decision history, so it works for a new workspace from
+    # its first video. ``fit_basis`` fingerprints the profile and prompt that
+    # produced it: a profile edit makes the score stale and it's redone.
+    fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fit_reason: Mapped[str] = mapped_column(Text, default="")
+    fit_basis: Mapped[str] = mapped_column(String(16), default="")
+    fit_scored_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     channel: Mapped[Channel] = relationship(back_populates="candidates")
@@ -212,7 +256,7 @@ class Cut(Base):
     # Operator-chosen segments (JSON [{start, end}, ...]) and the exported
     # supercut file produced from them.
     trim_segments: Mapped[str] = mapped_column(Text, default="")
-    trimmed_clip_path: Mapped[str] = mapped_column(Text, default="")
+    trimmed_clip_path: Mapped[str] = mapped_column(DataPath, default="")
     # Background export job: "" | "exporting" | "failed". The Post step shows a
     # skeleton while exporting so Save can navigate immediately.
     export_status: Mapped[str] = mapped_column(String(20), default="")
@@ -220,14 +264,14 @@ class Cut(Base):
     # Optional stylized-caption variant of the exported clip (Funnel font,
     # word-by-word highlight). Cleared on re-export; posting uses it only when
     # ``use_subtitles`` is on.
-    subtitled_clip_path: Mapped[str] = mapped_column(Text, default="")
+    subtitled_clip_path: Mapped[str] = mapped_column(DataPath, default="")
     use_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
     # Where burned-in captions sit on the frame: "bottom" (default) or "top".
     subs_position: Mapped[str] = mapped_column(String(10), default="bottom")
     # Whisper word stream of the trimmed clip (same pass that drives burned-in
     # captions). JSON sidecar path; Suggest caption / Copy transcript read it.
     # Cleared on re-export with the video files.
-    clip_transcript_path: Mapped[str] = mapped_column(Text, default="")
+    clip_transcript_path: Mapped[str] = mapped_column(DataPath, default="")
 
     # Vertical (9:16) composite for Instagram Reels: hook text rendered at the
     # top of the frame, the 16:9 clip mid-frame on a branded background,
@@ -239,7 +283,7 @@ class Cut(Base):
     # this flag is what stops the auto-draft from refilling a field the operator
     # deliberately cleared. The sparkle button ignores it.
     hook_autodrafted: Mapped[bool] = mapped_column(Boolean, default=False)
-    vertical_clip_path: Mapped[str] = mapped_column(Text, default="")
+    vertical_clip_path: Mapped[str] = mapped_column(DataPath, default="")
     # Unused: reel caption is the Threads ``draft_caption``. Kept for existing DBs.
     ig_draft_caption: Mapped[str] = mapped_column(Text, default="")
 
@@ -277,7 +321,7 @@ class ThreadsPost(Base):
     # history imported from outside the app, which has no clip/title concept).
     calendar_name: Mapped[str] = mapped_column(Text, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase Storage object key
-    clip_local_path: Mapped[str] = mapped_column(Text, default="")
+    clip_local_path: Mapped[str] = mapped_column(DataPath, default="")
     # When the clip's storage copy was last confirmed (uploaded or verified —
     # see scheduler.repair_clip_uploads). NULL means a headless runner may
     # find nothing to sign at publish time; the repair sweep re-uploads from
@@ -425,7 +469,7 @@ class InstagramPost(Base):
         ForeignKey("threads_posts.id"), nullable=True,
     )
     caption: Mapped[str] = mapped_column(Text, default="")
-    clip_local_path: Mapped[str] = mapped_column(Text, default="")
+    clip_local_path: Mapped[str] = mapped_column(DataPath, default="")
     clip_object_path: Mapped[str] = mapped_column(Text, default="")  # Supabase object key
     # Storage copy last confirmed (see ThreadsPost.clip_uploaded_at).
     clip_uploaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -688,6 +732,11 @@ class TriageDecision(Base):
     # be backfilled from a model that has since seen the decision.
     predicted_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
     model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The operator's verdict on a video that automatic triage rejected and drew
+    # into its random spot-check sample (app/auto_triage.py). Only these calls
+    # measure what automatic rejection throws away; a video rescued while
+    # browsing the rejected list was picked by eye, so it isn't one.
+    audit: Mapped[bool] = mapped_column(Boolean, default=False)
     undone: Mapped[bool] = mapped_column(Boolean, default=False)
     decided_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -710,6 +759,136 @@ class TriageModel(Base):
     backtest: Mapped[str] = mapped_column(Text, default="")
     params: Mapped[str] = mapped_column(Text, default="")
     trained_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AutoTriageRun(Base):
+    """One pass of automatic triage (app/auto_triage.py), including passes that
+    rejected nothing or paused, so the admin page can say when it last looked
+    and why it held back. A pass is also the unit of undo."""
+
+    __tablename__ = "auto_triage_runs"
+
+    OUTCOME_DONE = "done"
+    OUTCOME_PAUSED = "paused"      # a safety check tripped; nothing rejected
+    OUTCOME_WAITING = "waiting"    # no model good enough to act on yet
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stage: Mapped[str] = mapped_column(String(20), default="metadata")
+    # What it judged by: "approval" (the approve predictor's chance) or "fit"
+    # (positioning fit). ``reject_below`` is that signal's cut-off.
+    signal: Mapped[str] = mapped_column(String(10), default="approval")
+    # What started it: "monitor" (a dashboard monitor pass), "monitor:actions"
+    # (GitHub Actions), "manual" (the admin page), "cli".
+    trigger: Mapped[str] = mapped_column(String(30), default="")
+    model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reject_below: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Waiting videos the pass was allowed to judge (scored by the current
+    # model, never decided by the operator, never auto-triaged before).
+    considered: Mapped[int] = mapped_column(Integer, default=0)
+    rejected: Mapped[int] = mapped_column(Integer, default=0)
+    # Automatic approval (stage "select", app/auto_select.py) approves instead.
+    approved: Mapped[int] = mapped_column(Integer, default=0)
+    audited: Mapped[int] = mapped_column(Integer, default=0)
+    outcome: Mapped[str] = mapped_column(String(20), default=OUTCOME_DONE)
+    note: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    undone_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AutoTriageAction(Base):
+    """One automatic triage call on one video. Never training data: the model
+    must not learn from its own calls, so these live apart from
+    ``TriageDecision``, which only ever holds what the operator decided.
+
+    ``undone`` marks a call that no longer stands: the operator approved or
+    restored the video, or the whole pass was undone. A video gets one
+    automatic call per stage, ever — an undone call still blocks another.
+    """
+
+    __tablename__ = "auto_triage_actions"
+
+    AUDIT_APPROVE = "approve"   # spot-check: the operator would have approved it
+    AUDIT_AGREE = "agree"       # spot-check: the operator agrees it's a reject
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_pk: Mapped[int] = mapped_column(ForeignKey("auto_triage_runs.id"))
+    candidate_pk: Mapped[int] = mapped_column(ForeignKey("candidates.id"))
+    video_id: Mapped[str] = mapped_column(String(20), default="")
+    stage: Mapped[str] = mapped_column(String(20), default="metadata")
+    action: Mapped[str] = mapped_column(String(10), default="reject")
+    # The evidence at the time: which signal it judged by, the approve chance
+    # and which model gave it, the positioning fit and why, and the cut-off it
+    # fell under (on the signal's own scale).
+    signal: Mapped[str] = mapped_column(String(10), default="approval")
+    fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fit_reason: Mapped[str] = mapped_column(Text, default="")
+    approve_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reject_below: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Drawn into the random spot-check sample, at what rate, and the
+    # operator's verdict once given ("" while waiting).
+    audit: Mapped[bool] = mapped_column(Boolean, default=False)
+    audit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audit_verdict: Mapped[str] = mapped_column(String(10), default="")
+    # Automatic approval only: picked at random from below the top on purpose,
+    # so the system learns where its ranking is wrong (app/auto_select.py).
+    explore: Mapped[bool] = mapped_column(Boolean, default=False)
+    audited_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    undone: Mapped[bool] = mapped_column(Boolean, default=False)
+    # "approved" | "restored" (operator overrode it) | "pass undone"
+    undone_reason: Mapped[str] = mapped_column(String(30), default="")
+    undone_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InboxItem(Base):
+    """One finished clip the system made on its own and is holding for the
+    operator's one-click call (app/inbox.py): picked from a clip-engine draft
+    that cleared the critic, cut, rendered, subtitled and captioned without
+    anyone touching it. Not a post yet — anything ``queued`` publishes, so a
+    post exists only once the operator approves. The AI caption is a
+    ``DraftProposal`` like every other draft; ``Cut.draft_caption`` is only
+    written with what the operator approved.
+    """
+
+    __tablename__ = "inbox_items"
+
+    STATE_DRAFTING = "drafting"   # being cut / rendered / captioned on the home machine
+    STATE_READY = "ready"         # waiting for the operator
+    STATE_APPROVED = "approved"   # approved; the post is created where the file is
+    STATE_QUEUED = "queued"       # in the posting queue (post_pk)
+    STATE_REJECTED = "rejected"
+    STATE_FAILED = "failed"       # couldn't be made (``error`` says why)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    candidate_pk: Mapped[int] = mapped_column(ForeignKey("candidates.id"))
+    proposal_pk: Mapped[int] = mapped_column(ForeignKey("clip_proposals.id"))
+    cut_pk: Mapped[int | None] = mapped_column(ForeignKey("cuts.id"), nullable=True)
+    state: Mapped[str] = mapped_column(String(12), default=STATE_DRAFTING)
+    # The critic's verdict that got it here: its score (0-1, as on the
+    # proposal) and the line the card shows ("Stops the scroll: ...").
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    critic_line: Mapped[str] = mapped_column(Text, default="")
+    story: Mapped[str] = mapped_column(Text, default="")
+    # The machine's caption, its DraftProposal row, and the gut check on it
+    # (None = the check couldn't run).
+    caption: Mapped[str] = mapped_column(Text, default="")
+    caption_proposal_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    caption_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    caption_note: Mapped[str] = mapped_column(Text, default="")
+    use_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
+    # What the operator approved (possibly edited) and the post it became.
+    final_caption: Mapped[str] = mapped_column(Text, default="")
+    post_pk: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reject_tags: Mapped[str] = mapped_column(String(200), default="")
+    reject_note: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ready_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DraftProposal(Base):

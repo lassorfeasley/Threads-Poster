@@ -167,6 +167,16 @@ def add(candidate_id: int, *, video_id: str = "", proposal_id: int | None = None
     line = (json.dumps(note, ensure_ascii=False) + "\n").encode("utf-8")
     try:
         path = notes_path()
+        from .. import shared_docs
+
+        if shared_docs.enabled():
+            # Other machines append too: one locked read-modify-write in the DB.
+            with _lock:
+                shared_docs.update_text(
+                    "notes", lambda cur: (cur or "") + line.decode("utf-8"), path)
+            log.info("Clip note %s (%s) on candidate %s: %s%s", note["id"], kind, candidate_id,
+                     ",".join(tags) or "-", f" — {text[:80]}" if text else "")
+            return note
         with _lock:
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
             try:
@@ -194,7 +204,12 @@ def _flock(fd: int) -> None:
 def _read_all() -> list[dict]:
     """Every readable note, oldest first. A torn or corrupt line is skipped."""
     try:
-        raw = notes_path().read_text(encoding="utf-8", errors="replace")
+        from .. import shared_docs
+
+        if shared_docs.enabled():
+            raw = shared_docs.read_text("notes", notes_path()) or ""
+        else:
+            raw = notes_path().read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return []
     except Exception as exc:
@@ -301,12 +316,24 @@ PROPOSE_SCHEMA = {
 
 
 def _read_proposals_file() -> dict:
-    data = util.read_json(proposals_path(), default=None)
+    from ..shared_docs import read_text
+
+    try:
+        data = json.loads(read_text("proposals", proposals_path()) or "null")
+    except ValueError:
+        data = None
     if not isinstance(data, dict):
         data = {}
     items = data.get("proposals")
     data["proposals"] = [p for p in items if isinstance(p, dict)] if isinstance(items, list) else []
     return data
+
+
+def _write_proposals_file(data: dict) -> None:
+    from ..shared_docs import write_text
+
+    write_text("proposals", json.dumps(data, indent=1, sort_keys=False, default=str),
+               proposals_path())
 
 
 def proposals(status: str | None = None) -> list[dict]:
@@ -340,7 +367,7 @@ def set_status(idx: int, status: str) -> dict | None:
             return None
         items[idx]["status"] = status
         items[idx]["decided_at"] = util.utcnow_iso()
-        util.atomic_write_json(proposals_path(), data)
+        _write_proposals_file(data)
         return {**items[idx], "idx": idx}
 
 
@@ -415,7 +442,7 @@ def _propose(*, model: str | None, settings, force: bool) -> list[dict]:
             state = _read_proposals_file()
             state["last_error_at"] = util.utcnow_iso()
             state["last_error"] = str(exc)[:300]
-            util.atomic_write_json(proposals_path(), state)
+            _write_proposals_file(state)
         return []
     by_id = {n["id"]: n for n in shown}
     new = _accept_proposals(data, by_id, brand_rules)
@@ -425,7 +452,7 @@ def _propose(*, model: str | None, settings, force: bool) -> list[dict]:
         state["last_run_at"] = started_at
         state.pop("last_error_at", None)
         state.pop("last_error", None)
-        util.atomic_write_json(proposals_path(), state)
+        _write_proposals_file(state)
     log.info("Rule proposals: %d new from %d notes", len(added), len(shown))
     return added
 
@@ -542,7 +569,7 @@ def add_proposals(items: Iterable[dict], *, source: str, settings=None) -> list[
                 state["proposals"].append(entry)
                 added.append({**entry, "idx": len(state["proposals"]) - 1})
             if added:
-                util.atomic_write_json(proposals_path(), state)
+                _write_proposals_file(state)
     except Exception as exc:
         log.warning("Couldn't queue %s rule proposals: %s", source, exc)
         return []

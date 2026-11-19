@@ -14,9 +14,13 @@ import json
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,7 +30,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
 from .. import chapters as chapter_index
-from .. import (channel_health, clip_proposals, facebook_api, instagram_api, linkedin_api, spend, threads_api,
+from .. import (channel_health, clip_proposals, datasync, facebook_api, instagram_api, linkedin_api, spend, threads_api,
                vision, x_api, youtube)
 from ..analytics import (generate_report, latest_metrics_bulk, metrics_at_age_bulk,
                          snapshot_metrics, write_and_store_digest)
@@ -40,6 +44,7 @@ from ..config import (
     load_brand, load_brand_rules, load_caption_rules, load_first_reply, load_keywords,
     load_settings, load_workspaces, render_caption_guide, save_brand,
     save_brand_rules, save_caption_rules, save_first_reply, save_keywords,
+    save_timezone, timezone_editable, timezone_saved,
 )
 from ..db import (
     SessionLocal,
@@ -93,6 +98,7 @@ from ..models import (
     Trait,
     TraitWeight,
     TriageDecision,
+    InboxItem,
     XPost,
     utcnow,
 )
@@ -119,7 +125,7 @@ from ..publishing import (
 )
 from ..placement import SHELF_LIVES
 from ..ranking import load_trait_weights, order_clauses, sort_candidates
-from .. import labels, llm, posting_schedule, rerun_review, triage_model
+from .. import auto_triage, labels, llm, posting_plan, posting_schedule, rerun_review, triage_model
 from ..config import scheduler_timezone
 from ..scheduler import (
     PIN_HORIZON_DAYS,
@@ -147,7 +153,7 @@ from ..vision import (
 )
 from ..voice import voice_context
 from ..youtube import YouTubeAPIError, parse_video_url
-from . import pagecache
+from . import auth, pagecache
 
 log = logging.getLogger("web")
 
@@ -425,6 +431,7 @@ pagecache.start_refresher()
 # Uploads source videos that are out of the workflow to storage and frees the
 # disk (no-op unless storage.offload_sources is on; see app/offload.py).
 start_offload_thread()
+datasync.start_mirror_thread()
 
 
 # Datasets a given write can actually change, keyed by the route's path
@@ -485,6 +492,29 @@ else:
         if "POST" in (getattr(_route, "methods", None) or ()):
             _WRITE_SCOPE[_route.path_format] = ()
 
+# Automatic triage (app/web/auto_triage.py): the same pattern and guard. Its
+# writes move videos between new and rejected, which only the dashboard lists
+# and the library's Videos section show — the same scope as a triage click.
+try:
+    from .auto_triage import router as auto_triage_router
+except Exception:
+    log.exception("Automatic triage page unavailable")
+else:
+    app.include_router(auto_triage_router)
+    for _route in auto_triage_router.routes:
+        if "POST" in (getattr(_route, "methods", None) or ()):
+            _WRITE_SCOPE[_route.path_format] = ("dashboard", "library")
+
+# The inbox (app/web/inbox.py). Approving creates a queued post, which the
+# calendar, library and notifications all show, so its writes keep the
+# default: drop every cached page.
+try:
+    from .inbox import router as inbox_router
+except Exception:
+    log.exception("Inbox page unavailable")
+else:
+    app.include_router(inbox_router)
+
 # Rule proposals live in a file under the engine directory; adding one writes
 # brand.yaml. Neither is part of any cached page.
 _WRITE_SCOPE["/clip-engine/rule-proposals/{idx}/add"] = ()
@@ -533,6 +563,7 @@ def _restore_clips_for(kind: str, pk: int) -> None:
     if now - _clips_checked.get((kind, pk), -1e9) < _CLIPS_CHECK_TTL:
         return
     paths: list[str] = []
+    sidecar = ""
     with session_scope(read_only=True) as session:
         cut = None
         if kind == "post":
@@ -544,6 +575,7 @@ def _restore_clips_for(kind: str, pk: int) -> None:
             cut = session.get(Cut, pk)
         if cut is not None:
             paths += [cut.trimmed_clip_path, cut.subtitled_clip_path, cut.vertical_clip_path]
+            sidecar = cut.clip_transcript_path
             ig = session.execute(
                 select(InstagramPost.clip_local_path).where(InstagramPost.cut_pk == cut.id)
             ).scalars().all()
@@ -551,11 +583,22 @@ def _restore_clips_for(kind: str, pk: int) -> None:
     for path in {p for p in paths if p}:
         if not Path(path).expanduser().exists():
             ensure_clip_file(path)
+    if sidecar:
+        datasync.ensure_file(sidecar)  # the clip's word timings (captions, editing)
     _clips_checked[(kind, pk)] = now
 
 
 @app.middleware("http")
 async def _restore_archived_clips(request: Request, call_next):
+    if request.url.path.startswith("/media/") and not _archives_here():
+        # The hosted dashboard sends players straight to Storage (see
+        # _clip_response) rather than downloading the clip first.
+        return await call_next(request)
+    if request.url.path.startswith("/brand-static/"):
+        # The uploaded logo may have been uploaded on another machine.
+        name = Path(request.url.path).name
+        await run_in_threadpool(datasync.ensure_file, _BRAND_LOGO_DIR / name)
+        return await call_next(request)
     m = _CLIP_ROUTE.match(request.url.path)
     if m and m.group(3) not in _CLIP_ROUTE_SKIP:
         kind = "post" if m.group(1) in ("post", "media/post") else "cut"
@@ -564,6 +607,196 @@ async def _restore_archived_clips(request: Request, call_next):
         except Exception:
             log.exception("Restoring archived clips for %s %s failed", kind, m.group(2))
     return await call_next(request)
+
+
+# Registered last, so it runs first: nothing above (cache invalidation, clip
+# restores from storage) happens for a request that isn't signed in.
+@app.middleware("http")
+async def _require_login(request: Request, call_next):
+    if not auth.enabled() or auth.is_public(request.url.path):
+        return await call_next(request)
+    try:
+        user, renewed = await run_in_threadpool(
+            auth.resolve, request.cookies.get(auth.COOKIE_NAME))
+    except (auth.AuthError, httpx.HTTPError) as exc:
+        log.warning("Sign-in check failed: %s", exc)
+        return HTMLResponse("Sign-in is unavailable right now. Try again in a minute.",
+                            status_code=503)
+    if user is None:
+        if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+            target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=303)
+        return JSONResponse({"error": "not signed in"}, status_code=401)
+    request.state.user = user.email
+    response = await call_next(request)
+    if renewed is not None:
+        _set_session_cookie(response, request, renewed)
+    return response
+
+
+def _client_ip(request: Request) -> str:
+    # Fly's proxy names the real client; locally there is no proxy.
+    return request.headers.get("fly-client-ip") or (request.client.host if request.client else "?")
+
+
+def _is_https(request: Request) -> bool:
+    return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+
+
+def _set_session_cookie(response, request: Request, session: "auth.Session") -> None:
+    response.set_cookie(auth.COOKIE_NAME, auth.make_cookie(session),
+                        max_age=auth.SESSION_SECONDS, httponly=True, samesite="lax",
+                        secure=_is_https(request), path="/")
+
+
+def _public_origin(request: Request) -> str:
+    """Where emailed links should land: PUBLIC_URL when set, else this request's
+    own origin (https behind Fly's proxy)."""
+    configured = env("PUBLIC_URL").rstrip("/")
+    if configured:
+        return configured
+    scheme = "https" if _is_https(request) else request.url.scheme
+    return f"{scheme}://{request.url.netloc}"
+
+
+def _auth_page(request: Request, name: str, **ctx):
+    return templates.TemplateResponse(request, name, ctx)
+
+
+@app.get("/healthz")
+def healthz():
+    return JSONResponse({"ok": True})
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(request: Request, next: str = "/", error: str = "", msg: str = ""):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    try:
+        user, _ = auth.resolve(request.cookies.get(auth.COOKIE_NAME))
+    except (auth.AuthError, httpx.HTTPError):
+        user = None
+    if user is not None:
+        return RedirectResponse(auth.safe_next(next), status_code=303)
+    return _auth_page(request, "login.html", next=auth.safe_next(next), error=error, msg=msg)
+
+
+@app.post("/login")
+async def login_submit(request: Request, email: str = Form(""), password: str = Form(""),
+                       next: str = Form("/")):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    target = auth.safe_next(next)
+    back = f"/login?next={quote(target, safe='')}"
+    keys = (f"ip:{_client_ip(request)}", f"email:{email.strip().lower()}")
+    if any(auth.throttled(k) for k in keys):
+        return RedirectResponse(f"{back}&error=throttled", status_code=303)
+    try:
+        result = await run_in_threadpool(auth.sign_in, email, password)
+    except (auth.AuthError, httpx.HTTPError) as exc:
+        log.warning("Sign-in unavailable: %s", exc)
+        return RedirectResponse(f"{back}&error=unavailable", status_code=303)
+    if result is None:
+        for k in keys:
+            auth.record_failure(k)
+        log.warning("Failed dashboard login for %r from %s", email, _client_ip(request))
+        return RedirectResponse(f"{back}&error=invalid", status_code=303)
+    session, user = result
+    if not user.can_use(WORKSPACE):
+        log.warning("Login by %s refused: no access to workspace %s", user.email, WORKSPACE)
+        await run_in_threadpool(auth.sign_out, session.access_token)
+        return RedirectResponse(f"{back}&error=noaccess", status_code=303)
+    for k in keys:
+        auth.clear_failures(k)
+    log.info("Dashboard login: %s", user.email)
+    response = RedirectResponse(target, status_code=303)
+    _set_session_cookie(response, request, session)
+    return response
+
+
+@app.get("/forgot", response_class=HTMLResponse)
+def forgot_form(request: Request, error: str = ""):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    return _auth_page(request, "auth_forgot.html", error=error)
+
+
+@app.post("/forgot")
+async def forgot_submit(request: Request, email: str = Form("")):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    key = f"reset:{_client_ip(request)}"
+    if auth.throttled(key):
+        return RedirectResponse("/forgot?error=throttled", status_code=303)
+    auth.record_failure(key)  # every request counts: this sends email
+    try:
+        await run_in_threadpool(auth.send_reset, email,
+                                _public_origin(request) + "/auth/callback")
+    except (auth.AuthError, httpx.HTTPError) as exc:
+        log.warning("Password reset for %r failed: %s", email, exc)
+        return RedirectResponse("/forgot?error=unavailable", status_code=303)
+    return RedirectResponse("/login?msg=reset_sent", status_code=303)
+
+
+@app.get("/auth/callback", response_class=HTMLResponse)
+def auth_callback(request: Request):
+    """Where emailed links (password reset, invitation) land. Supabase puts the
+    session in the URL fragment, which never reaches a server, so this page's
+    script posts it to /auth/session."""
+    return _auth_page(request, "auth_callback.html")
+
+
+@app.post("/auth/session")
+async def auth_session(request: Request, access_token: str = Form(""),
+                       refresh_token: str = Form(""), type: str = Form("")):
+    try:
+        user = await run_in_threadpool(auth.user_for, access_token)
+    except (auth.AuthError, httpx.HTTPError):
+        return RedirectResponse("/login?error=unavailable", status_code=303)
+    if user is None:
+        return RedirectResponse("/login?error=expired", status_code=303)
+    if not user.can_use(WORKSPACE):
+        return RedirectResponse("/login?error=noaccess", status_code=303)
+    target = "/account/password?welcome=1" if type in ("recovery", "invite", "signup") else "/"
+    response = RedirectResponse(target, status_code=303)
+    _set_session_cookie(response, request, auth.Session(access_token, refresh_token))
+    return response
+
+
+@app.get("/account/password", response_class=HTMLResponse)
+def password_form(request: Request, welcome: int = 0, error: str = "", msg: str = ""):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    return _auth_page(request, "auth_password.html", welcome=bool(welcome), error=error, msg=msg)
+
+
+@app.post("/account/password")
+async def password_submit(request: Request, password: str = Form(""), confirm: str = Form("")):
+    if not auth.enabled():
+        return RedirectResponse("/", status_code=303)
+    if len(password) < 12:
+        return RedirectResponse("/account/password?error=short", status_code=303)
+    if password != confirm:
+        return RedirectResponse("/account/password?error=mismatch", status_code=303)
+    session = auth.read_cookie(request.cookies.get(auth.COOKIE_NAME))
+    try:
+        await run_in_threadpool(auth.set_password, session.access_token if session else "", password)
+    except (auth.AuthError, httpx.HTTPError) as exc:
+        log.warning("Password change for %s failed: %s", getattr(request.state, "user", "?"), exc)
+        return RedirectResponse("/account/password?error=refused", status_code=303)
+    log.info("Password changed: %s", getattr(request.state, "user", "?"))
+    return RedirectResponse("/?msg=Password+saved", status_code=303)
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    session = auth.read_cookie(request.cookies.get(auth.COOKIE_NAME))
+    if auth.enabled() and session is not None:
+        await run_in_threadpool(auth.sign_out, session.access_token)
+    response = RedirectResponse("/login?msg=signed_out" if auth.enabled() else "/",
+                                status_code=303)
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return response
 
 
 def _flash(url: str, msg: str) -> RedirectResponse:
@@ -579,9 +812,46 @@ def _in_background(fn, *args) -> None:
         try:
             fn(*args)
         finally:
-            pagecache.invalidate()
+            _after_background_work()
 
     threading.Thread(target=_run, daemon=True, name=getattr(fn, "__name__", "worker")).start()
+
+
+def _after_background_work() -> None:
+    """A job finished: drop the cached reads, and share what it rendered soon
+    (a hosted machine may sleep once nobody is on the page)."""
+    pagecache.invalidate()
+    _push_soon()
+
+
+# Sharing a job's files must never hold the job's own thread: a mirror sweep
+# can take minutes, and with a file the store keeps refusing it took an hour —
+# during which the clip engine's queue (it calls this when a run ends), the
+# home worker and the inbox all stood still. One push at a time waits behind a
+# sweep in progress; anything written meanwhile goes with it or with the
+# mirror's next timed sweep.
+_push_lock = threading.Lock()
+_push_pending = False
+
+
+def _push_soon() -> None:
+    global _push_pending
+    with _push_lock:
+        if _push_pending:
+            return
+        _push_pending = True
+
+    def _run() -> None:
+        global _push_pending
+        try:
+            datasync.push_now()
+        except Exception:
+            log.exception("Sharing a finished job's files failed (the timer will retry)")
+        finally:
+            with _push_lock:
+                _push_pending = False
+
+    threading.Thread(target=_run, daemon=True, name="push-after-job").start()
 
 
 def _retrain_triage_model_in_background() -> None:
@@ -606,7 +876,20 @@ _scrape_inflight: set[int] = set()
 _scrape_inflight_lock = threading.Lock()
 
 
+def _archives_here() -> bool:
+    """Whether this machine downloads and transcribes approved videos.
+
+    YouTube blocks downloads from datacenter IPs, so the hosted dashboard sets
+    ARCHIVE_ON_THIS_MACHINE=off: approving there only marks the video
+    ``approved``, and a machine on a home connection picks it up (today: the
+    Mac's dashboard, which resumes every approved video when it starts)."""
+    return env("ARCHIVE_ON_THIS_MACHINE", "on").strip().lower() not in ("0", "off", "false", "no")
+
+
 def _scrape_in_thread(candidate_id: int) -> None:
+    if not _archives_here():
+        log.info("Candidate %s approved; its download waits for a home machine", candidate_id)
+        return
     with _scrape_inflight_lock:
         if candidate_id in _scrape_inflight:
             log.info("Archive already running for candidate %s; not starting another", candidate_id)
@@ -658,7 +941,7 @@ def _queue_clip_engine_after_archive(candidate_id: int) -> None:
                 return
             if clip_proposals.pending_for_candidate(session, candidate_id):
                 return
-        jobs.enqueue(candidate_id, reason="archive", on_done=pagecache.invalidate)
+        jobs.enqueue(candidate_id, reason="archive", on_done=_after_background_work)
     except Exception:
         log.exception("Couldn't queue clip suggestions for candidate %s", candidate_id)
 
@@ -685,7 +968,7 @@ def _resume_clip_engine_runs() -> None:
     try:
         from ..clip_engine import jobs
 
-        jobs.resume_recent(on_done=pagecache.invalidate)
+        jobs.resume_recent(on_done=_after_background_work)
     except Exception:
         log.exception("Couldn't resume clip engine runs")
 
@@ -718,6 +1001,236 @@ def _start_background_work() -> None:
         log.exception("Couldn't resume stalled downloads")
     _resume_clip_engine_runs()                 # never raises
     _retrain_triage_model_in_background()      # its own thread, its own try
+    _start_home_worker()
+
+
+# --- The home worker ------------------------------------------------------------
+# On the machine that downloads (ARCHIVE_ON_THIS_MACHINE on: a home connection),
+# a loop runs automatic approval (app/auto_select.py; off until switched on)
+# and then downloads every approved video one at a time — including approvals
+# made on the hosted dashboard, which used to wait for this process to restart.
+
+_home_worker_started = threading.Event()
+
+
+def _home_worker_tick() -> dict:
+    """One round: approve what today's pace allows (if switched on), then
+    download every approved video that isn't already downloading, in turn.
+    Downloads go through scrape's machine-wide pacing, never in parallel."""
+    from .. import auto_select
+
+    picked: dict = {}
+    try:
+        with session_scope() as session:
+            picked = auto_select.run(session, load_settings(), trigger="worker")
+    except Exception:
+        log.exception("Automatic approval failed")
+    if picked.get("approved"):
+        pagecache.invalidate()
+    with session_scope(read_only=True) as session:
+        waiting = session.execute(
+            select(Candidate.id).where(Candidate.status == STATUS_APPROVED)
+            .order_by(Candidate.approved_at.asc().nullsfirst(), Candidate.id)
+        ).scalars().all()
+    downloaded = 0
+    for cid in waiting:
+        with _scrape_inflight_lock:
+            busy = cid in _scrape_inflight
+        if busy:
+            continue
+        _scrape_in_thread(cid)   # blocking: one at a time
+        downloaded += 1
+        _after_background_work()
+    inbox_round: dict = {}
+    try:
+        inbox_round = _inbox_tick()
+    except Exception:
+        log.exception("Inbox round failed")
+    # The posting plan grows with the archive (a rerun per 60 posts): keep the
+    # schedule from tomorrow on in step. One count query when nothing changed.
+    try:
+        with session_scope() as session:
+            if posting_plan.ensure(session, today=_schedule_today()):
+                pagecache.invalidate()
+    except Exception:
+        log.exception("Posting plan check failed")
+    return {"approved": picked.get("approved", 0), "downloads": downloaded,
+            "inbox_made": inbox_round.get("made", 0), "inbox_queued": inbox_round.get("queued", 0)}
+
+
+class _InboxSkip(Exception):
+    """The draft can't become an inbox clip, and retrying won't change that."""
+
+
+def _inbox_draft_item(item_id: int) -> None:
+    """Make one inbox clip end to end: cut the engine's draft, render it, burn
+    in subtitles, draft a caption in the account's voice and gut-check it —
+    one redraft if the check flags it, as re-airs do. Blocking (ffmpeg,
+    Whisper, model calls); the home worker runs these one at a time. Sessions
+    are opened per step, never held across the slow parts."""
+    from .. import inbox as inbox_mod
+    from ..caption_check import run as check_caption, vetted_airing
+    from ..subtitles import NoSpeechError
+
+    settings = load_settings()
+    try:
+        with session_scope() as session:
+            item = session.get(InboxItem, item_id)
+            if item is None or item.state != InboxItem.STATE_DRAFTING:
+                return
+            item.attempts = (item.attempts or 0) + 1
+            item.started_at = utcnow()
+            want_subs = inbox_mod.load_policy(session).subtitles
+            if item.cut_pk is None:
+                row = session.get(ClipProposal, item.proposal_pk)
+                c = session.get(Candidate, item.candidate_pk)
+                if (row is None or c is None or c.status != STATUS_ARCHIVED
+                        or row.verdict != ClipProposal.VERDICT_PENDING):
+                    raise _InboxSkip("The draft or its video changed before the clip was made")
+                try:
+                    segments, _ = clip_proposals.visible_segments(
+                        json.loads(row.proposed_segments or "[]"))
+                except (TypeError, ValueError):
+                    segments = []
+                if not segments:
+                    raise _InboxSkip("The draft has nothing left to cut")
+                conflict, clash = clip_proposals.clip_conflict(
+                    segments, clip_proposals.other_clips(session, c.id))
+                if conflict == clip_proposals.CONFLICT_DUPLICATE:
+                    raise _InboxSkip(f"Same clip as {clash or 'an existing one'}")
+                cut = Cut(candidate_pk=c.id, trim_segments=json.dumps(segments))
+                session.add(cut)
+                session.flush()
+                clip_proposals.accept(session, row.id, cut.id)
+                clip_proposals.resolve_for_cut(session, cut.id, c.id, segments)
+                cut.export_status = "exporting"
+                item.cut_pk = cut.id
+            cut = session.get(Cut, item.cut_pk)
+            cut_id = cut.id
+            exported = bool(cut.trimmed_clip_path) and Path(cut.trimmed_clip_path).exists()
+            if not exported:
+                cut.export_status = "exporting"
+
+        # 1. Render (title, calendar name and footage tags come with it).
+        if not exported:
+            _export_cut_in_thread(cut_id)
+        with session_scope(read_only=True) as session:
+            cut = session.get(Cut, cut_id)
+            if cut.export_status == "failed" or not cut.trimmed_clip_path:
+                raise RuntimeError(cut.export_error or "The clip didn't render")
+            traits = cut.footage_traits or (cut.candidate.visual_traits if cut.candidate else "")
+            has_subs = bool(cut.subtitled_clip_path) and Path(cut.subtitled_clip_path).exists()
+
+        # 2. Subtitles, unless the footage already has them burned in.
+        position = vision.suggest_subs_position(traits)
+        if want_subs and position != "none" and not has_subs:
+            try:
+                _burn_subtitles(cut_id, position)
+                has_subs = True
+            except NoSpeechError:
+                has_subs = False
+        use_subs = want_subs and has_subs
+
+        # 3. Caption: drafted, checked, redrafted once if flagged.
+        with session_scope() as session:
+            cut = session.get(Cut, cut_id)
+            draft, verdict = None, None
+            for _ in range(2):
+                draft = _draft_caption_for_cut(session, cut, settings)
+                verdict = check_caption(session, cut, draft["caption"], source="inbox",
+                                        reference=vetted_airing(session, cut))
+                if verdict.ok is not False:
+                    break
+            item = session.get(InboxItem, item_id)
+            item.caption = draft["caption"]
+            item.caption_proposal_pk = draft["proposal_id"]
+            item.caption_ok = verdict.ok
+            item.caption_note = (verdict.reason or verdict.error or "")[:1000]
+            item.use_subtitles = use_subs
+            item.state = InboxItem.STATE_READY
+            item.ready_at = utcnow()
+            item.error = ""
+        log.info("Inbox clip %s ready (cut %s)", item_id, cut_id)
+    except (_InboxSkip, CaptionDraftError) as exc:
+        _inbox_fail(item_id, str(exc), retry=False)
+    except Exception as exc:
+        log.exception("Inbox clip %s failed", item_id)
+        _inbox_fail(item_id, str(exc), retry=True)
+
+
+def _inbox_fail(item_id: int, error: str, *, retry: bool) -> None:
+    """Record why an inbox clip couldn't be made. A retryable failure stays
+    ``drafting`` (stalled() retries it later) until attempts run out."""
+    from .. import inbox as inbox_mod
+
+    with session_scope() as session:
+        item = session.get(InboxItem, item_id)
+        if item is None:
+            return
+        item.error = error[:1000]
+        if not retry or (item.attempts or 0) >= inbox_mod.MAX_ATTEMPTS:
+            item.state = InboxItem.STATE_FAILED
+
+
+def _inbox_discard_render(session, cut: Cut) -> None:
+    """A rejected inbox clip keeps its cut row (its caption drafts and the
+    clip ledger point at it, and its footage must not be suggested again) but
+    not its rendered files."""
+    files = [cut.trimmed_clip_path, cut.subtitled_clip_path, cut.vertical_clip_path]
+    cut.trimmed_clip_path = cut.subtitled_clip_path = cut.vertical_clip_path = ""
+    cut.use_subtitles = False
+    cut.updated_at = utcnow()
+    session.flush()
+    _delete_if_unreferenced(session, [f for f in files if f])
+
+
+def _inbox_tick() -> dict:
+    """The inbox's round on the home worker: retry drafts a restart cut off,
+    make what today's pace allows, and queue approvals made where the files
+    aren't (the hosted dashboard)."""
+    from .. import inbox as inbox_mod
+
+    with session_scope() as session:
+        retry = inbox_mod.stalled(session)
+        fresh = inbox_mod.claim(session, load_settings())
+    made = 0
+    for item_id in retry + fresh:
+        _inbox_draft_item(item_id)
+        made += 1
+        _after_background_work()
+    queued = 0
+    with session_scope() as session:
+        approved = session.execute(
+            select(InboxItem).where(InboxItem.state == InboxItem.STATE_APPROVED)
+        ).scalars().all()
+        for item in approved:
+            try:
+                if inbox_mod.queue_approved(session, item):
+                    queued += 1
+            except Exception:
+                log.exception("Couldn't queue approved inbox clip %s", item.id)
+    if queued:
+        pagecache.invalidate()
+    return {"made": made, "queued": queued}
+
+
+def _start_home_worker() -> None:
+    if not _archives_here() or _home_worker_started.is_set():
+        return
+    _home_worker_started.set()
+    interval = float(load_settings().get("auto_select.worker_interval_seconds", 600))
+
+    def _loop() -> None:
+        # Let startup's own resumes claim their videos first.
+        time.sleep(60)
+        while True:
+            try:
+                _home_worker_tick()
+            except Exception:
+                log.exception("Home worker round failed")
+            time.sleep(max(60.0, interval))
+
+    threading.Thread(target=_loop, daemon=True, name="home-worker").start()
 
 
 # Not ``@app.on_event``: deprecated on this FastAPI, and these are the same hooks.
@@ -1531,7 +2044,7 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
         ]
 
         transcript_segments = []
-        if c.transcript_path and Path(c.transcript_path).exists():
+        if c.transcript_path and datasync.ensure_file(c.transcript_path):
             try:
                 transcript_segments = json.loads(Path(c.transcript_path).read_text())
             except Exception:
@@ -1543,10 +2056,13 @@ def video_detail(request: Request, candidate_id: int, step: str = "", msg: str =
         # of them into a clip, which is far less work than an empty editor.
         suggested_clips = (_pending_proposals(session, c.id)
                            if c.status == STATUS_ARCHIVED else [])
+        auto_call = (auto_triage.standing_call(session, c.id)
+                     if c.status == STATUS_REJECTED else None)
 
     return templates.TemplateResponse(
         request, "video.html",
         {"c": c, "state": state, "step": step,
+         "auto_call": auto_call,
          "cut_rows": cut_rows, "posts": posts,
          "suggested_clips": suggested_clips,
          "engine_job": _active_engine_job(c.id),
@@ -1854,7 +2370,7 @@ def _suggest_in_background(candidate_id: int, window: dict | None, setup: str, *
 
         result = jobs.enqueue(candidate_id, window=window, topic=topic,
                               reason="section" if window else "reroll",
-                              on_done=pagecache.invalidate, advice=advice)
+                              on_done=_after_background_work, advice=advice)
     except Exception as exc:
         log.exception("Couldn't queue clip suggestions for candidate %s", candidate_id)
         return JSONResponse({"error": f"Couldn't start the clip engine: {exc}", **extra},
@@ -2238,6 +2754,7 @@ def clip_proposal_thumb(proposal_id: int):
     at += 0.4
     key = f"proposal-{proposal_id}-{int(at * 1000)}"
     cached = THUMBS_DIR / f"{key}.jpg"
+    datasync.ensure_file(cached)
     if not Path(source).exists():
         if cached.exists():
             return FileResponse(str(cached), media_type="image/jpeg",
@@ -2539,7 +3056,7 @@ def cut_detail(request: Request, cut_id: int, step: str = "", msg: str = ""):
         ).scalar_one_or_none() or ""
 
         transcript_segments = []
-        if c.transcript_path and Path(c.transcript_path).exists():
+        if c.transcript_path and datasync.ensure_file(c.transcript_path):
             try:
                 transcript_segments = json.loads(Path(c.transcript_path).read_text())
             except Exception:
@@ -2692,6 +3209,9 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
 
     from ..config import storage_dir
 
+    if not _archives_here():
+        return _flash("/", "Uploading your own video isn't available on the hosted "
+                           "dashboard yet. Upload it from the Mac's dashboard.")
     filename = file.filename or "upload.mp4"
     ext = Path(filename).suffix.lower()
     if ext not in _UPLOAD_EXTS:
@@ -2862,18 +3382,10 @@ def upload_url(urls: str = Form(...)):
 
 
 def _log_triage_decision(session, c: Candidate, action: str) -> None:
-    """Record what the operator decided given the signals on screen. This is
-    the training record for eventual AI-assisted triage."""
-    session.add(TriageDecision(
-        candidate_pk=c.id,
-        video_id=c.video_id,
-        action=action,
-        relevance_score=c.relevance_score,
-        visual_score=c.visual_score,
-        visual_traits=c.visual_traits or "",
-        predicted_prob=c.approve_prob,
-        model_pk=c.approve_model_pk,
-    ))
+    """Record what the operator decided given the signals on screen — the
+    approve predictor's training record — and settle any automatic-triage call
+    on the video (a spot-check verdict, or approving over its rejection)."""
+    auto_triage.record_operator_decision(session, c, action)
 
 
 @app.post("/video/{candidate_id}/approve")
@@ -2932,21 +3444,28 @@ def reset_to_new(candidate_id: int):
         ).scalar_one_or_none()
         if last is not None:
             last.undone = True
+            auto_triage.record_operator_undo(session, last)
     return {"ok": True}
 
 
 @app.post("/video/{candidate_id}/unreject")
-def unreject(candidate_id: int):
+def unreject(request: Request, candidate_id: int):
     """Restore a rejected clip. If it was already downloaded, return it to the
     archived state (ready to trim); otherwise send it back to the review gate.
-    Never re-downloads."""
+    Never re-downloads. An automatic rejection restored this way is never
+    made again."""
+    wants_json = "application/json" in request.headers.get("accept", "")
     with session_scope() as session:
         c = session.get(Candidate, candidate_id)
         if c is None:
-            return _flash("/", "Video not found")
+            return (JSONResponse({"error": "not found"}, status_code=404)
+                    if wants_json else _flash("/", "Video not found"))
         downloaded = _has_source(c)
         c.status = STATUS_ARCHIVED if downloaded else STATUS_NEW
         dest = STATUS_ARCHIVED if downloaded else STATUS_NEW
+        auto_triage.record_operator_restore(session, c)
+    if wants_json:
+        return JSONResponse({"ok": True, "status": dest})
     return _flash(f"/video/{candidate_id}", f"Restored — status is now {dest}")
 
 
@@ -3008,6 +3527,7 @@ def media_thumb(candidate_id: int):
             return JSONResponse({"error": "no local video"}, status_code=404)
         source = c.local_video_path
     cached = THUMBS_DIR / f"{candidate_id}.jpg"
+    datasync.ensure_file(cached)
     if not Path(source).exists() and cached.exists():
         # Offloaded source: the still was cached before the file left the disk.
         return FileResponse(str(cached), media_type="image/jpeg",
@@ -3033,6 +3553,7 @@ def media_cut_thumb(cut_id: int):
             return JSONResponse({"error": "no clip"}, status_code=404)
         source = cut.trimmed_clip_path
     cached = THUMBS_DIR / f"cut-{cut_id}.jpg"
+    datasync.ensure_file(cached)
     if not Path(source).exists() and cached.exists():
         # Archived clip: the still was cached before the file left the disk.
         return FileResponse(str(cached), media_type="image/jpeg",
@@ -3046,22 +3567,55 @@ def media_cut_thumb(cut_id: int):
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
+def _stored_clip_url(path: str, publish_key: str = "") -> str:
+    """A signed Storage URL for a clip this machine doesn't have on disk: the
+    shared copy (app/datasync.py, same key as the clip archive), else the copy
+    uploaded for publishing. '' when neither exists."""
+    key = datasync.key_for(path) if path else None
+    if key:
+        try:
+            from ..offload import remote_size, signed_source_url
+
+            if remote_size(key) is not None:
+                return signed_source_url(key)
+        except Exception as exc:
+            log.info("No stored copy of %s: %s", Path(path).name, exc)
+    if publish_key:
+        try:
+            from ..storage_supabase import signed_clip_url
+
+            return signed_clip_url(publish_key)
+        except Exception as exc:
+            log.info("No publish copy %s: %s", publish_key, exc)
+    return ""
+
+
+def _clip_response(path: str, missing: str, publish_key: str = ""):
+    """The clip from disk when it's here (the Mac, as always); otherwise send the
+    browser straight to Storage instead of relaying the video through this
+    server (the hosted dashboard keeps no clips of its own)."""
+    if path and Path(path).is_file():
+        return FileResponse(path, media_type="video/mp4")
+    url = _stored_clip_url(path, publish_key)
+    if url:
+        return RedirectResponse(url, status_code=307)
+    return JSONResponse({"error": missing}, status_code=404)
+
+
 @app.get("/media/clip/{cut_id}")
 def media_clip(cut_id: int):
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
-        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
-            return JSONResponse({"error": "no clip"}, status_code=404)
-        return FileResponse(cut.trimmed_clip_path, media_type="video/mp4")
+        path = cut.trimmed_clip_path if cut is not None else ""
+    return _clip_response(path, "no clip")
 
 
 @app.get("/media/subtitled/{cut_id}")
 def media_subtitled(cut_id: int):
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
-        if cut is None or not cut.subtitled_clip_path or not Path(cut.subtitled_clip_path).exists():
-            return JSONResponse({"error": "no subtitled clip"}, status_code=404)
-        return FileResponse(cut.subtitled_clip_path, media_type="video/mp4")
+        path = cut.subtitled_clip_path if cut is not None else ""
+    return _clip_response(path, "no subtitled clip")
 
 
 @app.get("/media/vertical/{cut_id}")
@@ -3069,9 +3623,8 @@ def media_vertical(cut_id: int):
     """The cut's 1080x1920 Instagram Reels composite (hook + clip + captions)."""
     with session_scope() as session:
         cut = session.get(Cut, cut_id)
-        if cut is None or not cut.vertical_clip_path or not Path(cut.vertical_clip_path).exists():
-            return JSONResponse({"error": "no vertical composite"}, status_code=404)
-        return FileResponse(cut.vertical_clip_path, media_type="video/mp4")
+        path = cut.vertical_clip_path if cut is not None else ""
+    return _clip_response(path, "no vertical composite")
 
 
 @app.get("/media/post/{post_id}")
@@ -3087,16 +3640,23 @@ def media_post_clip(post_id: int):
         p = session.get(ThreadsPost, post_id)
         if p is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        path = p.clip_local_path
-        if (not path or not Path(path).exists()) and p.cut:
+        # In order: the post's own file, the cut's captioned variant (when the
+        # cut uses captions), the plain trim.
+        options = [(p.clip_local_path or "", p.clip_object_path or "")]
+        if p.cut:
             cut = p.cut
-            if cut.use_subtitles and cut.subtitled_clip_path and Path(cut.subtitled_clip_path).exists():
-                path = cut.subtitled_clip_path
-            else:
-                path = cut.trimmed_clip_path
-        if not path or not Path(path).exists():
-            return JSONResponse({"error": "no clip"}, status_code=404)
-        return FileResponse(path, media_type="video/mp4")
+            if cut.use_subtitles and cut.subtitled_clip_path:
+                options.append((cut.subtitled_clip_path, ""))
+            options.append((cut.trimmed_clip_path or "", ""))
+    for path, _key in options:
+        if path and Path(path).is_file():
+            return FileResponse(path, media_type="video/mp4")
+    # Nothing on this disk (the hosted dashboard): the same order, from Storage.
+    for path, key in options:
+        url = _stored_clip_url(path, key)
+        if url:
+            return RedirectResponse(url, status_code=307)
+    return JSONResponse({"error": "no clip"}, status_code=404)
 
 
 def _safe_download_stem(text: str, limit: int = 60) -> str:
@@ -3211,20 +3771,27 @@ def _delete_if_unreferenced(session, paths: list[str]) -> None:
     re-caption) for that clip until a re-export recreated the file.
     """
     for path in {p for p in paths if p}:
+        # By file name, not full path: rows hold the path of whichever machine
+        # wrote them (models.DataPath), and clip names are versioned and unique.
+        tail = "/" + Path(path).name
+
+        def _refs(col):
+            return col.endswith(tail, autoescape=True)
+
         referenced = session.execute(
-            select(ThreadsPost.id).where(ThreadsPost.clip_local_path == path).limit(1)
+            select(ThreadsPost.id).where(_refs(ThreadsPost.clip_local_path)).limit(1)
         ).scalar_one_or_none()
         if referenced is None:
             referenced = session.execute(
                 select(InstagramPost.id)
-                .where(InstagramPost.clip_local_path == path).limit(1)
+                .where(_refs(InstagramPost.clip_local_path)).limit(1)
             ).scalar_one_or_none()
         if referenced is None:
             referenced = session.execute(
                 select(Cut.id).where(or_(
-                    Cut.trimmed_clip_path == path,
-                    Cut.subtitled_clip_path == path,
-                    Cut.vertical_clip_path == path,
+                    _refs(Cut.trimmed_clip_path),
+                    _refs(Cut.subtitled_clip_path),
+                    _refs(Cut.vertical_clip_path),
                 )).limit(1)
             ).scalar_one_or_none()
         if referenced is not None:
@@ -3347,7 +3914,7 @@ def _export_cut_in_thread(cut_id: int) -> None:
         # videos archived before word sidecars fall back to Whisper-on-the-clip
         # inside ensure_clip_words, exactly as before.
         transcript_sidecar = ""
-        if word_transcript_path and Path(word_transcript_path).exists():
+        if word_transcript_path and datasync.ensure_file(word_transcript_path):
             try:
                 from ..subtitles import (
                     load_clip_words, save_clip_transcript, slice_source_words,
@@ -3512,6 +4079,42 @@ def set_subs_mode(cut_id: int, mode: str = Form("")):
     return JSONResponse({"ok": True, "mode": mode})
 
 
+def _burn_subtitles(cut_id: int, position: str = "", force: bool = False) -> str:
+    """Burn the stylized captions into the exported clip and record the new
+    file on the cut; returns its path. Blocking (Whisper + ffmpeg), so the
+    route and the inbox pipeline both call it off the event loop.
+
+    Raises LookupError when there's no exported clip yet, and subtitles'
+    NoSpeechError / SubtitleError as they come.
+    """
+    from ..subtitles import clip_transcript_path_for, create_subtitled_clip
+
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+            raise LookupError("Export a clip first")
+        clip_path = cut.trimmed_clip_path
+        previous_subs = cut.subtitled_clip_path
+    # Version each render so regenerating captions never overwrites the file a
+    # queued post is already pointing at.
+    stamp = utcnow().strftime("%Y%m%dT%H%M%S")
+    out_path = Path(clip_path).with_name(f"{Path(clip_path).stem}_subs_{stamp}.mp4")
+    out = create_subtitled_clip(clip_path, position=position or None,
+                                out_path=out_path, force_transcribe=force)
+    transcript_path = clip_transcript_path_for(clip_path)
+    with session_scope() as session:
+        cut = session.get(Cut, cut_id)
+        if cut is not None:
+            cut.subtitled_clip_path = str(out)
+            if transcript_path.exists():
+                cut.clip_transcript_path = str(transcript_path)
+            _delete_if_unreferenced(session, [previous_subs])
+            cut.use_subtitles = True
+            cut.subs_position = "top" if (position or "").lower() == "top" else "bottom"
+            cut.updated_at = utcnow()
+    return str(out)
+
+
 @app.post("/cut/{cut_id}/subtitles")
 def generate_subtitles(cut_id: int, position: str = Form(""), force: str = Form("")):
     """Generate the stylized-caption variant of the exported clip (AJAX).
@@ -3524,23 +4127,12 @@ def generate_subtitles(cut_id: int, position: str = Form(""), force: str = Form(
     ``force`` (the UI's "Try again" after a no-speech failure) skips the cached
     word sidecar and re-runs Whisper at its strongest tier.
     """
-    from ..subtitles import (
-        NoSpeechError, SubtitleError, clip_transcript_path_for, create_subtitled_clip,
-    )
+    from ..subtitles import NoSpeechError, SubtitleError
 
-    with session_scope() as session:
-        cut = session.get(Cut, cut_id)
-        if cut is None or not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
-            return JSONResponse({"error": "Export a clip first"}, status_code=404)
-        clip_path = cut.trimmed_clip_path
-        previous_subs = cut.subtitled_clip_path
-    # Version each render so regenerating captions never overwrites the file a
-    # queued post is already pointing at.
-    stamp = utcnow().strftime("%Y%m%dT%H%M%S")
-    out_path = Path(clip_path).with_name(f"{Path(clip_path).stem}_subs_{stamp}.mp4")
     try:
-        out = create_subtitled_clip(clip_path, position=position or None,
-                                    out_path=out_path, force_transcribe=bool(force))
+        _burn_subtitles(cut_id, position, bool(force))
+    except LookupError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     except NoSpeechError as exc:
         # Not a server fault: every Whisper tier heard nothing. The UI offers
         # a "Try again" that re-posts with force=1.
@@ -3550,17 +4142,6 @@ def generate_subtitles(cut_id: int, position: str = Form(""), force: str = Form(
     except Exception as exc:
         log.exception("Caption generation failed for cut %s", cut_id)
         return JSONResponse({"error": f"Caption generation failed: {exc}"}, status_code=500)
-    transcript_path = clip_transcript_path_for(clip_path)
-    with session_scope() as session:
-        cut = session.get(Cut, cut_id)
-        if cut is not None:
-            cut.subtitled_clip_path = str(out)
-            if transcript_path.exists():
-                cut.clip_transcript_path = str(transcript_path)
-            _delete_if_unreferenced(session, [previous_subs])
-            cut.use_subtitles = True
-            cut.subs_position = "top" if (position or "").lower() == "top" else "bottom"
-            cut.updated_at = utcnow()
     return {"url": f"/media/subtitled/{cut_id}"}
 
 
@@ -3811,7 +4392,7 @@ def _caption_scene_context(cut: Cut, lead_in_seconds: float = 60.0) -> tuple[str
     except (ValueError, TypeError, KeyError, IndexError):
         return "", None
     lead_in = ""
-    if c.transcript_path and Path(c.transcript_path).exists():
+    if c.transcript_path and datasync.ensure_file(c.transcript_path):
         try:
             segments = json.loads(Path(c.transcript_path).read_text())
         except Exception:
@@ -3831,6 +4412,94 @@ def _caption_scene_context(cut: Cut, lead_in_seconds: float = 60.0) -> tuple[str
     return lead_in, chapter
 
 
+class CaptionDraftError(Exception):
+    """A caption couldn't be drafted for a reason the operator can act on;
+    ``status`` is the HTTP code the route answers with."""
+
+    def __init__(self, message: str, status: int = 409):
+        super().__init__(message)
+        self.status = status
+
+
+def _draft_caption_for_cut(session, cut: Cut, settings) -> dict:
+    """Draft a voice-matched caption for an exported clip and log it as a
+    pending caption proposal. Never writes ``cut.draft_caption``: a draft is a
+    proposal until the operator accepts it. Returns {caption, proposal_id,
+    voice_examples, target_words, transcript}; raises CaptionDraftError."""
+    c = cut.candidate
+    # Draft from the Whisper transcript of the exported clip — the same
+    # source burned-in captions use. Transcribe on demand if captions
+    # haven't been generated yet. Never fall back to the full-video
+    # YouTube captions (those describe parts that aren't in the clip).
+    if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
+        raise CaptionDraftError("Export the clip first — the caption is drafted "
+                                "from what is said in the trimmed clip.")
+    _lines, clip_text = _ensure_whisper_clip_transcript(cut)
+    if not clip_text.strip():
+        raise CaptionDraftError("No speech detected in the clip — nothing to draft "
+                                "a caption from.")
+    excerpt = " ".join(clip_text.split())[:3000]
+    seconds = clip_duration(cut.trimmed_clip_path) if cut.trimmed_clip_path else None
+    # Voice matching from past captions — never let it break drafting.
+    try:
+        voice = voice_context(session, settings)
+    except Exception as exc:
+        log.warning("Voice context failed (drafting generic): %s", exc)
+        voice = {"examples": [], "style_guide": "", "target_words": None}
+    model = settings.get("engagement.draft_model", "claude-sonnet-5")
+    max_chars = int(settings.get("engagement.caption_max_chars", 220))
+    operator_guide = render_caption_guide()
+    target_words = voice.get("target_words")
+    # Promo captions carry the call-to-action URL themselves, because those
+    # posts get no first reply to put it in.
+    first_party = is_first_party(c)
+    # What the scene means rarely lives in its few seconds of dialogue —
+    # extra context only, so a failure here drafts without it.
+    try:
+        lead_in, chapter = _caption_scene_context(cut)
+    except Exception as exc:
+        log.warning("Caption scene context failed for cut %s: %s", cut.id, exc)
+        lead_in, chapter = "", None
+    contact_sheet = (vision.clip_contact_sheet(cut.trimmed_clip_path)
+                     if settings.get("vision.enabled", True) else None)
+    try:
+        caption = suggest_post_caption(
+            model,
+            c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
+            examples=voice["examples"], style_guide=voice["style_guide"],
+            operator_guide=operator_guide,
+            max_chars=max_chars,
+            target_words=target_words,
+            description=c.description,
+            first_party=first_party,
+            contact_sheet=contact_sheet,
+            lead_in=lead_in,
+            chapter=chapter,
+        )
+    except Exception as exc:
+        raise CaptionDraftError(str(exc), status=500) from exc
+    # The caption field itself is left untouched — this is a proposal until
+    # the operator accepts it (/cut/{id}/caption, or Approve in the inbox).
+    # The DRAFT is persisted here regardless, so dismissing it records a
+    # rejection instead of discarding the most informative event in the loop.
+    proposal_id = log_draft_proposal(
+        session, cut.id, caption, kind=KIND_CAPTION,
+        model=model,
+        policy=draft_policy_version(
+            model=model, max_chars=max_chars, target_words=target_words,
+            style_guide=voice["style_guide"], operator_guide=operator_guide,
+            examples=len(voice["examples"]), first_party=first_party,
+            scene_context=bool(contact_sheet or lead_in or chapter),
+        ),
+        max_chars=max_chars,
+        target_words=target_words,
+        voice_examples=len(voice["examples"]),
+    )
+    return {"caption": caption, "voice_examples": len(voice["examples"]),
+            "proposal_id": proposal_id, "target_words": target_words,
+            "transcript": clip_text}
+
+
 @app.post("/cut/{cut_id}/suggest-caption")
 def suggest_caption(cut_id: int):
     settings = load_settings()
@@ -3838,80 +4507,10 @@ def suggest_caption(cut_id: int):
         cut = session.get(Cut, cut_id)
         if cut is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        c = cut.candidate
-        # Draft from the Whisper transcript of the exported clip — the same
-        # source burned-in captions use. Transcribe on demand if captions
-        # haven't been generated yet. Never fall back to the full-video
-        # YouTube captions (those describe parts that aren't in the clip).
-        if not cut.trimmed_clip_path or not Path(cut.trimmed_clip_path).exists():
-            return JSONResponse(
-                {"error": "Export the clip first — the caption is drafted "
-                          "from what is said in the trimmed clip."},
-                status_code=409)
-        _lines, clip_text = _ensure_whisper_clip_transcript(cut)
-        if not clip_text.strip():
-            return JSONResponse(
-                {"error": "No speech detected in the clip — nothing to draft "
-                          "a caption from."},
-                status_code=409)
-        excerpt = " ".join(clip_text.split())[:3000]
-        seconds = clip_duration(cut.trimmed_clip_path) if cut.trimmed_clip_path else None
-        # Voice matching from past captions — never let it break drafting.
         try:
-            voice = voice_context(session, settings)
-        except Exception as exc:
-            log.warning("Voice context failed (drafting generic): %s", exc)
-            voice = {"examples": [], "style_guide": "", "target_words": None}
-        model = settings.get("engagement.draft_model", "claude-sonnet-5")
-        max_chars = int(settings.get("engagement.caption_max_chars", 220))
-        operator_guide = render_caption_guide()
-        target_words = voice.get("target_words")
-        # Promo captions carry the call-to-action URL themselves, because those
-        # posts get no first reply to put it in.
-        first_party = is_first_party(c)
-        # What the scene means rarely lives in its few seconds of dialogue —
-        # extra context only, so a failure here drafts without it.
-        try:
-            lead_in, chapter = _caption_scene_context(cut)
-        except Exception as exc:
-            log.warning("Caption scene context failed for cut %s: %s", cut_id, exc)
-            lead_in, chapter = "", None
-        contact_sheet = (vision.clip_contact_sheet(cut.trimmed_clip_path)
-                         if settings.get("vision.enabled", True) else None)
-        try:
-            caption = suggest_post_caption(
-                model,
-                c.title, c.channel.call_sign, c.channel.market, excerpt, seconds,
-                examples=voice["examples"], style_guide=voice["style_guide"],
-                operator_guide=operator_guide,
-                max_chars=max_chars,
-                target_words=target_words,
-                description=c.description,
-                first_party=first_party,
-                contact_sheet=contact_sheet,
-                lead_in=lead_in,
-                chapter=chapter,
-            )
-            # The caption field itself is left untouched — this is a proposal
-            # until the operator accepts it (/cut/{id}/caption). The DRAFT is
-            # persisted here regardless, so dismissing it records a rejection
-            # instead of discarding the most informative event in the loop.
-            proposal_id = log_draft_proposal(
-                session, cut_id, caption, kind=KIND_CAPTION,
-                model=model,
-                policy=draft_policy_version(
-                    model=model, max_chars=max_chars, target_words=target_words,
-                    style_guide=voice["style_guide"], operator_guide=operator_guide,
-                    examples=len(voice["examples"]), first_party=first_party,
-                    scene_context=bool(contact_sheet or lead_in or chapter),
-                ),
-                max_chars=max_chars,
-                target_words=target_words,
-                voice_examples=len(voice["examples"]),
-            )
-            return {"caption": caption, "voice_examples": len(voice["examples"]),
-                    "proposal_id": proposal_id, "target_words": target_words,
-                    "transcript": clip_text}
+            return _draft_caption_for_cut(session, cut, settings)
+        except CaptionDraftError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status)
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -5092,10 +5691,16 @@ def _library_dataset() -> dict:
         ]
 
         # --- Cuts (first-class trimmed clips) ---
+        # Inbox clips the operator rejected (or that couldn't be made) keep
+        # their row for the ledgers, not a place in the library.
+        discarded = select(InboxItem.id).where(
+            InboxItem.cut_pk == Cut.id,
+            InboxItem.state.in_((InboxItem.STATE_REJECTED, InboxItem.STATE_FAILED)))
         cuts = session.execute(
             select(Cut)
             .options(selectinload(Cut.candidate).options(
                 selectinload(Candidate.channel), *_CANDIDATE_LIST_ONLY))
+            .where(~discarded.exists())
             .order_by(Cut.created_at.desc())
         ).scalars().all()
         published_cut_pks = {
@@ -6409,7 +7014,7 @@ def _pending_rule_proposals() -> list[dict]:
 # Fields the Brand & audience form may send. A field the form doesn't post is
 # left alone — never blanked — so moving a field off the page can't erase it.
 _BRAND_FORM_FIELDS = ("topic", "name", "cta_url", "mission", "audience",
-                      "voice_notes", "source_kind", "relevance_rules",
+                      "positioning", "voice_notes", "source_kind", "relevance_rules",
                       "false_positives", "strong_openings", "weak_openings",
                       "clip_guidance")
 
@@ -6598,6 +7203,56 @@ def _schedule_today() -> dt.date:
     return utcnow().astimezone(scheduler_timezone()).date()
 
 
+# The time zones the Posting schedule page offers first, by region. Any other
+# IANA zone can be typed in ("Somewhere else…").
+_COMMON_TIMEZONES = (
+    ("North America", (
+        ("America/New_York", "Eastern — New York"), ("America/Chicago", "Central — Chicago"),
+        ("America/Denver", "Mountain — Denver"), ("America/Phoenix", "Arizona — Phoenix"),
+        ("America/Los_Angeles", "Pacific — Los Angeles"), ("America/Anchorage", "Alaska — Anchorage"),
+        ("Pacific/Honolulu", "Hawaii — Honolulu"), ("America/Toronto", "Toronto"),
+        ("America/Vancouver", "Vancouver"), ("America/Mexico_City", "Mexico City"),
+    )),
+    ("South America", (
+        ("America/Sao_Paulo", "São Paulo"), ("America/Argentina/Buenos_Aires", "Buenos Aires"),
+        ("America/Bogota", "Bogotá"), ("America/Lima", "Lima"),
+    )),
+    ("Europe and Africa", (
+        ("Europe/London", "London"), ("Europe/Dublin", "Dublin"), ("Europe/Lisbon", "Lisbon"),
+        ("Europe/Paris", "Paris"), ("Europe/Berlin", "Berlin"), ("Europe/Madrid", "Madrid"),
+        ("Europe/Rome", "Rome"), ("Europe/Amsterdam", "Amsterdam"), ("Europe/Stockholm", "Stockholm"),
+        ("Europe/Warsaw", "Warsaw"), ("Europe/Athens", "Athens"), ("Europe/Istanbul", "Istanbul"),
+        ("Africa/Lagos", "Lagos"), ("Africa/Cairo", "Cairo"), ("Africa/Nairobi", "Nairobi"),
+        ("Africa/Johannesburg", "Johannesburg"),
+    )),
+    ("Asia and the Pacific", (
+        ("Asia/Dubai", "Dubai"), ("Asia/Karachi", "Karachi"), ("Asia/Kolkata", "India"),
+        ("Asia/Dhaka", "Dhaka"), ("Asia/Bangkok", "Bangkok"), ("Asia/Jakarta", "Jakarta"),
+        ("Asia/Singapore", "Singapore"), ("Asia/Manila", "Manila"), ("Asia/Hong_Kong", "Hong Kong"),
+        ("Asia/Shanghai", "China"), ("Asia/Seoul", "Seoul"), ("Asia/Tokyo", "Tokyo"),
+        ("Australia/Perth", "Perth"), ("Australia/Sydney", "Sydney"), ("Pacific/Auckland", "Auckland"),
+    )),
+)
+
+
+def _utc_offset(zone: str, now: dt.datetime) -> str:
+    minutes = int(now.astimezone(ZoneInfo(zone)).utcoffset().total_seconds() // 60)
+    hours, rest = divmod(abs(minutes), 60)
+    return f"UTC{'+' if minutes >= 0 else '−'}{hours}" + (f":{rest:02d}" if rest else "")
+
+
+def _timezone_choices(now: dt.datetime) -> list[tuple[str, list[tuple[str, str]]]]:
+    return [(group, [(key, f"{label} ({_utc_offset(key, now)})") for key, label in zones])
+            for group, zones in _COMMON_TIMEZONES]
+
+
+def _all_timezones() -> list[str]:
+    from zoneinfo import available_timezones
+
+    return sorted(z for z in available_timezones()
+                  if "/" in z and not z.startswith(("Etc/", "SystemV/", "posix/", "right/")))
+
+
 @app.get("/schedule", response_class=HTMLResponse)
 def schedule_page(request: Request, msg: str = ""):
     """Posts per day and their times (app/posting_schedule.py)."""
@@ -6607,11 +7262,26 @@ def schedule_page(request: Request, msg: str = ""):
     now_tz = utcnow().astimezone(scheduler_timezone())
     with session_scope(read_only=True) as session:
         outlook = recycle_overview(session)
+        archive = posting_plan.archive_size(session)
+        mode = posting_plan.load_mode(session)
     library = {"size": len(outlook),
                "ready": sum(1 for f in outlook.values() if f["next_eligible"] <= today)}
+    tz_name = str(scheduler_timezone())
     return templates.TemplateResponse(
         request, "schedule.html",
         {"current": current, "latest": latest,
+         "plan_mode": mode,
+         "plan_progress": posting_plan.progress(archive),
+         "plan_tiers": posting_plan.tiers(),
+         "plan_preview": {m: posting_plan.plan(archive, m) for m in posting_plan.MODES},
+         "plan_waking": (posting_plan.WAKING_FIRST, posting_plan.WAKING_LAST),
+         "tz_city": tz_name.split("/")[-1].replace("_", " "),
+         "now_label": now_tz.strftime("%-I:%M %p"),
+         "tz_editable": timezone_editable(),
+         "tz_saved": timezone_saved(),
+         "tz_choices": _timezone_choices(utcnow()),
+         "tz_common": [k for _, zones in _COMMON_TIMEZONES for k, _ in zones],
+         "tz_all": _all_timezones(),
          "notes": posting_schedule.notes(latest["windows"], latest["reruns"]),
          "rerun_library": library,
          "rerun_hours": load_settings().get("scheduler.placement.reruns.stage_ahead_hours", 24),
@@ -6651,6 +7321,36 @@ def save_schedule(windows: list[str] = Form(default=[]), kinds: list[str] = Form
         msg += (f" — moved {result['moved']} pinned post{'' if result['moved'] == 1 else 's'}"
                 + (f", unpinned {result['unpinned']}" if result["unpinned"] else ""))
     return _flash("/schedule", msg)
+
+
+@app.post("/schedule/timezone")
+def save_schedule_timezone(tz: str = Form("")):
+    """The account's own time zone (config.save_timezone). Takes effect at once:
+    today's remaining posts move to the same local times in the new zone."""
+    try:
+        name = save_timezone(tz)
+    except ValueError as exc:
+        return _flash("/schedule", str(exc))
+    city = name.split("/")[-1].replace("_", " ")
+    return _flash("/schedule", f"Saved — posts are now timed for {city}. "
+                               f"The rest of today's posts move to {city} times.")
+
+
+@app.post("/schedule/plan")
+def save_schedule_plan(mode: str = Form("")):
+    """Choose when the plan's posts go out (app/posting_plan.py). The schedule
+    follows from tomorrow; posts already lined up for today stay put."""
+    today = _schedule_today()
+    try:
+        with session_scope() as session:
+            posting_plan.save_mode(session, mode)
+            result = posting_plan.ensure(session, today=today)
+    except ValueError as exc:
+        return _flash("/schedule", str(exc))
+    label = "during waking hours" if mode == "waking" else "around the clock"
+    if result is None:
+        return _flash("/schedule", f"Saved — your posts already go out {label}")
+    return _flash("/schedule", f"Saved — from tomorrow, {result['per_day']} posts a day, {label}")
 
 
 @app.post("/schedule/cancel")

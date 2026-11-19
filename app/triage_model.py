@@ -18,6 +18,18 @@ Probabilities are trained unweighted so they read as real rates: of the videos
 it calls 10-20%, roughly that share get approved. Every decision also records
 the probability that was on screen when it was made (``predicted_prob``), which
 is what the live scorecard grades — never the model's opinion after the fact.
+
+Automatic triage (app/auto_triage.py) acts on these probabilities. Its own
+rejections are kept in a separate table and are never training data — a model
+that learned from its own calls would only grow surer of them. The operator's
+verdicts on its random spot-checks are ordinary decisions and are.
+
+Each model is graded twice when it's trained. ``backtest`` is the original
+single split: fit on the older three quarters, score the newest quarter.
+``rolling`` refits at several points in time and scores each next slice, so
+most decisions get an out-of-sample prediction. Its numbers rest on several
+times as many approvals, and it's what the automatic-triage cut-offs are
+judged on.
 """
 from __future__ import annotations
 
@@ -33,7 +45,7 @@ from dataclasses import dataclass
 from sqlalchemy import case, func, select, update
 
 from .config import Settings, load_settings
-from .models import Candidate, STATUS_NEW, TriageDecision, TriageModel, utcnow
+from .models import Candidate, STATUS_NEW, ThreadsPost, TriageDecision, TriageModel, utcnow
 
 log = logging.getLogger("triage_model")
 
@@ -54,6 +66,14 @@ KEEP_PARAMS = 3
 # Calibration buckets and hand-off thresholds the scorecard reports.
 BUCKETS = (0.0, 0.05, 0.10, 0.20, 0.40, 1.0)
 HANDOFF_THRESHOLDS = (0.02, 0.05, 0.10, 0.15)
+# The cut-offs automatic triage offers, graded by the rolling evaluation. On
+# the first 1,776 decisions, 2% cost about 5% of approvals and 5% about 15% —
+# worth it when only the best few videos a day are wanted, hence the top end.
+CUTOFF_CHOICES = (0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20)
+# Rolling evaluation: the first refit learns from this share of the decisions,
+# then each of ROLLING_FOLDS refits scores the next slice.
+ROLLING_START = 0.4
+ROLLING_FOLDS = 6
 
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9']+")
 _train_lock = threading.Lock()
@@ -101,10 +121,13 @@ class _Example:
     terms: Counter
     relevance: float | None
     duration: int | None
+    candidate_pk: int = 0
 
 
 def _load_examples(session) -> list[_Example]:
-    """Latest non-undone decision per video, oldest first."""
+    """Latest non-undone decision per video, oldest first. Automatic-triage
+    calls aren't decisions (they live in ``auto_triage_actions``), so they
+    never get here."""
     rows = session.execute(
         select(TriageDecision.candidate_pk, TriageDecision.action,
                Candidate.title, func.substr(Candidate.description, 1, DESCRIPTION_CHARS),
@@ -119,7 +142,7 @@ def _load_examples(session) -> list[_Example]:
         # holdout really is the most recent decisions.
         latest.pop(pk, None)
         latest[pk] = _Example(action == "approve", _term_counts(title or "", desc or ""),
-                              rel, dur)
+                              rel, dur, pk)
     return list(latest.values())
 
 
@@ -182,13 +205,19 @@ def _auc(labels: list[bool], probs: list[float]) -> float | None:
     return (rank_sum - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
 
 
-def evaluate(labels: list[bool], probs: list[float]) -> dict:
+def evaluate(labels: list[bool], probs: list[float],
+             thresholds: tuple[float, ...] = HANDOFF_THRESHOLDS,
+             posted: list[bool] | None = None) -> dict:
     """How the predictions held up against what the operator actually did.
 
     ``buckets``: within each predicted range, the share actually approved —
     honest probabilities land inside their own range. ``handoff``: had every
     video under the threshold been rejected automatically, how much of the
     queue that takes away and how many real approvals it would have thrown out.
+
+    ``posted`` (one flag per label: the approved video went on to a published
+    post) adds how many of those lost approvals became posts — an approval
+    that never got used costs less to lose.
     """
     buckets = []
     for lo, hi in zip(BUCKETS, BUCKETS[1:]):
@@ -196,11 +225,43 @@ def evaluate(labels: list[bool], probs: list[float]) -> dict:
                if lo <= p < hi or (hi == BUCKETS[-1] and p == hi)]
         buckets.append({"lo": lo, "hi": hi, "n": len(sel), "approved": sum(sel)})
     handoff = []
-    for t in HANDOFF_THRESHOLDS:
-        below = [y for y, p in zip(labels, probs) if p < t]
-        handoff.append({"threshold": t, "below": len(below), "approvals_lost": sum(below)})
-    return {"n": len(labels), "approved": sum(labels), "auc": _auc(labels, probs),
-            "buckets": buckets, "handoff": handoff}
+    for t in thresholds:
+        below = [i for i, p in enumerate(probs) if p < t]
+        row = {"threshold": t, "below": len(below),
+               "approvals_lost": sum(1 for i in below if labels[i])}
+        if posted is not None:
+            row["posted_lost"] = sum(1 for i in below if labels[i] and posted[i])
+        handoff.append(row)
+    out = {"n": len(labels), "approved": sum(labels), "auc": _auc(labels, probs),
+           "buckets": buckets, "handoff": handoff}
+    if posted is not None:
+        out["posted"] = sum(1 for y, p in zip(labels, posted) if y and p)
+    return out
+
+
+def _rolling_predictions(examples: list[_Example]) -> list[tuple[_Example, float]]:
+    """Out-of-sample predictions for every decision after the first
+    ``ROLLING_START`` share: refit on everything before each slice, score the
+    slice. Slices whose history holds only one outcome are skipped — there's
+    nothing to learn the split from yet."""
+    n = len(examples)
+    start = int(n * ROLLING_START)
+    step = max(1, math.ceil((n - start) / ROLLING_FOLDS))
+    out: list[tuple[_Example, float]] = []
+    for lo in range(start, n, step):
+        head, tail = examples[:lo], examples[lo:lo + step]
+        approved = sum(ex.approved for ex in head)
+        if not approved or approved == len(head):
+            continue
+        idf = _fit_idf(head)
+        out.extend(zip(tail, _predict_examples(tail, idf, _fit(head, idf))))
+    return out
+
+
+def _posted_candidates(session) -> set[int]:
+    return set(session.execute(
+        select(ThreadsPost.candidate_pk).where(ThreadsPost.status == "published")
+    ).scalars())
 
 
 # --- Model lifecycle --------------------------------------------------------------
@@ -232,6 +293,13 @@ def train(session, settings: Settings | None = None) -> TriageModel | None:
     idf = _fit_idf(head)
     backtest = evaluate([ex.approved for ex in tail],
                         _predict_examples(tail, idf, _fit(head, idf)))
+    rolled = _rolling_predictions(examples)
+    if rolled:
+        posted = _posted_candidates(session)
+        backtest["rolling"] = evaluate(
+            [ex.approved for ex, _ in rolled], [p for _, p in rolled],
+            thresholds=CUTOFF_CHOICES,
+            posted=[ex.candidate_pk in posted for ex, _ in rolled])
 
     idf = _fit_idf(examples)
     w = _fit(examples, idf)

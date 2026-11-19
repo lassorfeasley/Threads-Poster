@@ -178,7 +178,11 @@ clip_engine:
   taste_flops: 2             # only clips you labelled "not gripping" (Analytics → Label clips)
   taste_lookback_days: 180
   workers: 1                 # engine jobs that run at once in the dashboard
-  daily_usd: 5.00            # the engine's own daily cap for unattended runs; kept apart from llm.daily_budget_usd
+  # The engine's own daily cap for unattended runs (archive-time, resumes, and
+  # everything automatic approval sends it); kept apart from llm.daily_budget_usd.
+  # 9.00 = automatic approval's 10 a day x the $0.83 reserved per gemini run
+  # (reserved at 2027 prices; the real bill until then is about half).
+  daily_usd: 9.00
   estimate_usd_base: {gemini: 0.60, hybrid: 1.40, claude: 1.40}
   estimate_usd_per_minute: {gemini: 0.03, hybrid: 0.02, claude: 0.06}
   max_usd_per_video: 1.50    # the optional revision round is skipped past this
@@ -293,13 +297,61 @@ vision:
 triage_model:
   # Learns your approve/reject calls from triage history and shows each new
   # video's chance of approval (app/triage_model.py). While on, it also leads
-  # the queue order, ahead of `ranking:`. Nothing is approved or rejected
-  # automatically.
+  # the queue order, ahead of `ranking:`. The model itself never decides
+  # anything; automatic triage (below) acts on it only when switched on.
   enabled: true
   # Retrain (and rescore the queue) after this many new decisions.
   retrain_every: 20
   # Approvals AND rejections needed before the first model is trained.
   min_decisions_each: 30
+
+positioning:
+  # Positioning fit (app/positioning.py): one cheap model call per waiting
+  # video the dashboard shows, scoring 0-1 how well it suits this account
+  # from the Brand & audience profile (mission, audience, positioning, the
+  # on/off-topic notes, the rules), with the deciding factor in a few words.
+  # Needs no decision history, so it's what a new workspace triages by, and
+  # what the queue is ordered by until an approval model exists. Editing the
+  # profile re-scores the waiting videos, `per_pass` at a time.
+  enabled: true
+  # Blank = matching.model.
+  model: ''
+  workers: 8
+  per_pass: 200
+
+auto_select:
+  # Automatic approval (app/auto_select.py). Its switch, daily count and floors
+  # are on Settings > Automatic triage (shared database), like auto_triage's.
+  # On the machine that downloads (ARCHIVE_ON_THIS_MACHINE on), the dashboard
+  # runs it every worker_interval_seconds, then downloads every approved video
+  # one at a time.
+  worker_interval_seconds: 600
+
+auto_triage:
+  # Rejects waiting videos whose approve chance (or positioning fit) is under
+  # a cut-off, before they reach your queue (app/auto_triage.py). Judges only
+  # videos the dashboard shows (relevance at or above matching.score_threshold).
+  # Never approves, downloads or posts anything. The on/off switch, the signal,
+  # the cut-offs and the spot-check share are NOT here: they're set on
+  # Settings > Automatic triage (or with `run.py auto-triage on|off`) and kept
+  # in the shared database, so the monitor on GitHub Actions and every
+  # dashboard obey the same switch the moment it's flipped. These are the
+  # guardrails it runs inside.
+  #
+  # Wait (reject nothing) until the model has learned from this many decisions
+  # and grades at least this AUC on decisions it hadn't seen.
+  min_model_decisions: 500
+  min_backtest_auc: 0.65
+  # Pause if one pass would reject more than this share of the waiting
+  # videos (only once at least `max_reject_share_min_considered` are waiting):
+  # a swing like that means the model changed underneath it.
+  max_reject_share: 0.8
+  max_reject_share_min_considered: 20
+  # Pause once at least `pause_min_audits` spot-checks are answered and they
+  # show, beyond reasonable chance, that you'd approve more than this share of
+  # what it rejects.
+  pause_above_rate: 0.05
+  pause_min_audits: 20
 
 ranking:
   # Queue order: climate relevance, optionally nudged by ACTIVE trait verdicts
@@ -638,6 +690,8 @@ scheduler:
   # Disable to pause automatic publishing.
   enabled: true
   # All window times are interpreted in this zone (DST handled automatically).
+  # A zone the account chooses on the Posting schedule page is kept in the
+  # shared database and wins over this one on every machine.
   timezone: America/New_York
   # Active hours in the scheduler timezone (24h HH:MM). Outside this range the
   # scheduler never publishes.

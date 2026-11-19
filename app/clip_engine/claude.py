@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import importlib
 import logging
 import time
 from typing import Any
@@ -46,12 +47,21 @@ import anthropic
 from .. import llm, spend
 from .gemini import parse_json_object
 
-try:  # the SDK's transport; mid-stream read errors surface unwrapped
-    import httpx
 
-    _TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (httpx.HTTPError, OSError)
-except ImportError:  # pragma: no cover - a future SDK on another HTTP library
-    _TRANSPORT_ERRORS = (OSError,)
+def _transport_errors() -> tuple[type[BaseException], ...]:
+    """Errors from the SDK's HTTP layer, which a stream that breaks off midway
+    raises unwrapped. The SDK talks through httpx up to 0.x and httpx2 (the
+    same API, separate classes) from 2.x; both may be installed, so catch each."""
+    errors: list[type[BaseException]] = [OSError]
+    for name in ("httpx", "httpx2"):
+        try:
+            errors.append(importlib.import_module(name).HTTPError)
+        except ImportError:
+            continue
+    return tuple(errors)
+
+
+_TRANSPORT_ERRORS = _transport_errors()
 
 log = logging.getLogger("clip_engine.claude")
 

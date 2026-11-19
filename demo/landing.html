@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Continuity Throughline · Always telling your story, even when you're not</title>
+<meta name="description" content="Throughline publishes three short videos a day on your channels, on your topics, in your voice. By Continuity Marketing.">
+<meta property="og:title" content="Continuity Throughline">
+<meta property="og:description" content="Always telling your story, even when you're not. Three short videos a day, on your topics, in your voice.">
+<meta property="og:image" content="https://continuity.marketing/img/post-207.jpg">
+<meta name="theme-color" content="#f5f2ea">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap">
+<style>
+@font-face { font-family: "Funnel Sans"; src: url("fonts/FunnelSans-Variable.ttf"); font-weight: 300 800; font-display: swap; }
+
+:root {
+  --paper: #f5f2ea;
+  --paper-2: #ece7da;
+  --card: #fffdf8;
+  --ink: #161512;
+  --ink-2: #3d3a33;
+  --muted: #77715f;
+  --line: #ddd6c5;
+  --accent: #1d5c43;
+  --accent-soft: #dfe9df;
+  --serif: "Instrument Serif", Georgia, "Times New Roman", serif;
+  --sans: "Funnel Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --wrap: 1120px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body { font-family: var(--sans); font-size: 17px; line-height: 1.6; color: var(--ink); background: var(--paper); }
+img { display: block; max-width: 100%; }
+a { color: inherit; }
+.wrap { width: min(var(--wrap), calc(100% - 40px)); margin: 0 auto; }
+section { padding: 72px 0; }
+h1, h2, h3 { font-family: var(--serif); font-weight: 400; letter-spacing: -0.01em; line-height: 1.05; }
+h2 { font-size: clamp(34px, 7vw, 54px); max-width: 18ch; }
+h3 { font-size: 26px; line-height: 1.15; }
+.eyebrow { font-size: 12.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
+.lede { font-size: 19px; color: var(--ink-2); max-width: 36em; }
+.rule { border: 0; border-top: 1px solid var(--line); }
+
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 14px 22px; border-radius: 999px;
+  font: 600 16px/1 var(--sans); text-decoration: none; border: 1px solid var(--ink); cursor: pointer; transition: transform .15s ease, background .15s ease; }
+.btn.primary { background: var(--ink); color: var(--paper); }
+.btn.primary:hover { background: #000; transform: translateY(-1px); }
+.btn.ghost { background: transparent; color: var(--ink); }
+.btn.ghost:hover { background: var(--paper-2); }
+
+/* nav */
+nav { position: sticky; top: 0; z-index: 20; background: rgba(245, 242, 234, .9); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid transparent; }
+nav.scrolled { border-bottom-color: var(--line); }
+nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; gap: 16px; }
+.wordmark { font-family: var(--serif); font-size: 23px; text-decoration: none; white-space: nowrap; }
+.wordmark em { font-style: italic; }
+nav .links { display: flex; align-items: center; gap: 22px; font-size: 15px; }
+nav .links a { text-decoration: none; color: var(--ink-2); }
+nav .links a:hover { color: var(--ink); }
+nav .links .hide-sm { display: none; }
+nav .btn { padding: 10px 16px; font-size: 14.5px; }
+
+/* hero */
+.hero { padding: 40px 0 64px; }
+.hero .wrap { display: grid; gap: 48px; }
+.hero h1 { font-size: clamp(46px, 11vw, 88px); margin: 16px 0 20px; max-width: 12ch; }
+.hero h1 em { font-style: italic; color: var(--accent); }
+.hero .lede { font-size: 20px; }
+.hero .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+
+.phone-wrap { position: relative; justify-self: center; }
+.phone { width: 300px; height: 600px; border-radius: 44px; background: #0f0f0e; padding: 12px; box-shadow: 0 40px 80px -30px rgba(22, 21, 18, .45); }
+.screen { position: relative; height: 100%; border-radius: 34px; background: #fff; overflow: hidden; }
+.screen header { position: absolute; inset: 0 0 auto; z-index: 3; height: 74px; padding: 14px 16px 0; background: linear-gradient(#fff 72%, rgba(255,255,255,0)); }
+.screen .status { display: flex; justify-content: space-between; font: 600 12.5px var(--sans); color: #111; }
+.screen .acct { margin-top: 10px; text-align: center; font: 700 13px var(--sans); color: #111; }
+.feed { position: absolute; inset: 74px 0 0; padding: 0 14px; }
+.post { padding: 12px 0 14px; border-bottom: 1px solid #ececec; max-height: 420px; overflow: hidden;
+  transition: max-height .9s cubic-bezier(.6, .1, .2, 1), padding .9s cubic-bezier(.6, .1, .2, 1), opacity .7s ease .2s, background .6s ease; }
+.post.future { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; border-bottom-color: transparent; }
+.post .who { display: flex; align-items: center; gap: 8px; font: 600 12.5px var(--sans); color: #111; }
+.post .who i { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; font: 700 11px var(--sans); font-style: normal; }
+.post .who span { color: #999; font-weight: 400; }
+.post .who .tag { margin-left: auto; font-size: 10.5px; font-weight: 700; color: var(--accent); background: var(--accent-soft); padding: 2px 7px; border-radius: 999px; }
+.post p { margin: 6px 0 8px 34px; font: 13px/1.4 var(--sans); color: #222; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.post img { margin-left: 34px; width: calc(100% - 34px); aspect-ratio: 16/10; object-fit: cover; border-radius: 10px; }
+.post .stats { margin: 7px 0 0 34px; font: 11.5px var(--sans); color: #999; }
+.post.live { background: #fbfaf5; }
+.clock { position: absolute; right: -10px; top: -26px; z-index: 4; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px 14px; box-shadow: 0 12px 30px -16px rgba(0,0,0,.35); text-align: right; }
+.clock b { display: block; font: 400 30px/1 var(--serif); }
+.clock span { font-size: 12px; color: var(--muted); }
+.day-note { margin-top: 14px; text-align: center; font-size: 13px; color: var(--muted); }
+
+/* problem */
+.problem { background: var(--ink); color: var(--paper); }
+.problem p.big { font-family: var(--serif); font-size: clamp(28px, 5.4vw, 42px); line-height: 1.2; max-width: 24ch; }
+.problem p.big em { color: #b9d6c4; }
+.problem p.small { margin-top: 22px; color: #c8c2b2; max-width: 36em; }
+
+/* meaning */
+.define { margin: 22px 0 40px; font-size: 21px; color: var(--ink-2); max-width: 34em; }
+.define b { color: var(--ink); font-weight: 600; }
+.cards { display: grid; gap: 16px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 28px; }
+.card .num { font: 400 15px var(--serif); font-style: italic; color: var(--accent); }
+.card h3 { margin: 8px 0 10px; }
+.card q { display: block; font-family: var(--serif); font-size: 19px; font-style: italic; color: var(--ink-2); margin-bottom: 12px; quotes: "“" "”"; }
+.card p { color: var(--ink-2); font-size: 16px; }
+.compound { margin-top: 36px; font-family: var(--serif); font-size: clamp(26px, 4.6vw, 36px); }
+.compound em { color: var(--accent); }
+
+/* how */
+.steps { margin-top: 36px; display: grid; gap: 0; counter-reset: step; list-style: none; }
+.steps li { display: grid; grid-template-columns: 56px 1fr; gap: 8px; padding: 22px 0; border-top: 1px solid var(--line); }
+.steps li:last-child { border-bottom: 1px solid var(--line); }
+.steps li::before { counter-increment: step; content: counter(step, decimal-leading-zero); font: 400 30px/1 var(--serif); color: var(--accent); }
+.steps b { display: block; font-size: 18px; }
+.steps span { color: var(--ink-2); }
+
+/* formats */
+.tiles { margin-top: 36px; display: grid; gap: 18px; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; display: flex; flex-direction: column; text-decoration: none; transition: transform .2s ease; }
+.tile:hover { transform: translateY(-3px); }
+.tile img { width: 100%; aspect-ratio: 16/9; object-fit: cover; }
+.tile .body { padding: 20px 22px 22px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.tile .kind { font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }
+.tile h3 { font-size: 23px; }
+.tile .cap { font-size: 15px; color: var(--ink-2); }
+.tile .meta { margin-top: auto; padding-top: 6px; font-size: 13px; color: var(--muted); }
+.also { margin-top: 22px; color: var(--ink-2); }
+
+/* proof */
+.proof { background: var(--paper-2); }
+.facts { margin: 36px 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
+.fact { background: var(--paper-2); padding: 22px; }
+.fact b { display: block; font: 400 clamp(34px, 7vw, 48px)/1 var(--serif); }
+.fact span { display: block; margin-top: 6px; font-size: 14px; color: var(--muted); }
+.ba { display: grid; gap: 16px; margin-bottom: 36px; }
+.ba div { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 22px; }
+.ba small { font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.ba p { margin-top: 6px; font-family: var(--serif); font-size: 24px; line-height: 1.25; }
+.months { display: grid; gap: 10px; margin: 8px 0 36px; }
+.months div { display: grid; grid-template-columns: 54px 1fr 64px; align-items: center; gap: 12px; font-size: 14px; color: var(--ink-2); }
+.months i { display: block; height: 12px; border-radius: 6px; background: var(--accent); }
+.months b { font-weight: 600; text-align: right; }
+.shots { display: grid; gap: 16px; }
+.shot { display: grid; grid-template-columns: 112px 1fr; gap: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 12px; text-decoration: none; }
+.shot img { width: 112px; height: 84px; object-fit: cover; border-radius: 10px; }
+.shot p { font-size: 14.5px; line-height: 1.4; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.shot span { display: block; margin-top: 6px; font-size: 13px; color: var(--muted); }
+.shot span b { color: var(--accent); }
+.asof { margin-top: 18px; font-size: 13px; color: var(--muted); }
+
+/* pricing */
+.price-grid { margin-top: 36px; display: grid; gap: 22px; align-items: start; }
+.plan { background: var(--ink); color: var(--paper); border-radius: 24px; padding: 32px; }
+.plan .eyebrow { color: #b9d6c4; }
+.plan .amount { margin: 14px 0 4px; font: 400 64px/1 var(--serif); }
+.plan .amount span { font: 400 18px var(--sans); color: #c8c2b2; }
+.plan .per { color: #c8c2b2; }
+.plan ul { list-style: none; margin: 24px 0 28px; display: grid; gap: 11px; }
+.plan li { display: grid; grid-template-columns: 20px 1fr; gap: 10px; font-size: 15.5px; }
+.plan li::before { content: "—"; color: #b9d6c4; }
+.plan .btn.primary { background: var(--paper); color: var(--ink); border-color: var(--paper); width: 100%; justify-content: center; }
+.plan .fine { margin-top: 14px; text-align: center; font-size: 13px; color: #a8a292; }
+.reruns { background: var(--card); border: 1px solid var(--line); border-radius: 24px; padding: 28px; }
+.reruns h3 { margin-bottom: 10px; }
+.reruns p { color: var(--ink-2); font-size: 16px; }
+.chart { margin: 22px 0 8px; }
+.chart svg { width: 100%; height: auto; overflow: visible; }
+.chart .grid line { stroke: var(--line); }
+.chart text { font: 12px var(--sans); fill: var(--muted); }
+.chart .step { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linejoin: round; }
+.chart .area { fill: var(--accent-soft); }
+.chart.animate .step { stroke-dasharray: var(--len); stroke-dashoffset: var(--len); transition: stroke-dashoffset 2.2s ease; }
+.chart.animate .area { opacity: 0; transition: opacity 1s ease 1.6s; }
+.chart.animate.in .step { stroke-dashoffset: 0; }
+.chart.animate.in .area { opacity: 1; }
+table.ladder { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14.5px; }
+.ladder th { text-align: left; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 0 8px 8px 0; }
+.ladder td { padding: 10px 8px 10px 0; border-top: 1px solid var(--line); color: var(--ink-2); }
+.ladder td:last-child { font-weight: 600; color: var(--ink); }
+.unit { margin-top: 16px; font-family: var(--serif); font-size: 22px; }
+
+/* faq */
+.faq { margin-top: 32px; display: grid; gap: 10px; }
+details { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px 22px; }
+summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; gap: 16px; font-weight: 600; font-size: 17px; }
+summary::-webkit-details-marker { display: none; }
+summary::after { content: "+"; font: 400 24px/1 var(--serif); color: var(--accent); transition: transform .2s ease; }
+details[open] summary::after { transform: rotate(45deg); }
+details p { margin-top: 12px; color: var(--ink-2); font-size: 16px; }
+
+/* final cta + form */
+.final { text-align: left; }
+.final h2 { font-size: clamp(42px, 9vw, 76px); max-width: 14ch; }
+.final h2 em { font-style: italic; color: var(--accent); }
+.reassure { margin-top: 18px; color: var(--ink-2); font-size: 18px; }
+form.start { margin-top: 32px; background: var(--card); border: 1px solid var(--line); border-radius: 24px; padding: 26px; display: grid; gap: 14px; max-width: 640px; }
+form.start label { display: grid; gap: 6px; font-size: 14px; font-weight: 600; color: var(--ink-2); }
+form.start input, form.start textarea { width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--paper); font: 16px var(--sans); color: var(--ink); }
+form.start input:focus, form.start textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+form.start textarea { min-height: 96px; resize: vertical; }
+form.start .row { display: grid; gap: 14px; }
+form.start .hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+form.start .btn { justify-content: center; }
+form.start .note { font-size: 13px; color: var(--muted); }
+form.start .done { display: none; font-family: var(--serif); font-size: 24px; }
+form.start.sent > :not(.done) { display: none; }
+form.start.sent .done { display: block; }
+form.start .err { display: none; color: #a1361f; font-size: 14px; }
+form.start.failed .err { display: block; }
+
+footer { padding: 40px 0 56px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 14px 28px; justify-content: space-between; align-items: center; }
+footer a { color: var(--ink-2); }
+
+@media (min-width: 720px) {
+  section { padding: 104px 0; }
+  nav .links .hide-sm { display: inline; }
+  .cards, .tiles { grid-template-columns: repeat(3, 1fr); }
+  .ba { grid-template-columns: 1fr 1fr; }
+  .facts { grid-template-columns: repeat(4, 1fr); }
+  .shots { grid-template-columns: repeat(3, 1fr); }
+  .shot { grid-template-columns: 1fr; }
+  .shot img { width: 100%; height: auto; aspect-ratio: 16/10; }
+  form.start .row { grid-template-columns: 1fr 1fr; }
+}
+@media (min-width: 980px) {
+  .hero { padding: 56px 0 96px; }
+  .hero .wrap { grid-template-columns: 1.15fr .85fr; align-items: center; }
+  .price-grid { grid-template-columns: .9fr 1.1fr; }
+  .clock { top: 70px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .feed, .post, .tile, .btn { transition: none !important; }
+  .chart.animate .step { stroke-dashoffset: 0; transition: none; }
+  .chart.animate .area { opacity: 1; transition: none; }
+}
+</style>
+</head>
+<body>
+
+<nav id="nav">
+  <div class="wrap">
+    <a class="wordmark" href="/">Continuity <em>Marketing</em></a>
+    <div class="links">
+      <a class="hide-sm" href="#how">How it works</a>
+      <a class="hide-sm" href="#pricing">Pricing</a>
+      <a class="hide-sm" href="#faq">FAQ</a>
+      <a href="/signin">Sign in</a>
+      <a class="btn primary" href="#start">Start</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div>
+      <p class="eyebrow">Continuity Throughline</p>
+      <h1>Always telling your story, <em>even when you're not.</em></h1>
+      <p class="lede">Throughline publishes three short videos a day on your channels, on your topics, in your voice.</p>
+      <div class="ctas">
+        <a class="btn primary" href="#start">Start with Throughline</a>
+        <a class="btn ghost" href="#proof">See it running</a>
+      </div>
+    </div>
+
+    <div class="phone-wrap" aria-label="A real day of posts on @climate_archives, October 22, 2026">
+      <div class="clock" aria-hidden="true"><b id="clock">1:01 am</b><span>Wed, Oct 22</span></div>
+      <div class="phone">
+        <div class="screen">
+          <header><div class="status"><span id="status-time">1:01</span><span>●●● ▮</span></div><div class="acct">@climate_archives</div></header>
+          <div class="feed" id="feed">
+            <!-- A real day: three new posts and three reruns, Oct 22, 2026 (US Eastern). -->
+            <article class="post" data-time="9:01 pm" data-status="21:01"><div class="who"><i>CA</i>climate_archives <span>9:01 pm</span></div>
+              <p>Connecticut ospreys are disappearing. Starving chicks point to vanishing baitfish — likely caused by warmer waters.</p>
+              <img src="img/post-412.jpg" alt="" loading="lazy"><div class="stats">1.1K views</div></article>
+            <article class="post" data-time="5:01 pm" data-status="17:01"><div class="who"><i>CA</i>climate_archives <span>5:01 pm</span><em class="tag">Rerun</em></div>
+              <p>Scientists dart polar bears to attach tracking collars and assess their level of health and nutrition — measuring their adaptation to climate change.</p>
+              <img src="img/post-475.jpg" alt="" loading="lazy"><div class="stats">412K views</div></article>
+            <article class="post" data-time="1:01 pm" data-status="13:01"><div class="who"><i>CA</i>climate_archives <span>1:01 pm</span></div>
+              <p>Harrison Ford: Palm oil's in nearly everything on the shelf — and demand is growing faster than any other crop.</p>
+              <img src="img/post-361.jpg" alt="" loading="lazy"><div class="stats">1.2K views</div></article>
+            <article class="post" data-time="9:00 am" data-status="9:00"><div class="who"><i>CA</i>climate_archives <span>9:00 am</span><em class="tag">Rerun</em></div>
+              <p>The 2005 report flagged competition over fresh water and food as warming displaces people.</p>
+              <img src="img/post-469.jpg" alt="" loading="lazy"><div class="stats">542 views</div></article>
+            <article class="post" data-time="5:00 am" data-status="5:00"><div class="who"><i>CA</i>climate_archives <span>5:00 am</span></div>
+              <p>Climate denying Fox host apparently didn't realize Adam McKay's 'Don't Look Up' was a parable satirizing media coverage of climate change.</p>
+              <img src="img/post-366.jpg" alt="" loading="lazy"><div class="stats">1.3K views</div></article>
+            <article class="post" data-time="1:01 am" data-status="1:01"><div class="who"><i>CA</i>climate_archives <span>1:01 am</span><em class="tag">Rerun</em></div>
+              <p>Hoglets are arriving at UK rescues undersized this year — mothers can't dig baked, drought-hardened soil to find the worms and grubs they need.</p>
+              <img src="img/post-468.jpg" alt="" loading="lazy"><div class="stats">386 views</div></article>
+          </div>
+        </div>
+      </div>
+      <p class="day-note">A real day on @climate_archives: three new posts, three reruns.</p>
+    </div>
+  </div>
+</header>
+
+<section class="problem">
+  <div class="wrap">
+    <p class="big">Your best ideas live in decks, talks and inboxes. Your feed goes quiet between announcements. And posting every day is a job <em>nobody on the team has time for.</em></p>
+    <p class="small">Silence reads as stagnation, to customers, funders and hires alike.</p>
+  </div>
+</section>
+
+<section id="meaning">
+  <div class="wrap">
+    <p class="eyebrow">What continuity marketing means</p>
+    <h2>Hearing from you every day, not only when you have news.</h2>
+    <p class="define"><b>Continuity marketing</b> is a steady, daily presence built around the ideas your organization stands for. Instead of going loud for a launch and quiet for a month, you show up every day with something worth watching about the field you care about.</p>
+    <div class="cards">
+      <div class="card">
+        <span class="num">For organizations that need a pulse</span>
+        <h3>Show a pulse.</h3>
+        <q>People should be able to tell we're alive and moving.</q>
+        <p>Daily posts show an organization that is paying attention to its field.</p>
+      </div>
+      <div class="card">
+        <span class="num">For teams that need an audience that converts</span>
+        <h3>Build an audience that converts.</h3>
+        <q>We want followers who become customers, donors and partners.</q>
+        <p>Consistent, topic-focused posting attracts people who care about what you do, and every post's link brings them to you.</p>
+      </div>
+      <div class="card">
+        <span class="num">For leaders with a point of view</span>
+        <h3>Become a thought leader.</h3>
+        <q>We have a point of view; we just don't have time to publish it.</q>
+        <p>Throughline turns your perspective into daily commentary on what's happening in your field.</p>
+      </div>
+    </div>
+    <p class="compound">Campaigns spike and stop. <em>Continuity compounds.</em></p>
+  </div>
+</section>
+
+<section id="how" style="padding-top: 0">
+  <div class="wrap">
+    <hr class="rule" style="margin-bottom: 72px">
+    <p class="eyebrow">How it works</p>
+    <h2>Set it up once. Hear yourself every day.</h2>
+    <ol class="steps">
+      <li><div><b>Tell us about your organization.</b><span>Mission, audience, voice, topics, and the do's and don'ts.</span></div></li>
+      <li><div><b>Connect your accounts.</b><span>Threads, Instagram, LinkedIn, X and Facebook.</span></div></li>
+      <li><div><b>Throughline finds, makes and schedules posts every day.</b><span>Approve them yourself if you like, or let them publish.</span></div></li>
+      <li><div><b>You get a weekly report.</b><span>And every "this isn't us" note makes the next post better.</span></div></li>
+    </ol>
+  </div>
+</section>
+
+<section id="formats" style="padding-top: 0">
+  <div class="wrap">
+    <p class="eyebrow">Formats, not just archives</p>
+    <h2>Real stories from your field, with your take on them.</h2>
+    <div class="tiles">
+      <a class="tile" href="https://www.threads.com/@climate_archives/post/DdCLKNEFQL8" target="_blank" rel="noopener">
+        <img src="img/post-207.jpg" alt="Scientists collaring a polar bear, from a Nat Geo documentary" loading="lazy">
+        <div class="body">
+          <span class="kind">Documentaries</span>
+          <h3>The best minute of the best film in your field.</h3>
+          <p class="cap">"Scientists dart polar bears to attach tracking collars and assess their level of health and nutrition — measuring their adaptation to climate change."</p>
+          <span class="meta">From Nat Geo Animals · 1.17M views on Threads</span>
+        </div>
+      </a>
+      <a class="tile" href="https://www.threads.com/@climate_archives/post/DezeIWyirYR" target="_blank" rel="noopener">
+        <img src="img/post-361.jpg" alt="Harrison Ford speaking about palm oil" loading="lazy">
+        <div class="body">
+          <span class="kind">Talks &amp; interviews</span>
+          <h3>The line people quote, with your commentary.</h3>
+          <p class="cap">"Harrison Ford: Palm oil's in nearly everything on the shelf — and demand is growing faster than any other crop. The real cost: forests cleared for plantations."</p>
+          <span class="meta">From a NASA climate series · with a link to the full video</span>
+        </div>
+      </a>
+      <a class="tile" href="https://www.threads.com/@climate_archives/post/De0VDLzlcXH" target="_blank" rel="noopener">
+        <img src="img/post-412.jpg" alt="An osprey nest in Connecticut, from a local TV news report" loading="lazy">
+        <div class="body">
+          <span class="kind">News in your field</span>
+          <h3>Today's story, from your perspective.</h3>
+          <p class="cap">"Connecticut ospreys are disappearing. Starving chicks point to vanishing baitfish — likely caused by warmer waters."</p>
+          <span class="meta">From WVIT local news · found and posted the same week</span>
+        </div>
+      </a>
+    </div>
+    <p class="also">Your own long-form work goes through the same process: webinars, podcasts and keynotes become short videos, each with a link to the full recording.</p>
+  </div>
+</section>
+
+<section class="proof" id="proof">
+  <div class="wrap">
+    <p class="eyebrow">See it running</p>
+    <h2>Our own account is the case study.</h2>
+    <p class="lede" style="margin-top: 18px">Throughline runs <a href="https://www.threads.com/@climate_archives" target="_blank" rel="noopener">@climate_archives</a> for Renewables.org: found footage about climate, posted every day, each post linking back to Renewables.org.</p>
+    <div class="facts">
+      <div class="fact"><b>543</b><span>posts since July 9</span></div>
+      <div class="fact"><b>3.2M</b><span>views on Threads</span></div>
+      <div class="fact"><b>~6</b><span>posts a day, every day</span></div>
+      <div class="fact"><b>5</b><span>platforms from one queue</span></div>
+    </div>
+    <div class="ba">
+      <div><small>Before</small><p>About one post a day, written and posted by hand.</p></div>
+      <div><small>With Throughline</small><p>Three new posts a day plus reruns of proven ones: about six a day.</p></div>
+    </div>
+    <p class="eyebrow" style="color: var(--muted)">Views per month on Threads</p>
+    <div class="months" id="months">
+      <div><span>July</span><i style="width: 16.5%"></i><b>211K</b></div>
+      <div><span>Aug</span><i style="width: 43.6%"></i><b>555K</b></div>
+      <div><span>Sept</span><i style="width: 100%"></i><b>1.27M</b></div>
+      <div><span>Oct</span><i style="width: 80.5%"></i><b>1.03M</b></div>
+    </div>
+    <div class="shots">
+      <a class="shot" href="https://www.threads.com/@climate_archives/post/Dez5jEZDmvs" target="_blank" rel="noopener">
+        <img src="img/post-475.jpg" alt="" loading="lazy">
+        <div><p>Scientists dart polar bears to attach tracking collars and assess their level of health and nutrition.</p>
+          <span><b>Rerun</b> · 412K views, six weeks after the original's 1.17M</span></div></a>
+      <a class="shot" href="https://www.threads.com/@climate_archives/post/DerUR9sFWbl" target="_blank" rel="noopener">
+        <img src="img/post-445.jpg" alt="" loading="lazy">
+        <div><p>Musk says the Sabatier process — pulling CO2 from air, combining it with water to make methane and oxygen — is also how Starship would fuel up on Mars.</p>
+          <span><b>Rerun</b> · 124K views</span></div></a>
+      <a class="shot" href="https://www.threads.com/@climate_archives/post/DflyciHucCp" target="_blank" rel="noopener">
+        <img src="img/post-470.jpg" alt="" loading="lazy">
+        <div><p>Protests erupt in Indonesia, where toxic haze has lingered for months, and displaced orangutans now fill rehabilitation centers.</p>
+          <span>From Al Jazeera · 45K views</span></div></a>
+    </div>
+    <p class="asof">Figures from the account's own analytics, as of November 18, 2026.</p>
+  </div>
+</section>
+
+<section id="pricing">
+  <div class="wrap">
+    <p class="eyebrow">Pricing</p>
+    <h2>One plan. Your best work keeps working.</h2>
+    <div class="price-grid">
+      <div class="plan">
+        <p class="eyebrow">Continuity Throughline</p>
+        <p class="amount">$1,000 <span>/ month</span></p>
+        <p class="per">Three new posts every day.</p>
+        <ul>
+          <li>3 new posts a day, up to 6 a day with reruns</li>
+          <li>Optional approvals: review posts before they go live, or let them publish</li>
+          <li>Your topics, voice and rules, refined from your feedback</li>
+          <li>Weekly performance report</li>
+          <li>Threads, Instagram, LinkedIn, X and Facebook</li>
+          <li>Cancel anytime</li>
+        </ul>
+        <a class="btn primary" href="#start">Start with Throughline</a>
+        <p class="fine">Month to month. You own your accounts.</p>
+      </div>
+      <div class="reruns">
+        <h3>Output grows. The price doesn't.</h3>
+        <p>Once your library is big enough, Throughline brings back proven posts alongside the new ones. Audiences turn over, and a post that worked in September usually works again in October. So the longer you run, the more you publish, at the same price.</p>
+        <div class="chart animate" id="chart">
+          <svg viewBox="0 0 400 210" role="img" aria-label="Posts per day: 3 at first, 4 from day 20, 5 from day 40, 6 from day 60">
+            <g class="grid">
+              <line x1="34" y1="170" x2="390" y2="170"/><line x1="34" y1="140" x2="390" y2="140"/>
+              <line x1="34" y1="110" x2="390" y2="110"/><line x1="34" y1="80" x2="390" y2="80"/>
+              <line x1="34" y1="50" x2="390" y2="50"/><line x1="34" y1="20" x2="390" y2="20"/>
+            </g>
+            <text x="26" y="174" text-anchor="end">1</text><text x="26" y="114" text-anchor="end">3</text>
+            <text x="26" y="54" text-anchor="end">5</text><text x="26" y="24" text-anchor="end">6</text>
+            <path class="area" d="M34,110 H113 V80 H192 V50 H271 V20 H390 V200 H34 Z"/>
+            <path class="step" d="M34,110 H113 V80 H192 V50 H271 V20 H390"/>
+            <text x="34" y="198">Day 0</text><text x="113" y="198" text-anchor="middle">20</text>
+            <text x="192" y="198" text-anchor="middle">40</text><text x="271" y="198" text-anchor="middle">60</text>
+            <text x="390" y="198" text-anchor="end">90</text>
+          </svg>
+        </div>
+        <table class="ladder">
+          <thead><tr><th>Posts published</th><th>Roughly when</th><th>Each day</th></tr></thead>
+          <tbody>
+            <tr><td>0–59</td><td>First 3 weeks</td><td>3 new</td></tr>
+            <tr><td>60</td><td>About day 20</td><td>3 new + 1 rerun</td></tr>
+            <tr><td>120</td><td>About day 40</td><td>3 new + 2 reruns</td></tr>
+            <tr><td>180</td><td>About day 60</td><td>3 new + 3 reruns</td></tr>
+          </tbody>
+        </table>
+        <p class="unit">By month three: about 180 posts a month, about $5 a post.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="faq" style="padding-top: 0">
+  <div class="wrap">
+    <hr class="rule" style="margin-bottom: 72px">
+    <p class="eyebrow">FAQ</p>
+    <h2>Questions organizations ask.</h2>
+    <div class="faq">
+      <details><summary>Who approves what gets posted?</summary>
+        <p>You decide. Our editors check every post before it goes out. If you want the final say, turn on approvals and nothing publishes until you approve it in your dashboard.</p></details>
+      <details><summary>Can we review posts ourselves?</summary>
+        <p>Yes. You get your own sign-in to see the queue, edit captions and reject anything that isn't you. Each rejection teaches Throughline what to avoid next time.</p></details>
+      <details><summary>Which platforms?</summary>
+        <p>Threads, Instagram Reels, LinkedIn, X and Facebook. Each post goes out on every connected account, formatted for each.</p></details>
+      <details><summary>Whose footage do you use, and how do you handle rights and credit?</summary>
+        <p>Short excerpts from published documentaries, talks, interviews and news, posted with commentary, a credit to the original and a link to the full video. If a rights holder asks us to take a post down, we take it down. Your own footage stays yours.</p></details>
+      <details><summary>What happens on a sensitive news day?</summary>
+        <p>Your rules come first: topics to avoid, tone to keep, lines never to cross. If something happens that changes what's appropriate, tell us and we hold the queue until you're ready.</p></details>
+      <details><summary>Can we pause or cancel anytime?</summary>
+        <p>Yes. It's month to month, and you own your accounts and everything posted to them.</p></details>
+      <details><summary>What does onboarding involve?</summary>
+        <p>One conversation about your mission, audience, voice and topics, then connecting your accounts. Your first posts arrive for review within about two weeks.</p></details>
+    </div>
+  </div>
+</section>
+
+<section class="final" id="start" style="padding-top: 0">
+  <div class="wrap">
+    <hr class="rule" style="margin-bottom: 72px">
+    <h2>Always telling your story, <em>even when you're not.</em></h2>
+    <p class="reassure">Live in about two weeks. Cancel anytime.</p>
+    <form class="start" id="start-form" novalidate>
+      <div class="row">
+        <label>Your name<input name="name" autocomplete="name" required></label>
+        <label>Work email<input name="email" type="email" autocomplete="email" required></label>
+      </div>
+      <div class="row">
+        <label>Organization<input name="organization" autocomplete="organization" required></label>
+        <label>Website<input name="website" type="url" inputmode="url" placeholder="https://"></label>
+      </div>
+      <label>What should people hear from you every day?<textarea name="message" placeholder="Your field, your point of view, the accounts you'd like us to run."></textarea></label>
+      <div class="hp" aria-hidden="true"><label>Leave this empty<input name="company_url" tabindex="-1" autocomplete="off"></label></div>
+      <button class="btn primary" type="submit">Start with Throughline</button>
+      <p class="err" role="alert">That didn't send. Check the fields and try again.</p>
+      <p class="note">We'll reply within one business day to set up a call.</p>
+      <p class="done" role="status">Thanks. We'll be in touch within one business day.</p>
+    </form>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Continuity Throughline is made by <b style="color: var(--ink-2); font-weight: 600">Continuity Marketing</b>.</span>
+    <span><a href="/signin">Sign in</a> &nbsp;·&nbsp; © 2026 Continuity Marketing</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var nav = document.getElementById('nav');
+  addEventListener('scroll', function () { nav.classList.toggle('scrolled', scrollY > 8); }, { passive: true });
+
+  var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Hero: replay the day. The feed is newest-first, like Threads. Each tick
+  // the clock reaches the next post, which appears at the top and pushes the
+  // earlier ones down; after the last, the day starts over.
+  var feed = document.getElementById('feed');
+  var posts = Array.prototype.slice.call(feed.querySelectorAll('.post'));
+  var clock = document.getElementById('clock'), status = document.getElementById('status-time');
+  var order = posts.slice().reverse(), i = 0;
+  function show(k) {
+    order.forEach(function (p, j) { p.classList.toggle('future', j > k); p.classList.toggle('live', j === k); });
+    var post = order[k];
+    clock.textContent = post.dataset.time;
+    var t = post.dataset.status.split(':'), h = +t[0] % 12 || 12;
+    status.textContent = h + ':' + t[1];
+  }
+  if (still) { show(order.length - 1); }
+  else {
+    show(0);
+    setInterval(function () { i = (i + 1) % order.length; show(i); }, 3200);
+  }
+
+  // Rerun chart: draw the step line when it scrolls into view.
+  var chart = document.getElementById('chart'), step = chart.querySelector('.step');
+  chart.style.setProperty('--len', step.getTotalLength());
+  if (still || !('IntersectionObserver' in window)) { chart.classList.add('in'); }
+  else {
+    new IntersectionObserver(function (entries, obs) {
+      entries.forEach(function (e) { if (e.isIntersecting) { chart.classList.add('in'); obs.disconnect(); } });
+    }, { threshold: .4 }).observe(chart);
+  }
+
+  // Start form: posts to /api/start, which emails it to us.
+  var form = document.getElementById('start-form');
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    form.classList.remove('failed');
+    if (!form.checkValidity()) { form.classList.add('failed'); form.reportValidity(); return; }
+    var button = form.querySelector('button'); button.disabled = true;
+    var data = {}; new FormData(form).forEach(function (v, k) { data[k] = v; });
+    fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); form.classList.add('sent'); })
+      .catch(function () { form.classList.add('failed'); button.disabled = false; });
+  });
+})();
+</script>
+</body>
+</html>

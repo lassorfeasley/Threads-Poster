@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{% block title %}Sign in{% endblock %} · {{ brand_name() }}</title>
+<script>
+  try { document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark'); }
+  catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
+</script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
+<style>
+  body.login { min-height: 100vh; display: grid; place-items: center; margin: 0; background: var(--bg); }
+  .login-card { width: min(380px, calc(100vw - 40px)); padding: 32px; border-radius: 16px;
+    background: var(--panel); border: 1px solid var(--border); }
+  .login-card h1 { margin: 0 0 4px; font-size: 22px; color: var(--text); }
+  .login-card p.sub { margin: 0 0 24px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+  .login-card label { display: block; font-size: 13px; color: var(--text-dim); margin: 14px 0 6px; }
+  .login-card input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--border-strong); background: var(--panel2); color: var(--text); font: inherit; }
+  .login-card button { width: 100%; margin-top: 22px; padding: 11px; border: 0; border-radius: 10px;
+    background: var(--accent); color: #0b1f15; font: inherit; font-weight: 700; cursor: pointer; }
+  .login-card .alt { margin-top: 16px; text-align: center; font-size: 13.5px; }
+  .login-card .alt a { color: var(--text-dim); }
+  .login-err, .login-ok { margin: 0 0 8px; padding: 10px 12px; border-radius: 10px; font-size: 14px; line-height: 1.45; }
+  .login-err { background: rgba(220, 80, 60, .12); color: #e57a63; }
+  .login-ok { background: rgba(82, 211, 154, .12); color: var(--accent); }
+</style>
+</head>
+<body class="login">
+{% block body %}{% endblock %}
+</body>
+</html>

@@ -117,6 +117,13 @@ def save(proposal_id: int, *, meta: dict, render: Path | str | None) -> None:
         log.warning("Could not save the sidecar for proposal %s: %s", proposal_id, exc)
 
 
+def _fetch(path: Path) -> bool:
+    """On disk, or brought back from the shared data mirror (app/datasync.py)."""
+    from ..datasync import ensure_file
+
+    return ensure_file(path)
+
+
 def load(proposal_id: int) -> dict | None:
     """The sidecar's JSON, or None (no sidecar, or it can't be read). Never
     raises."""
@@ -124,6 +131,7 @@ def load(proposal_id: int) -> dict | None:
         paths = _paths(proposal_id)
         if paths is None:
             return None
+        _fetch(paths[0])
         data = util.read_json(paths[0])
         return data if isinstance(data, dict) else None
     except Exception as exc:
@@ -142,7 +150,7 @@ def preview_path(proposal_id: int) -> Path | None:
         info = meta.get("preview_file") if meta else None
         if not isinstance(info, dict) or info.get("name") != paths[1].name:
             return None
-        if not paths[1].is_file():
+        if not _fetch(paths[1]):
             return None
         size = paths[1].stat().st_size
         if size <= 0 or int(info.get("bytes", size)) != size:

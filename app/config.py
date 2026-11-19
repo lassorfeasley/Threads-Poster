@@ -48,6 +48,23 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _load_doc(key: str) -> dict[str, Any]:
+    """A workspace document shared across machines (app/shared_docs.py)."""
+    from .shared_docs import read_text
+
+    text = read_text(key)
+    if not text:
+        return {}
+    data = yaml.safe_load(text)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_doc(key: str, text: str) -> None:
+    from .shared_docs import write_text
+
+    write_text(key, text)
+
+
 @dataclass
 class Settings:
     raw: dict[str, Any] = field(default_factory=dict)
@@ -87,17 +104,124 @@ def load_settings() -> Settings:
     return settings
 
 
+DEFAULT_TIMEZONE = "America/New_York"
+TIMEZONE_TOKEN = f"timezone:{WORKSPACE}"
+
+# Rollout guard for choosing a time zone in the app: one switch for the whole
+# release, the same for every account, never a per-account setting. Only code
+# from this release on reads the zone an account saves. A machine that posts
+# while still on older code (the Fly worker's image, the GitHub Actions cron on
+# main) would keep posting on settings.yaml's zone while the others moved, and
+# the account would post on both clocks. Once every one of them runs this
+# code, delete the guard: this constant, the check in save_timezone, and the
+# locked branch on the Posting schedule page.
+TIMEZONE_CHOICE_OPEN = False
+
+# scheduler_timezone() runs hundreds of times per calendar build and on every
+# scheduler tick: the saved zone is read from the database at most once a
+# minute (a failed read is retried after a few seconds, not every call).
+_TIMEZONE_CACHE_TTL = 60.0
+_TIMEZONE_RETRY_AFTER = 5.0
+_timezone_cache: tuple[float, str | None] | None = None  # (expires, zone)
+
+
+def timezone_editable() -> bool:
+    """Whether accounts may choose their own time zone in the app yet (see
+    TIMEZONE_CHOICE_OPEN). Gates only the choosing: a zone already saved is in
+    force either way (scheduler_timezone)."""
+    return TIMEZONE_CHOICE_OPEN
+
+
+def _timezone_from_db() -> str | None:
+    """The zone saved from the Posting schedule page, or None when none is.
+
+    When the database can't be read, the zone from the last good read stands
+    (a blip mustn't put this machine back on settings.yaml's clock while the
+    others keep the saved one); with no good read yet, None."""
+    global _timezone_cache
+    import time
+
+    now = time.monotonic()
+    cached = _timezone_cache
+    if cached is not None and now < cached[0]:
+        return cached[1]
+    try:
+        from .db import session_scope
+        from .models import AppToken
+
+        name: str | None = None
+        with session_scope(read_only=True) as session:
+            row = session.get(AppToken, TIMEZONE_TOKEN)
+            if row is not None and row.value:
+                name = str(row.value).strip() or None
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("Could not read the saved time zone: %s", exc)
+        last = cached[1] if cached is not None else None
+        _timezone_cache = (now + _TIMEZONE_RETRY_AFTER, last)
+        return last
+    _timezone_cache = (now + _TIMEZONE_CACHE_TTL, name)
+    return name
+
+
 def scheduler_timezone() -> ZoneInfo:
-    """The zone posting windows are defined in (``scheduler.timezone``).
+    """The account's time zone: posting windows are defined in it.
 
     Also the zone each post's weekday/hour analytics are recorded in, so those
     numbers mean the same thing no matter which machine did the publishing.
-    """
-    return ZoneInfo(str(load_settings().get("scheduler.timezone", "America/New_York")))
+
+    The zone chosen on the Posting schedule page (kept in the shared database,
+    so every machine agrees), else ``scheduler.timezone`` from settings.yaml."""
+    settings = load_settings()
+    for name in (_timezone_from_db(), str(settings.get("scheduler.timezone", DEFAULT_TIMEZONE)),
+                 DEFAULT_TIMEZONE):
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            continue
+    return ZoneInfo(DEFAULT_TIMEZONE)
+
+
+def timezone_saved() -> bool:
+    """A zone has been chosen in the app (and is in force)."""
+    return _timezone_from_db() is not None
+
+
+def save_timezone(name: str) -> str:
+    """Save the account's time zone (an IANA name such as ``Europe/Berlin``).
+    Returns the name saved. Raises ValueError for anything that isn't a zone,
+    and while choosing is closed (TIMEZONE_CHOICE_OPEN)."""
+    global _timezone_cache
+    import time
+    from zoneinfo import available_timezones
+
+    from .db import session_scope
+    from .models import AppToken, utcnow
+
+    name = (name or "").strip()
+    if len(TIMEZONE_TOKEN) > 40:  # AppToken.name is String(40)
+        raise ValueError(f"workspace slug too long to save a time zone: {TIMEZONE_TOKEN!r}")
+    if not timezone_editable():
+        raise ValueError("This account's time zone can't be changed here yet.")
+    if name not in available_timezones():
+        raise ValueError(f"“{name}” isn't a time zone the app knows.")
+    with session_scope() as session:
+        row = session.get(AppToken, TIMEZONE_TOKEN)
+        if row is None:
+            row = AppToken(name=TIMEZONE_TOKEN)
+            session.add(row)
+        row.value = name
+        row.updated_at = utcnow()
+    # This machine follows at once; the others within a minute (their cache).
+    _timezone_cache = (time.monotonic() + _TIMEZONE_CACHE_TTL, name)
+    return name
 
 
 def load_keywords() -> list[str]:
-    data = _load_yaml(CONFIG_DIR / "keywords.yaml")
+    data = _load_doc("keywords")
     return [str(k).strip() for k in data.get("keywords", []) if str(k).strip()]
 
 
@@ -116,7 +240,7 @@ KEYWORDS_HEADER = """\
 def save_keywords(keywords: list[str]) -> None:
     cleaned = sorted({k.strip().lower() for k in keywords if k.strip()})
     body = yaml.safe_dump({"keywords": cleaned}, default_flow_style=False, allow_unicode=True)
-    (CONFIG_DIR / "keywords.yaml").write_text(KEYWORDS_HEADER + body)
+    _save_doc("keywords", KEYWORDS_HEADER + body)
 
 
 FIRST_REPLY_HEADER = """\
@@ -263,7 +387,8 @@ BRAND_HEADER = """\
 # White-label defaults: what the sidebar/title show when brand.yaml is unset.
 DEFAULT_APP_NAME = "Clip Monitor"
 
-_BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "voice_notes",
+_BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "positioning",
+                      "voice_notes",
                       "topic", "app_name", "logo_file",
                       # Prompt-framing fields consumed by app/llm.py. Blank
                       # fields fall back to generic phrasing there.
@@ -273,14 +398,14 @@ _BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "voice_notes",
 
 def load_brand() -> dict[str, str]:
     """Brand & audience config as ``{field: str}`` with every field present."""
-    data = _load_yaml(CONFIG_DIR / "brand.yaml")
+    data = _load_doc("brand")
     return {f: str(data.get(f) or "").strip() for f in _BRAND_TEXT_FIELDS}
 
 
 def _write_brand(fields: dict[str, str], rules: list[dict[str, Any]]) -> None:
     body = yaml.safe_dump({**fields, "rules": rules}, default_flow_style=False,
                           allow_unicode=True, width=88, sort_keys=False)
-    (CONFIG_DIR / "brand.yaml").write_text(BRAND_HEADER + body)
+    _save_doc("brand", BRAND_HEADER + body)
 
 
 def save_brand(values: dict[str, str]) -> None:
@@ -360,7 +485,7 @@ def _rule_key(text: str) -> str:
 
 
 def load_brand_rules() -> list[dict[str, Any]]:
-    raw = _load_yaml(CONFIG_DIR / "brand.yaml").get("rules") or []
+    raw = _load_doc("brand").get("rules") or []
     return [r for r in (_coerce_brand_rule(i) for i in raw) if r]
 
 
@@ -441,7 +566,7 @@ def _coerce_rule(item: Any) -> dict[str, Any] | None:
 def load_caption_rules() -> list[dict[str, Any]]:
     """The operator's caption style rules, in order. Back-compatible with the
     original single ``text:`` blob (split into one rule per line)."""
-    data = _load_yaml(CONFIG_DIR / "caption_style.yaml")
+    data = _load_doc("captions")
     raw = data.get("rules")
     if raw is None:
         text = data.get("text")
@@ -456,7 +581,7 @@ def save_caption_rules(rules: list[dict[str, Any]]) -> None:
     cleaned = [r for r in (_coerce_rule(item) for item in (rules or [])) if r]
     body = yaml.safe_dump({"rules": cleaned}, default_flow_style=False,
                           allow_unicode=True, width=88, sort_keys=False)
-    (CONFIG_DIR / "caption_style.yaml").write_text(CAPTION_STYLE_HEADER + body)
+    _save_doc("captions", CAPTION_STYLE_HEADER + body)
 
 
 def render_caption_guide() -> str:

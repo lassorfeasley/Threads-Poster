@@ -1,0 +1,21 @@
+{% extends "auth_base.html" %}
+{% block body %}
+<form class="login-card" method="post" action="/login">
+  <h1>{{ brand_name() }}</h1>
+  <p class="sub">Sign in to your dashboard.</p>
+  {% if error == "invalid" %}<p class="login-err">That email and password don't match.</p>
+  {% elif error == "throttled" %}<p class="login-err">Too many attempts. Try again in 15 minutes.</p>
+  {% elif error == "noaccess" %}<p class="login-err">This account doesn't have access to this dashboard. Ask whoever invited you.</p>
+  {% elif error == "expired" %}<p class="login-err">That link has expired or was already used. Request a new one below.</p>
+  {% elif error == "unavailable" %}<p class="login-err">Sign-in is unavailable right now. Try again in a minute.</p>{% endif %}
+  {% if msg == "reset_sent" %}<p class="login-ok">If that address has an account, a reset link is on its way. Check your email.</p>
+  {% elif msg == "signed_out" %}<p class="login-ok">You're signed out.</p>{% endif %}
+  <input type="hidden" name="next" value="{{ next }}">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button type="submit">Sign in</button>
+  <p class="alt"><a href="/forgot">Forgot your password?</a></p>
+</form>
+{% endblock %}

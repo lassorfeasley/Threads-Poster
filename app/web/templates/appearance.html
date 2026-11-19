@@ -1,30 +1,50 @@
 {% extends "settings_base.html" %}
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set ap_sub %}White label the app itself: the name and logo in the sidebar and window title. Clip caption colors and fonts are separate — they're the clip's look, not the app's (see <code>subtitles</code> in <code>config/settings.yaml</code>).{% endset %}
-{{ ui.pagebar("Appearance", sub=ap_sub) }}
+{# Appearance — the app's own name and logo (POST /appearance; logo removal
+   posts to /appearance/logo/remove). #}
+{{ ui.pagebar("Appearance", sub="Make the app yours: the name and logo shown in the sidebar and the browser tab.") }}
 
-<form method="post" action="/appearance" enctype="multipart/form-data">
-  <div class="card">
-    <label for="brand-app-name" class="field-label" style="margin-top: 0;">App name</label>
-    <input type="text" id="brand-app-name" name="app_name" value="{{ brand.app_name }}"
-           placeholder="{{ default_app_name }}" style="max-width: 460px;">
+<div class="set-page">
+<form method="post" action="/appearance" enctype="multipart/form-data" data-savebar>
+  <section class="set-section" id="identity">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Name and logo</h2>
+        <p class="set-section-desc">How captions look on your clips — colours and fonts — is set separately, per clip style.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div class="set-field">
+        <label class="set-label" for="brand-app-name">App name</label>
+        <p class="set-help">Leave blank to use “{{ default_app_name }}”.</p>
+        <input type="text" id="brand-app-name" name="app_name" value="{{ brand.app_name }}" placeholder="{{ default_app_name }}">
+      </div>
 
-    <label for="brand-logo" class="field-label">Logo</label>
-    {% if brand.logo_file %}
-      <p class="meta" style="margin: 0 0 10px; display:flex; align-items:center; gap:12px;">
-        <img src="/brand-static/{{ brand.logo_file }}" alt="Current logo"
-             style="height: 28px; width: 28px; object-fit: contain; border-radius: 6px;">
-        <span><code>{{ brand.logo_file }}</code> — upload a new file to replace it.</span>
-        <button class="sm" type="submit" form="logo-remove-form">Remove</button>
-      </p>
-    {% endif %}
-    <input type="file" id="brand-logo" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp,.gif">
-    <p class="meta" style="margin: 6px 0 0;">Square works best; shown at sidebar size. PNG, JPG, SVG, WebP, or GIF up to 2 MB.</p>
-  </div>
-  <div class="btn-group" style="margin-top: 16px;">
-    <button class="primary" type="submit">Save</button>
-  </div>
+      <div class="set-field">
+        <label class="set-label" for="brand-logo">Logo</label>
+        <p class="set-help">A square image works best. PNG, JPG, SVG, WebP or GIF, up to 2 MB.</p>
+        {% if brand.logo_file %}
+        <div class="set-item" style="padding: 0 0 12px;">
+          <div class="set-item-text" style="display: flex; align-items: center; gap: 12px;">
+            <img src="/brand-static/{{ brand.logo_file }}" alt="Current logo"
+                 style="height: 44px; width: 44px; object-fit: contain; border-radius: 10px; border: 1px solid var(--border);">
+            <span class="set-item-help" style="margin: 0;">Your current logo. Choose a new file to replace it.</span>
+          </div>
+          <div class="set-item-control">
+            <button class="set-link-btn is-danger" type="submit" form="logo-remove-form">Remove logo</button>
+          </div>
+        </div>
+        {% endif %}
+        <input type="file" id="brand-logo" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp,.gif">
+      </div>
+    </div>
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Changes show as soon as you save.</span>
+      <button class="btn-primary" type="submit">Save</button>
+    </div>
+  </section>
 </form>
 <form id="logo-remove-form" method="post" action="/appearance/logo/remove"></form>
+</div>
 {% endblock %}

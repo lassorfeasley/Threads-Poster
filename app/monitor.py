@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 
 from sqlalchemy import select
 from sqlalchemy.orm import object_session
 
-from . import channel_health, triage_model, youtube
+from . import auto_triage, channel_health, positioning, triage_model, youtube
 from .categories import auto_tag_candidate
 from .config import env, load_keywords, load_settings
 from .db import (
@@ -237,22 +238,44 @@ def run_monitor_once(lookback_days: int | None = None) -> dict:
         if total_stored and triage_model.enabled(settings):
             try:
                 scored = triage_model.score_new_candidates(session, only_missing=True)
+                session.commit()
                 log.info("Approve probability written for %d candidates", scored)
             except Exception as exc:  # a scoring failure must not fail the pass
                 session.rollback()
                 log.warning("Approve-probability scoring failed: %s", exc)
-    log.info("Monitor pass done: %d channels checked, %d new candidates, %d vision-scored",
-             checked, total_stored, vision_state["scored"])
+        # Positioning fit for the waiting videos the dashboard shows: new ones,
+        # and any left stale by a Brand & audience edit (a batch per pass).
+        if positioning.enabled(settings):
+            try:
+                positioning.score_waiting(session, settings)
+                session.commit()
+            except Exception as exc:  # a scoring failure must not fail the pass
+                session.rollback()
+                log.warning("Positioning-fit scoring failed: %s", exc)
+        # Every pass, not only ones that stored something: a retrain since the
+        # last pass may have moved waiting videos under the cut-off.
+        auto: dict = {}
+        try:
+            trigger = "monitor:actions" if os.environ.get("GITHUB_ACTIONS") else "monitor"
+            auto = auto_triage.run_pass(session, settings, trigger=trigger)
+            session.commit()
+        except Exception as exc:  # automatic triage must not fail the pass
+            session.rollback()
+            log.warning("Automatic triage failed: %s", exc)
+    log.info("Monitor pass done: %d channels checked, %d new candidates, %d vision-scored%s",
+             checked, total_stored, vision_state["scored"], auto_triage.summary_note(auto))
     if failed:
         log.warning("%d channels failed (see Channels page): %s", len(failed), ", ".join(failed))
     return {"channels_checked": checked, "candidates_stored": total_stored,
             "vision_scored": vision_state["scored"], "channels_failed": failed,
             "channels_retired": [r["call_sign"] for r in healing["retired"]],
-            "channels_added": [a["call_sign"] for a in healing["added"]]}
+            "channels_added": [a["call_sign"] for a in healing["added"]],
+            "auto_triage": auto}
 
 
 def failed_channels_note(result: dict) -> str:
-    """Summary suffix naming failing, retired, and auto-added channels, or ''."""
+    """Summary suffix naming failing, retired, and auto-added channels, plus
+    what automatic triage did, or ''."""
     note = ""
     failed = result.get("channels_failed") or []
     if failed:
@@ -263,4 +286,4 @@ def failed_channels_note(result: dict) -> str:
     added = result.get("channels_added") or []
     if added:
         note += f" — auto-added {len(added)}: {', '.join(added)}"
-    return note
+    return note + auto_triage.summary_note(result.get("auto_triage"))

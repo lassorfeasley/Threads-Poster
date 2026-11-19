@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "49"
+SCHEMA_VERSION = "53"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -176,6 +176,15 @@ _SCHEMA_SENTINELS = (
     "SELECT id FROM content_labels LIMIT 0",
     "SELECT flag FROM clip_proposals LIMIT 0",
     "SELECT comment_claimed_at FROM facebook_posts LIMIT 0",
+    "SELECT audit FROM triage_decisions LIMIT 0",
+    "SELECT id FROM auto_triage_runs LIMIT 0",
+    "SELECT audit_verdict FROM auto_triage_actions LIMIT 0",
+    "SELECT fit_basis FROM candidates LIMIT 0",
+    "SELECT signal FROM auto_triage_runs LIMIT 0",
+    "SELECT fit_reason FROM auto_triage_actions LIMIT 0",
+    "SELECT explore FROM auto_triage_actions LIMIT 0",
+    "SELECT approved FROM auto_triage_runs LIMIT 0",
+    "SELECT caption_ok FROM inbox_items LIMIT 0",
 )
 
 
@@ -266,10 +275,25 @@ def _ensure_new_columns() -> None:
             "approve_model_pk": "INTEGER",
             "source_object_key": "TEXT DEFAULT ''",
             "source_uploaded_at": "TIMESTAMP WITH TIME ZONE",
+            "fit_score": "FLOAT",
+            "fit_reason": "TEXT DEFAULT ''",
+            "fit_basis": "VARCHAR(16) DEFAULT ''",
+            "fit_scored_at": "TIMESTAMP WITH TIME ZONE",
+        },
+        "auto_triage_runs": {
+            "signal": "VARCHAR(10) DEFAULT 'approval'",
+            "approved": "INTEGER DEFAULT 0",
+        },
+        "auto_triage_actions": {
+            "signal": "VARCHAR(10) DEFAULT 'approval'",
+            "explore": "BOOLEAN DEFAULT FALSE",
+            "fit_score": "FLOAT",
+            "fit_reason": "TEXT DEFAULT ''",
         },
         "triage_decisions": {
             "predicted_prob": "FLOAT",
             "model_pk": "INTEGER",
+            "audit": "BOOLEAN DEFAULT FALSE",
         },
         "threads_posts": {
             "cut_pk": "INTEGER",
@@ -508,6 +532,15 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_clip_proposals_candidate_verdict "
         "ON clip_proposals (candidate_pk, verdict)",
         "CREATE INDEX IF NOT EXISTS ix_clip_proposals_cut_pk ON clip_proposals (cut_pk)",
+        # Automatic triage: "has this video ever been auto-triaged / decided by
+        # the operator" runs as NOT EXISTS against every waiting video.
+        "CREATE INDEX IF NOT EXISTS ix_triage_decisions_candidate_pk "
+        "ON triage_decisions (candidate_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_auto_triage_actions_candidate_pk "
+        "ON auto_triage_actions (candidate_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_auto_triage_actions_run_pk ON auto_triage_actions (run_pk)",
+        "CREATE INDEX IF NOT EXISTS ix_inbox_items_state ON inbox_items (state)",
+        "CREATE INDEX IF NOT EXISTS ix_inbox_items_proposal_pk ON inbox_items (proposal_pk)",
     )
     with engine.begin() as conn:
         for stmt in statements:

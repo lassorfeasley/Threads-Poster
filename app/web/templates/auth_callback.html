@@ -1,0 +1,37 @@
+{% extends "auth_base.html" %}
+{% block title %}Signing in{% endblock %}
+{% block body %}
+<div class="login-card">
+  <h1>Signing you in…</h1>
+  <p class="sub" id="status">One moment.</p>
+  <form id="session" method="post" action="/auth/session" hidden>
+    <input type="hidden" name="access_token">
+    <input type="hidden" name="refresh_token">
+    <input type="hidden" name="type">
+  </form>
+  <p class="alt"><a href="/login">Back to sign in</a></p>
+</div>
+<script>
+  // Supabase puts the session in the URL fragment, which never reaches the
+  // server: hand it over, then drop it from the address bar.
+  (function () {
+    var p = new URLSearchParams(location.hash.replace(/^#/, ''));
+    history.replaceState(null, '', location.pathname);
+    var status = document.getElementById('status');
+    if (p.get('error') || p.get('error_description')) {
+      status.textContent = (p.get('error_description') || 'That link did not work.').replace(/\+/g, ' ')
+        + ' Request a new link from the sign-in page.';
+      return;
+    }
+    if (!p.get('access_token')) {
+      status.textContent = 'This link is missing its sign-in details. Request a new one from the sign-in page.';
+      return;
+    }
+    var f = document.getElementById('session');
+    f.access_token.value = p.get('access_token');
+    f.refresh_token.value = p.get('refresh_token') || '';
+    f.type.value = p.get('type') || '';
+    f.submit();
+  })();
+</script>
+{% endblock %}

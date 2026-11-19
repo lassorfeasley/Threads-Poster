@@ -25,6 +25,9 @@ primary_region = "iad"
 [env]
   PYTHONUNBUFFERED = "1"
   WORKSPACE = "climate"
+  # Read brand, captions and first-reply settings from the shared database,
+  # so edits made on the hosted dashboard reach the posts (app/shared_docs.py).
+  SHARED_WORKSPACE = "on"
 
 [processes]
   app = "python run.py scheduler --loop"

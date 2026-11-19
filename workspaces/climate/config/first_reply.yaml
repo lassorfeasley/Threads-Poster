@@ -18,7 +18,6 @@
 # one: on those the clip is the ad, so the call to action rides in the caption.
 
 enabled: true
-watch_text: Watch the full video and take climate action 👉 {watch_url} — Fund solar, create
-  5.5x the carbon impact, get repaid
+watch_text: "Watch the full video \U0001F449 Renewables.org \r\n\r\n{watch_url}"
 fallback_text: Take climate action 👉 Renewables.org — fund solar, create 5.5x the carbon impact,
   get repaid

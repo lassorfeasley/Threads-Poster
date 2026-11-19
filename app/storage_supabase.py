@@ -113,6 +113,11 @@ def upload_file_resumable(local_path: str | Path, bucket: str, object_key: str,
         location = urljoin(endpoint, created.headers["location"])
 
         offset, failures = 0, 0
+        # A 409 is the store saying the upload conflicts (an offset mismatch,
+        # or the upload is locked). Resuming from the server's offset fixes a
+        # mismatch; two in a row at the same offset won't fix themselves, and
+        # retrying them with backoff held the mirror sweep for an hour.
+        conflict_at = None
         with open(path, "rb") as f:
             while offset < size:
                 f.seek(offset)
@@ -131,6 +136,12 @@ def upload_file_resumable(local_path: str | Path, bucket: str, object_key: str,
                     if r.status_code < 500 and r.status_code != 409:
                         raise RuntimeError(f"Upload chunk refused ({r.status_code}): "
                                            f"{r.text[:300]}")
+                    if r.status_code == 409:
+                        if conflict_at == offset:
+                            raise RuntimeError(
+                                f"Upload of {path.name} keeps conflicting at "
+                                f"{100 * offset / size:.0f}% (HTTP 409): {r.text[:200]}")
+                        conflict_at = offset
                     problem = f"HTTP {r.status_code}"
                 except httpx.TransportError as exc:
                     problem = str(exc) or type(exc).__name__
@@ -152,6 +163,7 @@ def download_to_file(bucket: str, object_key: str, dest: str | Path,
     """Stream a stored object to ``dest`` without holding it in memory. Written
     to a temp name and renamed into place, so a reader never sees half a file."""
     dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)  # a fresh machine has no clips/ yet
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.part")
     try:
         with httpx.Client(timeout=httpx.Timeout(120.0, connect=30.0)) as http:

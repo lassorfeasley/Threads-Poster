@@ -1016,11 +1016,14 @@ def normalize(data: Any) -> dict:
 def load() -> dict | None:
     """The report, normalized; None when there is none or it can't be read
     (a broken file is logged, never raised)."""
+    from ..shared_docs import read_text
+
     file = path()
-    if not file.is_file():
-        return None
     try:
-        return normalize(yaml.safe_load(file.read_text()) or {})
+        text = read_text("handbook", file)
+        if text is None:
+            return None
+        return normalize(yaml.safe_load(text) or {})
     except Exception as exc:  # noqa: BLE001
         log.warning("%s is not a usable handbook report (%s); ignoring it", file, exc)
         return None
@@ -1037,8 +1040,10 @@ def save(report: dict) -> Path:
         "# clip engine. Rebuild with: python run.py clip-engine handbook build\n")
     body = yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
     with _lock:
+        from ..shared_docs import write_text
+
         target = path()
-        util.atomic_write_text(target, header + body)
+        write_text("handbook", header + body, target)
     log.info("handbook report saved to %s (%d candidates)", target, len(data["candidates"]))
     return target
 

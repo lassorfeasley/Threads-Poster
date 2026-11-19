@@ -10,6 +10,10 @@ Usage:
   python run.py dashboard          # supervisor: one dashboard per enabled workspace
   python run.py dashboard --workspace climate   # a single workspace's dashboard
   python run.py workspace list     # show the workspace registry
+  python run.py config status       # shared workspace documents: database vs this machine
+  python run.py datasync push --dry-run  # files the hosted dashboard needs, not yet in Storage
+  python run.py user list          # dashboard accounts (Supabase Auth) and their workspaces
+  python run.py user invite <email> # email an invitation to this workspace's dashboard
   python run.py workspace create <slug>         # scaffold a new workspace
   python run.py monitor            # one discovery pass over all channels
   python run.py monitor --loop     # poll forever at the configured interval
@@ -100,21 +104,112 @@ def cmd_dashboard(args) -> None:
         _run_supervisor(args)
 
 
+def cmd_config(args) -> None:
+    from app import shared_docs
+
+    if args.config_command == "status":
+        print(f"SHARED_WORKSPACE is {'on' if shared_docs.enabled() else 'off'} on this machine.")
+        for row in shared_docs.status():
+            where = "database" if row["in_db"] else ("file" if row["on_disk"] else "missing")
+            note = "" if row["same"] else "   <- this machine's file differs from the database"
+            print(f"  {row['key']:10} {where:9}{note}")
+        return
+    docs = args.docs or list(shared_docs.DOC_FILES)
+    unknown = [d for d in docs if d not in shared_docs.DOC_FILES]
+    if unknown:
+        raise SystemExit(f"Unknown document(s): {', '.join(unknown)}")
+    fn = shared_docs.push if args.config_command == "push" else shared_docs.pull
+    for d in docs:
+        print(f"  {d:10} {'done' if fn(d) else 'nothing to ' + args.config_command}")
+
+
+def cmd_datasync(args) -> None:
+    from app import datasync
+
+    res = datasync.push_sweep(dry_run=args.dry_run, limit=args.limit)
+    total = sum(size for _, size in res.pending)
+    if args.dry_run:
+        by_folder: dict[str, list[int]] = {}
+        for rel, size in res.pending:
+            folder = next((f for f in datasync.MIRRORED if rel.startswith(f + "/")), "?")
+            by_folder.setdefault(folder, []).append(size)
+        for folder, sizes in by_folder.items():
+            print(f"  {folder:24} {len(sizes):6} files  {sum(sizes) / 1e6:9.1f} MB")
+        print(f"Would upload {len(res.pending)} files ({total / 1e6:.1f} MB).")
+        return
+    print(f"Uploaded {res.uploaded} files ({res.uploaded_bytes / 1e6:.1f} MB); "
+          f"{res.failed} failed.")
+
+
+def cmd_user(args) -> None:
+    """Dashboard accounts (Supabase Auth). Access is per workspace: the one
+    selected with --workspace (default: climate)."""
+    import getpass
+    import secrets
+
+    from app.config import WORKSPACE
+    from app.web import auth
+
+    try:
+        if args.user_command == "list":
+            for u in sorted(auth.list_users(), key=lambda u: u.email):
+                mark = "*" if u.can_use(WORKSPACE) else " "
+                print(f" {mark} {u.email:40} {u.role or '-':8} {', '.join(u.workspaces) or '(no workspaces)'}")
+            print(f"\n* = can use the {WORKSPACE!r} dashboard")
+        elif args.user_command == "add":
+            password = args.password or ""
+            if args.generate:
+                password = secrets.token_urlsafe(15)
+            elif not password:
+                password = getpass.getpass("Password (12+ characters): ")
+                if getpass.getpass("Again: ") != password:
+                    raise SystemExit("Passwords didn't match.")
+            if len(password) < 12:
+                raise SystemExit("Use at least 12 characters.")
+            user = auth.add_user(args.email, password, WORKSPACE, args.role)
+            print(f"{user.email} can sign in to the {WORKSPACE!r} dashboard.")
+            if args.generate:
+                print(f"Password: {password}")
+        elif args.user_command == "invite":
+            user = auth.invite(args.email, WORKSPACE, args.url.rstrip("/") + "/auth/callback",
+                               args.role)
+            print(f"Invitation emailed to {user.email} for the {WORKSPACE!r} dashboard.")
+        elif args.user_command == "remove":
+            user = auth.revoke(args.email, WORKSPACE)
+            print(f"{user.email} can no longer use the {WORKSPACE!r} dashboard "
+                  f"(the account itself remains).")
+    except auth.AuthError as exc:
+        raise SystemExit(str(exc)) from None
+
+
 def _run_single_dashboard(args) -> None:
     import uvicorn
 
     from app.config import ROOT, WORKSPACE, current_workspace
 
     port = args.port or current_workspace()["port"]
-    log.info("Dashboard for workspace %r on http://127.0.0.1:%d", WORKSPACE, port)
+    host = args.host
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        # Reachable from the network: refuse to come up without a login.
+        from app.web import auth
+
+        problem = auth.config_problem()
+        if problem:
+            raise SystemExit(f"Refusing to serve on {host}: {problem}. "
+                             "See `python run.py user --help`.")
+    log.info("Dashboard for workspace %r on http://%s:%d", WORKSPACE, host, port)
     # reload watches only ``app/`` so newly added routes/templates are picked
     # up without a manual restart — never ``data/`` (multi-GB downloads) or
     # ``.venv``. Disable with --no-reload for a stable run.
     uvicorn.run(
         "app.web.main:app",
-        host="127.0.0.1",
+        host=host,
         port=port,
         log_level="info",
+        # Behind Fly's proxy: trust X-Forwarded-Proto so the session cookie is
+        # marked Secure on https.
+        proxy_headers=True,
+        forwarded_allow_ips="*" if host not in ("127.0.0.1", "localhost", "::1") else None,
         reload=args.reload,
         reload_dirs=[str(ROOT / "app")] if args.reload else None,
     )
@@ -681,6 +776,189 @@ def cmd_triage_train(_args) -> None:
     for h in bt["handoff"]:
         print(f"  {h['threshold']:.0%}: {h['below']} of {bt['n']} videos, "
               f"{h['approvals_lost']} of {bt['approved']} approvals lost")
+    rolling = bt.get("rolling")
+    if rolling:
+        print(f"Rolling out-of-sample grade on {rolling['n']} decisions "
+              f"({rolling['approved']} approved, {rolling.get('posted', 0)} later posted): "
+              f"AUC {rolling['auc']:.3f}")
+        for h in rolling["handoff"]:
+            print(f"  under {h['threshold'] * 100:g}%: {h['below']} of {rolling['n']} videos, "
+                  f"{h['approvals_lost']} of {rolling['approved']} approvals lost "
+                  f"({h.get('posted_lost', 0)} of them posted)")
+
+
+def cmd_auto_triage(args) -> None:
+    """Automatic triage (app/auto_triage.py): see where it stands, switch it,
+    run a pass, or undo one. The dashboard's Automatic triage page does the
+    same with spot-checks and per-video undo."""
+    from app import auto_triage
+    from app.config import load_settings
+    from app.db import init_db, session_scope
+
+    init_db()
+    settings = load_settings()
+    pct = auto_triage.pct
+    verb = args.auto_triage_command
+
+    if verb in ("on", "off"):
+        try:
+            with session_scope() as session:
+                policy = auto_triage.set_policy(
+                    session, enabled=(verb == "on"),
+                    signal=getattr(args, "signal", None),
+                    reject_below=getattr(args, "cutoff", None),
+                    fit_below=getattr(args, "fit_cutoff", None),
+                    audit_rate=getattr(args, "audit_rate", None))
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+        print(f"Automatic triage is {policy.state}: judging by {policy.signal}, cut-off "
+              f"{auto_triage.cutoff_label(policy.signal, policy.cutoff)}, "
+              f"spot-check {pct(policy.audit_rate)} of rejections.")
+        if policy.enabled:
+            print("It rejects at the end of the next monitor pass, or run: "
+                  "python run.py auto-triage run")
+        return
+    if verb == "resume":
+        with session_scope() as session:
+            auto_triage.resume(session)
+        print("Resumed, with a fresh spot-check count.")
+        return
+    if verb == "run":
+        with session_scope() as session:
+            result = auto_triage.run_pass(session, settings, trigger="cli")
+        if result["outcome"] == "done":
+            print(f"Rejected {result['rejected']} of {result['considered']} waiting videos; "
+                  f"{result['audited']} set aside for a spot-check.")
+        else:
+            print(f"Nothing rejected ({result['outcome']}). {result['note']}".rstrip())
+        return
+    if verb in ("score-fit", "grade-fit"):
+        from app import positioning
+
+        with session_scope() as session:
+            if verb == "score-fit":
+                out = positioning.score_waiting(session, settings, limit=args.limit)
+                print(f"Positioning fit: scored {out['scored']} waiting videos "
+                      f"({out['failed']} failed, {out['left']} still to do).")
+                return
+            out = positioning.score_decided(session, settings, limit=args.limit)
+            print(f"Positioning fit: scored {out['scored']} decided videos ({out['failed']} failed).")
+        with session_scope(read_only=True) as session:
+            grade = auto_triage.fit_grade(session, settings)
+        if not grade:
+            print("Nothing graded yet.")
+            return
+        auc = f"{grade['auc']:.3f}" if grade["auc"] is not None else "n/a"
+        print(f"Against {grade['n']} of your decisions ({grade['approved']} approved, "
+              f"{grade.get('posted', 0)} later posted): AUC {auc}")
+        for h in grade["handoff"]:
+            lost = (f"{h['approvals_lost']} of {grade['approved']} approvals lost"
+                    if grade["approved"] else "no approvals to lose")
+            print(f"  under fit {h['threshold']:.1f}: {h['below']} of {grade['n']} videos, {lost} "
+                  f"({h.get('posted_lost', 0)} of them posted)")
+        return
+    if verb == "undo":
+        try:
+            with session_scope() as session:
+                n = auto_triage.undo_run(session, args.run_id)
+        except LookupError as exc:
+            raise SystemExit(str(exc))
+        print(f"Pass #{args.run_id} undone: {n} videos are back in the queue.")
+        return
+
+    # status
+    with session_scope(read_only=True) as session:
+        policy = auto_triage.load_policy(session)
+        model, why = auto_triage.readiness(session, settings, signal=policy.signal)
+        tables = {sig: auto_triage.cutoff_table(session, settings, sig)
+                  for sig in auto_triage.SIGNALS}
+        waiting = auto_triage.preview(session, settings, policy.signal)
+        spot = auto_triage.spot_check_summary(session, policy.watch_since_at)
+        runs = auto_triage.recent_runs(session, limit=8)
+        standing = auto_triage.count_standing(session)
+    print(f"Automatic triage: {policy.state} · judging by {policy.signal} · cut-off "
+          f"{auto_triage.cutoff_label(policy.signal, policy.cutoff)} · "
+          f"spot-check {pct(policy.audit_rate)}")
+    if policy.paused_reason:
+        print(f"  Paused: {policy.paused_reason}")
+    print(f"  Model: #{model.id} · {model.n_decisions} decisions" if model else "  Signal:",
+          f"NOT READY: {why}" if why else "ready")
+    print(f"  {waiting['waiting']} waiting videos judgeable now ({waiting['unscored']} without a "
+          f"current score); {standing} automatic rejections standing; "
+          f"{spot['pending']} spot-checks waiting")
+    if spot["answered"]:
+        print(f"  Spot-checks since {policy.watch_since[:10] or 'the start'}: approved "
+              f"{spot['approved']} of {spot['answered']} ({spot['rate']:.0%}, 90% range "
+              f"{spot['low']:.0%}-{spot['high']:.0%})")
+    for sig, rows in tables.items():
+        auc = rows[0]["history_auc"] if rows else None
+        graded = (f", graded on {rows[0]['history_n']} decisions: AUC {auc:.2f}"
+                  if auc is not None else ", not graded yet")
+        print(f"\n  {sig}{graded}")
+        print("  cut-off  per day  waiting  approvals lost (history)  posted lost")
+        for r in rows:
+            lost = (f"{r['approvals_lost']}/{r['approvals']} ({r['approvals_lost'] / r['approvals']:.1%})"
+                    if r["approvals_lost"] is not None and r["approvals"] else "-")
+            posted = (f"{r['posted_lost']}/{r['posted']}"
+                      if r["posted_lost"] is not None and r["posted"] else "-")
+            mark = " <" if sig == policy.signal and r["cutoff"] == policy.cutoff else ""
+            print(f"  {r['label']:>7}  {r['per_day']:7.1f}  {r['waiting_now']:7}  {lost:>24}  "
+                  f"{posted:>11}{mark}")
+    if runs:
+        print("\n  Recent passes:")
+        for r in runs:
+            undone = f" (undone {r.undone_at:%b %-d})" if r.undone_at else ""
+            print(f"    #{r.id} {r.started_at:%b %-d %H:%M} {r.trigger:<15} {r.outcome:<8} "
+                  f"rejected {r.rejected:>5} of {r.considered:<6} spot {r.audited}{undone}"
+                  f"{' — ' + r.note if r.note else ''}")
+
+
+def cmd_auto_select(args) -> None:
+    """Automatic approval (app/auto_select.py): see what it would pick, switch
+    it, or run it now. The downloads happen in the home machine's dashboard."""
+    from app import auto_select
+    from app.config import load_settings
+    from app.db import init_db, session_scope
+
+    init_db()
+    settings = load_settings()
+    verb = args.auto_select_command
+    if verb in ("on", "off"):
+        try:
+            with session_scope() as session:
+                policy = auto_select.set_policy(
+                    session, enabled=(verb == "on"), per_day=args.per_day,
+                    min_prob=args.min_prob, fit_floor=args.fit_floor) if verb == "on" else \
+                    auto_select.set_policy(session, enabled=False)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+        print(f"Automatic approval is {policy.state}: up to {policy.per_day} a day, approve chance "
+              f">= {policy.min_prob:.0%}, fit >= {policy.fit_floor:.1f}, last {policy.fresh_days} days, "
+              f"exploring {policy.explore:.0%}.")
+        return
+    if verb == "run":
+        with session_scope() as session:
+            out = auto_select.run(session, settings, trigger="cli")
+        print(f"Approved {out['approved']} ({out['explored']} exploring); "
+              f"{out['picked_today'] + out['approved']} picked today. "
+              "The home machine's dashboard downloads them within about ten minutes.")
+        return
+    with session_scope(read_only=True) as session:
+        pv = auto_select.preview(session, settings)
+        recent = auto_select.recent_picks(session, limit=10)
+    pol = pv["policy"]
+    print(f"Automatic approval: {pol.state} · up to {pol.per_day}/day · chance >= {pol.min_prob:.0%} · "
+          f"fit >= {pol.fit_floor:.1f} · last {pol.fresh_days} days · exploring {pol.explore:.0%}")
+    print(f"  Today: {pv['picked_today']} picked; the pace allows {pv['allowed']} more now; "
+          f"{pv['pool']} in the pool (ranked by {pv['signal']})")
+    for p in pv["picks"]:
+        tag = " [explore]" if p["explore"] else ""
+        print(f"    would pick: {p['score']:.2f}  {p['c'].title[:70]}{tag}")
+    if recent:
+        print("  Recent picks:")
+        for r in recent:
+            print(f"    {r['action'].created_at:%b %-d %H:%M}  {r['c'].status:<9} drafted {r['drafted']:>2} "
+                  f"cut {r['cuts']} posted {r['posted']}  {r['c'].title[:55]}")
 
 
 def cmd_metrics(_args) -> None:
@@ -2149,7 +2427,47 @@ def build_parser() -> argparse.ArgumentParser:
                    help="override the workspace's registry port (single-workspace mode only)")
     p.add_argument("--no-reload", dest="reload", action="store_false",
                    help="disable auto-reload on source changes")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="interface to listen on (single-workspace mode). Anything but "
+                        "loopback requires DASHBOARD_AUTH=supabase")
     p.set_defaults(func=cmd_dashboard, reload=True)
+
+    p = sub.add_parser("config", parents=[common],
+                       help="workspace documents shared through the database (SHARED_WORKSPACE)")
+    csub = p.add_subparsers(dest="config_command", required=True)
+    csub.add_parser("status", parents=[common], help="compare this machine's files with the database")
+    for verb, text in (("push", "send this machine's files to the database (overwrites the shared copy)"),
+                       ("pull", "overwrite this machine's files with the database copy")):
+        cp = csub.add_parser(verb, parents=[common], help=text)
+        cp.add_argument("docs", nargs="*", help="which (default: all): brand keywords captions "
+                                                 "handbook playbook notes proposals")
+    p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser("datasync", parents=[common],
+                       help="share working files (transcripts, clips, thumbnails) via Storage")
+    dsub = p.add_subparsers(dest="datasync_command", required=True)
+    dp = dsub.add_parser("push", parents=[common], help="upload new or changed files now")
+    dp.add_argument("--dry-run", action="store_true", help="list what would upload")
+    dp.add_argument("--limit", type=int, default=None, help="stop after this many files")
+    p.set_defaults(func=cmd_datasync)
+
+    p = sub.add_parser("user", help="dashboard accounts (Supabase Auth, per workspace)")
+    usub = p.add_subparsers(dest="user_command", required=True)
+    usub.add_parser("list", parents=[common], help="accounts and the workspaces they can use")
+    up = usub.add_parser("add", parents=[common],
+                         help="create an account with a password (or give one access)")
+    up.add_argument("email")
+    up.add_argument("--password", default="", help="(else prompted)")
+    up.add_argument("--generate", action="store_true", help="make up a strong password and print it")
+    up.add_argument("--role", default="member", choices=["owner", "member"])
+    up = usub.add_parser("invite", parents=[common], help="email an invitation (they choose a password)")
+    up.add_argument("email")
+    up.add_argument("--url", default="https://app.continuity.marketing",
+                    help="the dashboard's public address (where the email link lands)")
+    up.add_argument("--role", default="member", choices=["owner", "member"])
+    up = usub.add_parser("remove", parents=[common], help="take away access to this workspace")
+    up.add_argument("email")
+    p.set_defaults(func=cmd_user)
 
     p = sub.add_parser("workspace", help="manage the workspace registry")
     wsub = p.add_subparsers(dest="ws_command", required=True)
@@ -2227,6 +2545,43 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("triage-train", parents=[common],
                    help="retrain the approve predictor and print its backtest"
                    ).set_defaults(func=cmd_triage_train)
+    p = sub.add_parser("auto-triage", help="automatic rejection of the least likely videos "
+                                           "(app/auto_triage.py)")
+    asub = p.add_subparsers(dest="auto_triage_command", required=True)
+    asub.add_parser("status", parents=[common],
+                    help="the switch, the model, each cut-off's cost, recent passes")
+    ap = asub.add_parser("on", parents=[common], help="switch it on")
+    ap.add_argument("--signal", choices=("approval", "fit"), default=None,
+                    help="judge by your approval history or by positioning fit (default: keep)")
+    ap.add_argument("--cutoff", type=float, default=None,
+                    help="approve-chance cut-off, 0.005-0.2 (default: keep)")
+    ap.add_argument("--fit-cutoff", type=float, default=None,
+                    help="positioning-fit cut-off, 0.2-0.7 (default: keep)")
+    ap.add_argument("--audit-rate", type=float, default=None,
+                    help="share of rejections set aside for a spot-check (0.05, 0.1, 0.2)")
+    asub.add_parser("off", parents=[common], help="switch it off")
+    asub.add_parser("resume", parents=[common], help="clear a safety pause")
+    asub.add_parser("run", parents=[common], help="run a pass now (if it's on)")
+    ap = asub.add_parser("score-fit", parents=[common],
+                         help="score positioning fit for waiting videos now (a cheap model call each)")
+    ap.add_argument("--limit", type=int, default=200, help="at most this many (default 200)")
+    ap = asub.add_parser("grade-fit", parents=[common],
+                         help="score fit for videos you've decided and grade it against your calls")
+    ap.add_argument("--limit", type=int, default=300, help="at most this many (default 300)")
+    ap = asub.add_parser("undo", parents=[common], help="put a pass's rejections back in the queue")
+    ap.add_argument("run_id", type=int, help="the pass number (see status)")
+    p.set_defaults(func=cmd_auto_triage)
+    p = sub.add_parser("auto-select", help="automatic approval of the day's best videos "
+                                           "(app/auto_select.py)")
+    ssub = p.add_subparsers(dest="auto_select_command", required=True)
+    ssub.add_parser("status", parents=[common], help="the switch, today's pace, what it would pick")
+    sp = ssub.add_parser("on", parents=[common], help="switch it on")
+    sp.add_argument("--per-day", type=int, default=None, help="videos a day (default: keep)")
+    sp.add_argument("--min-prob", type=float, default=None, help="approve-chance floor (default: keep)")
+    sp.add_argument("--fit-floor", type=float, default=None, help="positioning-fit floor (default: keep)")
+    ssub.add_parser("off", parents=[common], help="switch it off")
+    ssub.add_parser("run", parents=[common], help="approve what today's pace allows, now")
+    p.set_defaults(func=cmd_auto_select)
     sub.add_parser("metrics", parents=[common],
                    help="snapshot Threads post metrics").set_defaults(func=cmd_metrics)
     sub.add_parser("comments", parents=[common],

@@ -434,6 +434,8 @@ a.nav.nav-create.active {
 }
 .sidebar .foot a { color: var(--text-dim); text-decoration: none; }
 .sidebar .foot a:hover { color: var(--text); text-decoration: underline; }
+.sidebar .foot .linklike { background: none; border: 0; padding: 0; font: inherit; color: var(--text-dim); cursor: pointer; }
+.sidebar .foot .linklike:hover { color: var(--text); text-decoration: underline; }
 
 /* Expand as overlay — body padding stays on the rail width. */
 aside.sidebar:hover,
@@ -1378,6 +1380,9 @@ button, .btn {
   white-space: nowrap;
   transition: background 0.16s var(--ease), border-color 0.16s var(--ease), box-shadow 0.16s var(--ease), color 0.16s var(--ease), transform 0.16s var(--ease);
 }
+/* The display above outranks the browser's own [hidden] rule, so without this
+   a button given the hidden attribute (or el.hidden = true) stays on screen. */
+button[hidden], .btn[hidden] { display: none; }
 button:hover, .btn:hover {
   background: var(--panel2);
   border-color: var(--border-strong);
@@ -6174,3 +6179,677 @@ details.panel > .panel-body { padding: 14px 18px; }
   color: var(--warn);
 }
 .proposal-warn::before, .suggest-warn::before { content: "⚠ "; }
+
+/* =========================================================================
+   Settings — one legible system for every settings page
+   -------------------------------------------------------------------------
+   Written for people who aren't technical: short plain sentences, one idea
+   per section, labels you can read at a glance, and the detail folded away
+   until asked for. Every settings page is built from the same pieces:
+
+     .set-page          readable column (forms); .is-wide for table pages
+     .set-section       a card: head (title + one-line purpose) / body / foot
+     .set-field         label above, help under it, control under that
+     .set-list/.set-item  "label on the left, control on the right" rows
+     .set-toggle        the big on/off switch that leads a section
+     .set-status        On / Off / Needs attention pill
+     .set-callout       a note that has to be read (info, warning, problem)
+     .set-more          "How this works" folds
+     .set-stats         number tiles
+     .set-savebar       the one Save, always in reach, says when unsaved
+   ========================================================================= */
+
+/* --- Page --------------------------------------------------------------- */
+.set-page { max-width: 880px; }
+.set-page.is-wide { max-width: none; }
+.settings-body .pagebar-title .sub {
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--text-dim);
+  max-width: 62ch;
+}
+.settings-body .pagebar-title h1 { font-size: 26px; letter-spacing: -0.02em; }
+
+/* --- Rail: sentence-case group names read faster than spaced capitals ---- */
+.settings-group {
+  font-size: 12.5px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  padding: 22px 12px 6px;
+}
+.settings-group-note {
+  display: block;
+  margin-top: 1px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.settings-link { font-size: 14.5px; padding: 9px 12px; }
+.settings-rail-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 18px 12px 0;
+}
+
+/* --- Section ------------------------------------------------------------ */
+.set-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  margin: 0 0 20px;
+  scroll-margin-top: 24px;
+}
+.set-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 24px 0;
+}
+.set-section-head > div:first-child { min-width: 0; }
+.set-section-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.set-section-desc {
+  margin: 6px 0 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  max-width: 64ch;
+}
+.set-section-aside { flex: none; display: flex; align-items: center; gap: 8px; }
+.set-section-body { padding: 18px 24px 22px; }
+.set-section-body > :last-child { margin-bottom: 0; }
+.set-section-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel2) 45%, transparent);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+.set-foot-note { margin-right: auto; font-size: 13.5px; color: var(--text-dim); }
+.set-subhead {
+  margin: 22px 0 10px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+.set-subhead:first-child { margin-top: 0; }
+.set-subhead .meta { font-weight: 400; margin-left: 6px; }
+
+/* --- Fields --------------------------------------------------------------- */
+.set-field { margin: 0 0 20px; }
+.set-field:last-child { margin-bottom: 0; }
+label.set-label, .set-label {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text);
+}
+.set-optional { font-weight: 400; color: var(--muted); margin-left: 4px; }
+.set-help {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  max-width: 64ch;
+}
+.set-help:last-child { margin-bottom: 0; }
+.set-field > .set-help-after { margin: 6px 0 0; }
+.set-field input[type="text"],
+.set-field input[type="url"],
+.set-field input[type="date"],
+.set-field select { max-width: 560px; }
+.set-field textarea { max-width: 720px; min-height: 76px; }
+.set-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+}
+@media (max-width: 760px) { .set-grid-2 { grid-template-columns: 1fr; } }
+
+/* --- Label-left, control-right rows ------------------------------------------ */
+.set-list { display: flex; flex-direction: column; }
+.set-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+}
+.set-item:first-child { border-top: none; padding-top: 2px; }
+.set-item:last-child { padding-bottom: 2px; }
+.set-item-text { flex: 1; min-width: 0; }
+.set-item-label { font-size: 14.5px; font-weight: 600; color: var(--text); line-height: 1.35; }
+.set-item-help { margin-top: 3px; font-size: 13.5px; line-height: 1.5; color: var(--text-dim); }
+.set-item-control { flex: none; display: flex; align-items: center; gap: 8px; }
+.set-item-control select { width: auto; min-width: 150px; }
+.set-item-control input[type="text"] { width: 240px; }
+@media (max-width: 640px) {
+  .set-item { flex-direction: column; align-items: stretch; gap: 10px; }
+  .set-item-control select { width: 100%; }
+}
+
+/* Choice cards: two or three options, each with a sentence of its own. */
+.set-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.set-choice {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  cursor: pointer;
+  transition: border-color .16s var(--ease), background .16s var(--ease);
+}
+.set-choice:hover { border-color: color-mix(in srgb, var(--ink) 30%, var(--border-strong)); }
+.set-choice input[type="radio"] { margin: 3px 0 0; flex: none; width: 16px; height: 16px; }
+.set-choice:has(input:checked) {
+  border-color: color-mix(in srgb, var(--ink) 70%, transparent);
+  background: color-mix(in srgb, var(--panel2) 70%, transparent);
+}
+.set-choice-title { display: block; font-size: 14px; font-weight: 600; color: var(--text); }
+.set-choice-help { display: block; margin-top: 3px; font-size: 13px; line-height: 1.5; color: var(--text-dim); font-weight: 400; }
+
+/* --- The section's main switch -------------------------------------------------- */
+.set-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  cursor: pointer;
+}
+.set-toggle .switch { flex: none; }
+.set-toggle .set-item-label { font-size: 15px; }
+
+/* --- Status pills ------------------------------------------------------------ */
+.set-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel2);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.set-status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.set-status.is-on { color: var(--accent); border-color: var(--accent-border); background: var(--accent-soft); }
+.set-status.is-warn { color: var(--warn); border-color: var(--warn-border); background: var(--warn-soft); }
+.set-status.is-error { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
+.set-status.is-info { color: var(--blue); border-color: var(--blue-border); background: var(--blue-soft); }
+.set-status.is-off { color: var(--muted); }
+.set-status.is-plain::before { display: none; }
+
+/* --- Callouts --------------------------------------------------------------- */
+.set-callout {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-strong);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--panel2);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.set-callout > :last-child { margin-bottom: 0; }
+.set-callout p { margin: 0 0 8px; }
+.set-callout-title { display: block; margin-bottom: 2px; font-weight: 650; }
+.set-callout .set-callout-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.set-callout.is-info { border-color: var(--blue-border); background: var(--blue-soft); }
+.set-callout.is-warn { border-color: var(--warn-border); background: var(--warn-soft); }
+.set-callout.is-danger { border-color: var(--danger-border); background: var(--danger-soft); }
+.set-callout.is-good { border-color: var(--accent-border); background: var(--accent-soft); }
+
+/* --- "How this works" folds -------------------------------------------------- */
+.set-more { margin-top: 16px; }
+.set-more > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  user-select: none;
+}
+.set-more > summary::-webkit-details-marker { display: none; }
+.set-more > summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin: 0 2px 0 1px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform .16s var(--ease);
+}
+.set-more[open] > summary::before { transform: rotate(45deg); }
+.set-more > summary:hover { color: var(--text); }
+.set-more-body {
+  margin-top: 12px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.set-more-body p { margin: 0 0 10px; max-width: 70ch; }
+.set-more-body > :last-child { margin-bottom: 0; }
+/* A whole section folded (e.g. Fine-tuning): its summary is the section head. */
+details.set-section > summary.set-section-head {
+  cursor: pointer;
+  list-style: none;
+  padding-bottom: 22px;
+}
+details.set-section > summary.set-section-head::-webkit-details-marker { display: none; }
+details.set-section > summary .set-fold-hint {
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+details.set-section[open] > summary.set-section-head { padding-bottom: 0; }
+details.set-section > summary .set-fold-hint::after { content: "Show"; }
+details.set-section[open] > summary .set-fold-hint::after { content: "Hide"; }
+
+/* --- Number tiles -------------------------------------------------------------- */
+.set-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.set-stat {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+.set-stat-value {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.set-stat-label { margin-top: 2px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+
+/* --- The save bar ---------------------------------------------------------------- */
+.set-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin: 4px 0 0;
+  padding: 16px 0 20px;
+  background: linear-gradient(to top, var(--bg) 72%, color-mix(in srgb, var(--bg) 0%, transparent));
+}
+.set-savebar-note { margin-right: auto; font-size: 13.5px; color: var(--muted); }
+.set-savebar.is-dirty .set-savebar-note { color: var(--warn); font-weight: 600; }
+
+/* --- Overview cards (Automation) ---------------------------------------------------- */
+.set-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 0 22px;
+}
+@media (max-width: 900px) { .set-overview { grid-template-columns: 1fr; } }
+a.set-overview-card, .set-overview-card {
+  display: block;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color .16s var(--ease);
+}
+a.set-overview-card:hover { border-color: var(--border-strong); text-decoration: none; color: inherit; }
+.set-overview-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.set-overview-step { font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.set-overview-title { margin-top: 6px; font-size: 15.5px; font-weight: 650; color: var(--text); }
+.set-overview-line { margin-top: 6px; font-size: 13.5px; line-height: 1.5; color: var(--text-dim); }
+
+/* --- Rule lists (Brand & audience, Caption style) ------------------------------------ */
+.set-rule-group + .set-rule-group { margin-top: 24px; }
+.set-rule-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+.set-rule-group-head .meta { font-weight: 400; }
+.set-rule-group-desc { margin: 0 0 6px; font-size: 13px; color: var(--text-dim); }
+.set-rule {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+}
+.set-rule .switch { margin-top: 1px; }
+.set-rule-body { min-width: 0; }
+.set-rule-when {
+  display: block;
+  margin: 0 0 2px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--blue);
+}
+.set-rule-text { font-size: 14.5px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.set-rule-text.is-empty { color: var(--muted); font-style: italic; }
+.set-rule-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 5px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.set-rule.is-off .set-rule-text,
+.set-rule.is-off .set-rule-when { opacity: 0.5; }
+.set-rule-actions { display: flex; align-items: center; gap: 2px; }
+.set-rule-edit { display: grid; gap: 10px; margin-top: 2px; }
+.set-rule-edit input[type="text"] { max-width: none; }
+.set-rule-edit-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.set-rule-edit-row label { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-dim); }
+.set-rule-edit-row select { width: auto; min-width: 200px; }
+.set-show-more { margin-top: 6px; }
+
+/* Text-only buttons (Edit, Remove, Show all) — quiet until hovered. */
+button.set-link-btn, .set-link-btn {
+  min-height: 0;
+  padding: 5px 8px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+}
+button.set-link-btn:hover, .set-link-btn:hover { background: var(--panel2); color: var(--text); }
+button.set-link-btn.is-danger:hover { color: var(--danger); background: var(--danger-soft); }
+
+/* Star toggle for "try first" caption rules. */
+.set-pill-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.set-pill-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.set-pill-toggle:has(input:checked) { color: var(--warn); border-color: var(--warn-border); background: var(--warn-soft); }
+.set-pill-toggle:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+/* --- Accounts ------------------------------------------------------------------------ */
+.set-account {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+  padding: 18px 0;
+  border-top: 1px solid var(--border);
+}
+.set-account:first-child { border-top: none; padding-top: 2px; }
+.set-account:last-child { padding-bottom: 2px; }
+.set-account-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--panel3);
+  border: 1px solid var(--border-strong);
+}
+.set-account-name { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 15px; font-weight: 650; color: var(--text); }
+.set-account-line { margin-top: 4px; font-size: 13.5px; line-height: 1.55; color: var(--text-dim); max-width: 62ch; }
+.set-account-actions { display: flex; gap: 8px; align-items: center; }
+.set-account .set-more { margin-top: 10px; }
+.set-account form.set-code-form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.set-account form.set-code-form input { max-width: 340px; }
+
+/* --- Posting times ------------------------------------------------------------------- */
+.set-times-now { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 0; }
+.set-time-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  font-variant-numeric: tabular-nums;
+}
+.set-time-chip strong { font-size: 15px; }
+.set-time-chip span { font-size: 12.5px; color: var(--muted); }
+.set-time-chip.is-rerun span { color: var(--blue); }
+.set-time-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.set-time-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+.set-time-row input[type="time"] { width: 128px; flex: none; }
+.set-time-row select { flex: 1; min-width: 0; width: auto; }
+.set-quickfill {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+}
+.set-quickfill .set-label { font-size: 13px; }
+.set-quickfill select, .set-quickfill input { width: auto; min-width: 120px; }
+
+/* Time inputs had no theme styles of their own (they rendered white in dark
+   mode): give them the same treatment as every other field. */
+input[type="time"] {
+  font: inherit;
+  font-size: 14px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  min-height: var(--control-h);
+  color-scheme: dark;
+  font-variant-numeric: tabular-nums;
+}
+html[data-theme="light"] input[type="time"] { color-scheme: light; }
+input[type="time"]:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--ink) 55%, var(--border-strong));
+  box-shadow: var(--ring);
+}
+
+/* --- Tables on settings pages ------------------------------------------------------ */
+.set-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  background: var(--panel);
+}
+.set-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.set-table th {
+  padding: 10px 14px;
+  text-align: left;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel2) 55%, transparent);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.set-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; color: var(--text); }
+.set-table tr:last-child td { border-bottom: none; }
+.set-table td.num, .set-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.set-table .set-cell-sub { display: block; margin-top: 2px; font-size: 12.5px; color: var(--muted); }
+.set-table tr.is-current td { background: color-mix(in srgb, var(--panel2) 70%, transparent); font-weight: 600; }
+.set-table tr.is-dim td { opacity: 0.5; }
+.set-table .set-row-actions { display: flex; justify-content: flex-end; gap: 2px; white-space: nowrap; }
+
+/* Effect pills (+36% / -15%) */
+.set-effect {
+  display: inline-block;
+  min-width: 56px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 650;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  background: var(--panel2);
+  color: var(--text-dim);
+}
+.set-effect.is-up { color: var(--accent); background: var(--accent-soft); }
+.set-effect.is-down { color: var(--danger); background: var(--danger-soft); }
+
+/* A progress bar (learning status). */
+.set-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--panel3);
+  overflow: hidden;
+  margin: 10px 0 6px;
+}
+.set-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+
+/* Keyword chips */
+.set-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.set-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 13.5px;
+  color: var(--text);
+}
+.set-chip-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.set-chip button {
+  min-height: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.set-chip button:hover { color: var(--danger); background: var(--danger-soft); }
+
+/* Settings headings are titles, not the app's spaced-capital section labels:
+   undo the global h2 treatment (capitals, tracking, trailing hairline). */
+h2.set-section-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  white-space: normal;
+  color: var(--text);
+}
+h2.set-section-title::after { content: none; }
+/* A section folded into a <details>: its summary must read like a section
+   head, not like the app's small grey disclosure link. */
+details.set-section > summary.set-section-head {
+  font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
+}
+details.set-section > summary .set-section-desc { font-weight: 400; color: var(--text-dim); }
+details.set-section > summary:hover .set-section-desc { color: var(--text-dim); }
+/* Text boxes grow with what's typed (Chromium/Safari 18+; older browsers keep
+   their rows and the script in settings_base sizes them). */
+.set-page textarea { field-sizing: content; max-height: 420px; }
+.set-help { max-width: 72ch; }
+/* A section whose footer is the save bar: it sticks to the bottom of the
+   window while the section is on screen. */
+.set-section-foot.set-savebar {
+  position: sticky;
+  bottom: 0;
+  margin: 0;
+  padding: 14px 24px;
+  background: color-mix(in srgb, var(--panel2) 85%, var(--panel));
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+.set-time-list { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+.set-time-row select { min-width: 150px; }
+/* Row actions stay quiet until the row is pointed at (or focused), so a long
+   table reads as data, not as a wall of buttons. */
+@media (hover: hover) {
+  .set-table .set-row-actions { opacity: 0.4; transition: opacity .16s var(--ease); }
+  .set-table tr:hover .set-row-actions,
+  .set-table tr:focus-within .set-row-actions { opacity: 1; }
+}
+/* Section footers stay put: a sticky one floats detached at the bottom of the
+   window as soon as its section's top scrolls in, and reads as part of the
+   section above. Only a page-wide save bar (one long form) sticks. */
+.set-section-foot.set-savebar { position: static; }

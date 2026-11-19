@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "components/toolbar.html" as ui %}
+{#
+  The inbox (app/web/inbox.py): finished clips the system made, one click
+  each. The screen a customer gets, so nothing but the clips and the three
+  actions — the settings are on the admin Automatic triage page.
+  Model-written text (captions, critic lines) is escaped; never mark it safe.
+#}
+{% set ib_sub %}Finished clips, made for you and waiting for one click. Approve queues a clip for the next open posting slot with the caption as you leave it.{% endset %}
+{{ ui.pagebar("Inbox", count=cards|length, sub=ib_sub) }}
+
+<style>
+  .ib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 22px; }
+  .ib-card { display: flex; flex-direction: column; gap: 10px; }
+  .ib-card video { width: 100%; max-height: 520px; background: #000; border-radius: 10px; }
+  .ib-card textarea { width: 100%; min-height: 96px; resize: vertical; field-sizing: content; max-height: 260px; }
+  .ib-why { font-size: 13px; }
+  .ib-warn { color: var(--danger); font-size: 13px; }
+  .ib-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .ib-reject { display: none; flex-direction: column; gap: 8px; }
+  .ib-reject.is-open { display: flex; }
+  .ib-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ib-chip { cursor: pointer; }
+  .ib-chip input { margin-right: 4px; }
+  .ib-card.is-done { opacity: 0.45; pointer-events: none; }
+  .ib-count { font-variant-numeric: tabular-nums; }
+</style>
+
+<div class="canvas canvas-wide">
+{% if not cards %}
+  <div class="empty">
+    <strong>Nothing waiting</strong>
+    {% if policy.enabled %}
+      New clips appear here as they're made — up to {{ policy.per_day }} a day.
+    {% else %}
+      The inbox is switched off. An admin turns it on under Settings › Automatic triage.
+    {% endif %}
+  </div>
+{% else %}
+<div class="ib-grid">
+  {% for card in cards %}
+  {% set it = card.item %}
+  <div class="card ib-card" id="ib-{{ it.id }}">
+    <video src="{{ card.src }}" controls playsinline preload="metadata"></video>
+    <div>
+      <strong>{{ card.cut.clip_title or it.story or card.video_title }}</strong>
+      <div class="meta">{{ card.channel }}{% if card.video_title %} · from <a href="/video/{{ card.candidate_id }}">{{ card.video_title }}</a>{% endif %}</div>
+    </div>
+    {% if it.critic_line %}<div class="meta ib-why">{{ it.critic_line }}</div>{% endif %}
+    <label class="meta" for="cap-{{ it.id }}">Caption <span class="ib-count" id="cnt-{{ it.id }}">{{ it.caption|length }}</span>/500</label>
+    <textarea id="cap-{{ it.id }}" maxlength="500" oninput="document.getElementById('cnt-{{ it.id }}').textContent = this.value.length">{{ it.caption }}</textarea>
+    {% if it.caption_ok == false %}<div class="ib-warn">Caption check: {{ it.caption_note or "flagged" }} — edit before approving, or approve as is.</div>{% endif %}
+    <div class="ib-actions">
+      <button class="btn approve" onclick="approveClip({{ it.id }}, this)">Approve</button>
+      <button class="btn" onclick="toggleReject({{ it.id }})">Reject…</button>
+    </div>
+    <div class="ib-reject" id="rej-{{ it.id }}">
+      <div class="meta">What's wrong? (optional — it teaches the house rules)</div>
+      <div class="ib-chips">
+        {% for slug, label in clip_note_tags() %}
+        <label class="badge ib-chip"><input type="checkbox" value="{{ slug }}">{{ label }}</label>
+        {% endfor %}
+      </div>
+      <input type="text" placeholder="Anything else, in your own words" id="note-{{ it.id }}">
+      <div class="ib-actions"><button class="btn danger sm" onclick="rejectClip({{ it.id }}, this)">Reject this clip</button></div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+</div>
+
+<script>
+async function postForm(url, fields) {
+  const body = new URLSearchParams(fields);
+  const r = await fetch(url, { method: 'POST', body, headers: { 'Accept': 'application/json' } });
+  let out = {};
+  try { out = await r.json(); } catch (e) { /* not JSON */ }
+  if (!r.ok) throw new Error(out.error || ('HTTP ' + r.status));
+  return out;
+}
+
+function settle(id, label) {
+  const card = document.getElementById('ib-' + id);
+  if (!card) return;
+  card.classList.add('is-done');
+  const note = document.createElement('div');
+  note.className = 'meta';
+  note.textContent = label;
+  card.appendChild(note);
+}
+
+async function approveClip(id, btn) {
+  const caption = document.getElementById('cap-' + id).value.trim();
+  if (!caption) { alert('The caption is empty'); return; }
+  btn.disabled = true;
+  try {
+    const out = await postForm(`/inbox/${id}/approve`, { caption });
+    settle(id, out.msg || 'Approved');
+  } catch (e) {
+    btn.disabled = false;
+    alert('Could not approve: ' + e.message);
+  }
+}
+
+function toggleReject(id) {
+  document.getElementById('rej-' + id).classList.toggle('is-open');
+}
+
+async function rejectClip(id, btn) {
+  const box = document.getElementById('rej-' + id);
+  const tags = Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(i => i.value).join(',');
+  const note = document.getElementById('note-' + id).value;
+  btn.disabled = true;
+  try {
+    const out = await postForm(`/inbox/${id}/reject`, { tags, note });
+    settle(id, out.msg || 'Rejected');
+  } catch (e) {
+    btn.disabled = false;
+    alert('Could not reject: ' + e.message);
+  }
+}
+</script>
+{% endblock %}

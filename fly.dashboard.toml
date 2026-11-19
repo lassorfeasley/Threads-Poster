@@ -1,0 +1,55 @@
+# Hosted dashboard for the CLIMATE workspace (Renewables.org), served at
+# https://app.continuity.marketing. Deploy: fly deploy -c fly.dashboard.toml
+#
+# Secrets (fly secrets set -a throughline-climate ...), none in this file:
+#   DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY
+#   ANTHROPIC_API_KEY, GEMINI_API_KEY, YOUTUBE_API_KEY, GIPHY_API_KEY
+#   THREADS_/INSTAGRAM_/LINKEDIN_/FACEBOOK_/X_ app ids, secrets and
+#   *_REDIRECT_URI values pointing at https://app.continuity.marketing/...
+#
+# No volume: Supabase holds every file. Players stream from Storage directly;
+# a render downloads its source into the machine's scratch disk, uploads the
+# result as soon as it finishes, and the scratch copy goes when the machine
+# stops. So the machine can sleep whenever nobody is using it.
+
+app = "throughline-climate"
+# Next to the database (Supabase, AWS us-west-2): pages make dozens of
+# queries, and a cross-country round trip on each added seconds.
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile.dashboard"
+
+[env]
+  WORKSPACE = "climate"
+  # Share the workspace with the Mac and the home worker: documents in the
+  # database, working files through Storage.
+  SHARED_WORKSPACE = "on"
+  # YouTube blocks datacenter IPs: downloads and transcription stay home.
+  ARCHIVE_ON_THIS_MACHINE = "off"
+  # The scheduler app (fly.toml) publishes; don't tick twice.
+  SCHEDULER_EMBEDDED = "false"
+  # Sign-in with Supabase Auth; accounts: python run.py user add/invite.
+  DASHBOARD_AUTH = "supabase"
+  PUBLIC_URL = "https://app.continuity.marketing"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Sleep when idle, wake on the next visit (a few seconds). Posting doesn't
+  # depend on this app: the scheduler app (fly.toml) stays up on its own.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # The web app plus an ffmpeg render of a short clip.
+  memory = "1gb"

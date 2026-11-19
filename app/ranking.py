@@ -1,5 +1,5 @@
-"""Candidate ranking: the learned approve probability, falling back to climate
-relevance nudged by learned trait verdicts.
+"""Candidate ranking: the learned approve probability, then positioning fit,
+falling back to climate relevance nudged by learned trait verdicts.
 
 The approve probability (``Candidate.approve_prob``, see app/triage_model.py)
 leads whenever the triage model is enabled; unscored candidates sort after
@@ -19,12 +19,27 @@ def _use_approve_prob(settings: Settings) -> bool:
     return bool(settings.get("triage_model.enabled", True))
 
 
+def relevance_threshold(settings: Settings) -> float:
+    return float(settings.get("matching.score_threshold", 0.5))
+
+
+def visible(settings: Settings):
+    """SQL filter: the videos the dashboard shows by default — relevance at or
+    above ``matching.score_threshold``, or not scored (a scoring failure must
+    not hide a video). Everything under it is treated as off topic already."""
+    return (Candidate.relevance_score.is_(None)) | (
+        Candidate.relevance_score >= relevance_threshold(settings))
+
+
 def order_clauses(settings: Settings) -> tuple:
-    """SQL ORDER BY keys, best first."""
+    """SQL ORDER BY keys, best first: the approve chance (when the model is on
+    and has scored the video), then positioning fit — which leads in a
+    workspace with no decision history yet — then relevance."""
     relevance = func.coalesce(Candidate.relevance_score, 0.0).desc()
+    fit = Candidate.fit_score.desc().nullslast()
     if _use_approve_prob(settings):
-        return (Candidate.approve_prob.desc().nullslast(), relevance)
-    return (relevance,)
+        return (Candidate.approve_prob.desc().nullslast(), fit, relevance)
+    return (fit, relevance)
 
 
 def load_trait_weights(session, metric: str = "views") -> dict[str, dict]:
@@ -66,13 +81,15 @@ def blended_score(candidate: Candidate, weights: dict[str, dict], settings: Sett
 def sort_candidates(candidates: list[Candidate], weights: dict[str, dict],
                     settings: Settings) -> list[Candidate]:
     """Stable sort, highest first: approve probability (when enabled), then
-    blended score, then recency."""
+    positioning fit, then blended score, then recency."""
     use_prob = _use_approve_prob(settings)
     return sorted(
         candidates,
         key=lambda c: (
             use_prob and c.approve_prob is not None,
             (c.approve_prob or 0.0) if use_prob else 0.0,
+            c.fit_score is not None,
+            c.fit_score or 0.0,
             blended_score(c, weights, settings),
             c.published_at or c.created_at,
         ),
