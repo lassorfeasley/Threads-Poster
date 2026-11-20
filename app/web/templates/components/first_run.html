@@ -3,7 +3,7 @@
   instead of "no matches". ``fr`` is first_run.status(); ``admin`` adds the
   monitor's run-now button; ``where`` names the page clips land on.
 #}
-{% macro first_run(fr, admin=false, where="here") %}
+{% macro first_run(fr, admin=false, where="here", upload_inline=false) %}
 <div class="fr">
   <div class="fr-head">
     <span class="fr-spark" aria-hidden="true">✨</span>
@@ -31,10 +31,12 @@
       <div><strong>Clips land {{ where }} for you to approve.</strong> Each one is cut, subtitled and captioned, ready to post.</div>
     </li>
   </ol>
-  <a class="fr-upload" href="/welcome/launch">
+  {% if not upload_inline %}
+  <a class="fr-upload" href="/inbox">
     <span aria-hidden="true">🎬</span>
-    <span><strong>Don't want to wait?</strong> Upload a video of your own and get clips from it right away.</span>
+    <span><strong>Don't want to wait?</strong> Add a video of your own or a YouTube link, and get clips from it right away.</span>
     <span aria-hidden="true">→</span>
   </a>
+  {% endif %}
 </div>
 {% endmacro %}
