@@ -21,7 +21,7 @@ _is_sqlite = _url.startswith("sqlite")
 # ``_ensure_indexes`` / ``_ensure_rls`` change.
 # Stored in ``app_tokens`` so remote Postgres startups skip the expensive
 # inspection round trips after the first successful migrate.
-SCHEMA_VERSION = "53"
+SCHEMA_VERSION = "54"
 _SCHEMA_TOKEN_NAME = "_schema_version"
 
 _engine_kwargs: dict = {"future": True}
@@ -185,6 +185,8 @@ _SCHEMA_SENTINELS = (
     "SELECT explore FROM auto_triage_actions LIMIT 0",
     "SELECT approved FROM auto_triage_runs LIMIT 0",
     "SELECT caption_ok FROM inbox_items LIMIT 0",
+    "SELECT updated_at FROM threads_posts LIMIT 0",
+    "SELECT updated_at FROM x_posts LIMIT 0",
 )
 
 
@@ -296,6 +298,7 @@ def _ensure_new_columns() -> None:
             "audit": "BOOLEAN DEFAULT FALSE",
         },
         "threads_posts": {
+            "updated_at": "TIMESTAMP WITH TIME ZONE",
             "cut_pk": "INTEGER",
             "source": "VARCHAR(20) DEFAULT 'app'",
             "scheduled_at": "TIMESTAMP WITH TIME ZONE",
@@ -326,6 +329,13 @@ def _ensure_new_columns() -> None:
         },
         "instagram_posts": {
             "clip_uploaded_at": "TIMESTAMP WITH TIME ZONE",
+            "updated_at": "TIMESTAMP WITH TIME ZONE",
+        },
+        "linkedin_posts": {
+            "updated_at": "TIMESTAMP WITH TIME ZONE",
+        },
+        "x_posts": {
+            "updated_at": "TIMESTAMP WITH TIME ZONE",
         },
         "traits": {
             "facet": "VARCHAR(20) DEFAULT 'subject'",
@@ -386,6 +396,7 @@ def _ensure_new_columns() -> None:
             "comment_id": "VARCHAR(60) DEFAULT ''",
             "comment_error": "TEXT DEFAULT ''",
             "comment_claimed_at": "TIMESTAMP WITH TIME ZONE",
+            "updated_at": "TIMESTAMP WITH TIME ZONE",
         },
     }
     added: list[tuple[str, str]] = []

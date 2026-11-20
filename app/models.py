@@ -433,6 +433,12 @@ class ThreadsPost(Base):
     first_reply_skipped: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Stamped on every write, so a row mid-publish shows when it was last
+    # touched: scheduler.recover_stuck_publishing leaves fresh ones alone,
+    # since another machine may be publishing them. NULL on rows from
+    # before the column existed.
+    updated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=utcnow, onupdate=utcnow)
 
     candidate: Mapped[Candidate | None] = relationship(back_populates="threads_posts")
     cut: Mapped["Cut | None"] = relationship(back_populates="threads_posts")
@@ -484,6 +490,12 @@ class InstagramPost(Base):
     )
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Stamped on every write, so a row mid-publish shows when it was last
+    # touched: scheduler.recover_stuck_publishing leaves fresh ones alone,
+    # since another machine may be publishing them. NULL on rows from
+    # before the column existed.
+    updated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=utcnow, onupdate=utcnow)
 
     cut: Mapped["Cut | None"] = relationship(back_populates="instagram_posts")
     threads_post: Mapped["ThreadsPost | None"] = relationship(back_populates="instagram_post")
@@ -515,6 +527,12 @@ class LinkedInPost(Base):
     )
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Stamped on every write, so a row mid-publish shows when it was last
+    # touched: scheduler.recover_stuck_publishing leaves fresh ones alone,
+    # since another machine may be publishing them. NULL on rows from
+    # before the column existed.
+    updated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=utcnow, onupdate=utcnow)
 
     threads_post: Mapped["ThreadsPost"] = relationship(back_populates="linkedin_post")
 
@@ -544,6 +562,12 @@ class XPost(Base):
     )
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Stamped on every write, so a row mid-publish shows when it was last
+    # touched: scheduler.recover_stuck_publishing leaves fresh ones alone,
+    # since another machine may be publishing them. NULL on rows from
+    # before the column existed.
+    updated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=utcnow, onupdate=utcnow)
 
     threads_post: Mapped["ThreadsPost"] = relationship(back_populates="x_post")
 
@@ -584,6 +608,12 @@ class FacebookPost(Base):
     )
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Stamped on every write, so a row mid-publish shows when it was last
+    # touched: scheduler.recover_stuck_publishing leaves fresh ones alone,
+    # since another machine may be publishing them. NULL on rows from
+    # before the column existed.
+    updated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=utcnow, onupdate=utcnow)
 
     threads_post: Mapped["ThreadsPost"] = relationship(back_populates="facebook_post")
 

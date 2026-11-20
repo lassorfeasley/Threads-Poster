@@ -109,7 +109,38 @@ _INTERRUPTED_PUBLISH_MSG = (
 _thread: threading.Thread | None = None
 
 
-def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
+# A publish waits for Threads to process the video, then the paired Instagram
+# reel, so a live one can sit untouched in ``publishing`` for the sum of both
+# waits. Recover only well past that.
+_STUCK_AFTER_MINUTES = 45.0
+
+
+def stuck_publishing_cutoff(now: dt.datetime | None = None) -> dt.datetime:
+    """Rows in ``publishing`` last written before this are taken as orphaned.
+
+    ``scheduler.stuck_publishing_minutes`` (default 45), never less than the
+    configured Threads and Instagram processing waits plus 15 minutes."""
+    settings = load_settings()
+    waits = (float(settings.get("threads.publish_poll_timeout_seconds", 600))
+             + float(settings.get("instagram.publish_poll_timeout_seconds", 600))) / 60
+    minutes = max(float(settings.get("scheduler.stuck_publishing_minutes", _STUCK_AFTER_MINUTES)),
+                  waits + 15)
+    return (now or utcnow()) - dt.timedelta(minutes=minutes)
+
+
+def _untouched_since(row, cutoff: dt.datetime) -> bool:
+    """Not written since ``cutoff``. A row from before ``updated_at`` existed
+    (NULL) counts as untouched, as every stuck row did before."""
+    stamp = getattr(row, "updated_at", None)
+    if stamp is None:
+        return True
+    if stamp.tzinfo is None:  # SQLite hands back naive UTC
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp <= cutoff
+
+
+def recover_stuck_publishing(session, *, only_inactive: bool = True,
+                             now: dt.datetime | None = None) -> int:
     """Rescue posts orphaned in the ``publishing`` status.
 
     A manual publish (or scheduler tick) flips a post to ``publishing`` and then
@@ -119,16 +150,24 @@ def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
     isn't ``published`` so the calendar drops it — the post silently disappears.
 
     Flip those back to ``failed`` with an explanatory error so they resurface in
-    the Posts list and can be retried. ``only_inactive`` skips posts this process
-    is actively publishing right now (so a live in-flight publish is never
-    clobbered); pass False only at startup, when nothing can be in flight yet.
+    the Posts list and can be retried.
+
+    Several machines publish for one account (the dashboard, the Fly worker,
+    GitHub Actions), and none can see another's in-flight work. So a row is only
+    taken back once it has gone untouched past ``stuck_publishing_cutoff`` —
+    even at startup — or a machine would fail a post another one is publishing
+    right then. ``only_inactive`` also skips what this process is publishing;
+    pass False only at startup, when nothing of its own can be in flight.
     """
+    cutoff = stuck_publishing_cutoff(now)
     rows = session.execute(
         select(ThreadsPost).where(ThreadsPost.status == STATUS_PUBLISHING)
     ).scalars().all()
     recovered = 0
     for p in rows:
         if only_inactive and is_publish_active(p.id):
+            continue
+        if not _untouched_since(p, cutoff):
             continue
         p.status = "failed"
         p.error = _INTERRUPTED_PUBLISH_MSG
@@ -146,6 +185,8 @@ def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
     for ig in ig_rows:
         if only_inactive and ig.threads_post_pk and is_publish_active(ig.threads_post_pk):
             continue
+        if not _untouched_since(ig, cutoff):
+            continue
         ig.status = "failed"
         ig.error = _INTERRUPTED_PUBLISH_MSG
         recovered += 1
@@ -157,6 +198,8 @@ def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
     ).scalars().all()
     for li in li_rows:
         if only_inactive and is_linkedin_publish_active(li.id):
+            continue
+        if not _untouched_since(li, cutoff):
             continue
         li.status = "failed"
         li.error = ("Publishing to LinkedIn was interrupted before it finished. "
@@ -172,6 +215,8 @@ def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
     for xp in x_rows:
         if only_inactive and is_x_publish_active(xp.id):
             continue
+        if not _untouched_since(xp, cutoff):
+            continue
         xp.status = "failed"
         xp.error = ("Publishing to X was interrupted before it finished. Check the "
                     "X account to see if this clip went out; if it didn't, retry from here.")
@@ -184,6 +229,8 @@ def recover_stuck_publishing(session, *, only_inactive: bool = True) -> int:
     ).scalars().all()
     for fb in fb_rows:
         if only_inactive and is_facebook_publish_active(fb.id):
+            continue
+        if not _untouched_since(fb, cutoff):
             continue
         fb.status = "failed"
         fb.error = ("Publishing to Facebook was interrupted before it finished. Check "
@@ -3450,8 +3497,8 @@ def start_scheduler_thread(interval_seconds: int = 60) -> None:
 
     def _loop() -> None:
         log.info("Adaptive scheduler started (checking every %ss)", interval_seconds)
-        # Nothing can be mid-publish in a freshly started process, so any post
-        # sitting in 'publishing' is an orphan from a previous run — recover it.
+        # Nothing of this process's own can be mid-publish yet, but another
+        # machine may be: recover only what has sat untouched past the cutoff.
         try:
             with session_scope() as session:
                 n = recover_stuck_publishing(session, only_inactive=False)
