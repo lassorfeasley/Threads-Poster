@@ -20,10 +20,11 @@ primary_region = "sjc"   # next to the databases
   SCHEDULER_EMBEDDED = "false"
   ARCHIVE_ON_THIS_MACHINE = "off"
 
-[experimental]
-  cmd = ["python", "run.py", "admin", "--host", "0.0.0.0", "--port", "8080"]
+[processes]
+  app = "python run.py admin --host 0.0.0.0 --port 8080"
 
 [http_service]
+  processes = ["app"]
   internal_port = 8080
   force_https = true
   auto_stop_machines = "stop"
