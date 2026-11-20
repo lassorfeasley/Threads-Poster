@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -7487,6 +7487,50 @@ def subtitle_style_save(font: str = Form(""), custom_font: str = Form(""),
         return _flash("/subtitle-style", str(exc))
     return _flash("/subtitle-style", f"Saved — new clips get {look['font']} on {look['box']}. "
                                      "Clips already made keep the look they were made with.")
+
+
+# --- Outro: the account's closing card (app/outro_card.py) -------------------
+
+@app.get("/outro-card", response_class=HTMLResponse)
+def outro_card_page(request: Request, msg: str = ""):
+    from .. import caption_look, outro_card
+
+    return templates.TemplateResponse(
+        request, "outro_card.html",
+        {"card": outro_card.current(), "colors": caption_look.COLORS,
+         "max_line": outro_card.MAX_LINE, "msg": msg, "active": "outro_card"})
+
+
+@app.get("/outro-card/preview.png")
+def outro_card_preview(orientation: str = "landscape", line1: str = "", line2: str = "",
+                       line3: str = "", website: str = "", color: str = ""):
+    """The card as the form stands, unsaved — drawn by the renderer itself."""
+    from .. import outro_card
+
+    try:
+        card = outro_card.clean(enabled=False, lines=[line1, line2, line3],
+                                website=website if website.strip() else "",
+                                color=color or outro_card.DEFAULT_COLOR)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    png = outro_card.preview_png(card, "vertical" if orientation == "vertical" else "landscape")
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/outro-card")
+def outro_card_save(enabled: str = Form(""), line1: str = Form(""), line2: str = Form(""),
+                    line3: str = Form(""), website: str = Form(""),
+                    color: str = Form(""), custom_color: str = Form("")):
+    from .. import outro_card
+
+    try:
+        card = outro_card.save(enabled=bool(enabled), lines=[line1, line2, line3],
+                               website=website,
+                               color=custom_color if color == "__custom" else color)
+    except ValueError as exc:
+        return _flash("/outro-card", str(exc))
+    return _flash("/outro-card", ("Saved — clips posted from now on end with this card."
+                                  if card["enabled"] else "Saved — the outro is off."))
 
 
 # --- Style guide (caption drafting prompt) -----------------------------------
