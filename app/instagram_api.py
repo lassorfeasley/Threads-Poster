@@ -123,13 +123,16 @@ def _peek_token() -> dict | None:
 
 # --- OAuth -------------------------------------------------------------------
 
-def authorize_url() -> str:
+def authorize_url(state: str = "") -> str:
+    """Instagram's sign-in page. ``state`` comes back untouched on the redirect."""
     params = {
         "client_id": env("INSTAGRAM_APP_ID"),
         "redirect_uri": env("INSTAGRAM_REDIRECT_URI"),
         "scope": SCOPES,
         "response_type": "code",
     }
+    if state:
+        params["state"] = state
     return f"https://www.instagram.com/oauth/authorize?{urlencode(params)}"
 
 

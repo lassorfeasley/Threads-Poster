@@ -7289,3 +7289,14 @@ body.ob .ob-src-row { flex-direction: row; justify-content: space-between; align
 .ob-tab-on { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; white-space: nowrap; cursor: pointer; }
 .ob-tab-on input { accent-color: var(--accent); width: 18px; height: 18px; }
 .ob-field-help { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
+
+/* Onboarding connect step: one-click Meta sign-in, and "later". */
+.ob-conn-req { margin-left: 8px; font-size: 12px; font-weight: 600; color: var(--warn); }
+.ob-conn-go { margin-top: 12px; font-size: 15px; padding: 12px 22px; }
+.ob-later { display: flex; gap: 10px; align-items: baseline; justify-content: flex-end; margin-top: 12px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+.ob-later .ob-link { font-weight: 600; color: var(--text-dim); text-decoration: underline; }
+
+/* Customer reminder until Threads is connected (base.html). */
+.connect-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  margin: 0 0 4px; padding: 12px 20px; background: var(--warn-soft); border-bottom: 1px solid var(--warn-border); font-size: 14.5px; }
+.connect-bar-go { font-weight: 700; color: var(--text); white-space: nowrap; }

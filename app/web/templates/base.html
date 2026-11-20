@@ -139,6 +139,12 @@
   })();
 </script>
 <main class="{% block main_class %}{% endblock %}">
+  {% if request is defined and not _admin and not threads_authenticated() %}
+  <div class="connect-bar" role="status">
+    <span><strong>Connect Threads</strong> so the clips you approve can post.</span>
+    <a class="connect-bar-go" href="{{ threads_connect_href(request.url.path) }}">Connect Threads →</a>
+  </div>
+  {% endif %}
   {% if _real_admin and not _admin %}
   <div class="view-as-bar" role="status">You're seeing what customers see. <a href="/view-as?mode=admin&amp;next=/">Back to the admin view</a></div>
   {% endif %}
