@@ -748,8 +748,11 @@ def with_extra_rules(rules: str, extra: list[str]) -> str:
     bullets = "\n".join(f"- {text}" for text in extra or [])
     if not bullets:
         return rules or ""
-    if not (rules or "").strip():
-        return _RULES_PREAMBLE + bullets + "\n" + _RULES_CODA
+    rules = rules or ""
+    if not rules.strip() or ("THROUGHLINE'S RULES" in rules and "THE OPERATOR'S RULES" not in rules):
+        # No account block yet (at most Throughline's universal rules, which
+        # stay as they are): the extra rules start the account's block.
+        return rules + _RULES_PREAMBLE + bullets + "\n" + _RULES_CODA
     marker = "\nMaterial that challenges"
     at = rules.rfind(marker)
     if at >= 0:

@@ -7164,8 +7164,23 @@ def brand_page(request: Request, msg: str = ""):
         request, "brand.html",
         {"brand": load_brand(), "rules": load_brand_rules(),
          "rule_proposals": _pending_rule_proposals(),
+         "universal": _universal_rules_for_page(),
          "msg": msg, "active": "brand"},
     )
+
+
+def _universal_rules_for_page() -> dict | None:
+    """Throughline's universal rules, shown read-only on the Brand page."""
+    try:
+        from .. import universal_rules
+
+        data = universal_rules.load()
+        return {"rules": [dict(r, scope=universal_rules.SCOPE_LABELS.get(r["applies_to"], ""))
+                          for r in data["rules"] if r["enabled"]],
+                "min_s": data["clip_length"]["min_seconds"], "max_s": data["clip_length"]["max_seconds"]}
+    except Exception:
+        log.exception("Universal rules unavailable for the Brand page")
+        return None
 
 
 def _pending_rule_proposals() -> list[dict]:

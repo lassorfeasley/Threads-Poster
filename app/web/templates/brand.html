@@ -96,6 +96,25 @@
     </div>
   </section>
 
+  {# ---- Throughline's universal rules: read-only, set by Throughline ---- #}
+  {% if universal %}
+  <section class="set-section" id="universal-rules">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Throughline's rules</h2>
+        <p class="set-section-desc">How we make every clip, for every account. They're applied alongside your own rules and win if the two ever disagree.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <ul class="ur-list">
+        <li><strong>Clips run {{ universal.min_s }} to {{ universal.max_s }} seconds.</strong></li>
+        {% for r in universal.rules %}<li>{{ r.text }} <span class="set-optional">{{ r.scope }}</span></li>{% endfor %}
+      </ul>
+    </div>
+  </section>
+  <style>.ur-list { margin: 0; padding-left: 18px; display: grid; gap: 8px; color: var(--text-dim); line-height: 1.5; } .ur-list strong { color: var(--text); }</style>
+  {% endif %}
+
   {# ---- Rules suggested from notes and past edits ---- #}
   <section class="set-section" id="rule-proposals"{% if not rule_proposals %} hidden{% endif %}>
     <div class="set-section-head">

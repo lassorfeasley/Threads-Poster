@@ -96,10 +96,24 @@ def load_settings() -> Settings:
         key = (st.st_mtime_ns, st.st_size)
     except OSError:
         key = (0, 0)
+    try:
+        from .universal_rules import clip_length
+
+        lo, hi = clip_length()
+    except Exception:
+        lo = hi = None
+    key = (*key, lo, hi)
     cached = _settings_cache
     if cached is not None and cached[0] == key:
         return cached[1]
-    settings = Settings(raw=_load_yaml(path))
+    raw = _load_yaml(path)
+    if lo is not None:
+        # Throughline's universal clip length wins over the account's own
+        # (app/universal_rules.py), for the transcript suggester and the engine.
+        for section in ("clips", "clip_engine"):
+            raw.setdefault(section, {})
+            raw[section]["min_seconds"], raw[section]["max_seconds"] = lo, hi
+    settings = Settings(raw=raw)
     _settings_cache = (key, settings)
     return settings
 
