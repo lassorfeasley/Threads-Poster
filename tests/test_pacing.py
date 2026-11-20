@@ -262,6 +262,18 @@ class TestDailyCeiling(unittest.TestCase):
         ctx = paced_ctx({}, 6, pace_max_share=0.5, pace_max_per_day=4)
         self.assertEqual(ctx.day_cap(DAY0), 3)
 
+    def test_share_counts_rerun_slots_too(self):
+        # The posting plan's six windows, three of them rerun slots: half of six
+        # is three new clips, not half of the three left over (one).
+        ctx = paced_ctx({}, 3, slots=3, pace_max_share=0.5, pace_max_per_day=4)
+        ctx.pace_day_windows = {DAY0: 6}
+        self.assertEqual(ctx.day_cap(DAY0), 3)
+        # Never more than the windows new clips may use.
+        ctx.pace_day_windows = {DAY0: 10}
+        self.assertEqual(ctx.day_cap(DAY0), 3)
+        # A day without the count falls back to the organic windows, as before.
+        self.assertEqual(ctx.day_cap(DAY0 + dt.timedelta(days=1)), 1)
+
 
 class TestPaceRate(unittest.TestCase):
     CFG = {"fixed": None, "spread_days": 7, "min_per_day": 3}
@@ -275,6 +287,11 @@ class TestPaceRate(unittest.TestCase):
         cfg = {**self.CFG, "max_per_day": 4, "max_share": 0.5}
         self.assertEqual(scheduler.pace_per_day(cfg, 46, windows=6), 3.0)
         self.assertEqual(scheduler.pace_per_day(cfg, 46, windows=10), 4.0)
+
+    def test_share_of_all_windows_capped_at_the_organic_ones(self):
+        cfg = {**self.CFG, "max_per_day": 4, "max_share": 0.5}
+        self.assertEqual(scheduler.pace_per_day(cfg, 44, windows=6, organic=3), 3.0)   # 3 rerun slots
+        self.assertEqual(scheduler.pace_per_day(cfg, 44, windows=6, organic=2), 2.0)
 
     def test_deep_queue_spreads_over_a_week(self):
         self.assertEqual(scheduler.pace_per_day(self.CFG, 35), 5.0)

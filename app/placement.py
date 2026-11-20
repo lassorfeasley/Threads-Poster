@@ -195,6 +195,11 @@ class PlacementContext:
     # overflow windows excluded), so a window's share of the daily pace never
     # depends on which windows happen to be left in this walk.
     pace_windows: dict[dt.date, tuple[int, ...]] = field(default_factory=dict)
+    # Each day's windows in all, rerun slots included: ``max_share`` is a share
+    # of these. Reserved rerun slots already take reruns, so a share of only
+    # the organic windows would halve the new clips twice (3 rerun slots of 6
+    # and max_share 0.5 left one new clip a day). Missing day: the organic count.
+    pace_day_windows: dict[dt.date, int] = field(default_factory=dict)
     # Windows the pace may not hold back (the tick's fallback when a held
     # window found no rerun to air).
     pace_open: frozenset[str] = frozenset()
@@ -268,8 +273,9 @@ class PlacementContext:
         if s.pace_max_per_day > 0:
             caps.append(s.pace_max_per_day)
         if s.pace_max_share > 0 and day is not None:
-            n = len(self.pace_windows.get(day, ()))
-            caps.append(math.floor(round(s.pace_max_share * n, 6)))
+            organic = len(self.pace_windows.get(day, ()))
+            n = self.pace_day_windows.get(day, organic)
+            caps.append(min(organic, math.floor(round(s.pace_max_share * n, 6))))
         return min(caps) if caps else None
 
     def pace_capped(self, window_key: str, done_today: int) -> bool:
