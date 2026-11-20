@@ -281,7 +281,7 @@ python run.py retranscribe --missing-words --limit 20
 - It adds word streams only. The existing transcript is never touched, and the method "captions" becomes "captions+whisper".
 - Videos with an exported clip go first.
 - Sources it has to bring back from storage are deleted again afterwards.
-- It stops when free disk drops below `clip_engine.min_free_gb` (10 GB).
+- It stops when free disk drops below `clip_engine.min_free_gb` (10 GB). The `CLIP_ENGINE_MIN_FREE_GB` environment variable overrides it per machine (the hosted dashboard sets 3).
 - Whisper runs on the CPU: allow tens of seconds to a few minutes per video.
 
 ## Where files live

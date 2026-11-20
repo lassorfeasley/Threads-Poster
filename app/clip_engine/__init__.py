@@ -25,6 +25,7 @@ the headless scheduler imports may import this package at module level.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import uuid
 from pathlib import Path
@@ -89,6 +90,30 @@ def opt(settings, key: str, default):
     if value is None or (isinstance(value, str) and not value.strip()):
         return default
     return value
+
+
+def min_free_gb(settings) -> float:
+    """The free-disk floor (GiB) below which engine work stops.
+
+    ``CLIP_ENGINE_MIN_FREE_GB`` wins over ``clip_engine.min_free_gb``: the
+    floor describes this machine's disk, and the setting can be shared by
+    machines with very different disks (the hosted dashboard's scratch disk
+    is ~8 GB in all, so the Mac's 10 GB floor would block every run there).
+    A value that isn't a finite number warns and reads as the next source."""
+    from ..config import env
+
+    for source, raw in (("CLIP_ENGINE_MIN_FREE_GB", env("CLIP_ENGINE_MIN_FREE_GB", "")),
+                        ("clip_engine.min_free_gb", opt(settings, "clip_engine.min_free_gb", 10))):
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        try:
+            value = float(raw)
+            if math.isfinite(value):
+                return value
+        except (TypeError, ValueError):
+            pass
+        log.warning("%s=%r isn't a number; ignoring it", source, raw)
+    return 10.0
 
 
 def model_for(settings, provider: str, role: str) -> str:

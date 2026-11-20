@@ -1,8 +1,9 @@
 {% extends "auth_base.html" %}
 {% block body %}
 <form class="login-card" method="post" action="/login">
-  <h1>{{ brand_name() }}</h1>
-  <p class="sub">Sign in to your dashboard.</p>
+  <p class="eyebrow">Continuity Throughline</p>
+  <h1>Sign in</h1>
+  <p class="sub">Your queue, your posts, your reports.</p>
   {% if error == "invalid" %}<p class="login-err">That email and password don't match.</p>
   {% elif error == "throttled" %}<p class="login-err">Too many attempts. Try again in 15 minutes.</p>
   {% elif error == "noaccess" %}<p class="login-err">This account doesn't have access to this dashboard. Ask whoever invited you.</p>

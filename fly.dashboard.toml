@@ -32,6 +32,10 @@ primary_region = "sjc"
   # Sign-in with Supabase Auth; accounts: python run.py user add/invite.
   DASHBOARD_AUTH = "supabase"
   PUBLIC_URL = "https://app.continuity.marketing"
+  # The scratch disk is ~8 GB in all, so the shared 10 GB floor
+  # (clip_engine.min_free_gb) would stop every Suggest before it starts.
+  # A run needs the source (under 1 GB) plus proxies.
+  CLIP_ENGINE_MIN_FREE_GB = "3"
 
 [http_service]
   internal_port = 8080

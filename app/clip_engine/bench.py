@@ -54,7 +54,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable
 
-from . import ROLES, SETUPS, bench_dir, engine_dir, model_for, opt, util
+from . import ROLES, SETUPS, bench_dir, engine_dir, min_free_gb, model_for, opt, util
 from . import brand as engine_brand
 
 _log = logging.getLogger("clip_engine.bench")
@@ -2133,7 +2133,7 @@ def _execute(run_dir: Path, manifest: dict, videos: list[dict], labels: list[str
     specs = manifest.get("arm_specs") or {}
     labels = [l for l in labels if l in specs]
     max_usd = float(manifest.get("max_usd") or 0.0)
-    min_free = float(opt(settings, "clip_engine.min_free_gb", 10))
+    min_free = min_free_gb(settings)
     timeout = float(opt(settings, "clip_engine.job_timeout_seconds", 1800))
     brand = engine_brand()
     state = _LoopState(_run_spent(run_dir))
@@ -2744,7 +2744,7 @@ def _render_needed(run_dir: Path, needed: dict[str, list[dict]], videos: list[di
     try:
         from ..config import load_settings
 
-        min_free = float(opt(load_settings(), "clip_engine.min_free_gb", 10))
+        min_free = min_free_gb(load_settings())
     except Exception:
         pass
     sources = _source_fields(videos)

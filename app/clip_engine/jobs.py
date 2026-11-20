@@ -72,7 +72,7 @@ from .. import clip_proposals, spend
 from ..config import load_settings
 from ..db import session_scope
 from ..models import STATUS_ARCHIVED, Candidate, ClipProposal, Cut, utcnow
-from . import BOOT_ID, brand, effective_setup, engine_dir, opt, util
+from . import BOOT_ID, brand, effective_setup, engine_dir, min_free_gb, opt, util
 
 log = logging.getLogger("clip_engine.jobs")
 
@@ -657,7 +657,7 @@ def _execute(job: _Job) -> dict:
             log.warning("Couldn't tidy the advice for candidate %s: %s", job.candidate_id, exc)
             advice_for_engine = job.advice
 
-    min_free = _number_setting(settings, "clip_engine.min_free_gb", 10)
+    min_free = min_free_gb(settings)
     try:
         free = float(media.disk_free_gb(engine_dir()))
     except Exception as exc:

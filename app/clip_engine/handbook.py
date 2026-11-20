@@ -59,7 +59,7 @@ from typing import Any, Callable
 
 import yaml
 
-from . import engine_dir, model_for, opt, util
+from . import engine_dir, min_free_gb, model_for, opt, util
 
 log = logging.getLogger("clip_engine.handbook")
 
@@ -660,7 +660,7 @@ def analyse(example: dict, settings, meter=None) -> dict:
     shot_log = shotlog.load_cached(example["video_id"], "gemini", perceiver_model,
                                    settings=settings, seconds=example.get("duration"))
     if shot_log is None:
-        min_free = float(opt(settings, "clip_engine.min_free_gb", 10))
+        min_free = min_free_gb(settings)
         with source_for(example, min_free_gb=min_free,
                         key=f"handbook-{example['video_id']}") as source:
             shot_log = shotlog.build(
@@ -1255,7 +1255,7 @@ def validate(report: dict, settings, *, limit: int = 15, max_usd: float | None =
     }
     brand = load_brand()
     playbook = playbooks.strip_examples(playbooks.load())
-    min_free = float(opt(settings, "clip_engine.min_free_gb", 10))
+    min_free = min_free_gb(settings)
     timeout = float(opt(settings, "clip_engine.job_timeout_seconds", 1800))
     rows: dict[str, list[dict]] = {arm: [] for arm in arms}
     spent, stopped = 0.0, ""
