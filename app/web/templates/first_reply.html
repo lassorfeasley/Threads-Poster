@@ -1,51 +1,78 @@
-{% extends "base.html" %}
-{% block content %}
+{% extends "settings_base.html" %}
+{% block settings_content %}
 {% import "components/toolbar.html" as ui %}
-{% set fr_sub %}Posted under every found-footage post right after it publishes. Your own promos don't get one. A failed reply never undoes the post; retry it from the post page.{% endset %}
-{{ ui.pagebar("First reply", sub=fr_sub) }}
+{#
+  First reply (POST /engagement/first-reply). Every account gets one reply,
+  posted under each post. Admins also see the watch-page style Renewables.org
+  uses — a page per clip on the site, linked from the reply — which a
+  customer's save leaves exactly as it was (app/web/access.py).
+#}
+{{ ui.pagebar("First reply", sub="A reply posted under each of your posts right after it goes out — a good place for a link or a call to action.") }}
 
-<form method="post" action="/engagement/first-reply">
-  <div class="card">
-    <label class="inline-label" style="display:flex; align-items:center; gap:10px;">
-      <input type="checkbox" name="enabled" value="1" {% if enabled %}checked{% endif %}>
-      Post a first reply under each post
-    </label>
-  </div>
-
-  <div class="card">
-    <label for="watch-text" class="card-title" style="display:block; margin-bottom: 4px;">1. Linking the video page</label>
-    <p class="meta" style="margin: 0 0 10px;">
-      Used when the clip's full segment is on YouTube and its page on
-      Renewables.org goes up. Put <code>{{ placeholder }}</code> where the link
-      goes; it becomes <code>renewables.org/watch/…</code> and Threads shows its
-      preview card.
-    </p>
-    <textarea name="watch_text" id="watch-text" rows="4" data-link="1"
-              placeholder="e.g. Watch the full segment 👉 {{ placeholder }}">{{ watch_text }}</textarea>
-    <div class="meta fr-foot">
-      <span class="fr-preview"></span>
-      <span class="fr-count"></span>
+<div class="set-page">
+<form method="post" action="/engagement/first-reply" data-savebar>
+  <section class="set-section" id="reply">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Your first reply</h2>
+        <p class="set-section-desc">Posted under every post. If it ever fails, the post itself stays up.</p>
+      </div>
     </div>
-  </div>
-
-  <div class="card">
-    <label for="fallback-text" class="card-title" style="display:block; margin-bottom: 4px;">2. When there's no video page</label>
-    <p class="meta" style="margin: 0 0 10px;">
-      Used when the source isn't an embeddable YouTube video, or its page
-      couldn't be published. Points people to Renewables.org instead.
-    </p>
-    <textarea name="fallback_text" id="fallback-text" rows="4"
-              placeholder="e.g. Take climate action 👉 Renewables.org">{{ fallback_text }}</textarea>
-    <div class="meta fr-foot">
-      <span></span>
-      <span class="fr-count"></span>
+    <div class="set-section-body">
+      <label class="set-toggle">
+        <span class="set-item-text">
+          <span class="set-item-label" style="display: block;">Post a first reply</span>
+          <span class="set-item-help" style="display: block;">Switch off and posts go out on their own.</span>
+        </span>
+        <span class="switch">
+          <input type="checkbox" name="enabled" value="1" {% if enabled %}checked{% endif %}>
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </span>
+      </label>
+      <div class="set-field">
+        <label class="set-label" for="fallback-text">The reply</label>
+        <p class="set-help">Up to 500 characters. A link here shows as a preview card on Threads.</p>
+        <textarea name="fallback_text" id="fallback-text" rows="4"
+                  placeholder="e.g. Want to help? Find out how at example.org">{{ fallback_text }}</textarea>
+        <div class="meta fr-foot"><span></span><span class="fr-count"></span></div>
+      </div>
     </div>
-  </div>
+    {% if not admin %}
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Applies to posts from now on.</span>
+      <button class="btn-primary" type="submit">Save</button>
+    </div>
+    {% endif %}
+  </section>
 
-  <div class="btn-group" style="margin-top: 16px;">
-    <button class="primary" type="submit">Save</button>
-  </div>
+  {% if admin %}
+  <section class="set-section" id="watch-pages">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Video page reply <span class="set-status is-plain">For admins</span></h2>
+        <p class="set-section-desc">The style Renewables.org uses. When a clip's full segment is on YouTube, the post
+          gets its own page on Renewables.org and this reply links to it; otherwise the reply above goes out.
+          Leave it blank to switch video pages off. Customers don't see this.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div class="set-field">
+        <label class="set-label" for="watch-text">Reply linking the video page</label>
+        <p class="set-help">Put <code>{{ placeholder }}</code> where the link goes. It becomes
+          <code>renewables.org/watch/…</code>, and Threads shows its preview card.</p>
+        <textarea name="watch_text" id="watch-text" rows="4" data-link="1"
+                  placeholder="e.g. Watch the full segment 👉 {{ placeholder }}">{{ watch_text }}</textarea>
+        <div class="meta fr-foot"><span class="fr-preview"></span><span class="fr-count"></span></div>
+      </div>
+    </div>
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Applies to posts from now on.</span>
+      <button class="btn-primary" type="submit">Save</button>
+    </div>
+  </section>
+  {% endif %}
 </form>
+</div>
 
 <style>
   .fr-foot { margin-top: 6px; display: flex; justify-content: space-between; gap: 12px; }

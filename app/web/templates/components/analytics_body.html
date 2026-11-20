@@ -60,12 +60,14 @@
 <div class="panel-head" style="margin-top: 20px;">
   <h2>Digest <span class="meta" id="digest-meta">{{ digest_meta(digest) }}</span></h2>
   <div class="panel-head-actions">
+    {% if is_admin(request) %}
     <form method="post" action="/analytics/digest" class="inline"
           data-async="Digest written" data-async-then="onDigestWritten"
           data-confirm="This sends your post stats to {{ digest.model or 'Claude' }} and takes about half a minute."
           data-confirm-title="Write a new digest" data-confirm-ok="Write it">
       <button class="sm">{{ "Rewrite digest" if digest.text else "Write digest" }}</button>
     </form>
+    {% endif %}
   </div>
 </div>
 {% if digest.text %}
@@ -370,10 +372,11 @@ if (window.Chart && TS.days && TS.days.length) {
   }
   engCtx.addEventListener('click', (e) => {
     const pk = postTarget(elementAt(e));
-    if (pk != null) location.href = `/post/${pk}`;
+    // A post's page is an admin page (app/web/access.py).
+    if (pk != null && {{ 'true' if is_admin(request) else 'false' }}) location.href = `/post/${pk}`;
   });
   engCtx.addEventListener('mousemove', (e) => {
-    engCtx.style.cursor = postTarget(elementAt(e)) != null ? 'pointer' : '';
+    engCtx.style.cursor = ({{ 'true' if is_admin(request) else 'false' }} && postTarget(elementAt(e)) != null) ? 'pointer' : '';
   });
 }
 </script>

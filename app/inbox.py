@@ -336,6 +336,29 @@ def reject(session, item: InboxItem, tags: list[str], note: str = "",
         .execution_options(synchronize_session=False))
 
 
+def add_reasons(session, item: InboxItem, tags: list[str], note: str = "") -> tuple[str, str]:
+    """Reasons given after a one-click rejection ("what was wrong?"), merged
+    into the ones already recorded. The draft's dismiss reason follows the
+    first tag when it had none. Returns the (tags, note) just added, cleaned,
+    for the caller to save as a clip note."""
+    from .clip_engine import notes
+
+    if item.state != InboxItem.STATE_REJECTED:
+        raise ValueError(f"This clip is {item.state}, not rejected")
+    have = [t for t in (item.reject_tags or "").split(",") if t]
+    added = [t for t in notes.clean_tags(tags) if t not in have]
+    note = " ".join((note or "").split())[:1000]
+    item.reject_tags = ",".join(have + added)[:200]
+    if note:
+        item.reject_note = (f"{item.reject_note} {note}" if item.reject_note else note)[:1000]
+    if added and not have:
+        session.execute(
+            update(ClipProposal).where(ClipProposal.id == item.proposal_pk).values(
+                dismiss_reason=notes.dismiss_reason_for(added) or "other")
+            .execution_options(synchronize_session=False))
+    return ",".join(added), note
+
+
 # --- Reading it back ---------------------------------------------------------------------
 
 def ready_items(session, limit: int = 50) -> list[InboxItem]:
