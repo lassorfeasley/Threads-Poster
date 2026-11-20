@@ -765,7 +765,10 @@ scheduler:
     # behind clips that have waited longer. Needs filler.enabled. Added
     # 2026-10-02; set enabled: false to revert to fill-every-window.
     pace:
-      enabled: true
+      # 2026-11-19: off. The posting plan sets the mix itself (its rerun
+      # slots), and every other slot takes a new clip until the queue runs
+      # out — no clips held back while windows go to reruns.
+      enabled: false
       # New clips per day: a number, or "auto" — the queue spread over
       # ``spread_days`` (counted as of this morning), held between
       # ``min_per_day`` and the ceilings below. With 6 windows a day:

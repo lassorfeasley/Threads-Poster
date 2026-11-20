@@ -2946,6 +2946,57 @@ class WindowHorizon:
     rerun_by_key: dict[str, dict]
 
 
+def _project_reruns(session, fcfg, full_upcoming, post_by_key) -> dict[str, dict]:
+    """The rerun each window the queue leaves free would air (the filler
+    rotation's pick), walking the whole horizon in order."""
+    rerun_by_key: dict[str, dict] = {}
+    if fcfg is None:
+        return rerun_by_key
+    facts, cand_last = _filler_rotation(session, fcfg)
+    source_gap = float(_placement_settings(load_settings()).same_source_days)
+    for key, _win_utc, _idx in full_upcoming:
+        day_of = window_key_date(key)
+        if day_of is None:
+            continue
+        assigned = post_by_key.get(key)
+        if assigned is not None:
+            # A real post occupies this window; its source video blocks
+            # sibling reruns around it just like a real airing would.
+            if assigned.candidate_pk is not None:
+                prev = cand_last.get(assigned.candidate_pk)
+                if prev is None or day_of > prev:
+                    cand_last[assigned.candidate_pk] = day_of
+            continue
+        pick = _pick_filler(facts, day_of, cand_last, source_gap)
+        if pick is None:
+            continue
+        rerun_by_key[key] = pick
+        pick["last_aired"] = day_of
+        if pick["candidate_pk"] is not None:
+            cand_last[pick["candidate_pk"]] = day_of
+    return rerun_by_key
+
+
+def _fill_open_windows(session, regular, full_upcoming, post_by_key, rerun_by_key, fcfg):
+    """Hand windows with neither a post nor a rerun to the queue, as the tick
+    does when one comes due (``organic_fallback``): a new clip beats silence.
+
+    Every queued post may already have a later window; the tick pulls the
+    best one forward into the empty slot, so the plan does too, and a slot
+    shows open only once the queue has nothing left that may air there.
+    Returns ``(post_by_key, decisions, rerun_by_key)``, or None when there's
+    nothing to do."""
+    full_keys = [k for k, _, _ in full_upcoming]
+    still_open = frozenset(k for k in full_keys
+                           if post_by_key.get(k) is None and k not in rerun_by_key)
+    if not (still_open and regular):
+        return None
+    assignment, ctx = _assign_with_mode(session, regular, full_keys, open_keys=still_open)
+    post_by_key = dict(zip(full_keys, assignment))
+    decisions = ctx.decisions if ctx is not None else {}
+    return post_by_key, decisions, _project_reruns(session, fcfg, full_upcoming, post_by_key)
+
+
 def plan_horizon(session) -> WindowHorizon:
     """Queue assignment and rerun projection over the full pin horizon.
 
@@ -3000,31 +3051,12 @@ def plan_horizon(session) -> WindowHorizon:
     # modulo whatever reality changes in between). Fresh content displaces
     # reruns by construction: real posts claim windows first, reruns only
     # ever take the leftovers.
-    rerun_by_key: dict[str, dict] = {}
     fcfg = _filler_config()
-    if fcfg is not None:
-        facts, cand_last = _filler_rotation(session, fcfg)
-        source_gap = float(_placement_settings(load_settings()).same_source_days)
-        for key, _win_utc, _idx in full_upcoming:
-            day_of = window_key_date(key)
-            if day_of is None:
-                continue
-            assigned = post_by_key.get(key)
-            if assigned is not None:
-                # A real post occupies this window; its source video blocks
-                # sibling reruns around it just like a real airing would.
-                if assigned.candidate_pk is not None:
-                    prev = cand_last.get(assigned.candidate_pk)
-                    if prev is None or day_of > prev:
-                        cand_last[assigned.candidate_pk] = day_of
-                continue
-            pick = _pick_filler(facts, day_of, cand_last, source_gap)
-            if pick is None:
-                continue
-            rerun_by_key[key] = pick
-            pick["last_aired"] = day_of
-            if pick["candidate_pk"] is not None:
-                cand_last[pick["candidate_pk"]] = day_of
+    rerun_by_key = _project_reruns(session, fcfg, full_upcoming, post_by_key)
+
+    filled = _fill_open_windows(session, regular, full_upcoming, post_by_key, rerun_by_key, fcfg)
+    if filled is not None:
+        post_by_key, decisions, rerun_by_key = filled
 
     return WindowHorizon(now=now, state=state, overflow_days=overflow_days,
                          post_by_key=post_by_key, decisions=decisions,
