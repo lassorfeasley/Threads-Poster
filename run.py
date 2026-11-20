@@ -2226,7 +2226,7 @@ def cmd_retranscribe(args) -> None:
 
     init_db()
     settings = load_settings()
-    min_free_gb = float(clip_engine.opt(settings, "clip_engine.min_free_gb", 10))
+    min_free_gb = clip_engine.min_free_gb(settings)
     with session_scope() as session:
         todo = _missing_word_streams(session)
         session.rollback()
