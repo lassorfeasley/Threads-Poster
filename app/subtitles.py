@@ -225,8 +225,10 @@ def _fonts_at_px(font_path: str | Path, px: int) -> tuple[ImageFont.FreeTypeFont
     return base, big
 
 
-def _load_fonts(px: int, font_name: str) -> tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
-    font_file = FONT_DIR / font_name
+def _load_fonts(px: int, font_name: str | Path) -> tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
+    """A bundled font by file name, or any font by full path (a Google font the
+    account chose, app/caption_look.py)."""
+    font_file = Path(font_name) if Path(font_name).is_absolute() else FONT_DIR / font_name
     if not font_file.exists():
         raise SubtitleError(f"Caption font missing: {font_file}")
     return _fonts_at_px(font_file, px)
@@ -495,16 +497,16 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
     uppercase = bool(settings.get("subtitles.uppercase", False))
     max_words = int(settings.get("subtitles.max_words_per_group", 3))
     font_frac = float(settings.get("subtitles.font_size_frac", 0.11))
-    font_name = settings.get("subtitles.font_file", "FunnelDisplay-SemiBold.ttf")
+    from .caption_look import resolve
+
+    look = resolve(settings)    # the account's font and box colour, else settings.yaml's
+    font_name = look["font"]
     dwell = max(0.0, float(settings.get("subtitles.dwell_seconds", 2.0)))
     position = str(position or settings.get("subtitles.position", "bottom")).strip().lower()
     if position not in ("top", "bottom"):
         raise SubtitleError(f"subtitles.position must be 'top' or 'bottom', got {position!r}")
-    colors = {
-        "text": _hex_to_rgba(settings.get("subtitles.text_color", "#FFFFFF")),
-        "box": _hex_to_rgba(settings.get("subtitles.highlight_box_color", "#FFFFFF")),
-        "box_text": _hex_to_rgba(settings.get("subtitles.highlight_text_color", "#1A4A7D")),
-    }
+    colors = {"text": _hex_to_rgba(look["text"]), "box": _hex_to_rgba(look["box"]),
+              "box_text": _hex_to_rgba(look["box_text"])}
 
     # Reuse a cached Whisper pass when re-rendering at a new position; the
     # sidecar is also what Suggest caption / Copy transcript read from.

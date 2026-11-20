@@ -7454,6 +7454,41 @@ def first_reply_redirect():
     return RedirectResponse("/engagement/first-reply", status_code=303)
 
 
+# --- Subtitles: how the burned-in captions look (app/caption_look.py) --------
+
+@app.get("/subtitle-style", response_class=HTMLResponse)
+def subtitle_style_page(request: Request, msg: str = ""):
+    from .. import caption_look
+
+    settings = load_settings()
+    look = caption_look.load()
+    font = look["font"] or caption_look.BUNDLED_FAMILY
+    box = (look["box"] or settings.get("subtitles.highlight_box_color", "#FFFFFF")).upper()
+    return templates.TemplateResponse(
+        request, "subtitle_style.html",
+        {"fonts": caption_look.FONTS, "colors": caption_look.COLORS,
+         "font_specs": caption_look.FONT_WEIGHT_SPEC, "default_spec": caption_look.DEFAULT_WEIGHT_SPEC,
+         "font": font, "box": box, "font_is_preset": font in caption_look.FONTS,
+         "box_is_preset": box in {c for c, _ in caption_look.COLORS},
+         "uppercase": bool(settings.get("subtitles.uppercase", False)),
+         "msg": msg, "active": "subtitle_style"})
+
+
+@app.post("/subtitle-style")
+def subtitle_style_save(font: str = Form(""), custom_font: str = Form(""),
+                        box: str = Form(""), custom_box: str = Form("")):
+    from .. import caption_look
+
+    family = custom_font if font == "__custom" else font
+    color = custom_box if box == "__custom" else box
+    try:
+        look = caption_look.save(font=family, box=color)
+    except ValueError as exc:   # FontError is a ValueError
+        return _flash("/subtitle-style", str(exc))
+    return _flash("/subtitle-style", f"Saved — new clips get {look['font']} on {look['box']}. "
+                                     "Clips already made keep the look they were made with.")
+
+
 # --- Style guide (caption drafting prompt) -----------------------------------
 
 @app.get("/style-guide", response_class=HTMLResponse)
