@@ -149,13 +149,13 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
     uppercase = bool(settings.get("subtitles.uppercase", False))
     max_words = int(settings.get("vertical.caption_max_words", 9))
     caption_lines = int(settings.get("vertical.caption_max_lines", 3))
-    caption_font_name = settings.get("subtitles.font_file", "FunnelDisplay-SemiBold.ttf")
+    from .caption_look import resolve
+
+    look = resolve(settings)    # the account's font and box colour, else settings.yaml's
+    caption_font_name = look["font"]
     dwell = max(0.0, float(settings.get("subtitles.dwell_seconds", 2.0)))
-    colors = {
-        "text": _hex_to_rgba(settings.get("subtitles.text_color", "#FFFFFF")),
-        "box": _hex_to_rgba(settings.get("subtitles.highlight_box_color", "#FFFFFF")),
-        "box_text": _hex_to_rgba(settings.get("subtitles.highlight_text_color", "#1A4A7D")),
-    }
+    colors = {"text": _hex_to_rgba(look["text"]), "box": _hex_to_rgba(look["box"]),
+              "box_text": _hex_to_rgba(look["box_text"])}
 
     try:
         words, _sidecar = ensure_clip_words(clip, transcript_path)

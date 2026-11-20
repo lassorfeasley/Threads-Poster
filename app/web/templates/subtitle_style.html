@@ -1,0 +1,198 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+{% import "components/toolbar.html" as ui %}
+{#
+  Subtitles — the burned-in captions' font and highlight colour
+  (app/caption_look.py; POST /subtitle-style). Nine of each, or any Google
+  font and any colour. Saved choices apply to clips made from now on.
+#}
+{{ ui.pagebar("Subtitles", sub="The words that appear on your videos as people speak. Pick a font and the colour behind the word being said.") }}
+
+{# One stylesheet per family: a weight one family lacks would get a combined
+   request refused, and every sample would fall back. #}
+{% for f in fonts %}
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family={{ f|replace(' ', '+') }}{{ font_specs.get(f, default_spec) }}&display=swap">
+{% endfor %}
+<link rel="stylesheet" id="custom-font-css" href="">
+<link rel="stylesheet" id="custom-font-css-bold" href="">
+
+<style>
+  .ss-preview { position: relative; height: 230px; border-radius: 14px; overflow: hidden;
+    background: linear-gradient(160deg, #3d5a6c 0%, #1f2f3a 55%, #0e161c 100%);
+    display: flex; align-items: flex-end; justify-content: center; padding-bottom: 34px; }
+  .ss-preview::before { content: ""; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 30% 30%, rgba(255,255,255,.18), transparent 60%); }
+  .ss-words { position: relative; display: flex; gap: 14px; align-items: baseline;
+    font-size: 44px; font-weight: 700; color: #fff; text-shadow: 0 3px 4px rgba(0,0,0,.45); }
+  .ss-words .on { padding: 2px 14px 6px; border-radius: 12px; text-shadow: none; font-size: 48px; }
+  .ss-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .ss-font { display: flex; flex-direction: column; gap: 4px; padding: 14px; border-radius: 12px;
+    border: 1px solid var(--border-strong); cursor: pointer; background: var(--panel); }
+  .ss-font input, .ss-swatch input { position: absolute; opacity: 0; pointer-events: none; }
+  .ss-font .ss-sample { font-size: 24px; font-weight: 700; line-height: 1.2; color: var(--text); }
+  .ss-font .ss-name { font-size: 12.5px; color: var(--muted); }
+  .ss-font:has(input:checked), .ss-swatch:has(input:checked) { outline: 2px solid var(--text); outline-offset: 1px; }
+  .ss-swatches { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 8px; }
+  @media (max-width: 900px) { .ss-swatches { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+  .ss-swatch { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    padding: 10px 6px; border-radius: 12px; border: 1px solid var(--border-strong); cursor: pointer; }
+  .ss-chip { width: 38px; height: 38px; border-radius: 10px; border: 1px solid rgba(0,0,0,.15); }
+  .ss-swatch span:last-child { font-size: 12.5px; color: var(--text-dim); }
+  .ss-own { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  .ss-own input[type=text] { max-width: 260px; }
+  .ss-own input[type=color] { width: 44px; height: 38px; padding: 2px; border-radius: 8px; }
+  @media (max-width: 640px) { .ss-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+</style>
+
+<div class="set-page">
+<form method="post" action="/subtitle-style" data-savebar id="ss-form">
+  <section class="set-section">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Preview</h2>
+        <p class="set-section-desc">How the words sit on your clips. The highlighted one is being said.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div class="ss-preview" aria-hidden="true">
+        <div class="ss-words" id="ss-words">
+          {% set w = ["the", "floods", "came"] %}
+          {% for word in w %}<span class="{{ 'on' if loop.index == 2 }}">{{ word|upper if uppercase else word }}</span>{% endfor %}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="set-section">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Font</h2>
+        <p class="set-section-desc">Shown in bold, the way it appears on your videos.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div class="ss-grid" role="radiogroup" aria-label="Font">
+        {% for f in fonts %}
+        <label class="ss-font">
+          <input type="radio" name="font" value="{{ f }}" data-weight="{{ font_specs.get(f, default_spec)[-3:] or 400 }}" {% if font == f %}checked{% endif %}>
+          {% set spec = font_specs.get(f, default_spec) %}
+          <span class="ss-sample" style="font-family: '{{ f }}', sans-serif; font-weight: {{ spec[-3:] if spec else 400 }};">The floods came</span>
+          <span class="ss-name">{{ f }}{% if loop.first %} · default{% endif %}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="ss-own">
+        <label class="ss-font" style="padding: 8px 12px; flex-direction: row; align-items: center; gap: 8px;">
+          <input type="radio" name="font" value="__custom" {% if not font_is_preset %}checked{% endif %}>
+          <span>Any Google font:</span>
+        </label>
+        <input type="text" name="custom_font" id="custom-font" placeholder="e.g. Space Grotesk"
+               value="{{ '' if font_is_preset else font }}" aria-label="Google font name">
+        <a class="meta" href="https://fonts.google.com" target="_blank" rel="noopener">Browse Google Fonts</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="set-section">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Highlight colour</h2>
+        <p class="set-section-desc">The box behind the word being said. Its text turns black or white, whichever reads best.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div class="ss-swatches" role="radiogroup" aria-label="Highlight colour">
+        {% for hex, name in colors %}
+        <label class="ss-swatch">
+          <input type="radio" name="box" value="{{ hex }}" {% if box == hex %}checked{% endif %}>
+          <span class="ss-chip" style="background: {{ hex }};"></span>
+          <span>{{ name }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="ss-own">
+        <label class="ss-font" style="padding: 8px 12px; flex-direction: row; align-items: center; gap: 8px;">
+          <input type="radio" name="box" value="__custom" {% if not box_is_preset %}checked{% endif %}>
+          <span>Your own colour:</span>
+        </label>
+        <input type="color" id="custom-box-picker" value="{{ box }}" aria-label="Pick a colour">
+        <input type="text" name="custom_box" id="custom-box" value="{{ box }}" maxlength="7"
+               style="max-width: 110px;" aria-label="Colour code">
+      </div>
+    </div>
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Applies to clips made from now on.</span>
+      <button class="btn-primary" type="submit">Save</button>
+    </div>
+  </section>
+</form>
+</div>
+
+<script>
+(function () {
+  const form = document.getElementById('ss-form');
+  const words = document.getElementById('ss-words');
+  const customFont = document.getElementById('custom-font');
+  const customBox = document.getElementById('custom-box');
+  const picker = document.getElementById('custom-box-picker');
+  const customCss = document.getElementById('custom-font-css');
+
+  // Mirrors caption_look._contrast_text: black or white on the box.
+  function contrast(hex) {
+    const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+    const lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    return lum > 0.36 ? '#111111' : '#FFFFFF';
+  }
+
+  function chosen(name, customInput) {
+    const r = form.querySelector(`input[name="${name}"]:checked`);
+    if (!r) return '';
+    return r.value === '__custom' ? customInput.value.trim() : r.value;
+  }
+
+  let loadedFamily = '';
+  function update() {
+    const family = chosen('font', customFont);
+    let box = chosen('box', customBox);
+    if (!/^#[0-9a-fA-F]{6}$/.test(box)) box = '#FFFFFF';
+    if (family && form.querySelector('input[name="font"][value="__custom"]').checked && family !== loadedFamily) {
+      // The plain face always exists; the bold one only for families that have it.
+      const base = 'https://fonts.googleapis.com/css2?family=' + encodeURIComponent(family);
+      customCss.href = base + '&display=swap';
+      document.getElementById('custom-font-css-bold').href = base + ':wght@700&display=swap';
+      loadedFamily = family;
+    }
+    words.style.fontFamily = `'${family || 'Funnel Display'}', sans-serif`;
+    // The weight the video is rendered in: a preset's own, else bold.
+    const picked = form.querySelector('input[name="font"]:checked');
+    words.style.fontWeight = (picked && picked.dataset.weight) || '700';
+    const on = words.querySelector('.on');
+    on.style.background = box;
+    on.style.color = contrast(box);
+  }
+
+  form.addEventListener('change', update);
+  customFont.addEventListener('input', () => {
+    form.querySelector('input[name="font"][value="__custom"]').checked = true;
+    clearTimeout(customFont._t);
+    customFont._t = setTimeout(update, 350);
+  });
+  customFont.addEventListener('focus', () => {
+    form.querySelector('input[name="font"][value="__custom"]').checked = true; update();
+  });
+  picker.addEventListener('input', () => {
+    customBox.value = picker.value.toUpperCase();
+    form.querySelector('input[name="box"][value="__custom"]').checked = true;
+    update();
+    if (window.markSettingsDirty) window.markSettingsDirty(form);
+  });
+  customBox.addEventListener('input', () => {
+    form.querySelector('input[name="box"][value="__custom"]').checked = true;
+    if (/^#[0-9a-fA-F]{6}$/.test(customBox.value)) picker.value = customBox.value;
+    update();
+  });
+  update();
+})();
+</script>
+{% endblock %}

@@ -30,6 +30,7 @@ _CUSTOMER_SECTIONS = (
     "/schedule",
     "/brand",
     "/style-guide",
+    "/subtitle-style",
     "/connections",
     "/appearance",
     "/account",
