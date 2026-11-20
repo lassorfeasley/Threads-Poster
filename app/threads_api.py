@@ -120,13 +120,17 @@ def _peek_token() -> dict | None:
 
 # --- OAuth -------------------------------------------------------------------
 
-def authorize_url() -> str:
+def authorize_url(state: str = "") -> str:
+    """Meta's sign-in page. ``state`` comes back untouched on the redirect
+    (the dashboard uses it for where to return to)."""
     params = {
         "client_id": env("THREADS_APP_ID"),
         "redirect_uri": env("THREADS_REDIRECT_URI"),
         "scope": SCOPES,
         "response_type": "code",
     }
+    if state:
+        params["state"] = state
     return f"https://threads.net/oauth/authorize?{urlencode(params)}"
 
 

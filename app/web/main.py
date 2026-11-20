@@ -323,6 +323,20 @@ def _threads_authenticated() -> bool:
 templates.env.globals["threads_authenticated"] = _threads_authenticated
 
 
+def _threads_connect_href(back_to: str = "/inbox") -> str:
+    """Where a "Connect Threads" button goes: straight to Meta (and back to
+    ``back_to``) when Meta redirects to this dashboard, else Connected accounts."""
+    try:
+        if meta_redirects_here("threads"):
+            return meta_connect_url("threads", back_to)
+    except Exception:
+        log.exception("Threads connect link unavailable")
+    return "/connections"
+
+
+templates.env.globals["threads_connect_href"] = _threads_connect_href
+
+
 def _brand_name() -> str:
     """White-label app name for the sidebar/title. Renders on every page, so it
     must never raise."""
@@ -5776,6 +5790,90 @@ def _clean_auth_code(raw: str) -> str:
             raw = vals[0]
     raw = raw.split("#")[0]  # drop Meta's "#_" fragment (and anything after)
     return raw.strip()
+
+
+# --- Meta sign-in that comes back here (Threads, Instagram) ----------------------
+# When the app's redirect URI points at this dashboard's own /…/callback, a
+# Connect button sends the customer to Meta and Meta sends them straight back,
+# connected, to where they started (``state``: a signed same-site path). Where
+# it doesn't (a local dashboard registered with https://localhost/...), the
+# old flow stays: sign in, copy the code, paste it.
+
+_META = {"threads": ("THREADS_REDIRECT_URI", "THREADS_APP_SECRET", "/threads/callback"),
+         "instagram": ("INSTAGRAM_REDIRECT_URI", "INSTAGRAM_APP_SECRET", "/instagram/callback")}
+
+
+def meta_redirects_here(platform: str) -> bool:
+    """Whether Meta will send people back to this dashboard for ``platform``."""
+    uri_var, _secret, path = _META[platform]
+    uri = env(uri_var).strip().rstrip("/")
+    return uri.endswith(path) and "localhost" not in uri and "127.0.0.1" not in uri
+
+
+def _state_sig(platform: str, target: str) -> str:
+    import hashlib
+    import hmac
+
+    key = (env(_META[platform][1]) or "throughline").encode()
+    return hmac.new(key, f"{platform}:{target}".encode(), hashlib.sha256).hexdigest()[:24]
+
+
+def meta_state(platform: str, target: str) -> str:
+    """``state`` for Meta's sign-in: where to come back to, signed."""
+    import base64
+
+    target = auth.safe_next(target)
+    return base64.urlsafe_b64encode(target.encode()).decode().rstrip("=") + "." + _state_sig(platform, target)
+
+
+def _meta_return(platform: str, state: str) -> str:
+    """The signed same-site path in ``state``, else Connected accounts."""
+    import base64
+    import hmac
+
+    try:
+        packed, sig = state.rsplit(".", 1)
+        target = base64.urlsafe_b64decode(packed + "=" * (-len(packed) % 4)).decode()
+    except Exception:
+        return "/connections"
+    if not hmac.compare_digest(sig, _state_sig(platform, target)):
+        return "/connections"
+    return auth.safe_next(target)
+
+
+def meta_connect_url(platform: str, back_to: str) -> str:
+    api = threads_api if platform == "threads" else instagram_api
+    return api.authorize_url(state=meta_state(platform, back_to))
+
+
+@app.get("/threads/callback")
+def threads_callback(code: str = "", state: str = "", error: str = "",
+                     error_description: str = ""):
+    """Meta's redirect after Threads sign-in (THREADS_REDIRECT_URI)."""
+    back = _meta_return("threads", state)
+    if error or not code:
+        return _flash(back, quote(f"Threads wasn't connected: {error_description or error or 'no code came back'}"))
+    try:
+        token = threads_api.exchange_code(_clean_auth_code(code))
+    except Exception as exc:
+        return _flash(back, quote(f"Threads wasn't connected: {exc}"))
+    who = token.get("username") if isinstance(token, dict) else ""
+    return _flash(back, quote(f"Threads connected{' as @' + who if who else ''}"))
+
+
+@app.get("/instagram/callback")
+def instagram_callback(code: str = "", state: str = "", error: str = "",
+                       error_description: str = ""):
+    """Instagram's redirect after sign-in (INSTAGRAM_REDIRECT_URI)."""
+    back = _meta_return("instagram", state)
+    if error or not code:
+        return _flash(back, quote(f"Instagram wasn't connected: {error_description or error or 'no code came back'}"))
+    try:
+        token = instagram_api.exchange_code(_clean_auth_code(code))
+    except Exception as exc:
+        return _flash(back, quote(f"Instagram wasn't connected: {exc}"))
+    who = token.get("username") if isinstance(token, dict) else ""
+    return _flash(back, quote(f"Instagram connected{' as @' + who if who else ''}"))
 
 
 @app.post("/threads/connect")

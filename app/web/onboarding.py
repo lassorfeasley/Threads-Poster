@@ -117,19 +117,39 @@ def _screen_extras(key: str) -> dict:
 
 
 def _connections() -> list[dict]:
-    """Threads and Instagram, each connected or with its sign-in link."""
+    """Threads and Instagram: connected (as whom), or how to connect. Where
+    Meta redirects back to this dashboard, one button does it; elsewhere the
+    sign-in-and-paste-the-code flow stays."""
     from .. import instagram_api, threads_api
+    from .main import meta_connect_url, meta_redirects_here
 
     out = []
-    for name, api, action in (("Threads", threads_api, "/threads/connect"),
-                              ("Instagram", instagram_api, "/instagram/connect")):
+    for key, name, api, action in (("threads", "Threads", threads_api, "/threads/connect"),
+                                   ("instagram", "Instagram", instagram_api, "/instagram/connect")):
+        entry = {"key": key, "name": name, "connected": False, "username": "", "action": action,
+                 "redirect": False, "auth_url": "", "required": key == "threads"}
         try:
-            done = api.is_authenticated()
-            url = "" if done else api.authorize_url()
+            entry["connected"] = api.is_authenticated()
+            if entry["connected"]:
+                entry["username"] = api.account_username() or ""
+            elif meta_redirects_here(key):
+                entry["redirect"] = True
+                entry["auth_url"] = meta_connect_url(key, "/welcome/connect")
+            else:
+                entry["auth_url"] = api.authorize_url()
         except Exception:
-            done, url = False, ""
-        out.append({"name": name, "connected": done, "auth_url": url, "action": action})
+            log.exception("Connection status for %s unavailable", name)
+        out.append(entry)
     return out
+
+
+def threads_connected() -> bool:
+    from .. import threads_api
+
+    try:
+        return threads_api.is_authenticated()
+    except Exception:
+        return False
 
 
 def _start_sources(feedback: str = "") -> None:
@@ -282,6 +302,8 @@ async def welcome_save(request: Request, key: str):
         return _to("/welcome")
     form = await request.form()
     values = {k: str(v) for k, v in form.items() if isinstance(v, str)}
+    if key == "connect" and values.get("later") != "1" and not threads_connected():
+        return _to("/welcome/connect", "Connect Threads to carry on, or choose “I'll do this later”")
     missing = [f for f in spec["fields"] if f["required"] and not values.get(f["name"], "").strip()]
     if missing:
         return _to(f"/welcome/{key}", "Fill this in to carry on")
@@ -291,6 +313,9 @@ async def welcome_save(request: Request, key: str):
         return _to(f"/welcome/{key}", str(exc))
     before = onboarding.saved_values()
     state = await run_in_threadpool(onboarding.save_step, key, values)
+    if key == "connect":
+        state["connect_later"] = values.get("later") == "1"
+        await run_in_threadpool(onboarding.save, state)
 
     # Read the brand once, and again when they change its name or website or
     # upload something new on a second visit.

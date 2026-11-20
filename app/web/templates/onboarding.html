@@ -199,11 +199,14 @@
         {% for c in connections %}
         <div class="ob-conn{{ ' is-on' if c.connected }}">
           <div class="ob-conn-head">
-            <span class="ob-conn-name">{{ c.name }}</span>
-            {% if c.connected %}<span class="ob-conn-ok">✓ Connected</span>{% endif %}
+            <span class="ob-conn-name">{{ c.name }}{% if c.required and not c.connected %} <span class="ob-conn-req">needed to post</span>{% endif %}</span>
+            {% if c.connected %}<span class="ob-conn-ok">✓ Connected{% if c.username %} as @{{ c.username }}{% endif %}</span>{% endif %}
           </div>
           {% if not c.connected %}
-          {% if c.auth_url %}
+          {% if c.redirect %}
+          <p class="ob-conn-note">{{ 'Your clips are posted here once you approve them.' if c.required else 'Each approved clip also goes out as a Reel.' }}</p>
+          <a class="ob-go ob-conn-go" href="{{ c.auth_url }}">Connect {{ c.name }} <span aria-hidden="true">→</span></a>
+          {% elif c.auth_url %}
           <ol class="ob-conn-steps">
             <li><a class="ob-send" href="{{ c.auth_url }}" target="_blank" rel="noopener">Sign in to {{ c.name }} ↗</a></li>
             <li>After you approve, copy the code from the page you land on and paste it here:</li>
@@ -218,28 +221,7 @@
           {% endif %}
         </div>
         {% endfor %}
-        <p class="ob-teach-note">You can connect LinkedIn, X and Facebook later in Settings.</p>
-      </div>
-      {% elif f.kind == 'upload' %}
-      {% if uploads_here %}
-      <label class="ob-drop ob-drop-video" id="ob-vdrop">
-        <input type="file" id="ob-video" accept=".mp4,.mov,.m4v,.mkv,.webm,video/*" multiple hidden>
-        <span class="ob-drop-ic" aria-hidden="true">🎬</span>
-        <span><strong>Drop a video here</strong> or click to choose one. MP4, MOV or WebM.</span>
-      </label>
-      {% else %}
-      <p class="ob-teach-note">Uploading your own videos is coming to this page soon. For now, send them to us and we'll clip them for you.</p>
-      {% endif %}
-      <div class="ob-uploads" id="ob-uploads"></div>
-      {% elif f.kind == 'avatar' %}
-      {% set logo = brand_logo() %}
-      <div class="ob-avatar-row">
-        <label class="ob-avatar{{ ' has-logo' if logo }}" id="ob-avatar" title="Add your icon">
-          <input type="file" id="ob-avatar-file" accept=".png,.jpg,.jpeg,.svg,.webp,.gif" hidden>
-          {% if logo %}<img src="{{ logo }}" alt="">{% else %}<span class="ob-avatar-plus" aria-hidden="true">＋</span>{% endif %}
-        </label>
-        <div class="ob-avatar-help"><strong>{{ f.label }}</strong> <span class="set-optional">optional</span><br>
-          The square logo or profile picture you use on social. It shows in your app.</div>
+        <p class="ob-teach-note">Nothing posts until you approve it. You can connect LinkedIn, X and Facebook later in Settings.</p>
       </div>
       {% elif f.kind == 'chips' %}
       <textarea name="{{ f.name }}" id="f-{{ f.name }}" hidden>{{ values[f.name] }}</textarea>
@@ -279,6 +261,10 @@
       {% if prev_key %}<a class="ob-back" href="/welcome/{{ prev_key }}">← Back</a>{% else %}<span></span>{% endif %}
       <button class="ob-go" type="submit">{{ 'Continue' if next_key else 'Finish' }} <span aria-hidden="true">→</span></button>
     </div>
+    {% if spec.key == 'connect' and not (connections|selectattr('key', 'equalto', 'threads')|selectattr('connected')|list) %}
+    <div class="ob-later"><button class="ob-link" type="submit" name="later" value="1" formnovalidate>I'll do this later</button>
+      <span>We'll remind you. Clips can't post until Threads is connected.</span></div>
+    {% endif %}
     {% if sample %}
     <div class="ob-testbar" aria-label="Testing (admins only)">
       <span>Testing</span>
