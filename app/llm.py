@@ -74,12 +74,26 @@ def _operator_rules(scope: str) -> str:
     material) or "captions" (text). Never raises: a broken brand.yaml must not
     stop a prompt."""
     try:
+        from .universal_rules import render as render_universal
+        universal = render_universal(scope)
+    except Exception:
+        universal = ""
+    house = ""
+    if universal:
+        house = ("\n\nTHROUGHLINE'S RULES — the house method for every account. They "
+                 "outrank everything else here, the account's own rules included:\n"
+                 + universal[:2500])
+    try:
         from .config import render_brand_rules
         rules = render_brand_rules(scope)
     except Exception:
-        return ""
+        rules = ""
     if not rules:
-        return ""
+        return house + ("\n" if house else "")
+    return house + _account_rules_block(scope, rules)
+
+
+def _account_rules_block(scope: str, rules: str) -> str:
     if scope == "captions":
         return (
             "\n\nTHE OPERATOR'S RULES — hard constraints every word you write "

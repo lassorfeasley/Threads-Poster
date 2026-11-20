@@ -1,0 +1,37 @@
+# Throughline's universal rules: how every account's clips and captions are
+# made. They apply to every account and win over an account's own rules and
+# settings when the two conflict. These are the defaults; the operator edits
+# the live copy in Throughline Admin (admin.continuity.marketing > Rules), and
+# every account picks up a change within about ten minutes.
+#
+# applies_to:  videos   - which videos are picked AND which moments are cut
+#              clips    - which moments are picked and how they're cut
+#              captions - what captions say
+#              everything
+
+clip_length:
+  min_seconds: 20
+  max_seconds: 45
+
+rules:
+  - id: striking-opening
+    applies_to: clips
+    enabled: true
+    text: >-
+      Open every clip on a visually striking image: motion, action, a dramatic
+      scene, a face mid-reaction. Never open on a news anchor at a desk, a title
+      card, a logo or a static graphic.
+  - id: celebrities-first
+    applies_to: videos
+    enabled: true
+    text: >-
+      Prioritize celebrities and famous public figures. A video featuring a
+      household name beats an otherwise equal one, and a moment with them on
+      screen or speaking beats one without.
+  - id: coherent-story
+    applies_to: clips
+    enabled: true
+    text: >-
+      Every clip tells one coherent story from start to finish. When segments
+      are joined, each cut must follow from the one before; never jump between
+      unrelated moments.

@@ -11,7 +11,9 @@
 #}
 {% set ib_title = "Today's posts" %}
 {% set ib_sub %}{{ day_label }} · Approve the ones you want posted. They go out at your next open posting times.{% endset %}
-{{ ui.pagebar(ib_title, count=cards|length, sub=ib_sub) }}
+{% set ib_actions %}<button type="button" class="btn" onclick="openAddVideo()">＋ Add a video</button>{% endset %}
+{{ ui.pagebar(ib_title, count=cards|length, sub=ib_sub, actions=ib_actions) }}
+{% from "components/add_video.html" import add_video %}
 
 <style>
   .ib-feed { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
@@ -63,9 +65,10 @@
 </style>
 
 <div class="canvas">
+{{ add_video(open=(not cards and first_run)) }}
 {% if not cards and first_run %}
   {% from "components/first_run.html" import first_run as first_run_card %}
-  {{ first_run_card(first_run, admin=admin, where="here") }}
+  {{ first_run_card(first_run, admin=admin, where="here", upload_inline=true) }}
 {% elif not cards %}
   <div class="ib-caught-up">
     <strong>You're all caught up</strong>

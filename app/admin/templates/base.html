@@ -40,7 +40,11 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/" style="text-decoration:none">Throughline <span>Admin</span></a>
+  <nav style="display:flex; gap:22px; align-items:center">
+    <a class="brand" href="/" style="text-decoration:none">Throughline <span>Admin</span></a>
+    <a href="/" class="link" style="text-decoration:none">Health</a>
+    <a href="/rules" class="link" style="text-decoration:none">Universal rules</a>
+  </nav>
   {% if request.state.user is defined and request.state.user %}<form method="post" action="/logout"><span class="muted" style="margin-right:12px">{{ request.state.user }}</span><button class="link">Sign out</button></form>{% endif %}
 </header>
 <main>{% block content %}{% endblock %}</main>

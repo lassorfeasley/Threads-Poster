@@ -177,7 +177,11 @@ class PromptTest(TempConfig):
 
     def test_broken_brand_file_never_breaks_a_prompt(self):
         (self.dir / "brand.yaml").write_text("rules: [unclosed")
-        self.assertEqual(llm._operator_rules("content"), "")
+        with mock.patch("app.universal_rules.render", return_value=""):
+            self.assertEqual(llm._operator_rules("content"), "")
+        # Throughline's universal rules still reach the prompt.
+        with mock.patch("app.universal_rules.render", return_value="- Open on a striking image"):
+            self.assertIn("THROUGHLINE'S RULES", llm._operator_rules("content"))
 
 
 def _throwaway_db() -> bool:

@@ -1,0 +1,112 @@
+{#
+  Add a video to clip (app/web/inbox.py /inbox/add-*): a file of your own or a
+  YouTube link. Its best clips land in Today's posts, finished. Shows each
+  added video's progress (polls /inbox/added).
+#}
+{% macro add_video(open=true) %}
+<div class="av" id="av"{% if not open %} hidden{% endif %}>
+  <div class="av-head">
+    <strong>Add a video to clip</strong>
+    <span>A talk, an interview, a webinar, a news segment. We'll find the best moments and cut them into clips for you to approve.</span>
+  </div>
+  <div class="av-row">
+    <label class="av-drop" id="av-drop">
+      <input type="file" id="av-file" accept=".mp4,.mov,.m4v,.mkv,.webm,video/*" hidden>
+      <span aria-hidden="true">🎬</span><span><strong>Upload a file</strong><br><small>MP4, MOV or WebM</small></span>
+    </label>
+    <div class="av-or">or</div>
+    <form class="av-url" id="av-url-form">
+      <input type="url" id="av-url" placeholder="Paste a YouTube link" required>
+      <button type="submit" class="btn-primary" id="av-url-go">Clip it</button>
+    </form>
+  </div>
+  <p class="av-note" id="av-note" hidden></p>
+  <div class="av-list" id="av-list"></div>
+</div>
+<style>
+  .av { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 18px 20px; margin: 0 auto 18px; max-width: 680px; }
+  .av[hidden] { display: none; }
+  .av-head { display: grid; gap: 2px; margin-bottom: 14px; }
+  .av-head span { color: var(--text-dim); font-size: 14px; }
+  .av-row { display: grid; grid-template-columns: 1fr auto 1.4fr; gap: 12px; align-items: center; }
+  .av-drop { display: flex; gap: 10px; align-items: center; padding: 14px; border-radius: var(--radius); border: 1.5px dashed var(--border-strong); cursor: pointer; font-size: 14px; }
+  .av-drop:hover, .av-drop.is-over { border-color: var(--accent); background: var(--accent-soft); }
+  .av-drop small { color: var(--muted); }
+  .av-or { color: var(--muted); font-size: 13px; }
+  .av-url { display: flex; gap: 8px; }
+  .av-url input { flex: 1; min-width: 0; }
+  .av-note { margin: 10px 0 0; font-size: 13.5px; color: var(--danger); }
+  .av-list { display: grid; gap: 8px; margin-top: 14px; }
+  .av-item { display: grid; gap: 4px; padding: 10px 12px; border-radius: var(--radius); background: var(--panel2); font-size: 14px; }
+  .av-item .t { font-weight: 600; overflow-wrap: anywhere; }
+  .av-item .s { color: var(--text-dim); font-size: 13px; }
+  .av-item.is-done .s { color: var(--accent); font-weight: 600; }
+  .av-item.is-failed .s { color: var(--danger); }
+  .av-bar { height: 4px; border-radius: 99px; background: var(--border); overflow: hidden; }
+  .av-bar span { display: block; height: 100%; background: var(--accent); transition: width .5s; }
+  @media (max-width: 720px) { .av-row { grid-template-columns: 1fr; } .av-or { text-align: center; } }
+</style>
+<script>
+(function () {
+  var list = document.getElementById('av-list'), note = document.getElementById('av-note');
+  var PCT = { uploading: 10, downloading: 20, transcribing: 40, finding: 65, making: 85, done: 100, failed: 100 };
+  function row(id) {
+    var el = list.querySelector('[data-id="' + id + '"]');
+    if (!el) { el = document.createElement('div'); el.className = 'av-item'; el.dataset.id = id;
+      el.innerHTML = '<span class="t"></span><span class="s"></span><span class="av-bar"><span></span></span>'; list.prepend(el); }
+    return el;
+  }
+  function paint(el, title, stage, label) {
+    el.className = 'av-item is-' + stage;
+    el.querySelector('.t').textContent = title; el.querySelector('.s').textContent = (stage === 'done' ? '✓ ' : '') + label;
+    el.querySelector('.av-bar span').style.width = (PCT[stage] || 10) + '%';
+  }
+  var timer = null, seen = {};
+  function poll() {
+    fetch('/inbox/added', { headers: { 'Accept': 'application/json' } }).then(function (r) { return r.json(); }).then(function (j) {
+      var busy = false, finished = false;
+      (j.videos || []).forEach(function (v) {
+        paint(row(v.id), v.title || 'Your video', v.stage, v.label);
+        if (v.stage !== 'done' && v.stage !== 'failed') busy = true;
+        // Clips just became ready while this page was open: show them.
+        if (v.stage === 'done' && seen[v.id] && seen[v.id] !== 'done') finished = true;
+        seen[v.id] = v.stage;
+      });
+      if (!j.files_here) { var d = document.getElementById('av-drop'); d.style.display = 'none'; document.querySelector('.av-or').style.display = 'none'; }
+      if (finished) setTimeout(function () { location.reload(); }, 1500);   // new clips to show
+      clearTimeout(timer); if (busy) timer = setTimeout(poll, 4000);
+    }).catch(function () { clearTimeout(timer); timer = setTimeout(poll, 8000); });
+  }
+  function say(msg) { note.textContent = msg; note.hidden = !msg; }
+  function sendFile(f) {
+    say('');
+    var el = row('up-' + Date.now()); paint(el, f.name, 'uploading', 'Uploading… 0%');
+    var body = new FormData(); body.append('file', f, f.name);
+    var x = new XMLHttpRequest(); x.open('POST', '/inbox/add-file'); x.setRequestHeader('Accept', 'application/json');
+    x.upload.onprogress = function (e) { if (e.lengthComputable) el.querySelector('.s').textContent = 'Uploading… ' + Math.round(100 * e.loaded / e.total) + '%'; };
+    x.onload = function () { var j = {}; try { j = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status >= 400 || j.error) { paint(el, f.name, 'failed', j.error || 'Upload failed'); return; }
+      el.remove(); poll(); };
+    x.onerror = function () { paint(el, f.name, 'failed', 'Upload failed. Try again.'); };
+    x.send(body);
+  }
+  var input = document.getElementById('av-file'), drop = document.getElementById('av-drop');
+  input.addEventListener('change', function () { if (input.files[0]) sendFile(input.files[0]); input.value = ''; });
+  ['dragover', 'dragenter'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('is-over'); }); });
+  drop.addEventListener('dragleave', function () { drop.classList.remove('is-over'); });
+  drop.addEventListener('drop', function (e) { e.preventDefault(); drop.classList.remove('is-over'); if (e.dataTransfer.files[0]) sendFile(e.dataTransfer.files[0]); });
+  document.getElementById('av-url-form').addEventListener('submit', function (e) {
+    e.preventDefault(); say('');
+    var url = document.getElementById('av-url'), go = document.getElementById('av-url-go');
+    go.disabled = true; go.textContent = 'Adding…';
+    var body = new FormData(); body.append('url', url.value.trim());
+    fetch('/inbox/add-url', { method: 'POST', body: body, headers: { 'Accept': 'application/json' } }).then(function (r) { return r.json(); })
+      .then(function (j) { if (j.error) say(j.error); else { url.value = ''; poll(); } })
+      .catch(function () { say('Couldn’t add that. Try again.'); })
+      .finally(function () { go.disabled = false; go.textContent = 'Clip it'; });
+  });
+  window.openAddVideo = function () { var p = document.getElementById('av'); p.hidden = false; p.scrollIntoView({ behavior: 'smooth', block: 'center' }); };
+  poll();
+})();
+</script>
+{% endmacro %}

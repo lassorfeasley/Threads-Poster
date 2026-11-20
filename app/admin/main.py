@@ -14,13 +14,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 
+import hmac
+import json
+
 from fastapi import FastAPI, Form, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ..web import auth
-from . import collect, fly, sources
+from .. import universal_rules
+from . import collect, fly, rules_store, sources
 
 log = logging.getLogger("admin")
 
@@ -48,7 +52,8 @@ def is_operator(user) -> bool:
 
 @app.middleware("http")
 async def _gate(request: Request, call_next):
-    if request.url.path in ("/login", "/healthz") or _local(request):
+    # The rules API has its own token (every account's workers call it).
+    if request.url.path in ("/login", "/healthz", "/api/universal-rules") or _local(request):
         return await call_next(request)
     try:
         user, renewed = await run_in_threadpool(auth.resolve, request.cookies.get(COOKIE))
@@ -135,3 +140,44 @@ def account(request: Request, slug: str):
     daily = (snap.get("results") or {}).get("daily") or []
     peak = max((d["views"] for d in daily), default=0) or 1
     return templates.TemplateResponse(request, "account.html", {"s": snap, "daily": daily, "peak": peak})
+
+
+# --- Universal rules -----------------------------------------------------------------
+
+@app.get("/api/universal-rules")
+def universal_rules_api(request: Request):
+    """The live universal rules, for every account's workers. Bearer token:
+    ``UNIVERSAL_RULES_TOKEN``."""
+    want = os.environ.get("UNIVERSAL_RULES_TOKEN", "")
+    got = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if not want or not hmac.compare_digest(want, got):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        return rules_store.read()
+    except Exception:
+        log.exception("Universal rules unreadable")
+        return JSONResponse({"error": "unavailable"}, status_code=503)
+
+
+@app.get("/rules", response_class=HTMLResponse)
+def rules_page(request: Request, msg: str = "", error: str = ""):
+    try:
+        data, problem = rules_store.read(), ""
+    except Exception as exc:
+        data, problem = universal_rules.defaults(), f"Couldn't read the live rules ({exc}); showing the defaults."
+    return templates.TemplateResponse(request, "rules.html", {
+        "data": data, "scopes": universal_rules.SCOPE_LABELS, "msg": msg,
+        "error": error or problem})
+
+
+@app.post("/rules")
+def rules_save(request: Request, payload: str = Form(...)):
+    try:
+        rules_store.write(json.loads(payload))
+    except (ValueError, TypeError) as exc:
+        return RedirectResponse(f"/rules?error={quote(str(exc))}", status_code=303)
+    except Exception as exc:
+        log.exception("Saving universal rules failed")
+        return RedirectResponse(f"/rules?error={quote('Save failed: ' + str(exc)[:120])}", status_code=303)
+    return RedirectResponse("/rules?msg=" + quote("Saved. Every account picks this up within ten minutes."),
+                            status_code=303)

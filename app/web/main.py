@@ -998,6 +998,11 @@ def _queue_clip_engine_after_archive(candidate_id: int) -> None:
     the transcript suggester is in charge (it already ran inline, in
     ``archive_candidate``) or when suggestions are already waiting.
     """
+    if _wants_inbox(candidate_id):
+        # Added by a customer to be clipped (a file or a YouTube link): its
+        # best clips go straight to their inbox.
+        _engine_then_inbox(candidate_id)
+        return
     try:
         from ..clip_engine import effective_setup, jobs
 
@@ -3361,23 +3366,78 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
     return _flash(f"/video/{cid}", "Uploaded — transcribing now")
 
 
-def clip_upload_to_inbox(candidate_id: int) -> None:
-    """The whole path for a video a customer uploads to be clipped: transcribe
-    it, run the clip engine, and put its best clips in the inbox (finished:
-    cut, subtitled, captioned) for them to approve. Runs in the background."""
-    _scrape_in_thread(candidate_id, after_archive=_engine_then_inbox)
+# Videos a customer added to be clipped straight into their inbox (a file or a
+# YouTube link), in the shared database: on the hosted app a link's download
+# waits for the home machine, and that machine must know where its clips go.
+_TO_INBOX_TOKEN = "to_inbox"
+_TO_INBOX_KEEP = 50
+
+
+def _to_inbox_entries(session) -> list[dict]:
+    from ..models import AppToken
+
+    row = session.get(AppToken, _TO_INBOX_TOKEN)
+    try:
+        data = json.loads(row.value) if row and row.value else []
+    except ValueError:
+        data = []
+    return [e for e in data if isinstance(e, dict) and e.get("id")]
+
+
+def mark_for_inbox(candidate_id: int, kind: str) -> None:
+    with session_scope() as session:
+        entries = [e for e in _to_inbox_entries(session) if e["id"] != candidate_id]
+        entries.append({"id": candidate_id, "kind": kind, "at": utcnow().isoformat()})
+        from ..models import AppToken
+
+        row = session.get(AppToken, _TO_INBOX_TOKEN)
+        if row is None:
+            row = AppToken(name=_TO_INBOX_TOKEN)
+            session.add(row)
+        row.value = json.dumps(entries[-_TO_INBOX_KEEP:])
+        row.updated_at = utcnow()
+
+
+def _wants_inbox(candidate_id: int) -> bool:
+    try:
+        with session_scope(read_only=True) as session:
+            return any(e["id"] == candidate_id for e in _to_inbox_entries(session))
+    except Exception:
+        log.exception("Couldn't read the to-inbox list")
+        return False
+
+
+def added_videos(limit: int = 6) -> list[dict]:
+    """The latest videos the customer added, newest first, with where each is."""
+    with session_scope(read_only=True) as session:
+        entries = _to_inbox_entries(session)
+    return [{**upload_progress(e["id"], sent=e.get("sent")), "kind": e.get("kind", "file")}
+            for e in reversed(entries[-limit:])]
+
+
+def clip_upload_to_inbox(candidate_id: int, kind: str = "file") -> None:
+    """The whole path for a video a customer adds to be clipped: download it
+    (a link) or take the file, transcribe, run the clip engine, and put its
+    best clips in the inbox (finished: cut, subtitled, captioned) for them to
+    approve. Runs in the background; where downloads wait for the home
+    machine, it picks the video up and the marker sends its clips here."""
+    mark_for_inbox(candidate_id, kind)
+    _scrape_in_thread(candidate_id)
 
 
 def _engine_then_inbox(candidate_id: int) -> None:
-    from ..clip_engine import effective_setup, jobs
+    from ..clip_engine import jobs
 
-    setup, _why = effective_setup(load_settings())
-    if setup == "transcript":
-        # The transcript suggester already ran inside the archive step.
+    with session_scope(read_only=True) as session:
+        waiting = clip_proposals.pending_for_candidate(session, candidate_id)
+    if waiting:
+        # Clips were already suggested (the transcript suggester can run
+        # inside the archive step): straight to the inbox.
         _upload_clips_to_inbox(candidate_id)
         return
     # "reroll" is a run someone asked for (as the Suggest button is), so the
-    # unattended daily budget doesn't hold it back.
+    # unattended daily budget doesn't hold it back. In transcript mode the
+    # job runs the transcript suggester.
     jobs.enqueue(candidate_id, reason="reroll",
                  on_done=lambda: _upload_clips_to_inbox(candidate_id))
 
@@ -3391,12 +3451,32 @@ def _upload_clips_to_inbox(candidate_id: int) -> None:
         for item_id in ids:
             _inbox_draft_item(item_id)
         log.info("Upload %s: %d clips sent to the inbox", candidate_id, len(ids))
+        _note_sent(candidate_id, len(ids))
     except Exception:
         log.exception("Couldn't send upload %s's clips to the inbox", candidate_id)
+        _note_sent(candidate_id, 0)
     _after_background_work()
 
 
-def upload_progress(candidate_id: int) -> dict:
+def _note_sent(candidate_id: int, n: int) -> None:
+    """Record that the video's run finished and how many clips it gave, so
+    its status can end (with clips, or with "no clips came out")."""
+    from ..models import AppToken
+
+    try:
+        with session_scope() as session:
+            entries = _to_inbox_entries(session)
+            for e in entries:
+                if e["id"] == candidate_id:
+                    e["sent"], e["finished_at"] = n, utcnow().isoformat()
+            row = session.get(AppToken, _TO_INBOX_TOKEN)
+            if row is not None:
+                row.value = json.dumps(entries)
+    except Exception:
+        log.exception("Couldn't note upload %s's result", candidate_id)
+
+
+def upload_progress(candidate_id: int, *, sent: int | None = None) -> dict:
     """Where a customer's upload is, in their words: transcribing, finding
     clips, making clips, done (with how many are waiting) or failed."""
     from ..clip_engine import jobs
@@ -3407,12 +3487,15 @@ def upload_progress(candidate_id: int) -> dict:
             return {"stage": "failed", "label": "That upload is gone", "clips": 0}
         title = c.title
         archived = c.status == STATUS_ARCHIVED
+        downloaded = bool(c.local_video_path) or not (c.url or "").startswith("http")
         items = session.execute(
             select(InboxItem.state).where(InboxItem.candidate_pk == candidate_id)).scalars().all()
     ready = sum(1 for st in items if st == InboxItem.STATE_READY)
     making = sum(1 for st in items if st == InboxItem.STATE_DRAFTING)
     base = {"id": candidate_id, "title": title, "clips": ready}
     if not archived:
+        if not downloaded:
+            return {**base, "stage": "downloading", "label": "Getting the video from YouTube…"}
         return {**base, "stage": "transcribing", "label": "Listening to your video…"}
     job = jobs.status(candidate_id)
     if job.get("state") in jobs.ACTIVE_STATES:
@@ -3424,6 +3507,9 @@ def upload_progress(candidate_id: int) -> dict:
                 "label": f"{ready} clip{'' if ready == 1 else 's'} waiting in Today's posts"}
     if job.get("state") in ("failed", "interrupted") or job.get("error"):
         return {**base, "stage": "failed", "label": "We couldn't clip this one. Try another video."}
+    if sent == 0:
+        return {**base, "stage": "failed",
+                "label": "No clips worth posting came out of this one. Try another video."}
     return {**base, "stage": "finding", "label": "Finding the best moments…"}
 
 
@@ -3441,6 +3527,79 @@ def _get_or_create_pasted_channel(session) -> Channel:
     return ch
 
 
+def add_youtube_video(raw: str) -> tuple[str, int | None]:
+    """Add one pasted YouTube URL as an approved video, ready to download.
+    Returns ("queued", id), ("duplicate", existing id) or ("invalid", None).
+    The caller starts the download."""
+    try:
+        video_id = parse_video_url(raw)
+    except YouTubeAPIError:
+        return "invalid", None
+    canonical = f"https://www.youtube.com/watch?v={video_id}"
+    with session_scope() as session:
+        existing = session.execute(
+            select(Candidate.id).where(Candidate.video_id == video_id)
+        ).scalar_one_or_none()
+    if existing is not None:
+        return "duplicate", existing
+
+    title = ""
+    duration = None
+    published_at = utcnow()
+    # Best-effort metadata; if it fails we still queue the download.
+    try:
+        meta = fetch_video_metadata(canonical)
+        title = meta.get("title") or ""
+        duration = meta.get("duration_seconds")
+        upload_date = meta.get("upload_date")
+        if upload_date:
+            try:
+                published_at = dt.datetime.strptime(upload_date, "%Y%m%d").replace(
+                    tzinfo=dt.timezone.utc
+                )
+            except ValueError:
+                pass
+    except Exception as exc:
+        log.info("Metadata fetch failed for %s: %s", canonical, exc)
+
+    # Give the clip a concise 2-5 word AI title instead of the raw (often
+    # long/clickbait) YouTube title. Best-effort: fall back to the source
+    # title, then the URL. The original title is kept in `description`.
+    # This is the label shown while the download runs; once the transcript
+    # lands, archive_candidate rewrites the title from what is actually said,
+    # which is also all we have to go on if the video has no source title.
+    source_title = title.strip()
+    display_title = source_title
+    if source_title:
+        try:
+            short = suggest_short_title(load_settings().get("matching.model", "claude-haiku-4-5"),
+                                        source_title)
+            if short:
+                display_title = short
+        except Exception as exc:
+            log.info("Short-title generation failed for %s: %s", canonical, exc)
+
+    with session_scope() as session:
+        ch = _get_or_create_pasted_channel(session)
+        c = Candidate(
+            video_id=video_id,
+            channel_pk=ch.id,
+            title=(display_title or canonical)[:300],
+            description=source_title[:2000],
+            url=canonical,
+            # Same poster URL the Data API hands back for discovered clips.
+            # Metadata-only, so the card has a still while the download runs.
+            thumbnail_url=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+            published_at=published_at,
+            duration_seconds=duration,
+            status=STATUS_APPROVED,
+            approved_at=utcnow(),
+        )
+        session.add(c)
+        session.flush()
+        return "queued", c.id
+
+
 @app.post("/upload-url")
 def upload_url(urls: str = Form(...)):
     """Queue one or more pasted YouTube URLs for download.
@@ -3455,80 +3614,17 @@ def upload_url(urls: str = Form(...)):
     if not parts:
         return _flash("/", "Paste at least one YouTube URL")
 
-    settings = load_settings()
-    title_model = settings.get("matching.model", "claude-haiku-4-5")
     queued: list[int] = []
     duplicates = 0
     invalid: list[str] = []
-
     for raw in parts:
-        try:
-            video_id = parse_video_url(raw)
-        except YouTubeAPIError:
+        outcome, cid = add_youtube_video(raw)
+        if outcome == "queued":
+            queued.append(cid)
+        elif outcome == "duplicate":
+            duplicates += 1
+        else:
             invalid.append(raw)
-            continue
-
-        canonical = f"https://www.youtube.com/watch?v={video_id}"
-        title = ""
-        duration = None
-        published_at = utcnow()
-        # Best-effort metadata; if it fails we still queue the download.
-        try:
-            meta = fetch_video_metadata(canonical)
-            title = meta.get("title") or ""
-            duration = meta.get("duration_seconds")
-            upload_date = meta.get("upload_date")
-            if upload_date:
-                try:
-                    published_at = dt.datetime.strptime(upload_date, "%Y%m%d").replace(
-                        tzinfo=dt.timezone.utc
-                    )
-                except ValueError:
-                    pass
-        except Exception as exc:
-            log.info("Metadata fetch failed for %s: %s", canonical, exc)
-
-        # Give the clip a concise 2-5 word AI title instead of the raw (often
-        # long/clickbait) YouTube title. Best-effort: fall back to the source
-        # title, then the URL. The original title is kept in `description`.
-        # This is the label shown while the download runs; once the transcript
-        # lands, archive_candidate rewrites the title from what is actually said,
-        # which is also all we have to go on if the video has no source title.
-        source_title = title.strip()
-        display_title = source_title
-        if source_title:
-            try:
-                short = suggest_short_title(title_model, source_title)
-                if short:
-                    display_title = short
-            except Exception as exc:
-                log.info("Short-title generation failed for %s: %s", canonical, exc)
-
-        with session_scope() as session:
-            existing = session.execute(
-                select(Candidate.id).where(Candidate.video_id == video_id)
-            ).scalar_one_or_none()
-            if existing is not None:
-                duplicates += 1
-                continue
-            ch = _get_or_create_pasted_channel(session)
-            c = Candidate(
-                video_id=video_id,
-                channel_pk=ch.id,
-                title=(display_title or canonical)[:300],
-                description=source_title[:2000],
-                url=canonical,
-                # Same poster URL the Data API hands back for discovered clips.
-                # Metadata-only, so the card has a still while the download runs.
-                thumbnail_url=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-                published_at=published_at,
-                duration_seconds=duration,
-                status=STATUS_APPROVED,
-                approved_at=utcnow(),
-            )
-            session.add(c)
-            session.flush()
-            queued.append(c.id)
 
     for cid in queued:
         _in_background(_scrape_in_thread, cid)
@@ -7164,8 +7260,23 @@ def brand_page(request: Request, msg: str = ""):
         request, "brand.html",
         {"brand": load_brand(), "rules": load_brand_rules(),
          "rule_proposals": _pending_rule_proposals(),
+         "universal": _universal_rules_for_page(),
          "msg": msg, "active": "brand"},
     )
+
+
+def _universal_rules_for_page() -> dict | None:
+    """Throughline's universal rules, shown read-only on the Brand page."""
+    try:
+        from .. import universal_rules
+
+        data = universal_rules.load()
+        return {"rules": [dict(r, scope=universal_rules.SCOPE_LABELS.get(r["applies_to"], ""))
+                          for r in data["rules"] if r["enabled"]],
+                "min_s": data["clip_length"]["min_seconds"], "max_s": data["clip_length"]["max_seconds"]}
+    except Exception:
+        log.exception("Universal rules unavailable for the Brand page")
+        return None
 
 
 def _pending_rule_proposals() -> list[dict]:

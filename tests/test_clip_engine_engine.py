@@ -1961,8 +1961,16 @@ class ExtraRulesTest(unittest.TestCase):
 
     def test_an_empty_block_is_created_like_the_operators(self):
         out = engine.with_extra_rules("", ["Open on the action"])
-        with mock.patch("app.config.render_brand_rules", return_value="- Open on the action"):
+        with mock.patch("app.config.render_brand_rules", return_value="- Open on the action"), \
+                mock.patch("app.universal_rules.render", return_value=""):
             self.assertEqual(out, llm._operator_rules("content"))
+
+    def test_extra_rules_join_the_account_block_not_the_universal_one(self):
+        universal = "\n\nTHROUGHLINE'S RULES — the house method:\n- Open on a striking image\n"
+        out = engine.with_extra_rules(universal, ["No interviews"])
+        self.assertTrue(out.startswith(universal))
+        self.assertIn("THE OPERATOR'S RULES", out[len(universal):])
+        self.assertIn("- No interviews", out[len(universal):])
 
     def test_no_extra_rules_changes_nothing(self):
         self.assertEqual(engine.with_extra_rules("BLOCK", []), "BLOCK")

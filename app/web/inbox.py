@@ -236,3 +236,55 @@ def inbox_settings(enabled: str = Form(""), per_day: str = Form(""), min_score: 
         else:
             msg = "Saved"
     return RedirectResponse(f"/auto-triage?msg={quote(msg)}#inbox", status_code=303)
+
+
+# --- Adding a video to clip ------------------------------------------------------------
+# A customer's own file or a YouTube link, clipped straight into Today's posts
+# (main.clip_upload_to_inbox). Imported in the handlers, like the rest here.
+
+@router.post("/inbox/add-file")
+async def inbox_add_file(request: Request):
+    from .main import UploadRejected, clip_upload_to_inbox, store_upload
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not getattr(upload, "filename", ""):
+        return JSONResponse({"error": "Choose a video file"}, status_code=400)
+    try:
+        cid = await store_upload(upload)
+    except UploadRejected as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    threading.Thread(target=clip_upload_to_inbox, args=(cid, "file"), daemon=True,
+                     name="inbox-add-file").start()
+    return {"ok": True, "id": cid}
+
+
+@router.post("/inbox/add-url")
+def inbox_add_url(url: str = Form("")):
+    from ..models import STATUS_ARCHIVED, Candidate
+    from ..db import session_scope
+    from .main import _engine_then_inbox, add_youtube_video, clip_upload_to_inbox, mark_for_inbox
+
+    outcome, cid = add_youtube_video(url.strip())
+    if outcome == "invalid":
+        return JSONResponse({"error": "That doesn't look like a YouTube video link"}, status_code=400)
+    if outcome == "duplicate":
+        with session_scope(read_only=True) as session:
+            c = session.get(Candidate, cid)
+            archived = c is not None and c.status == STATUS_ARCHIVED
+        if archived:
+            # Already downloaded and transcribed here: straight to clipping.
+            mark_for_inbox(cid, "link")
+            threading.Thread(target=_engine_then_inbox, args=(cid,), daemon=True,
+                             name="inbox-add-url").start()
+            return {"ok": True, "id": cid}
+    threading.Thread(target=clip_upload_to_inbox, args=(cid, "link"), daemon=True,
+                     name="inbox-add-url").start()
+    return {"ok": True, "id": cid}
+
+
+@router.get("/inbox/added")
+def inbox_added():
+    from .main import _archives_here, added_videos
+
+    return {"videos": added_videos(), "files_here": _archives_here()}

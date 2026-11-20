@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Universal rules · Throughline Admin{% endblock %}
+{% block content %}
+<h1>Universal rules</h1>
+<p class="sub">How every account's clips and captions are made. These apply to every account and win over an account's own rules and settings. Customers see them, read-only, on their Brand page. Changes reach every account within about ten minutes.</p>
+{% if msg %}<p class="ok-text">{{ msg }}</p>{% endif %}
+{% if error %}<p class="bad-text">{{ error }}</p>{% endif %}
+
+<form method="post" action="/rules" id="rules-form">
+  <input type="hidden" name="payload" id="payload">
+  <div class="card" style="margin-bottom:16px">
+    <h2 class="section-title">Clip length</h2>
+    <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap">
+      <label>Shortest <input type="number" id="min-s" min="5" max="180" value="{{ data.clip_length.min_seconds }}" class="ur-num"> s</label>
+      <label>Longest <input type="number" id="max-s" min="5" max="180" value="{{ data.clip_length.max_seconds }}" class="ur-num"> s</label>
+      <span class="muted" style="font-size:13px">Overrides every account's clip length, for the clip engine and the transcript suggester.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px">
+      <h2 class="section-title" style="margin:0">Rules</h2>
+      <button type="button" class="ur-btn" id="add-rule">＋ Add a rule</button>
+    </div>
+    <div id="rules"></div>
+  </div>
+
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px">
+    <span class="muted" style="font-size:13px">{% if data.updated_at %}Last saved {{ data.updated_at }}{% else %}Showing the shipped defaults; nothing saved yet.{% endif %}</span>
+    <button class="ur-btn ur-primary" type="submit">Save rules</button>
+  </div>
+</form>
+
+<template id="rule-tpl">
+  <div class="ur-rule">
+    <label class="ur-on"><input type="checkbox" class="r-on"> On</label>
+    <textarea class="r-text" rows="2" placeholder="A rule every account follows"></textarea>
+    <select class="r-scope">{% for k, v in scopes.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+    <button type="button" class="ur-x" title="Delete this rule">×</button>
+  </div>
+</template>
+
+<style>
+  .ur-num { width:72px; padding:7px 9px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit; font-family:var(--mono); }
+  .ur-rule { display:grid; grid-template-columns:auto 1fr 220px auto; gap:10px; align-items:start; padding:10px 0; border-bottom:1px solid var(--border); }
+  .ur-rule:last-child { border-bottom:0; }
+  .ur-rule textarea, .ur-rule select { width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit; resize:vertical; }
+  .ur-on { font-size:13px; color:var(--dim); padding-top:8px; white-space:nowrap; }
+  .ur-x { background:none; border:0; color:var(--muted); font-size:22px; cursor:pointer; padding:2px 6px; }
+  .ur-x:hover { color:var(--bad); }
+  .ur-btn { padding:8px 14px; border-radius:99px; border:1px solid var(--border); background:var(--panel2); color:var(--text); font:inherit; font-weight:600; cursor:pointer; }
+  .ur-primary { background:var(--text); color:var(--bg); border-color:var(--text); padding:10px 20px; }
+  @media (max-width:760px) { .ur-rule { grid-template-columns:1fr; } }
+</style>
+<script>
+(function () {
+  var data = {{ data|tojson }};
+  var box = document.getElementById('rules'), tpl = document.getElementById('rule-tpl');
+  function add(r) {
+    var node = tpl.content.firstElementChild.cloneNode(true);
+    node.dataset.id = r.id || '';
+    node.querySelector('.r-on').checked = r.enabled !== false;
+    node.querySelector('.r-text').value = r.text || '';
+    node.querySelector('.r-scope').value = r.applies_to || 'clips';
+    node.querySelector('.ur-x').onclick = function () { node.remove(); };
+    box.appendChild(node);
+    return node;
+  }
+  (data.rules || []).forEach(add);
+  document.getElementById('add-rule').onclick = function () { add({}).querySelector('.r-text').focus(); };
+  document.getElementById('rules-form').addEventListener('submit', function () {
+    var rules = Array.prototype.map.call(box.querySelectorAll('.ur-rule'), function (n) {
+      return { id: n.dataset.id, text: n.querySelector('.r-text').value, enabled: n.querySelector('.r-on').checked,
+               applies_to: n.querySelector('.r-scope').value };
+    });
+    document.getElementById('payload').value = JSON.stringify({
+      clip_length: { min_seconds: +document.getElementById('min-s').value, max_seconds: +document.getElementById('max-s').value },
+      rules: rules });
+  });
+})();
+</script>
+{% endblock %}
