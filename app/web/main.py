@@ -1088,6 +1088,9 @@ def _home_worker_tick() -> dict:
     """One round: approve what today's pace allows (if switched on), then
     download every approved video that isn't already downloading, in turn.
     Downloads go through scrape's machine-wide pacing, never in parallel."""
+    from ..heartbeat import beat
+
+    beat("home-worker")
     from .. import auto_select
 
     picked: dict = {}

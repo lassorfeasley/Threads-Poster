@@ -1,0 +1,42 @@
+# Throughline Admin: health, pipeline and activity across every customer
+# account, served at https://admin.continuity.marketing. Only the operator gets
+# in (an admin-role login that is also in ADMIN_EMAILS). Read-only throughout.
+# Deploy: fly deploy -c fly.admin.toml
+#
+# Secrets (fly secrets set -a throughline-admin ...), none in this file:
+#   ADMIN_EMAILS          the operator's login email(s), comma-separated
+#   ADMIN_WORKSPACES      JSON list of {slug, label, database_url, fly_apps}
+#                         (use a read-only database role where possible)
+#   FLY_API_TOKEN         a read-only Fly token, for machine state
+#   SUPABASE_URL, SUPABASE_SERVICE_KEY   the project that holds the logins
+
+app = "throughline-admin"
+primary_region = "sjc"   # next to the databases
+
+[build]
+  dockerfile = "Dockerfile.dashboard"
+
+[env]
+  SCHEDULER_EMBEDDED = "false"
+  ARCHIVE_ON_THIS_MACHINE = "off"
+
+[experimental]
+  cmd = ["python", "run.py", "admin", "--host", "0.0.0.0", "--port", "8080"]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

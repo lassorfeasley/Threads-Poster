@@ -3454,6 +3454,9 @@ def reschedule_windows_for_post(session, post_id: int) -> list[dict]:
 
 def run_tick() -> None:
     """One loop iteration: recover → annotate → metrics → window → first replies."""
+    from .heartbeat import beat
+
+    beat("scheduler")
     try:
         with session_scope() as session:
             n = recover_stuck_publishing(session, only_inactive=True)
