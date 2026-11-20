@@ -10,7 +10,7 @@ import re
 from anthropic import Anthropic
 
 from . import spend
-from .config import env, load_brand
+from .config import env, load_brand, with_american_english
 
 _client: Anthropic | None = None
 
@@ -48,8 +48,23 @@ def _brand() -> dict:
         if value:
             out[key] = value
     # No generic default makes sense for these; empty just omits the context.
-    for key in ("name", "mission", "audience", "positioning", "voice_notes", "cta_url"):
+    for key in ("name", "mission", "audience", "positioning", "voice_notes", "cta_url",
+                "throughline", "format", "caption_brief"):
         out[key] = str(raw.get(key) or "").strip()
+    return out
+
+
+def _caption_concept(b: dict) -> str:
+    """The account's throughline and caption brief as a caption-prompt block,
+    or "" when neither is set (accounts set up before onboarding had them)."""
+    out = ""
+    if b.get("throughline"):
+        out += ("The account's throughline — the one idea every caption brings the "
+                f"clip back to, whatever the footage: {b['throughline']}\n\n")
+    if b.get("caption_brief"):
+        out += ("The brand's caption brief — its own perspective to apply to what "
+                "the clip shows. Use it to shape the take; don't quote it or mention "
+                f"that it exists:\n{b['caption_brief'][:4000]}\n\n")
     return out
 
 
@@ -99,6 +114,25 @@ _NO_TEMPERATURE_PREFIXES = (
 )
 
 
+# Models that think unless told otherwise. Their thinking counts against
+# max_tokens, so a call sized for its answer alone ("max_tokens=3000" for a
+# clip list) can spend the whole budget thinking and return no text at all.
+# They get at least THINKING_FLOOR; billing is for tokens used, so the extra
+# room costs nothing unless it's needed. Kept under the SDK's ~21k ceiling for
+# non-streaming requests.
+_THINKS_BY_DEFAULT = ("claude-opus-5", "claude-sonnet-5", "claude-haiku-5", "claude-fable",
+                      "claude-mythos")
+THINKING_FLOOR = 16000
+
+
+class TruncatedReply(ValueError):
+    """The model ran out of output budget before writing its answer."""
+
+
+def _thinks_by_default(model: str) -> bool:
+    return str(model or "").strip().lower().startswith(_THINKS_BY_DEFAULT)
+
+
 def _sends_temperature(model: str) -> bool:
     return not str(model or "").strip().lower().startswith(_NO_TEMPERATURE_PREFIXES)
 
@@ -107,9 +141,11 @@ def _create(model: str, system: str, content, max_tokens: int, temperature: floa
     """Single entry point for Anthropic message calls. `content` is either a
     plain string or a list of content blocks (for multimodal). Records token
     usage in the spend ledger."""
+    if _thinks_by_default(model):
+        max_tokens = max(int(max_tokens), THINKING_FLOOR)
     kwargs = dict(
         model=model,
-        system=system,
+        system=with_american_english(system),
         messages=[{"role": "user", "content": content}],
         max_tokens=max_tokens,
     )
@@ -132,7 +168,11 @@ def _create(model: str, system: str, content, max_tokens: int, temperature: floa
 
 
 def _text_from(resp) -> str:
-    return "".join(block.text for block in resp.content if block.type == "text")
+    text = "".join(block.text for block in resp.content if block.type == "text")
+    if not text.strip() and getattr(resp, "stop_reason", None) == "max_tokens":
+        raise TruncatedReply("the model ran out of room before answering "
+                             "(it used its whole output budget thinking)")
+    return text
 
 
 def _text_chat(model: str, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2) -> str:
@@ -199,6 +239,11 @@ def fit_profile() -> dict:
         "source_kind": b["source_kind"], "relevance_rules": b["relevance_rules"],
         "false_positives": b["false_positives"],
         "rules": _operator_rules("screening"),
+        # Only when set: a new key in this dict re-scores every waiting video
+        # (app/positioning.py fingerprints it), and accounts set up before
+        # formats existed have none.
+        **({"throughline": b["throughline"]} if b["throughline"] else {}),
+        **({"format": b["format"]} if b["format"] else {}),
     }
 
 
@@ -214,9 +259,12 @@ def score_fit(model: str, title: str, description: str) -> dict:
     """
     p = fit_profile()
     lines = [f"Account: {p['name'] or 'this account'}", f"Topic: {p['topic']}"]
-    for key, label in (("mission", "Mission"), ("audience", "Audience"),
+    for key, label in (("mission", "What the brand behind it does"),
+                       ("audience", "The brand's customers"),
+                       ("throughline", "Its throughline — the one idea every clip comes back to"),
+                       ("format", "Kinds of clips that carry it"),
                        ("positioning", "Positioning — what its clips should be known for")):
-        if p[key]:
+        if p.get(key):
             lines.append(f"{label}: {p[key]}")
     lines.append(f"On topic when: {p['relevance_rules']}")
     lines.append(f"Off topic when: {p['false_positives']}")
@@ -508,10 +556,13 @@ def suggest_rerun_caption(model: str, *, title: str, channel: str,
     length = (f"Aim for about {target_words} words — the length this operator "
               f"actually posts; shorter is fine, longer is not."
               if target_words else "One or two short lines.")
+    concept = _caption_concept(b)
+    # Unchanged wording for accounts without a throughline or caption brief.
+    lead_in = f".\n\n{concept}Rules for the new caption:\n" if concept else ":\n"
     system = (
         f"You write the caption for a short {b['source_kind']} clip about "
         f"{b['topic']} that is being RE-AIRED on Threads. It first aired on "
-        "first_aired with original_caption. Write a NEW caption for today:\n"
+        f"first_aired with original_caption. Write a NEW caption for today{lead_in}"
         "- Same subject. original_caption says what the clip shows, and the new "
         "caption must be about that same story — the title can cover a longer "
         "video with other stories in it, and none of those belong here.\n"
@@ -684,7 +735,7 @@ def _words_to_clauses(words: list[dict], max_words: int = 12,
     captions group the same stream. Times are rounded to ``ndigits``: the
     default 1 keeps prompts short; the clip engine's editor asks for 2, since
     a boundary copied from a 1 dp entry can land up to 0.05 s inside the
-    neighbouring word.
+    neighboring word.
     """
     clauses: list[dict] = []
     cur: list[dict] = []
@@ -722,7 +773,7 @@ CLIP_TRANSCRIPT_ENTRIES = 400
 
 
 def _fit_entries(entries: list[dict], cap: int) -> list[dict]:
-    """Coarsen a timeline to at most ``cap`` entries by joining neighbours.
+    """Coarsen a timeline to at most ``cap`` entries by joining neighbors.
 
     Truncating instead would hide the end of every long video from a
     whole-video pass. Joined entries span first-start to last-end, so an entry
@@ -871,7 +922,7 @@ def suggest_clips(model: str, title: str, transcript_segments: list[dict],
     # The entry cap goes AFTER the window filter, never before: the first 400
     # clauses of a 57-minute video are its first quarter, and a section past
     # that would arrive here with an empty transcript and propose nothing.
-    # Over the cap, neighbours are merged rather than the tail dropped — a
+    # Over the cap, neighbors are merged rather than the tail dropped — a
     # whole-video pass has to SEE the whole video to pick its best moment.
     compact = _fit_entries(compact, CLIP_TRANSCRIPT_ENTRIES)
     if not compact:
@@ -1151,7 +1202,7 @@ def _transcript_blocks(segments: list[dict], target: int = 240,
 
     Chapter finding needs the WHOLE timeline, so it can't truncate the way the
     clip suggester does — a 45-minute video would lose its second half and
-    every chapter in it. Neighbouring lines are merged into blocks of roughly
+    every chapter in it. Neighboring lines are merged into blocks of roughly
     equal length instead, which keeps coverage end to end at a bounded token
     cost. Boundaries then land on block edges, which is fine: a chapter mark a
     few seconds out is still the right chapter.
@@ -1270,7 +1321,7 @@ def segment_chapters(model: str, title: str, transcript_segments: list[dict],
     """Divide a video into consecutive topical chapters.
 
     The deliberately easy half of "what is in this video": finding WHERE the
-    subject changes, with none of the judgement that makes clipping hard — no
+    subject changes, with none of the judgment that makes clipping hard — no
     frames to pick, no boundaries to land on words, no self-contained story to
     tell. A chapter a few seconds out costs nothing, because the operator cuts
     inside one rather than shipping it.
@@ -1326,7 +1377,7 @@ def segment_chapters(model: str, title: str, transcript_segments: list[dict],
         return ch["end"] - ch["start"]
 
     def absorb(index: int) -> None:
-        """Fold one chapter into its neighbour, keeping the tiling intact."""
+        """Fold one chapter into its neighbor, keeping the tiling intact."""
         gone = chapters.pop(index)
         if index > 0:
             chapters[index - 1]["end"] = gone["end"]
@@ -1364,7 +1415,7 @@ def rank_striking_frames(model: str, frames: list[tuple[float, bytes]], *,
     listed can open on it and cut to the talking afterwards.
 
     ``frames`` are ``(timestamp, jpeg)`` in order, each sent as its own
-    labelled image rather than tiled into a sheet — a model asked which cell
+    labeled image rather than tiled into a sheet — a model asked which cell
     of a grid it picked is guessing (see ``vision.frames_between``).
 
     Returns ``[{"index": int, "why": str}]``, strongest first, at most ``top``.
@@ -1400,7 +1451,7 @@ def rank_striking_frames(model: str, frames: list[tuple[float, bytes]], *,
         "type": "text",
         "text": (f"Video: {title}\n" if title else "")
         + (f"This stretch is about: {topic}\n" if topic else "")
-        + f"{len(frames)} frames follow, each labelled with its index.",
+        + f"{len(frames)} frames follow, each labeled with its index.",
     }]
     for i, (ts, image) in enumerate(frames):
         blocks.append({"type": "text", "text": f"Frame {i} (t={ts:.1f}s)"})
@@ -1545,7 +1596,7 @@ def pick_opening_frame(model: str, frames: list[tuple[float, bytes]],
         "type": "text",
         "text": (f"Story: {story}\n" if story else "")
         + (f"Video: {title}\n" if title else "")
-        + "Frames follow, each labelled with its index.",
+        + "Frames follow, each labeled with its index.",
     }]
     for i, (ts, image) in enumerate(frames):
         marker = " <- clip currently starts here" if i == latest_index else ""
@@ -1652,10 +1703,11 @@ def suggest_post_caption(model: str, title: str, station: str, market: str,
     if b["mission"] or b["audience"]:
         context_bits = []
         if b["mission"]:
-            context_bits.append(f"mission — {b['mission']}")
+            context_bits.append(f"what it does — {b['mission']}")
         if b["audience"]:
-            context_bits.append(f"audience — {b['audience']}")
-        system += "Channel context: " + "; ".join(context_bits) + ".\n\n"
+            context_bits.append(f"its customers — {b['audience']}")
+        system += "The brand behind this account: " + "; ".join(context_bits) + ".\n\n"
+    system += _caption_concept(b)
     if target_words:
         # Framed as a goal to land on, with permission to go shorter. A ceiling
         # on its own reads as an allowance and gets spent.

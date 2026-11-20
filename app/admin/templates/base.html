@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}Throughline Admin{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>
+  :root { --bg:#0f0f0e; --panel:#181817; --panel2:#222220; --border:#2b2b28; --text:#f3f2ef; --dim:#b9b7b0; --muted:#85837c;
+          --ok:#52d39a; --warn:#e9b862; --bad:#f2796d; --mono:"JetBrains Mono", ui-monospace, monospace; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 "Be Vietnam Pro", system-ui, sans-serif; }
+  a { color:inherit; }
+  header.top { display:flex; align-items:center; justify-content:space-between; padding:18px 28px; border-bottom:1px solid var(--border); }
+  header.top .brand { font-weight:800; letter-spacing:-0.01em; } header.top .brand span { color:var(--muted); font-weight:500; }
+  header.top form { margin:0; } .link { background:none; border:0; color:var(--muted); font:inherit; cursor:pointer; padding:0; }
+  .link:hover { color:var(--text); text-decoration:underline; }
+  main { padding:28px; max-width:1280px; margin:0 auto; }
+  h1 { font-size:28px; letter-spacing:-0.02em; margin:0 0 6px; } .sub { color:var(--dim); margin:0 0 24px; }
+  .num, .mono { font-family:var(--mono); }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; margin-bottom:26px; }
+  .tile { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:14px 16px; }
+  .tile .k { color:var(--muted); font-size:12.5px; } .tile .v { font-family:var(--mono); font-size:24px; font-weight:700; margin-top:2px; }
+  .card .tiles { grid-template-columns:repeat(auto-fit, minmax(92px, 1fr)); gap:8px; }
+  .card .tile { padding:10px 12px; } .card .tile .v { font-size:19px; overflow-wrap:anywhere; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:18px 20px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; flex:none; }
+  .dot.ok { background:var(--ok); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); box-shadow:0 0 0 4px rgba(242,121,109,.15); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:99px; font-size:12px; font-weight:600; border:1px solid var(--border); color:var(--dim); }
+  .pill.ok { color:var(--ok); border-color:rgba(82,211,154,.4); } .pill.warn { color:var(--warn); border-color:rgba(233,184,98,.4); } .pill.bad { color:var(--bad); border-color:rgba(242,121,109,.45); }
+  table { width:100%; border-collapse:collapse; font-size:14px; } th { text-align:left; color:var(--muted); font-weight:500; font-size:12.5px; padding:8px 10px; border-bottom:1px solid var(--border); }
+  td { padding:9px 10px; border-bottom:1px solid var(--border); vertical-align:top; } tr:last-child td { border-bottom:0; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit, minmax(380px, 1fr)); gap:16px; }
+  .section-title { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 12px; font-weight:600; }
+  .muted { color:var(--muted); } .dim { color:var(--dim); } .bad-text { color:var(--bad); } .warn-text { color:var(--warn); } .ok-text { color:var(--ok); }
+  .reasons { margin:6px 0 0; padding-left:18px; color:var(--dim); font-size:13.5px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/" style="text-decoration:none">Throughline <span>Admin</span></a>
+  {% if request.state.user is defined and request.state.user %}<form method="post" action="/logout"><span class="muted" style="margin-right:12px">{{ request.state.user }}</span><button class="link">Sign out</button></form>{% endif %}
+</header>
+<main>{% block content %}{% endblock %}</main>
+</body>
+</html>

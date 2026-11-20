@@ -42,14 +42,14 @@ So the plan was: keep clip selection assisted by you, keep rich data, and come b
 - [ ] `account_snapshots` has about one row a day. If not, check that the Threads token has the `threads_manage_insights` scope.
 - [ ] `placement_logs` has a row for most published windows, with non-empty `alternatives`.
 - [ ] Posts older than 60 days have weekly snapshots.
-- [ ] At least 30 clips labelled, including both hits and flops. Fewer than that and step 2 isn't meaningful; spend 15 minutes on the labels page first.
+- [ ] At least 30 clips labeled, including both hits and flops. Fewer than that and step 2 isn't meaningful; spend 15 minutes on the labels page first.
 
 ### 2. Test video models against your labels (the gate for everything else)
 
 - [ ] Pick the strongest available video-understanding model(s).
-- [ ] For each labelled clip, give the model the actual clip (video, not frames, if it supports that) and ask: "Would someone scrolling stop on this? Is it visually gripping?"
+- [ ] For each labeled clip, give the model the actual clip (video, not frames, if it supports that) and ask: "Would someone scrolling stop on this? Is it visually gripping?"
 - [ ] Measure agreement with your labels. Look separately at agreement on your "yes" clips and on your "no" clips.
-- [ ] **Decision:** if it agrees about 80% of the time or more, on both "yes" and "no", it's ready to use for scoring. If not, set another six-month reminder and keep labelling.
+- [ ] **Decision:** if it agrees about 80% of the time or more, on both "yes" and "no", it's ready to use for scoring. If not, set another six-month reminder and keep labeling.
 
 ### 3. Measure what actually performs, before building anything
 

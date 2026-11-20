@@ -22,7 +22,7 @@ log = logging.getLogger("labels")
 
 VALUES = ("yes", "no")
 # Labels needed before a model comparison means anything — and a reminder of
-# what "enough" looks like on the labelling page.
+# what "enough" looks like on the labeling page.
 TARGET = 30
 
 REVIEW_NOTE = "docs/six-month-review.md"
@@ -63,12 +63,12 @@ def counts(session, label: str = ContentLabel.LABEL_GRIPPING) -> dict:
 
 def queue(session, *, limit: int = 60,
           label: str = ContentLabel.LABEL_GRIPPING) -> list[dict]:
-    """Published clips to label, unlabelled first, newest first within each.
+    """Published clips to label, unlabeled first, newest first within each.
 
     One entry per clip (a rerun is the same footage), carrying the post it
     aired as so the page can play and link it, and its latest views — shown
-    AFTER labelling would be ideal, but views on the card are useful context
-    for spotting which hits and flops are still unlabelled.
+    AFTER labeling would be ideal, but views on the card are useful context
+    for spotting which hits and flops are still unlabeled.
     """
     from .analytics import latest_metrics_bulk
 

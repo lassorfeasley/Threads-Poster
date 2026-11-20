@@ -4,7 +4,7 @@
 {#
   Outro — the card every posted clip ends on (app/outro_card.py; POST
   /outro-card). Three lines, the website (typed out at the end, and on a tab
-  over the footage) and a colour. The
+  over the footage) and a color. The
   preview images come from the renderer itself (/outro-card/preview.png).
 #}
 {{ ui.pagebar("Outro", sub="The card your clips end on: three short lines and your website. Your website also rides on a tab at the top of the video.") }}
@@ -94,12 +94,12 @@
   <section class="set-section">
     <div class="set-section-head">
       <div>
-        <h2 class="set-section-title">Colour</h2>
+        <h2 class="set-section-title">Color</h2>
         <p class="set-section-desc">The card's background and the tab on the video. The text turns black or white, whichever reads best.</p>
       </div>
     </div>
     <div class="set-section-body">
-      <div class="ss-swatches" role="radiogroup" aria-label="Colour">
+      <div class="ss-swatches" role="radiogroup" aria-label="Color">
         {% for hex, name in colors %}
         <label class="ss-swatch">
           <input type="radio" name="color" value="{{ hex }}" {% if card.color == hex %}checked{% endif %}>
@@ -111,11 +111,11 @@
       <div class="ss-own">
         <label class="ss-swatch" style="flex-direction: row; padding: 8px 12px;">
           <input type="radio" name="color" value="__custom" {% if card.color not in preset_colors %}checked{% endif %}>
-          <span>Your own colour:</span>
+          <span>Your own color:</span>
         </label>
-        <input type="color" id="oc-picker" value="{{ card.color }}" aria-label="Pick a colour">
+        <input type="color" id="oc-picker" value="{{ card.color }}" aria-label="Pick a color">
         <input type="text" name="custom_color" id="oc-custom" value="{{ card.color }}" maxlength="7"
-               style="max-width: 110px;" aria-label="Colour code">
+               style="max-width: 110px;" aria-label="Color code">
       </div>
     </div>
     <div class="set-section-foot set-savebar">

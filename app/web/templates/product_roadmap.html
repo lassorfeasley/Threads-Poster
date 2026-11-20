@@ -246,7 +246,7 @@
 <div class="card roadmap-card" style="margin-top: 14px;">
   <div class="card-title" style="margin-bottom: 4px;">Billing — Stripe</div>
   <p class="meta" style="margin: 0 0 12px;">
-    Hosted everything: Stripe Checkout for starting a subscription, Stripe Customer Portal for changing or cancelling one. No card data touches the app, no PCI scope, and no billing UI to build or maintain — two redirects and a webhook. Depends on the entity (Stripe needs business details before it pays out) and on the control plane (subscription state needs a table to live in).
+    Hosted everything: Stripe Checkout for starting a subscription, Stripe Customer Portal for changing or canceling one. No card data touches the app, no PCI scope, and no billing UI to build or maintain — two redirects and a webhook. Depends on the entity (Stripe needs business details before it pays out) and on the control plane (subscription state needs a table to live in).
   </p>
   <ul class="roadmap-list">
     <li>
@@ -267,7 +267,7 @@
       <span class="badge info">Next</span>
       <div>
         <strong>C3. Decide what lapsing actually does</strong>
-        <span class="meta">This is a product decision, not a Stripe one, and it deserves to be made deliberately rather than discovered. Proposal: a failed payment shows a banner and starts a grace period; a cancelled subscription makes the scheduler skip that workspace and the dashboard read-only, but <em>never</em> deletes the queue or the media. Silently dropping a queued post is the one failure this product cannot afford — someone's content calendar has a hole in it and no error to point at.</span>
+        <span class="meta">This is a product decision, not a Stripe one, and it deserves to be made deliberately rather than discovered. Proposal: a failed payment shows a banner and starts a grace period; a canceled subscription makes the scheduler skip that workspace and the dashboard read-only, but <em>never</em> deletes the queue or the media. Silently dropping a queued post is the one failure this product cannot afford — someone's content calendar has a hole in it and no error to point at.</span>
       </div>
     </li>
     <li>

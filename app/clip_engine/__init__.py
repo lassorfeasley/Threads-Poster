@@ -59,7 +59,7 @@ def effective_setup(settings, requested: str | None = None) -> tuple[str, str]:
     """``(setup, reason)``: the setup that can actually run right now.
 
     A setup whose provider key is missing falls back to ``transcript`` rather
-    than failing, so a missing ``GEMINI_API_KEY`` degrades to today's behaviour
+    than failing, so a missing ``GEMINI_API_KEY`` degrades to today's behavior
     instead of leaving a video with no suggestions. ``reason`` says why when it
     fell back, and is "" otherwise.
     """

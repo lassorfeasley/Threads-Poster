@@ -10,7 +10,7 @@ Three judgments, each built against a known way model judges go wrong:
   scroll. It never raises: an outage yields a "not reviewed" critique that
   ``cold_score`` sorts last, so a provider failure never reads as a verdict.
 - ``rank`` compares drafts side by side against this account's own hits and
-  flops. Pairwise and listwise judges favour positions and letters, so it
+  flops. Pairwise and listwise judges favor positions and letters, so it
   runs twice — in the given order and reversed, with letters assigned by
   position in each pass — and merges the two with a Borda count (ties
   broken by the cold score, not by which pass came first).

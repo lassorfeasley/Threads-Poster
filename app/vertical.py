@@ -151,7 +151,7 @@ def create_vertical_composite(clip_path: str | Path, hook_text: str,
     caption_lines = int(settings.get("vertical.caption_max_lines", 3))
     from .caption_look import resolve
 
-    look = resolve(settings)    # the account's font and box colour, else settings.yaml's
+    look = resolve(settings)    # the account's font and box color, else settings.yaml's
     caption_font_name = look["font"]
     dwell = max(0.0, float(settings.get("subtitles.dwell_seconds", 2.0)))
     colors = {"text": _hex_to_rgba(look["text"]), "box": _hex_to_rgba(look["box"]),

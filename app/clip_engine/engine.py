@@ -373,7 +373,7 @@ OFF_TOPIC = ("incidental", "none")
 def material_topic(shot_log: dict | None, segments: list[dict]) -> float | None:
     """The shot log's 0-2 ``topic`` for the material a clip uses: the mean
     over the beats it overlaps, weighted by how much of each it uses (so a
-    sliver of a neighbouring beat can't swing it). None when no beat
+    sliver of a neighboring beat can't swing it). None when no beat
     overlaps, i.e. the log has no opinion."""
     weighted = covered = 0.0
     for beat in (shot_log or {}).get("beats") or []:
@@ -1109,7 +1109,7 @@ class _Run:
                 transcript=self.transcript, window=self.window, meter=self.meter,
                 check=self.checkpoint, cancel=self.cancel)
         except (util.Cancelled, EngineError):
-            # Cancelled, out of time, or past the hard cap (the checkpoint's
+            # Canceled, out of time, or past the hard cap (the checkpoint's
             # own errors): not a perceiver failure, so not reworded as one.
             raise
         except Exception as exc:

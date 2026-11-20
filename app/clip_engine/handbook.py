@@ -13,7 +13,7 @@ critic and ranker can follow:
    says about his taste: published 1.0, exported but never posted 0.5, and a
    cut that started from an accepted transcript-suggester proposal 0.3 (its
    boundaries are partly the suggester's). A deterministic 20% of VIDEOS
-   (by sha1 of the video id) is held out and never analysed, so ``validate``
+   (by sha1 of the video id) is held out and never analyzed, so ``validate``
    can test the rules on edits they were not learned from.
 2. ``analyse`` — one Gemini call per cut, text only: the video's shot log
    (cached; built once per video), the transcript, his segments in play order
@@ -33,7 +33,7 @@ candidates into the same proposal queue as rules drawn from the operator's
 notes (``notes.add_proposals(source="handbook")``); on the Brand & audience
 page he adds or dismisses them like any other suggestion, and an added one
 is an ordinary brand rule the engine already reads. Nothing changes the
-engine's behaviour until he does. ``render_active`` stays for compatibility
+engine's behavior until he does. ``render_active`` stays for compatibility
 and returns "".
 
 config/clip_handbook.yaml is the analysis REPORT (when it was built, how many
@@ -71,7 +71,7 @@ WEIGHT_SEEDED = 0.3
 HOLDOUT_BUCKETS = 5            # 1 in 5 videos (20%) is held out
 RULE_MIN_SUPPORT = 5
 RULE_MIN_SHARE = 0.7
-MIN_EDITS = 10                 # fewer analysed edits than this: nothing to generalise from
+MIN_EDITS = 10                 # fewer analyzed edits than this: nothing to generalize from
 TEXT_LIMIT = 200
 SLIVER_S = 0.3
 MAX_EXAMPLE_IDS = 8
@@ -790,7 +790,7 @@ def synthesize(edits: list[dict], settings, meter=None, *, model: str | None = N
 
     records = [e for e in edits or [] if isinstance(e, dict) and isinstance(e.get("edit"), dict)]
     if len(records) < MIN_EDITS:
-        raise HandbookError(f"only {len(records)} analysed edits; need at least {MIN_EDITS}")
+        raise HandbookError(f"only {len(records)} analyzed edits; need at least {MIN_EDITS}")
     payload = {"records": [compact_edit(r) for r in records]}
     model_id = model or model_for(settings, "claude", "editor")
     try:
@@ -878,7 +878,7 @@ _LOWER_FIRST = frozenset({"a", "an", "the", "any", "every", "this", "there", "it
 
 
 def _keys_of(item: dict) -> set[str]:
-    """Every text a queued proposal or a brand rule can be recognised by: what
+    """Every text a queued proposal or a brand rule can be recognized by: what
     the engine reads, the formatted sentence, and what was originally given."""
     return {k for k in (_key(item.get("text")), _key(item.get("rule")),
                         _key(item.get("original"))) if k}
@@ -1112,7 +1112,7 @@ def _db():
 
 def build(settings, *, limit: int | None = None, max_usd: float = 40.0, meter=None,
           say: Callable[[str], Any] = log.info) -> dict:
-    """Analyse the non-holdout exported cuts (best evidence first; ``limit``
+    """Analyze the non-holdout exported cuts (best evidence first; ``limit``
     of them) until ``max_usd`` is spent or the disk runs low, then synthesize.
     Cached analyses cost nothing and are reused. Returns the report; neither
     proposes nor saves (the caller does both)."""

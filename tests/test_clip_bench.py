@@ -1326,7 +1326,7 @@ class ArmInputsTest(_RunFixture):
         util.atomic_write_json(bench.bench_dir() / "t1" / "manifest.json", manifest)
         with self.assertRaises(bench.BenchError) as ctx:
             self.run_bench(arms=None)
-        self.assertIn("can't run as labelled", str(ctx.exception))
+        self.assertIn("can't run as labeled", str(ctx.exception))
         self.assertEqual(len(self.engine_calls), 3)
 
 

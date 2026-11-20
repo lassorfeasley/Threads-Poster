@@ -175,7 +175,7 @@ clip_engine:
   max_seconds: 45
   max_segments: 6
   taste_hits: 3              # this account's best clips shown to the ranking critic
-  taste_flops: 2             # only clips you labelled "not gripping" (Analytics → Label clips)
+  taste_flops: 2             # only clips you labeled "not gripping" (Analytics → Label clips)
   taste_lookback_days: 180
   workers: 1                 # engine jobs that run at once in the dashboard
   # The engine's own daily cap for unattended runs (archive-time, resumes, and
@@ -969,6 +969,6 @@ analytics:
 
 reminders:
   # From this date the Notifications bell lights up with the six-month review
-  # (docs/six-month-review.md): test video models against your labelled clips
+  # (docs/six-month-review.md): test video models against your labeled clips
   # and decide what to automate. Stays until you mark it done.
   model_review_on: "2027-05-09"

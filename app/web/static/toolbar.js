@@ -1,5 +1,5 @@
 /*
- * Shared behaviour for the pagebar toolbar component (see
+ * Shared behavior for the pagebar toolbar component (see
  * templates/components/toolbar.html). Everything is driven by data- attributes
  * so pages stay declarative and keep their own server/client filtering model.
  *

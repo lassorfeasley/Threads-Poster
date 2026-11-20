@@ -2,7 +2,7 @@
 
 Trait tagging is observation only — no good/bad scores. ``find_striking_frames``
 is the exception that judges, because picking an opening image is nothing but
-judgement; it stays here because this is where the frame sampling lives.
+judgment; it stays here because this is where the frame sampling lives.
 
 Three tagging entry points:
 

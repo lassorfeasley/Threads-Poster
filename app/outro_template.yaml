@@ -1,7 +1,7 @@
 # The outro design every account starts from when it has no config/outro.yaml
-# of its own: three lines and a typed website on a coloured card, with the
+# of its own: three lines and a typed website on a colored card, with the
 # website on a tab over the footage. Accounts fill in their own words, website,
-# logo and colour on Settings > Outro (app/outro_card.py), applied over this.
+# logo and color on Settings > Outro (app/outro_card.py), applied over this.
 # Same format as workspaces/*/config/outro.yaml; see app/outro.py.
 
 enabled: false

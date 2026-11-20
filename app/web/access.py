@@ -21,9 +21,11 @@ import re
 ADMIN_ROLE = "admin"
 VIEW_COOKIE = "view_as"
 CUSTOMER_HOME = "/inbox"
+ONBOARDING_HOME = "/welcome"
 
 # Whole sections a customer may use (the path itself and everything under it).
 _CUSTOMER_SECTIONS = (
+    "/welcome",
     "/inbox",
     "/calendar",
     "/analytics",
@@ -71,9 +73,16 @@ _CUSTOMER_ACTIONS = (
 _ADMIN_ONLY = frozenset({
     ("POST", "/inbox/settings"),     # the inbox's own switch and limits
     ("POST", "/schedule"),           # hand-edited posting windows (custom schedules)
-    ("POST", "/schedule/cancel"),    # ...and cancelling one
+    ("POST", "/schedule/cancel"),    # ...and canceling one
     ("POST", "/analytics/digest"),
+    ("POST", "/welcome/reset"),      # starting an account's onboarding over
+    ("POST", "/welcome/skip"),       # ...or marking it done without it
 })
+
+# What a customer can still open while their account isn't onboarded: the
+# onboarding itself, what its pages load, signing out and the account page, and
+# the connect flows (a later step sends them out to Meta and back).
+_DURING_ONBOARDING = (ONBOARDING_HOME, "/static", "/brand-static", "/media", "/account")
 
 
 def customer_may(path: str, method: str = "GET") -> bool:
@@ -85,6 +94,14 @@ def customer_may(path: str, method: str = "GET") -> bool:
     if path in _CUSTOMER_PATHS:
         return True
     return any(path == s or path.startswith(s + "/") for s in _CUSTOMER_SECTIONS)
+
+
+def onboarding_applies(path: str, method: str = "GET") -> bool:
+    """Whether an account still being onboarded sends this request to
+    onboarding instead (customers only; the gate checks the account)."""
+    if path in _CUSTOMER_PATHS and path != "/settings":
+        return False
+    return not any(path == s or path.startswith(s + "/") for s in _DURING_ONBOARDING)
 
 
 def real_admin(*, sign_in_on: bool, role: str | None) -> bool:

@@ -76,6 +76,13 @@ def keys_named(obj, names: set) -> list:
     return found
 
 
+
+# Every request carries the American English line after its own system prompt
+# (app/config.py).
+from app.config import AMERICAN_ENGLISH, with_american_english  # noqa: E402
+
+SYS_US = with_american_english("SYS")
+
 class ProviderCase(unittest.TestCase):
     """Temp engine dir + ledger, the code's own prices, provider state reset."""
 
@@ -227,7 +234,7 @@ class GeminiRequestTest(GeminiCase):
         self.assertEqual(call["headers"], {"x-goog-api-key": "test-key"})
         self.assertEqual(call["timeout"], (15.0, 120.0))
         self.assertEqual(call["json"], {
-            "systemInstruction": {"parts": [{"text": "SYS"}]},
+            "systemInstruction": {"parts": [{"text": SYS_US}]},
             "contents": [{"role": "user", "parts": [video, {"text": "payload"}]}],
             "generationConfig": {
                 "responseMimeType": "application/json",
@@ -244,7 +251,7 @@ class GeminiRequestTest(GeminiCase):
         self.http.add(answer({"a": 1}))
         self.generate(system="", thinking=None, media_resolution=None)
         body = self.http.calls[0]["json"]
-        self.assertNotIn("systemInstruction", body)
+        self.assertEqual(body["systemInstruction"], {"parts": [{"text": AMERICAN_ENGLISH}]})
         self.assertEqual(sorted(body["generationConfig"]),
                          ["maxOutputTokens", "responseJsonSchema", "responseMimeType"])
 
@@ -702,7 +709,7 @@ class GeminiDowngradeTest(GeminiCase):
 
     def first_body(self) -> dict:
         return {
-            "systemInstruction": {"parts": [{"text": "SYS"}]},
+            "systemInstruction": {"parts": [{"text": SYS_US}]},
             "contents": [{"role": "user", "parts": self.PARTS}],
             "generationConfig": {"responseMimeType": "application/json",
                                  "responseJsonSchema": SCHEMA, "maxOutputTokens": 32768,
@@ -723,7 +730,7 @@ class GeminiDowngradeTest(GeminiCase):
     def test_each_downgrade(self):
         def system_merged(b):
             b.pop("systemInstruction")
-            b["contents"][0]["parts"] = [{"text": "SYS"}] + self.PARTS
+            b["contents"][0]["parts"] = [{"text": SYS_US}] + self.PARTS
 
         def legacy_schema(b):
             gc = b["generationConfig"]
@@ -775,7 +782,6 @@ class GeminiDowngradeTest(GeminiCase):
             ("unrelated", "Request contains an invalid argument.", {}),
             ("thinking already off", "thinking is not supported", {"thinking": None}),
             ("no media resolution sent", "mediaResolution unsupported", {"media_resolution": None}),
-            ("no system prompt", "systemInstruction unsupported", {"system": ""}),
         ]
         for name, message, kw in cases:
             with self.subTest(name):
@@ -1489,7 +1495,7 @@ class ClaudeRequestTest(ClaudeCase):
         body = json.loads(request.content)
         self.assertEqual(body["model"], "claude-opus-5-5")
         self.assertEqual(body["max_tokens"], 4000)
-        self.assertEqual(body["system"], "SYS")
+        self.assertEqual(body["system"], SYS_US)
         self.assertEqual(body["messages"], [{"role": "user", "content": [{"type": "text", "text": "payload"}]}])
         self.assertIs(body["stream"], True)
         self.assertEqual(body["output_config"], {
@@ -1499,12 +1505,12 @@ class ClaudeRequestTest(ClaudeCase):
         for key in ("temperature", "top_p", "top_k", "thinking"):
             self.assertNotIn(key, body)
 
-    def test_blank_effort_and_system_are_left_out(self):
+    def test_blank_effort_is_left_out_and_system_is_just_the_spelling_line(self):
         fake = self.fake(streamed([text('{"a": 1}')]))
         self.call(effort="", system="", content="just text")
         body = fake.bodies()[0]
         self.assertEqual(list(body["output_config"]), ["format"])
-        self.assertNotIn("system", body)
+        self.assertEqual(body["system"], AMERICAN_ENGLISH)
         self.assertEqual(body["messages"], [{"role": "user", "content": "just text"}])
 
     def test_usage_and_spend(self):

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width:380px; margin:60px auto">
+  <h1 style="font-size:22px">Sign in</h1>
+  {% if error %}<p class="bad-text" style="font-size:14px">That didn't work.</p>{% endif %}
+  <form method="post" action="/login" style="display:grid; gap:10px; margin-top:14px">
+    <input type="hidden" name="next" value="{{ next }}">
+    <input name="email" type="email" placeholder="Email" required autocomplete="username" style="padding:11px 12px; border-radius:10px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit">
+    <input name="password" type="password" placeholder="Password" required autocomplete="current-password" style="padding:11px 12px; border-radius:10px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit">
+    <button style="padding:11px; border-radius:99px; border:0; background:var(--text); color:var(--bg); font:inherit; font-weight:700; cursor:pointer">Sign in</button>
+  </form>
+</div>
+{% endblock %}

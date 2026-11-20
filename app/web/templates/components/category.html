@@ -7,7 +7,7 @@
    Renders as a segmented toggle of short slug labels rather than a dropdown —
    a handful of options fit a narrow rail, and the full label is in the button
    title. Text only: the configured emoji renders differently on every platform
-   and gave four colour accents to a control that carries no urgency. #}
+   and gave four color accents to a control that carries no urgency. #}
 {% macro field(candidate_id, category, next_url, show_label=true) %}
 <form method="post" action="/video/{{ candidate_id }}/category" class="cat-toggle-form">
   <input type="hidden" name="next" value="{{ next_url }}">

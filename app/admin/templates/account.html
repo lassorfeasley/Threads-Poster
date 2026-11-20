@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}{{ s.label }} · Throughline Admin{% endblock %}
+{% block content %}
+{% set p = s.pipeline or {} %}{% set pub = s.publishing or {} %}{% set d = s.decisions or {} %}{% set r = s.results or {} %}
+<p class="muted" style="margin:0 0 6px"><a href="/" style="text-decoration:none">← All accounts</a></p>
+<h1><span class="dot {{ s.status }}" style="vertical-align:middle; margin-right:8px"></span>{{ s.label }}</h1>
+{% if s.reasons %}<ul class="reasons" style="margin-bottom:20px">{% for x in s.reasons %}<li>{{ x }}</li>{% endfor %}</ul>{% else %}<p class="sub ok-text">Healthy</p>{% endif %}
+
+<div class="tiles">
+  <div class="tile"><div class="k">Found · 7d</div><div class="v">{{ p.found|num }}</div></div>
+  <div class="tile"><div class="k">Approved · 7d</div><div class="v">{{ p.approved|num }}</div></div>
+  <div class="tile"><div class="k">Drafted · 7d</div><div class="v">{{ p.drafted|num }}</div></div>
+  <div class="tile"><div class="k">In inbox now</div><div class="v">{{ p.inbox_waiting|num }}</div></div>
+  <div class="tile"><div class="k">Posted · 7d</div><div class="v">{{ p.published|num }}</div></div>
+  <div class="tile"><div class="k">Channels</div><div class="v">{{ p.channels|num }}</div></div>
+  <div class="tile"><div class="k">Spend today</div><div class="v">{{ s.spend_today|money }}</div></div>
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <h2 class="section-title">Results · {{ r.days or 30 }} days</h2>
+    {% if r.posts %}
+    <div class="tiles" style="margin-bottom:14px">
+      <div class="tile"><div class="k">Posts</div><div class="v">{{ r.posts|num }}</div></div>
+      <div class="tile"><div class="k">Views</div><div class="v">{{ r.views|num }}</div></div>
+      <div class="tile"><div class="k">Likes</div><div class="v">{{ r.likes|num }}</div></div>
+      <div class="tile"><div class="k">Replies</div><div class="v">{{ r.replies|num }}</div></div>
+    </div>
+    <div style="display:flex; align-items:flex-end; gap:3px; height:90px; margin-bottom:6px" aria-label="Views by day posted">
+      {% for x in daily %}<div title="{{ x.day }}: {{ x.views }} views" style="flex:1; background:var(--ok); opacity:.75; border-radius:3px 3px 0 0; height:{{ (100 * x.views / peak)|round(0, 'ceil') }}%; min-height:{{ 2 if x.views else 0 }}px"></div>{% endfor %}
+    </div>
+    <p class="muted" style="font-size:12px; margin:0 0 14px">Views by the day each clip was posted.</p>
+    <table><thead><tr><th>Top clips</th><th>Views</th><th>Likes</th></tr></thead><tbody>
+      {% for t in r.top %}<tr><td>{% if t.permalink %}<a href="{{ t.permalink }}" target="_blank" rel="noopener">{{ t.name or 'Untitled' }}</a>{% else %}{{ t.name or 'Untitled' }}{% endif %}<div class="muted">{{ ago(t.published_at) }}</div></td><td class="mono">{{ t.views|num }}</td><td class="mono">{{ t.likes|num }}</td></tr>{% endfor %}
+    </tbody></table>
+    {% else %}<p class="muted">Nothing posted in the last {{ r.days or 30 }} days.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">Customer decisions · {{ d.days or 30 }} days</h2>
+    {% if d.approved or d.rejected %}
+    <div class="tiles" style="margin-bottom:14px">
+      <div class="tile"><div class="k">Approved</div><div class="v">{{ d.approved|num }}</div></div>
+      <div class="tile"><div class="k">Rejected</div><div class="v">{{ d.rejected|num }}</div></div>
+      <div class="tile"><div class="k">Approve rate</div><div class="v">{{ '%.0f%%'|format(100 * d.approve_rate) if d.approve_rate is not none else '—' }}</div></div>
+      <div class="tile"><div class="k">Median wait</div><div class="v">{{ (d.median_hours ~ 'h') if d.median_hours is not none else '—' }}</div></div>
+    </div>
+    <p class="dim" style="font-size:14px">Captions edited before approving: <span class="mono">{{ d.captions_edited }}</span></p>
+    {% if d.reasons %}<h3 class="section-title" style="margin-top:16px">Why clips were rejected</h3>
+    <table><tbody>{% for tag, n in d.reasons %}<tr><td>{{ tag.replace('_', ' ') }}</td><td class="mono" style="width:60px">{{ n }}</td></tr>{% endfor %}</tbody></table>{% endif %}
+    {% if d.notes %}<h3 class="section-title" style="margin-top:16px">Their notes</h3>
+    {% for n in d.notes %}<p style="margin:0 0 10px; font-size:14px">“{{ n.note }}” <span class="muted">{{ ago(n.at) }}</span></p>{% endfor %}{% endif %}
+    {% else %}<p class="muted">No inbox decisions yet.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">Machines</h2>
+    <table><tbody>
+      {% for h in s.heartbeats or [] %}<tr><td><span class="pill {{ 'ok' if h.alive else 'bad' }}">{{ h.role }}</span></td><td class="dim">{{ h.host }} · {{ h.region }}</td><td class="muted">{{ ago(h.at) }}</td></tr>{% endfor %}
+      {% for m in s.machines %}<tr><td><span class="pill {{ 'ok' if m.state in ('started','stopped','suspended') else 'bad' }}">{{ m.app }}</span></td><td class="dim">{{ m.state }}{% if m.region %} · {{ m.region }}{% endif %}{% if m.error %} · {{ m.error }}{% endif %}</td><td class="muted">{{ ago(m.updated_at) }}</td></tr>{% endfor %}
+      {% if not s.heartbeats and not s.machines %}<tr><td class="muted">No heartbeats or Fly apps recorded.</td></tr>{% endif %}
+    </tbody></table>
+    <h2 class="section-title" style="margin-top:18px">Monitor</h2>
+    {% if s.monitor %}<p class="dim" style="margin:0">Last run {{ ago(s.monitor.started_at) }}: <span class="{{ 'bad-text' if s.monitor.status == 'failed' }}">{{ s.monitor.status }}</span>, {{ s.monitor.checked or 0 }} channels checked, {{ s.monitor.found or 0 }} videos stored. Last success {{ ago(s.monitor.last_ok) }}.</p>
+      {% if s.monitor.error %}<p class="bad-text mono" style="font-size:12.5px">{{ s.monitor.error }}</p>{% endif %}
+    {% else %}<p class="muted">Never run.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">Publishing</h2>
+    <p class="dim" style="margin-top:0">Last post {{ ago(pub.last_published_at) }} · {{ pub.queued }} queued{% if pub.overdue %} · <span class="bad-text">{{ pub.overdue }} overdue</span>{% endif %}{% if pub.ig_failed %} · {{ pub.ig_failed }} Instagram failures{% endif %}</p>
+    {% if pub.failed %}<table><thead><tr><th>Failed post</th><th>Error</th></tr></thead><tbody>
+      {% for f in pub.failed %}<tr><td>{{ f.name or ('#' ~ f.id) }}<div class="muted">{{ ago(f.at) }}</div></td><td class="bad-text" style="font-size:13px">{{ f.error }}</td></tr>{% endfor %}
+    </tbody></table>{% endif %}
+    <h2 class="section-title" style="margin-top:18px">Sign-ins</h2>
+    <table><tbody>
+      {% for t in s.tokens or [] %}<tr><td>{{ t.name|capitalize }}</td><td class="{{ 'bad-text' if t.days_left is not none and t.days_left < 0 else 'warn-text' if t.days_left is not none and t.days_left < 7 else 'dim' }}">{% if t.never %}doesn't expire{% elif t.days_left is none %}unknown{% elif t.days_left < 0 %}expired{% else %}expires in {{ '%.0f'|format(t.days_left) }} days{% endif %}</td></tr>{% endfor %}
+      {% if not s.tokens %}<tr><td class="muted">No platforms connected.</td></tr>{% endif %}
+    </tbody></table>
+  </div>
+</div>
+{% if s.errors %}<p class="warn-text" style="font-size:13px; margin-top:18px">Couldn't read: {{ s.errors|join('; ') }}</p>{% endif %}
+{% endblock %}

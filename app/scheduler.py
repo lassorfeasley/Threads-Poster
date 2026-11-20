@@ -1270,8 +1270,8 @@ def ensure_promo_staged() -> str | None:
             post = _stage_promo(session, cut, window_key)
             if post is None:
                 return None
-            # Consume the cycle even though the post could still be cancelled:
-            # cancelling deletes the row, and without this marker the next tick
+            # Consume the cycle even though the post could still be canceled:
+            # canceling deletes the row, and without this marker the next tick
             # would mint it straight back and the operator could never decline
             # one. Skipped-over slots stay unconsumed, so freeing one up before
             # it fires still lets a promo land there.
@@ -1590,7 +1590,7 @@ def ensure_repost_staged() -> str | None:
     """Stage the next proven re-air onto its window if one is due.
 
     Mirrors ``ensure_promo_staged``: safe to call every tick, consumes its
-    cycle via ``last_repost_window_key`` so a cancelled staged repost is a
+    cycle via ``last_repost_window_key`` so a canceled staged repost is a
     decision, not a re-mint loop.
     """
     cfg = _repost_config()
@@ -2857,7 +2857,7 @@ def window_time_labels(day: dt.date | None = None) -> list[str]:
     """Posting windows as operator-local labels, in window order.
 
     The calendar times every card in the operator's zone, so its empty slots
-    have to be labelled the same way — falling back to the raw scheduler-zone
+    have to be labeled the same way — falling back to the raw scheduler-zone
     strings from settings made a vacant slot read as though it were the window
     the post directly beneath it had published into.
     """
@@ -2895,7 +2895,7 @@ def _assign_published_slots(
             when = when.replace(tzinfo=dt.timezone.utc)
         times.append(when)
 
-    # Order-preserving assignment: fill as many slots as possible, then minimise
+    # Order-preserving assignment: fill as many slots as possible, then minimize
     # total distance between publish time and window time. State is
     # ``(-matched, cost)`` so plain tuple comparison prefers more matches first.
     k, n = len(times), len(free)
@@ -3454,6 +3454,9 @@ def reschedule_windows_for_post(session, post_id: int) -> list[dict]:
 
 def run_tick() -> None:
     """One loop iteration: recover → annotate → metrics → window → first replies."""
+    from .heartbeat import beat
+
+    beat("scheduler")
     try:
         with session_scope() as session:
             n = recover_stuck_publishing(session, only_inactive=True)

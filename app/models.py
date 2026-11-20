@@ -630,12 +630,12 @@ class SchedulerState(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     last_window_key: Mapped[str] = mapped_column(String(40), default="")
-    # Latest window the promo rotation has staged a post for. Cancelling a
+    # Latest window the promo rotation has staged a post for. Canceling a
     # staged promo deletes its row, so without this marker the next tick would
     # mint the promo straight back and the operator could never decline one.
     last_promo_window_key: Mapped[str] = mapped_column(String(40), default="")
     # Same marker for the evergreen-winners repost rotation (see
-    # app/scheduler.py): a cancelled staged repost must not be re-minted.
+    # app/scheduler.py): a canceled staged repost must not be re-minted.
     last_repost_window_key: Mapped[str] = mapped_column(String(40), default="")
     # High-water mark of rerun-slot windows already staged (or skipped), so a
     # staged rerun the operator deletes leaves its slot to organic placement

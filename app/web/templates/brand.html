@@ -42,20 +42,32 @@
       </div>
 
       <div class="set-field">
-        <label class="set-label" for="brand-mission">Mission <span class="set-optional">optional</span></label>
-        <p class="set-help">What the account exists to do.</p>
-        <textarea id="brand-mission" name="mission" rows="2" placeholder="e.g. Show what climate change looks like on the ground, and what people are doing about it.">{{ brand.mission }}</textarea>
+        <label class="set-label" for="brand-mission">What your brand does <span class="set-optional">optional</span></label>
+        <p class="set-help">The brand behind the account, in a sentence or two.</p>
+        <textarea id="brand-mission" name="mission" rows="2" placeholder="e.g. We fund solar projects in places that need them most.">{{ brand.mission }}</textarea>
       </div>
 
       <div class="set-field">
-        <label class="set-label" for="brand-audience">Audience <span class="set-optional">optional</span></label>
-        <p class="set-help">Who you're trying to reach. Captions are written for them.</p>
-        <textarea id="brand-audience" name="audience" rows="2" placeholder="e.g. Curious people who don't follow climate news closely.">{{ brand.audience }}</textarea>
+        <label class="set-label" for="brand-audience">Your customers <span class="set-optional">optional</span></label>
+        <p class="set-help">Who your brand serves. Captions are written with them in mind.</p>
+        <textarea id="brand-audience" name="audience" rows="2" placeholder="e.g. Everyday donors who want their giving to do something visible.">{{ brand.audience }}</textarea>
+      </div>
+
+      <div class="set-field">
+        <label class="set-label" for="brand-throughline">Your throughline <span class="set-optional">optional</span></label>
+        <p class="set-help">The one idea every clip comes back to, whatever the footage. Every caption carries it.</p>
+        <textarea id="brand-throughline" name="throughline" rows="2" placeholder="e.g. Every conflict has a moment where it could have gone differently.">{{ brand.throughline }}</textarea>
+      </div>
+
+      <div class="set-field">
+        <label class="set-label" for="brand-format">Clips that carry it <span class="set-optional">optional</span></label>
+        <p class="set-help">The kinds of footage you draw on, one per line.</p>
+        <textarea id="brand-format" name="format" rows="3" placeholder="e.g. 🗞️ In the news — fresh stories as they break">{{ brand.format }}</textarea>
       </div>
 
       <div class="set-field">
         <label class="set-label" for="brand-positioning">What your clips should be known for <span class="set-optional">optional</span></label>
-        <p class="set-help">Your angle — what you favour and what you pass over. The app uses it to decide which videos suit your account.</p>
+        <p class="set-help">Your angle — what you favor and what you pass over. The app uses it to decide which videos suit your account.</p>
         <textarea id="brand-positioning" name="positioning" rows="4" placeholder="e.g. Real places and people dealing with climate change — on the ground, not in the studio; solutions over doom.">{{ brand.positioning }}</textarea>
       </div>
     </div>

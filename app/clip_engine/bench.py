@@ -11,7 +11,7 @@ picks two ways:
   and empty answers counted as misses; per-video hit rates shown beside a
   chance baseline (on a two-minute source a random window often "hits");
   cuts the operator started from a legacy suggestion split out, because they
-  favour the transcript arm; and the archive-time legacy runs kept in their
+  favor the transcript arm; and the archive-time legacy runs kept in their
   own "anchored" table, because the operator saw those before cutting.
 - Blind, by the operator (``prepare_pairs`` -> ``next_item``/``judge`` ->
   ``reveal``). The primary test puts the engine's top pick against the
@@ -166,7 +166,7 @@ _OPERATIONAL_KEYS = ("setup", "bench", "workers", "daily_usd", "estimate_usd_bas
                      "estimate_usd_per_minute", "max_source_seconds", "min_free_gb",
                      "job_timeout_seconds")
 
-# Source files whose behaviour the results depend on.
+# Source files whose behavior the results depend on.
 _CODE_FILES = (
     "clip_engine/__init__.py", "clip_engine/util.py", "clip_engine/engine.py",
     "clip_engine/editor.py", "clip_engine/critic.py", "clip_engine/shotlog.py",
@@ -685,7 +685,7 @@ def settings_for(arm: dict, settings):
 def _display_label(label: str, setup: str) -> str:
     """The transcript arm runs today's prompt (v3, single-take wording, Opus
     opening pass) — not the suggester behind the historical figures — so it's
-    labelled with its prompt version."""
+    labeled with its prompt version."""
     if setup != "transcript" or not label.startswith("transcript"):
         return label
     try:
@@ -1232,7 +1232,7 @@ def _freeze_examples(session, videos: list[dict], settings, notes: list[str]) ->
         notes.append(f"taste examples unavailable for {failures} video(s); "
                      "their critics rank without examples")
     if trimmed:
-        notes.append(f"taste flops labelled 'not gripping' after the video was archived were "
+        notes.append(f"taste flops labeled 'not gripping' after the video was archived were "
                      f"left out on {trimmed} video(s): a replay only sees labels made by then")
 
 
@@ -1424,7 +1424,7 @@ def _recheck_arm(label: str, specs: dict, settings, taste: dict) -> None:
     try:
         _check_inputs(parse_arm(spec), settings, taste)
     except BenchError as exc:
-        raise BenchError(f"arm {label} can't run as labelled: {exc}. Start a new run "
+        raise BenchError(f"arm {label} can't run as labeled: {exc}. Start a new run "
                          "without it.") from None
 
 
@@ -1678,7 +1678,7 @@ def _frozen_examples(video: dict, fresh) -> list[dict]:
 def _arm_examples(examples: list, arm_settings) -> list:
     """The frozen examples one engine arm's critic sees: the first
     ``taste_hits`` hits and the first ``taste_flops`` flops (an example not
-    labelled "flop" counts as a hit, as the ranker reads it). An arm can only
+    labeled "flop" counts as a hit, as the ranker reads it). An arm can only
     show fewer than the run froze; ``_check_inputs`` refuses asking for more."""
     limits = {"hit": _whole(opt(arm_settings, "clip_engine.taste_hits", 3), 3),
               "flop": _whole(opt(arm_settings, "clip_engine.taste_flops", 2), 2)}
@@ -1765,7 +1765,7 @@ def legacy_arm(*, video: dict, source, settings, inputs: dict) -> dict:
     """The transcript arm: today's transcript suggester (``legacy.suggest``),
     replayed with no other clips and no striking-frame scan (both came later
     than the archive-time pass) and the same replay context the engine arms
-    get. Labelled with its prompt version ("transcript-v3"): this is the
+    get. Labeled with its prompt version ("transcript-v3"): this is the
     suggester that would remain as the fallback, not the one behind the
     historical numbers. Raises on failure; the caller records the error."""
     from .. import clip_proposals
@@ -2460,7 +2460,7 @@ def evaluate(name: str) -> dict:
     Arms are compared on the COMMON set: positive videos where every arm has
     a result (errors and empty tops count as misses). Each metric is given
     for all targets and for unseeded targets only (the headline: a cut started
-    from a legacy suggestion favours the transcript arm). See the module
+    from a legacy suggestion favors the transcript arm). See the module
     docstring for what each number means.
     """
     run_dir, manifest, videos = _load_run(name)
@@ -3487,7 +3487,7 @@ def _critic_check(run_dir: Path | None, name_or_none, *, roles: list[str], limit
     with _db() as session:
         items = _critic_items(session, limit=limit)
     labelled = sum(1 for it in items if it["label"])
-    say(f"Critic check: {len(items)} posts ({labelled} labelled), roles {', '.join(roles)}.")
+    say(f"Critic check: {len(items)} posts ({labelled} labeled), roles {', '.join(roles)}.")
     b = engine_brand()
 
     def prepare(item: dict):

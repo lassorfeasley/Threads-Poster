@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>System health</h1>
+<p class="sub">{{ snaps|length }} account{{ '' if snaps|length == 1 else 's' }} ·
+  {% if counts.bad %}<span class="bad-text">{{ counts.bad }} need{{ 's' if counts.bad == 1 }} attention</span>{% elif counts.warn %}<span class="warn-text">{{ counts.warn }} worth a look</span>{% else %}<span class="ok-text">all healthy</span>{% endif %}
+  · updated {{ now.strftime('%H:%M UTC') }}</p>
+
+<div class="tiles">
+  <div class="tile"><div class="k">Videos found · 7 days</div><div class="v">{{ totals.found|num }}</div></div>
+  <div class="tile"><div class="k">Clips drafted · 7 days</div><div class="v">{{ totals.drafted|num }}</div></div>
+  <div class="tile"><div class="k">Waiting in inboxes</div><div class="v">{{ totals.inbox_waiting|num }}</div></div>
+  <div class="tile"><div class="k">Published · 7 days</div><div class="v">{{ totals.published|num }}</div></div>
+  <div class="tile"><div class="k">AI spend today</div><div class="v">{{ spend|money }}</div></div>
+</div>
+
+<div class="card" style="padding:6px 8px">
+<table>
+  <thead><tr><th></th><th>Account</th><th>Machines</th><th>Monitor</th><th>Publishing</th><th>Pipeline · 7 days</th><th>Spend today</th></tr></thead>
+  <tbody>
+  {% for s in snaps %}
+  {% set p = s.pipeline or {} %}{% set pub = s.publishing or {} %}
+  <tr>
+    <td style="width:22px; padding-top:14px"><span class="dot {{ s.status }}"></span></td>
+    <td><a href="/account/{{ s.slug }}" style="font-weight:700; text-decoration:none">{{ s.label }}</a>
+      {% if s.reasons %}<ul class="reasons">{% for r in s.reasons[:4] %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}</td>
+    <td>
+      {% for h in s.heartbeats or [] %}<div><span class="pill {{ 'ok' if h.alive else 'bad' }}">{{ h.role }}</span> <span class="muted">{{ ago(h.at) }}</span></div>{% endfor %}
+      {% for m in s.machines %}<div><span class="pill {{ 'ok' if m.state in ('started','stopped','suspended') else 'bad' }}">{{ m.app }}</span> <span class="muted">{{ m.state }}</span></div>{% endfor %}
+      {% if not s.heartbeats and not s.machines %}<span class="muted">—</span>{% endif %}
+    </td>
+    <td>{% if s.monitor %}<span class="{{ 'bad-text' if s.monitor.status == 'failed' }}">{{ s.monitor.status }}</span><div class="muted">{{ ago(s.monitor.started_at) }} · {{ s.monitor.found or 0 }} found</div>{% else %}<span class="muted">never run</span>{% endif %}</td>
+    <td>{% if pub %}<div>last {{ ago(pub.last_published_at) }}</div>
+      <div class="muted">{{ pub.queued }} queued{% if pub.failed_count %} · <span class="bad-text">{{ pub.failed_count }} failed</span>{% endif %}{% if pub.overdue %} · <span class="bad-text">{{ pub.overdue }} overdue</span>{% endif %}</div>{% endif %}</td>
+    <td class="mono" style="font-size:13px; white-space:nowrap">{% if p %}{{ p.found }} → {{ p.drafted }} → {{ p.inbox_made }} → {{ p.published }}
+      <div class="muted" style="font-family:inherit">found · drafted · inbox · posted</div>{% endif %}</td>
+    <td class="mono">{{ s.spend_today|money }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted" style="font-size:12.5px; margin-top:14px">Read-only. Machines: heartbeats from each worker, plus Fly's machine state. Spend comes from the workers' heartbeats.</p>
+{% endblock %}

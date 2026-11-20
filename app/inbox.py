@@ -247,6 +247,43 @@ def claim(session, settings: Settings | None = None, *, now: dt.datetime | None 
     return ids
 
 
+# An uploaded video's best clips go to the inbox at once, at most this many.
+UPLOAD_CLIPS = 5
+
+
+def claim_upload(session, candidate_id: int, *, limit: int = UPLOAD_CLIPS,
+                 now: dt.datetime | None = None) -> list[int]:
+    """Create ``drafting`` inbox items for a video the customer uploaded
+    themselves: its best drafts, best first, up to ``limit``. The daily pace,
+    the score floor and the "only auto-picked videos" rule don't apply: they
+    asked for clips from this video. Drafts the clip engine flagged as doubtful
+    still stay out. Returns the new item ids (the caller drafts them)."""
+    now = now or utcnow()
+    have = select(InboxItem.id).where(InboxItem.proposal_pk == ClipProposal.id)
+    rows = session.execute(
+        select(ClipProposal)
+        .where(ClipProposal.candidate_pk == candidate_id,
+               ClipProposal.verdict == ClipProposal.VERDICT_PENDING,
+               func.coalesce(ClipProposal.flag, "") == "",
+               ~have.exists())
+        .order_by(func.coalesce(ClipProposal.confidence, 0.0).desc(), ClipProposal.id)
+    ).scalars().all()
+    taken = int(session.execute(
+        select(func.count(InboxItem.id)).where(InboxItem.candidate_pk == candidate_id,
+                                               InboxItem.state != InboxItem.STATE_FAILED)
+    ).scalar_one() or 0)
+    ids = []
+    for row in rows[:max(0, limit - taken)]:
+        item = InboxItem(candidate_pk=candidate_id, proposal_pk=row.id,
+                         state=InboxItem.STATE_DRAFTING, score=row.confidence,
+                         story=row.story or "", critic_line=critic_line(row.id),
+                         created_at=now)
+        session.add(item)
+        session.flush()
+        ids.append(item.id)
+    return ids
+
+
 def stalled(session, now: dt.datetime | None = None) -> list[int]:
     """Items left ``drafting`` by a restart: retried while attempts remain,
     otherwise marked failed. Returns the ids to retry."""

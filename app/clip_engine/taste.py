@@ -3,7 +3,7 @@
 A generic "would this stop a scroll" judge doesn't know that this audience
 rewards a recognizable person's charged line and scrolls past aerial
 spectacle. Showing the ranker a few of the account's real hits (and clips the
-operator labelled not gripping) next to the drafts teaches that in the one
+operator labeled not gripping) next to the drafts teaches that in the one
 language a video model reads well: video.
 
 How examples are chosen, and why:
@@ -17,7 +17,7 @@ How examples are chosen, and why:
 - Hits come from the top decile, one per source video, picked by a shuffle
   seeded with the source being edited, so different videos see different
   hits instead of the same three celebrities every time.
-- Flops are only clips the operator labelled "not gripping": a low view
+- Flops are only clips the operator labeled "not gripping": a low view
   count alone can't separate a weak clip from a bad posting slot.
 
 The pool is read in the caller's writer session (the caller rolls it back);
@@ -42,9 +42,9 @@ from . import engine_dir, media, opt, util
 log = logging.getLogger("clip_engine.taste")
 
 VIEWS_AGE_HOURS = 6
-LOCAL_DAYS = 30            # percentile neighbourhood: posts within ±30 days
+LOCAL_DAYS = 30            # percentile neighborhood: posts within ±30 days
 MIN_POOL = 10              # fewer eligible posts than this: no examples at all
-_MIN_NEIGHBOURS = 5        # a sparser neighbourhood falls back to the whole population
+_MIN_NEIGHBOURS = 5        # a sparser neighborhood falls back to the whole population
 _TOP_DECILE = 0.10
 _OUTRO_MIN, _OUTRO_MAX = 2.0, 4.5   # an appended outro adds ~2.8 s
 _WORDS_CHARS = 600
@@ -81,7 +81,7 @@ def local_percentiles(points: list[tuple[Any, dt.datetime, float]], *,
                       days: int = LOCAL_DAYS) -> dict[Any, float]:
     """``{key: percentile}`` for ``(key, published_at, views)`` points: the
     share (0-100) of posts published within ±``days`` (the post included)
-    that got FEWER views. A neighbourhood under 5 posts falls back to the
+    that got FEWER views. A neighborhood under 5 posts falls back to the
     whole population. "Top X%" is then ``100 - percentile`` (the best of 50
     is the top 2%)."""
     points = [(k, _aware(t), float(v)) for k, t, v in points]
@@ -104,8 +104,8 @@ def scored_first_airings(session, *, as_of: dt.datetime, lookback_days: int,
 
     First airing = the earliest published, non-repost post of its cut. The
     brand's own footage (``categories.is_first_party``) is left out of both
-    the pool and the percentile neighbourhoods; posts of excluded candidates
-    still count as neighbours (they are part of how the account performed),
+    the pool and the percentile neighborhoods; posts of excluded candidates
+    still count as neighbors (they are part of how the account performed),
     they just can't be picked. Shared with ``playbook.generate``."""
     from sqlalchemy import select
 
@@ -217,7 +217,7 @@ def _one_per_candidate(posts: list[dict]) -> list[dict]:
 
 
 def _gripping_no(session, cut_pks: list[int], as_of: dt.datetime | None = None) -> set[int]:
-    """The cuts among ``cut_pks`` labelled not gripping — with ``as_of``,
+    """The cuts among ``cut_pks`` labeled not gripping — with ``as_of``,
     only labels given (or last changed: a relabel overwrites the row) by
     then, so a replay of an earlier day never learns from a verdict the
     operator hadn't given yet."""
@@ -243,8 +243,8 @@ def select_examples(session, *, as_of=None, exclude_candidate_pk=None, hits=3, f
 
     Hits: one per source, from the top decile by local percentile, chosen by
     a shuffle seeded with ``seed`` (callers pass the video id). Flops: posts
-    whose cut is labelled gripping = "no", one per source, lowest percentile
-    first (none when nothing is labelled) — with an explicit ``as_of`` (a
+    whose cut is labeled gripping = "no", one per source, lowest percentile
+    first (none when nothing is labeled) — with an explicit ``as_of`` (a
     replay), only labels given by then. [] when fewer than 10 posts are
     eligible."""
     labels_as_of = _aware(as_of)        # None: every label there is now
@@ -349,7 +349,7 @@ def example_file(example, settings, *, height=360) -> Path | None:
 def performance_line(example) -> str:
     """How the example did, as the ranker reads it."""
     if (example or {}).get("label") == "flop":
-        return "you labelled this one not gripping"
+        return "you labeled this one not gripping"
     percentile = (example or {}).get("percentile")
     views = (example or {}).get("views")
     if percentile is None:

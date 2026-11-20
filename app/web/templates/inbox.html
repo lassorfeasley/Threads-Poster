@@ -63,7 +63,10 @@
 </style>
 
 <div class="canvas">
-{% if not cards %}
+{% if not cards and first_run %}
+  {% from "components/first_run.html" import first_run as first_run_card %}
+  {{ first_run_card(first_run, admin=admin, where="here") }}
+{% elif not cards %}
   <div class="ib-caught-up">
     <strong>You're all caught up</strong>
     {% if policy.enabled %}

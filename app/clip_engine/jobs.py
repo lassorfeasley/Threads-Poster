@@ -929,7 +929,7 @@ def _provider_blocked(setup: str, *, attended: bool = False) -> str:
         if attended:
             gemini.reset_breaker(status=402)
         return gemini.breaker_reason()
-    except Exception as exc:   # the check is an optimisation; the run finds out anyway
+    except Exception as exc:   # the check is an optimization; the run finds out anyway
         log.debug("Couldn't read the Gemini breaker: %s", exc)
         return ""
 

@@ -11,7 +11,7 @@ Consumers:
   text back so the stored "suggestion" is the MODEL's draft rather than the
   operator's final text (the bug this module exists to fix).
 - ``app/voice.py`` and the Style guide page read the resolved pairs to learn
-  length and voice from real keep/reject behaviour.
+  length and voice from real keep/reject behavior.
 """
 from __future__ import annotations
 

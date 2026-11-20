@@ -2,7 +2,7 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {% set lb_sub %}Is each posted clip visually gripping — would it stop someone scrolling? One tap each. Label hits and flops alike: this becomes the test set for judging whether video models can make that call the way you do.{% if review_on %} Review on {{ review_on.strftime("%b %-d, %Y") }}.{% endif %}{% endset %}
-{% set lb_extra %}<span class="badge" id="label-progress">{{ stats.total }} / {{ target }} labelled</span>{% endset %}
+{% set lb_extra %}<span class="badge" id="label-progress">{{ stats.total }} / {{ target }} labeled</span>{% endset %}
 {{ ui.pagebar("Label clips", sub=lb_sub, title_extra=lb_extra) }}
 
 <div class="canvas canvas-wide">
@@ -57,7 +57,7 @@ document.querySelectorAll('.label-card').forEach(card => {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      document.getElementById('label-progress').textContent = `${d.stats.total} / ${LABEL_TARGET} labelled`;
+      document.getElementById('label-progress').textContent = `${d.stats.total} / ${LABEL_TARGET} labeled`;
       const fill = document.getElementById('label-meter-fill');
       if (fill) fill.style.width = Math.min(100, Math.round(d.stats.total * 100 / LABEL_TARGET)) + '%';
     } catch (e) {

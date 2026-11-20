@@ -209,7 +209,7 @@ def image_block(jpeg: bytes) -> dict:
 def frames_blocks(frames: list[tuple[float, bytes]], *, clock: str = "video") -> list[dict]:
     """Each frame as a time label then the image, in order: "t=12.0s" on the
     source clock (``clock="video"``) or "clip 12.0s" from the start of a
-    rendered clip (``clock="clip"``). Separate labelled images rather than a
+    rendered clip (``clock="clip"``). Separate labeled images rather than a
     contact sheet, so the model can say exactly when something happens.
     Frames without bytes are skipped."""
     if clock not in ("video", "clip"):
@@ -278,8 +278,9 @@ def _request(model: str, *, system: str, content: Any, schema: dict, effort: str
         "messages": [{"role": "user", "content": content}],
         "output_config": output_config,
     }
-    if system:
-        request["system"] = system
+    from ..config import with_american_english
+
+    request["system"] = with_american_english(system)
     return request
 
 

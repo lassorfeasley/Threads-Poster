@@ -46,7 +46,7 @@ def make_templates() -> Jinja2Templates:
         "category_options": lambda: [],
         "category_by_slug": lambda slug: None,
         "digest_meta": lambda *a, **k: {},
-        "default_app_name": "Clip Monitor",
+        "default_app_name": "Throughline",
         "is_admin": lambda request: True,
     })
     return templates
@@ -193,7 +193,7 @@ class JudgingViewTest(PageTestCase):
         self.assertIn('src="/clip-bench/test-1/media/abc123def456/a"', html)
         self.assertIn('src="/clip-bench/test-1/media/abc123def456/b"', html)
         for text in ("A is better", "B is better", "Tie", "Neither",
-                     "I recognised one of these as mine", "Reveal results",
+                     "I recognized one of these as mine", "Reveal results",
                      "12 / 58 judged", 'data-reason="weak_opening"', 'data-reason="no_sense"'):
             self.assertIn(text, html)
         self.next_item.assert_called_once_with("test-1")

@@ -97,6 +97,24 @@ def _load_registry() -> list[dict]:
     return out
 
 
+def cmd_admin(args) -> None:
+    """Throughline Admin (app/admin): read-only health, pipeline, decisions and
+    results for every workspace. On loopback it opens without sign-in; on any
+    other address only an admin login listed in ADMIN_EMAILS gets in."""
+    import os
+
+    import uvicorn
+
+    local = args.host in ("127.0.0.1", "localhost", "::1")
+    if local:
+        os.environ.setdefault("ADMIN_LOCAL", "1")
+    elif not os.environ.get("ADMIN_EMAILS", "").strip():
+        raise SystemExit("Refusing to serve the admin site on a non-local address without ADMIN_EMAILS.")
+    log.info("Throughline Admin on http://%s:%d", args.host, args.port)
+    uvicorn.run("app.admin.main:app", host=args.host, port=args.port, log_level="info",
+                proxy_headers=not local, forwarded_allow_ips=None if local else "*")
+
+
 def cmd_dashboard(args) -> None:
     if args.workspace:
         _run_single_dashboard(args)
@@ -2050,7 +2068,7 @@ def cmd_clipbench_reveal(args) -> None:
 
 def cmd_clipbench_critic_check(args) -> None:
     """How well does the critic agree with your "gripping?" labels? Runs the
-    cold critic over labelled posted clips (about $0.01 a clip on Gemini)."""
+    cold critic over labeled posted clips (about $0.01 a clip on Gemini)."""
     from app.config import load_settings
     from app.db import init_db
 
@@ -2392,7 +2410,7 @@ def _add_clip_engine_parsers(sub, common) -> None:
     bp.set_defaults(func=cmd_clipbench_reveal)
 
     bp = bsub.add_parser("critic-check", parents=[common],
-                         help="run the critic over your labelled posted clips and compare "
+                         help="run the critic over your labeled posted clips and compare "
                               "with your 'gripping?' labels")
     bp.add_argument("--roles", type=_critic_roles, default=None, metavar="R,R",
                     help="critics to check: gemini, claude (default: gemini)")
@@ -2425,6 +2443,13 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--workspace", default=None, metavar="SLUG",
                         help="workspace to run against (default: WORKSPACE env var, then 'climate')")
+
+    p = sub.add_parser("admin", parents=[common],
+                       help="run Throughline Admin: health and activity across every account")
+    p.add_argument("--port", type=int, default=8400)
+    p.add_argument("--host", default="127.0.0.1",
+                   help="loopback opens without sign-in; anything else requires ADMIN_EMAILS")
+    p.set_defaults(func=cmd_admin)
 
     p = sub.add_parser("dashboard", parents=[common],
                        help="run the web dashboard(s); with no --workspace, supervises all enabled workspaces")

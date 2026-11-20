@@ -263,7 +263,7 @@ class PerformanceLineTest(unittest.TestCase):
         ({"label": "hit", "percentile": 99.9, "views": 5}, "top 1% of this account's posts from "
                                                            "the same weeks (5 views at 6 h)"),
         ({"label": "hit"}, "one of this account's best posts from the same weeks"),
-        ({"label": "flop", "percentile": 3.0, "views": 40}, "you labelled this one not gripping"),
+        ({"label": "flop", "percentile": 3.0, "views": 40}, "you labeled this one not gripping"),
         ({}, "one of this account's best posts from the same weeks"),
     ]
 

@@ -216,7 +216,7 @@ def strip_segments(segments: list[dict]) -> list[dict]:
 # The footage-reuse rule. A clip may recycle footage another clip of the same
 # video already uses (shared setup, context, b-roll), but it must (a) OPEN on a
 # different shot and (b) tell a meaningfully different story. (a) and the
-# duplicate test are mechanical and live here; (b) is the model's judgement,
+# duplicate test are mechanical and live here; (b) is the model's judgment,
 # which is why every suggester and reviser is shown the other clips' titles and
 # words heard.
 

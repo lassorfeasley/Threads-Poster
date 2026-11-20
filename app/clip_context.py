@@ -410,7 +410,7 @@ def build(session, candidate, settings, *, as_of=None, replay: bool = False,
     ``as_of`` rebuilds the context as it stood at that moment; ``replay`` also
     drops everything tied to this video and leaves calibration out (see the
     module docstring); ``calibration`` picks whose ledger rows calibrate
-    ("legacy", the default, keeps the original suggester's behaviour).
+    ("legacy", the default, keeps the original suggester's behavior).
     """
     if not settings.get("clips.learn_from_history", True):
         return {}

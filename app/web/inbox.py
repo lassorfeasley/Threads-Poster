@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from .. import auto_select, inbox
+from .. import first_run, auto_select, inbox
 from . import access
 from ..config import load_settings, scheduler_timezone
 from ..db import session_scope
@@ -60,6 +60,7 @@ def inbox_page(request: Request, msg: str = ""):
         policy = inbox.load_policy(session)
         admin = access.is_admin(request)
         decided = _decided(session) if admin else []
+        fresh_account = first_run.status(session) if not items else None
     cards = []
     for item in items:
         cut = cuts.get(item.cut_pk)
@@ -77,7 +78,7 @@ def inbox_page(request: Request, msg: str = ""):
     return request.app.state.templates.TemplateResponse(
         request, "inbox.html",
         {"cards": cards, "today": today, "policy": policy, "msg": msg, "active": "inbox",
-         "admin": admin, "decided": decided,
+         "admin": admin, "decided": decided, "first_run": fresh_account,
          "day_label": f"{utcnow().astimezone(scheduler_timezone()):%A, %B} "
                       f"{utcnow().astimezone(scheduler_timezone()).day}"})
 
