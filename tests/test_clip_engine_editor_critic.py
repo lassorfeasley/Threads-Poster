@@ -1069,7 +1069,7 @@ class RankTest(TempCase):
         self.assertEqual(texts, [
             "Example 1 — Nye hit: top 2% of this account's posts from the same weeks "
             "(21,895 views at 6 h)", str(self.example_files[11]),
-            "Example 2 — Aerial flop: you labelled this one not gripping", str(self.example_files[13]),
+            "Example 2 — Aerial flop: you labeled this one not gripping", str(self.example_files[13]),
             "Draft A — Credits: 0-5 s: Bill Nye", str(self.renders["d1"]),
             "Draft B — Credits: none", str(self.renders["d2"]),
             "Draft C — Credits: none", str(self.renders["d3"]),
@@ -1133,7 +1133,7 @@ class RankTest(TempCase):
         # d1's cold score (5.0) beats d3's (4.0). d2 goes last.
         self.assertEqual(self.rank(role="claude"), ["d1", "d3", "d2"])
         content = [b.get("text") or b["src"] for b in self.call_for(1)["content"]]
-        self.assertEqual(content[0], "Example 1 — Aerial flop: you labelled this one not gripping")
+        self.assertEqual(content[0], "Example 1 — Aerial flop: you labeled this one not gripping")
         self.assertNotIn("d2.mp4", content)
 
     def test_ten_videos_at_most_examples_dropped_first(self):
@@ -1183,7 +1183,7 @@ class RankTest(TempCase):
         self.assertEqual(content[:4], [
             "Example 1 — Nye hit: top 2% of this account's posts from the same weeks "
             "(21,895 views at 6 h)", "ex11.mp4",
-            "Example 2 — Aerial flop: you labelled this one not gripping", "ex13.mp4"])
+            "Example 2 — Aerial flop: you labeled this one not gripping", "ex13.mp4"])
         self.assertEqual(content[4], "Draft A — Credits: 0-5 s: Bill Nye\n"
                                      "Words heard (clip seconds):\n[0.5] word1")
         self.assertEqual(content[5:8], ["d1.mp4", "Draft B — Credits: none\n"

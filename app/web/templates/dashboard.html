@@ -193,7 +193,7 @@
     <span class="thumb-dur">{{ c.duration_seconds // 60 }}:{{ "%02d"|format(c.duration_seconds % 60) }}</span>
     {% endif %}
     {# Bookmark marker: icon-only chip, bottom-left. The tooltip carries the
-       explanation the old labelled pill spelled out on every card, in the same
+       explanation the old labeled pill spelled out on every card, in the same
        words as the toggle that sets it. #}
     {% if c.multi_clip_potential %}
     <span class="mc-multi" title="{{ 'Bookmarked for additional clips — the suggester found more than one story here. Stays until you turn the bookmark off.' if c.multi_clip_auto else 'Bookmarked for additional clips. Stays here until you turn the bookmark off.' }}">
@@ -331,6 +331,10 @@
     {{ "chance you approve" if model_on else "relevance" }}. Narrow with filters above to see the rest.</div>
 {% endif %}
 {% if not candidates %}
+  {% if first_run and not filtering %}
+  {% from "components/first_run.html" import first_run as first_run_card %}
+  {{ first_run_card(first_run, admin=true, where="in your inbox") }}
+  {% else %}
   <div class="empty">
     <span class="icon">◎</span>
     {% if filtering %}
@@ -341,6 +345,7 @@
       Run the monitor above, or check back later.
     {% endif %}
   </div>
+  {% endif %}
 {% endif %}
 
 <div class="card-grid">

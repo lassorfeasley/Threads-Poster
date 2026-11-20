@@ -100,9 +100,15 @@ def account_lines(brand: dict) -> str:
     topic = (brand.get("topic") or "the channel's topic").strip()
     lines = [f"{name} is a social account about {topic}."]
     if brand.get("mission"):
-        lines.append(f"Mission: {brand['mission']}")
+        lines.append(f"What the brand behind it does: {brand['mission']}")
     if brand.get("audience"):
-        lines.append(f"Audience: {brand['audience']}")
+        lines.append(f"The brand's customers: {brand['audience']}")
+    if brand.get("throughline"):
+        lines.append("Its throughline, the one idea every clip comes back to, whatever "
+                     f"the footage: {brand['throughline']}")
+    if brand.get("format"):
+        lines.append("Kinds of clips that carry it: "
+                     + "; ".join(l.strip() for l in brand["format"].splitlines() if l.strip()))
     if brand.get("clip_guidance"):
         lines.append(f"The operator's editorial guidance: {brand['clip_guidance']}")
     return "\n".join(lines)
@@ -218,7 +224,7 @@ def perceiver_system(brand: dict, *, mode: str, frame_interval: float = 2.0) -> 
             f"about {topic}. An editor who cannot watch this video will pick clips "
             "from your log, so log it precisely.\n"
             "You can't play the video. You get still frames sampled every "
-            f"{frame_interval:g} seconds, each labelled with its time in the video, "
+            f"{frame_interval:g} seconds, each labeled with its time in the video, "
             "and the transcript lines spoken in this stretch with their times. "
             "Infer motion and continuity from consecutive frames.\n\n"
         )
@@ -327,7 +333,7 @@ def editor_system(brand: dict, playbook_text: str, rules: str, *, n: int,
         eyes = (
             "You can't watch the video. The shot log was written by an assistant "
             "who watched it: it is your eyes and ears.\n"
-            + ("Keyframes from the strongest shots follow the payload, labelled "
+            + ("Keyframes from the strongest shots follow the payload, labeled "
                "with their times.\n" if has_keyframes else "")
         )
     section_line = ""
@@ -492,7 +498,7 @@ def cold_system(brand: dict, *, mode: str, frame_interval: float = 1.0,
     else:
         how = (
             "You can't play it: you get frames every "
-            f"{frame_interval:g} s, labelled with seconds from the clip's start, "
+            f"{frame_interval:g} s, labeled with seconds from the clip's start, "
             "and the words heard with their times. Judge sound only from the words "
             "and marks like [music] or [applause].\n"
         )
@@ -561,13 +567,13 @@ def rank_system(brand: dict, playbook_text: str, *, k: int, has_examples: bool,
         examples = "the playbook below describes what this audience rewards"
     how = "" if mode == "video" else (
         f"You can't play the clips: each comes as frames every {frame_interval:g} s "
-        "(labelled with seconds from its start) and the words heard. Judge sound "
+        "(labeled with seconds from its start) and the words heard. Judge sound "
         "only from the words.\n"
     )
     return (
         f"You decide what {_name(brand)} posts. {account_lines(brand)}\n"
         f"You'll see {k} candidate clips cut from the same source video, "
-        "each labelled Draft and a letter"
+        "each labeled Draft and a letter"
         + (", after examples of clips this account posted and how each did" if has_examples else "")
         + ".\n" + how + CREDITS_NOTE + "\n\n"
         "Rank every draft from the one you'd post first to the one you'd post "

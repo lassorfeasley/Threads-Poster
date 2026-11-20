@@ -79,7 +79,7 @@ The guardrails are under `auto_triage:` in `settings.yaml`.
 
 ## Undoing
 
-- **One video.** Click **Approve** to send it to download, or **Back to queue** to put it back in triage undecided. Both work from the page's rejected list, and Approve and Un-reject also work on the video page, where an automatic rejection is labelled with the chance it had.
+- **One video.** Click **Approve** to send it to download, or **Back to queue** to put it back in triage undecided. Both work from the page's rejected list, and Approve and Un-reject also work on the video page, where an automatic rejection is labeled with the chance it had.
 - **A whole pass.** **Undo** in the Passes table puts back every rejection from that pass that still stands. Videos you've approved, or agreed with on a spot-check, stay as you left them.
 
 A video it rejected and you put back is never rejected automatically again.
@@ -169,9 +169,9 @@ Automatic approval sends the top videos a day to the clip engine, and the inbox 
 
 The idea: a stage between metadata and the engine that reads a video's YouTube captions and a few frames (about 1¢) to catch obvious duds — no English, all studio talk, long live streams — before paying 40–75¢ for the engine to watch.
 
-It's shelved because it's an optimisation, not something the pipeline needs. The daily budget already caps engine spend, so the most it could save is roughly $1–2 a day. It would also add automated YouTube traffic from the home IP that downloads depend on.
+It's shelved because it's an optimization, not something the pipeline needs. The daily budget already caps engine spend, so the most it could save is roughly $1–2 a day. It would also add automated YouTube traffic from the home IP that downloads depend on.
 
-The first test showed the risk: fetching captions and storyboards for 132 past videos, 4 at a time, made YouTube bot-check the home IP and was stopped. It produced no result, because storyboard sheets are WebP and were being sent labelled as JPEG. That bug is fixed (`llm.image_media_type`), and it had also been quietly breaking storyboard trait tagging.
+The first test showed the risk: fetching captions and storyboards for 132 past videos, 4 at a time, made YouTube bot-check the home IP and was stopped. It produced no result, because storyboard sheets are WebP and were being sent labeled as JPEG. That bug is fixed (`llm.image_media_type`), and it had also been quietly breaking storyboard trait tagging.
 
 Come back to it if, after a couple of weeks of the daily budget, many engine watches yield nothing usable. Then test it safely:
 

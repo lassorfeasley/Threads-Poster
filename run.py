@@ -2050,7 +2050,7 @@ def cmd_clipbench_reveal(args) -> None:
 
 def cmd_clipbench_critic_check(args) -> None:
     """How well does the critic agree with your "gripping?" labels? Runs the
-    cold critic over labelled posted clips (about $0.01 a clip on Gemini)."""
+    cold critic over labeled posted clips (about $0.01 a clip on Gemini)."""
     from app.config import load_settings
     from app.db import init_db
 
@@ -2392,7 +2392,7 @@ def _add_clip_engine_parsers(sub, common) -> None:
     bp.set_defaults(func=cmd_clipbench_reveal)
 
     bp = bsub.add_parser("critic-check", parents=[common],
-                         help="run the critic over your labelled posted clips and compare "
+                         help="run the critic over your labeled posted clips and compare "
                               "with your 'gripping?' labels")
     bp.add_argument("--roles", type=_critic_roles, default=None, metavar="R,R",
                     help="critics to check: gemini, claude (default: gemini)")

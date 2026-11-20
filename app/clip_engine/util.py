@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterable
 
 
 class Cancelled(RuntimeError):
-    """Raised by ``check`` when a run was cancelled or ran out of time."""
+    """Raised by ``check`` when a run was canceled or ran out of time."""
 
 
 def check(cancel: threading.Event | None = None, deadline: float | None = None) -> None:

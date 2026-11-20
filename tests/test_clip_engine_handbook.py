@@ -843,7 +843,7 @@ def make_templates() -> Jinja2Templates:
         "attention_count": lambda: 0, "threads_authenticated": lambda: True,
         "static_v": "1", "thumb_for": lambda candidate: "", "category_options": lambda: [],
         "category_by_slug": lambda slug: None, "digest_meta": lambda *a, **k: {},
-        "default_app_name": "Clip Monitor",
+        "default_app_name": "Throughline",
         "is_admin": lambda request: True,
     })
     return templates

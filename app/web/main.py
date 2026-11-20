@@ -29,6 +29,7 @@ from starlette.concurrency import run_in_threadpool
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import defer, object_session, selectinload
 
+from .. import onboarding
 from .. import chapters as chapter_index
 from .. import (channel_health, clip_proposals, datasync, facebook_api, instagram_api, linkedin_api, spend, threads_api,
                vision, x_api, youtube)
@@ -157,7 +158,7 @@ from . import access, auth, pagecache
 
 log = logging.getLogger("web")
 
-app = FastAPI(title="Clip Monitor")
+app = FastAPI(title="Throughline")
 _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 # The uploaded brand logo is workspace data, not code: it lives under the
@@ -516,6 +517,17 @@ except Exception:
 else:
     app.include_router(inbox_router)
 
+# Onboarding (app/web/onboarding.py). A helper turn only touches the onboarding
+# record; saving a step writes the brand and keywords, which pages read, so
+# those keep the default and drop every cached page.
+try:
+    from .onboarding import router as onboarding_router
+except Exception:
+    log.exception("Onboarding pages unavailable")
+else:
+    app.include_router(onboarding_router)
+    _WRITE_SCOPE["/welcome/chat"] = ()
+
 # Rule proposals live in a file under the engine directory; adding one writes
 # brand.yaml. Neither is part of any cached page.
 _WRITE_SCOPE["/clip-engine/rule-proposals/{idx}/add"] = ()
@@ -621,6 +633,9 @@ def _role_gate(request: Request, *, real: bool):
     if request.state.is_admin:
         return None
     path = request.url.path
+    if access.onboarding_applies(path, request.method) and not onboarding.is_done():
+        if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+            return RedirectResponse(access.ONBOARDING_HOME, status_code=303)
     if path == "/":  # keeps ?msg= from a password change and the like
         query = request.url.query
         return RedirectResponse(access.CUSTOMER_HOME + (f"?{query}" if query else ""),
@@ -926,7 +941,10 @@ def _archives_here() -> bool:
     return env("ARCHIVE_ON_THIS_MACHINE", "on").strip().lower() not in ("0", "off", "false", "no")
 
 
-def _scrape_in_thread(candidate_id: int) -> None:
+def _scrape_in_thread(candidate_id: int, after_archive=None) -> None:
+    """Archive one approved video (download, transcript), then queue the clip
+    engine, or call ``after_archive(candidate_id)`` instead when given (an
+    upload sends its clips straight to the inbox)."""
     if not _archives_here():
         log.info("Candidate %s approved; its download waits for a home machine", candidate_id)
         return
@@ -954,7 +972,20 @@ def _scrape_in_thread(candidate_id: int) -> None:
         with _scrape_inflight_lock:
             _scrape_inflight.discard(candidate_id)
     if archived:
-        _queue_clip_engine_after_archive(candidate_id)
+        (after_archive or _queue_clip_engine_after_archive)(candidate_id)
+
+
+def _first_run_status() -> dict | None:
+    """The new-account placeholder's numbers (app/first_run.py); None once
+    videos arrive, or if they can't be read."""
+    try:
+        from .. import first_run
+
+        with session_scope(read_only=True) as session:
+            return first_run.status(session)
+    except Exception:
+        log.exception("First-run status unavailable")
+        return None
 
 
 def _queue_clip_engine_after_archive(candidate_id: int) -> None:
@@ -1698,6 +1729,7 @@ def dashboard(request: Request, q: str = "", channel_id: int = 0,
          "model_on": triage_model.enabled(settings),
          "date_defaulted": date_defaulted,
          "show_hidden": show_hidden, "filtering": filtering,
+         "first_run": _first_run_status(),
          "q": q, "channel_id": channel_id, "keyword": keyword, "region": region,
          "country": country, "scope": scope, "status": status,
          "msg": msg, "view": view, "active": "dashboard"},
@@ -3251,23 +3283,26 @@ def _get_or_create_upload_channel(session) -> Channel:
     return ch
 
 
-@app.post("/upload")
-async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
-    """Bring an operator's own video file into the same pipeline as discovered
-    clips: it lands pre-'downloaded', gets transcribed locally, then flows through
-    trim -> caption -> post like everything else."""
+class UploadRejected(ValueError):
+    """An upload that can't be taken, with the reason to show."""
+
+
+async def store_upload(file: UploadFile, title: str = "") -> int:
+    """Save an uploaded video and add it as an approved video (its own
+    synthetic "Uploads" channel). Returns the candidate id; the caller starts
+    the transcript. Raises UploadRejected with a message for the page."""
     import uuid
 
     from ..config import storage_dir
 
     if not _archives_here():
-        return _flash("/", "Uploading your own video isn't available on the hosted "
-                           "dashboard yet. Upload it from the Mac's dashboard.")
+        raise UploadRejected("Uploading your own video isn't available on the hosted "
+                             "dashboard yet. Upload it from the Mac's dashboard.")
     filename = file.filename or "upload.mp4"
     ext = Path(filename).suffix.lower()
     if ext not in _UPLOAD_EXTS:
-        return _flash("/", f"Unsupported file type '{ext or '?'}'. "
-                           f"Use one of: {', '.join(_UPLOAD_EXTS)}")
+        raise UploadRejected(f"Unsupported file type '{ext or '?'}'. "
+                             f"Use one of: {', '.join(_UPLOAD_EXTS)}")
 
     video_id = "up" + uuid.uuid4().hex[:16]  # unique, fits String(20)
     settings = load_settings()
@@ -3285,7 +3320,7 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
         await file.close()
     if size == 0:
         dest.unlink(missing_ok=True)
-        return _flash("/", "Upload was empty")
+        raise UploadRejected("Upload was empty")
 
     duration = clip_duration(dest)
 
@@ -3307,8 +3342,86 @@ async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
         session.add(c)
         session.flush()
         cid = c.id
+    return cid
+
+
+@app.post("/upload")
+async def upload_clip(file: UploadFile = File(...), title: str = Form("")):
+    """Bring an operator's own video file into the same pipeline as discovered
+    clips: it lands pre-'downloaded', gets transcribed locally, then flows through
+    trim -> caption -> post like everything else."""
+    try:
+        cid = await store_upload(file, title)
+    except UploadRejected as exc:
+        return _flash("/", str(exc))
     _in_background(_scrape_in_thread, cid)
     return _flash(f"/video/{cid}", "Uploaded — transcribing now")
+
+
+def clip_upload_to_inbox(candidate_id: int) -> None:
+    """The whole path for a video a customer uploads to be clipped: transcribe
+    it, run the clip engine, and put its best clips in the inbox (finished:
+    cut, subtitled, captioned) for them to approve. Runs in the background."""
+    _scrape_in_thread(candidate_id, after_archive=_engine_then_inbox)
+
+
+def _engine_then_inbox(candidate_id: int) -> None:
+    from ..clip_engine import effective_setup, jobs
+
+    setup, _why = effective_setup(load_settings())
+    if setup == "transcript":
+        # The transcript suggester already ran inside the archive step.
+        _upload_clips_to_inbox(candidate_id)
+        return
+    # "reroll" is a run someone asked for (as the Suggest button is), so the
+    # unattended daily budget doesn't hold it back.
+    jobs.enqueue(candidate_id, reason="reroll",
+                 on_done=lambda: _upload_clips_to_inbox(candidate_id))
+
+
+def _upload_clips_to_inbox(candidate_id: int) -> None:
+    from .. import inbox as inbox_mod
+
+    try:
+        with session_scope() as session:
+            ids = inbox_mod.claim_upload(session, candidate_id)
+        for item_id in ids:
+            _inbox_draft_item(item_id)
+        log.info("Upload %s: %d clips sent to the inbox", candidate_id, len(ids))
+    except Exception:
+        log.exception("Couldn't send upload %s's clips to the inbox", candidate_id)
+    _after_background_work()
+
+
+def upload_progress(candidate_id: int) -> dict:
+    """Where a customer's upload is, in their words: transcribing, finding
+    clips, making clips, done (with how many are waiting) or failed."""
+    from ..clip_engine import jobs
+
+    with session_scope() as session:
+        c = session.get(Candidate, candidate_id)
+        if c is None:
+            return {"stage": "failed", "label": "That upload is gone", "clips": 0}
+        title = c.title
+        archived = c.status == STATUS_ARCHIVED
+        items = session.execute(
+            select(InboxItem.state).where(InboxItem.candidate_pk == candidate_id)).scalars().all()
+    ready = sum(1 for st in items if st == InboxItem.STATE_READY)
+    making = sum(1 for st in items if st == InboxItem.STATE_DRAFTING)
+    base = {"id": candidate_id, "title": title, "clips": ready}
+    if not archived:
+        return {**base, "stage": "transcribing", "label": "Listening to your video…"}
+    job = jobs.status(candidate_id)
+    if job.get("state") in jobs.ACTIVE_STATES:
+        return {**base, "stage": "finding", "label": "Finding the best moments…"}
+    if making:
+        return {**base, "stage": "making", "label": f"Cutting {making} clip{'' if making == 1 else 's'}…"}
+    if ready:
+        return {**base, "stage": "done",
+                "label": f"{ready} clip{'' if ready == 1 else 's'} waiting in Today's posts"}
+    if job.get("state") in ("failed", "interrupted") or job.get("error"):
+        return {**base, "stage": "failed", "label": "We couldn't clip this one. Try another video."}
+    return {**base, "stage": "finding", "label": "Finding the best moments…"}
 
 
 def _get_or_create_pasted_channel(session) -> Channel:
@@ -7067,7 +7180,7 @@ def _pending_rule_proposals() -> list[dict]:
 _BRAND_FORM_FIELDS = ("topic", "name", "cta_url", "mission", "audience",
                       "positioning", "voice_notes", "source_kind", "relevance_rules",
                       "false_positives", "strong_openings", "weak_openings",
-                      "clip_guidance")
+                      "clip_guidance", "throughline", "format", "caption_brief")
 
 
 @app.post("/brand")
@@ -7184,20 +7297,29 @@ async def appearance_save(app_name: str = Form(""),
                           logo: UploadFile | None = File(None)):
     values = {"app_name": app_name}
     if logo is not None and (logo.filename or "").strip():
-        ext = Path(logo.filename).suffix.lower()
-        if ext not in _ALLOWED_LOGO_EXTS:
-            return _flash("/appearance", "Logo must be a PNG, JPG, SVG, WebP, or GIF")
-        data = await logo.read()
-        if len(data) > 2 * 1024 * 1024:
-            return _flash("/appearance", "Logo is too large — keep it under 2 MB")
-        _BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
-        # One canonical file: a new upload replaces the old, whatever its type.
-        for old in _BRAND_LOGO_DIR.glob("logo.*"):
-            old.unlink(missing_ok=True)
-        (_BRAND_LOGO_DIR / f"logo{ext}").write_bytes(data)
-        values["logo_file"] = f"logo{ext}"
+        try:
+            store_logo(logo.filename, await logo.read())
+        except ValueError as exc:
+            return _flash("/appearance", str(exc))
     save_brand(values)
     return _flash("/appearance", "Appearance saved")
+
+
+def store_logo(filename: str, data: bytes) -> str:
+    """Save the account's icon (Appearance, onboarding) and point the brand at
+    it. Returns its URL. Raises ValueError with a message for the page."""
+    ext = Path(filename or "").suffix.lower()
+    if ext not in _ALLOWED_LOGO_EXTS:
+        raise ValueError("Logo must be a PNG, JPG, SVG, WebP, or GIF")
+    if len(data) > 2 * 1024 * 1024:
+        raise ValueError("Logo is too large — keep it under 2 MB")
+    _BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
+    # One canonical file: a new upload replaces the old, whatever its type.
+    for old in _BRAND_LOGO_DIR.glob("logo.*"):
+        old.unlink(missing_ok=True)
+    (_BRAND_LOGO_DIR / f"logo{ext}").write_bytes(data)
+    save_brand({"logo_file": f"logo{ext}"})
+    return _brand_logo()
 
 
 @app.post("/appearance/logo/remove")
@@ -7410,7 +7532,7 @@ def cancel_schedule(effective_from: str = Form("")):
         return _flash("/schedule", "Nothing to cancel")
     with session_scope() as session:
         result = posting_schedule.cancel(session, start, today=_schedule_today())
-    return _flash("/schedule", "Change cancelled" if result is not None
+    return _flash("/schedule", "Change canceled" if result is not None
                   else "That change already started or doesn't exist")
 
 

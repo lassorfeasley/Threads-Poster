@@ -837,8 +837,11 @@ class _Shape:
 
 def _request_body(*, system: str, parts: list[dict], schema: dict, thinking: str | None,
                   media_resolution: str | None, max_output_tokens: int, shape: _Shape) -> dict:
+    from ..config import with_american_english
+
     contents = list(parts)
     body: dict[str, Any] = {}
+    system = with_american_english(system)
     if system:
         if shape.system_in_parts:
             contents = [{"text": system}] + contents

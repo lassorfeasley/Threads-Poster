@@ -499,7 +499,7 @@ def create_subtitled_clip(clip_path: str | Path, position: str | None = None,
     font_frac = float(settings.get("subtitles.font_size_frac", 0.11))
     from .caption_look import resolve
 
-    look = resolve(settings)    # the account's font and box colour, else settings.yaml's
+    look = resolve(settings)    # the account's font and box color, else settings.yaml's
     font_name = look["font"]
     dwell = max(0.0, float(settings.get("subtitles.dwell_seconds", 2.0)))
     position = str(position or settings.get("subtitles.position", "bottom")).strip().lower()

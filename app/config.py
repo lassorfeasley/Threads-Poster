@@ -364,8 +364,20 @@ BRAND_HEADER = """\
 
 """
 
+# Every model writes for an American audience. Appended to every system prompt
+# (app/llm.py, app/clip_engine/claude.py and gemini.py, app/onboarding.py), so
+# captions, rules and drafts never drift into British spelling.
+AMERICAN_ENGLISH = ("Write in American English: American spelling and usage "
+                    "(color, favorite, organize, center, canceled, labeled, gray).")
+
+
+def with_american_english(system: str | None) -> str:
+    system = (system or "").rstrip()
+    return f"{system}\n\n{AMERICAN_ENGLISH}" if system else AMERICAN_ENGLISH
+
+
 # White-label defaults: what the sidebar/title show when brand.yaml is unset.
-DEFAULT_APP_NAME = "Clip Monitor"
+DEFAULT_APP_NAME = "Throughline"
 
 _BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "positioning",
                       "voice_notes",
@@ -373,7 +385,15 @@ _BRAND_TEXT_FIELDS = ("name", "cta_url", "mission", "audience", "positioning",
                       # Prompt-framing fields consumed by app/llm.py. Blank
                       # fields fall back to generic phrasing there.
                       "source_kind", "relevance_rules", "false_positives",
-                      "strong_openings", "weak_openings", "clip_guidance")
+                      "strong_openings", "weak_openings", "clip_guidance",
+                      # The channel's concept (set in onboarding): its
+                      # throughline, the one idea every clip comes back to,
+                      # and the kinds of clips that carry it, one per line.
+                      "throughline", "format",
+                      # Optional background every caption can draw on: a
+                      # framework, how the brand's product would respond to
+                      # what a clip shows, sample takes.
+                      "caption_brief")
 
 
 def load_brand() -> dict[str, str]:

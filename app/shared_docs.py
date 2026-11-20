@@ -39,6 +39,8 @@ DOC_FILES = {
     "playbook": ("config", "clip_playbook.yaml"),
     "notes": ("engine", "notes.jsonl"),
     "proposals": ("engine", "rule_proposals.json"),
+    "onboarding": ("engine", "onboarding.json"),
+    "obsources": ("engine", "onboarding_sources.json"),
 }
 
 _CACHE_TTL = 30.0

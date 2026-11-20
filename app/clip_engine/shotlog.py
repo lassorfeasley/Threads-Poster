@@ -75,7 +75,7 @@ EVIDENCE = ("title", "description", "on_screen", "said", "none")
 # when the instructions change, not when the brand's wording does.
 _HASH_BRAND = {"name": "{name}", "topic": "{topic}"}
 
-_PART_OVERLAP = 10.0            # seconds neighbouring windows share
+_PART_OVERLAP = 10.0            # seconds neighboring windows share
 _MAX_SPLIT_LEVEL = 2            # a truncated window is halved at most twice...
 _MIN_SPLIT_SECONDS = 20.0       # ...and never into halves shorter than this
 # A real log runs well under 150 output tokens per second of video, even for
@@ -745,8 +745,8 @@ def _merge_beats(a: dict, b: dict) -> dict:
 
 
 def _fit_beats(beats: list[dict], cap: int) -> list[dict]:
-    """At most ``cap`` beats: merge neighbours that share a shot type first
-    (shortest pairs first), then any neighbours. Coarsens instead of dropping
+    """At most ``cap`` beats: merge neighbors that share a shot type first
+    (shortest pairs first), then any neighbors. Coarsens instead of dropping
     the end of a long video."""
     beats = list(beats)
     if cap <= 0:
@@ -783,7 +783,7 @@ def compact_for_prompt(log, *, window=None, max_beats=400, cuts=None, min_shot_s
     (on_screen 240, line 200, sound 80, note 60), and each beat's exact shot
     changes from the shot map (``cuts``: times with score >= min_shot_score)
     so a picture-led segment can start exactly on a cut. More than
-    ``max_beats`` beats are merged with their neighbours.
+    ``max_beats`` beats are merged with their neighbors.
 
     ``speech_language`` is kept on every beat that has one;
     ``english_voiceover`` only where it matters (foreign speech, or a
@@ -923,7 +923,7 @@ def _fmt_span(span: tuple[float, float]) -> str:
 
 
 def credits_for(log, segments) -> str:
-    """Who a viewer would recognise in a clip, on the CLIP clock.
+    """Who a viewer would recognize in a clip, on the CLIP clock.
 
     People the log ranks famous, public_figure or expert, and whose name is
     known (title, description, on screen or said), are mapped to clip time
@@ -1009,7 +1009,7 @@ def load_cached(video_id, perceiver, model, *, settings=None,
 # ---- building -----------------------------------------------------------------------------
 
 def _spans(lo: float, hi: float, size: float, overlap: float) -> list[tuple[float, float]]:
-    """Windows of at most ``size`` seconds covering [lo, hi], neighbours
+    """Windows of at most ``size`` seconds covering [lo, hi], neighbors
     sharing ``overlap``, all the same length (no tiny tail window)."""
     total = hi - lo
     size = max(size, overlap + 30.0)
@@ -1205,7 +1205,7 @@ class _Runner:
 
     def part(self, start: float, end: float, *, index: int, count: int, level: int):
         # Before anything is spent on this span — a window, or a half of one
-        # that was split: a cancelled run, a passed deadline or a run past its
+        # that was split: a canceled run, a passed deadline or a run past its
         # cost cap stops here. Raised outside the try below, so it ends the
         # log instead of becoming a failed placeholder.
         if self.check is not None:

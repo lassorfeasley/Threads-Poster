@@ -2,7 +2,7 @@
 video and join them into a single social-ready mp4 using ffmpeg.
 
 Each segment is re-encoded (frame-accurate cuts, uniform params), then joined
-with the concat demuxer, and the result's audio is levelled to one loudness
+with the concat demuxer, and the result's audio is leveled to one loudness
 (``level_audio``). Output goes to data/clips/.
 """
 from __future__ import annotations
@@ -33,9 +33,9 @@ class ClipExportError(RuntimeError):
     pass
 
 
-# Every exported clip is levelled to one loudness, so a quiet interview and a
+# Every exported clip is leveled to one loudness, so a quiet interview and a
 # loud protest play at the same volume in the feed. -14 LUFS is where the big
-# feeds normalise to; -1.5 dBTP keeps peaks clear of clipping after AAC.
+# feeds normalize to; -1.5 dBTP keeps peaks clear of clipping after AAC.
 TARGET_LUFS = -14.0
 TARGET_PEAK_DBTP = -1.5
 TARGET_LRA = 11.0
@@ -121,7 +121,7 @@ def level_audio(path: str | Path) -> bool:
     """Bring ``path``'s audio to TARGET_LUFS in place (two-pass loudnorm: one
     measured, even gain, so the dynamics are kept). The video is copied, not
     re-encoded. Returns whether it changed anything. Never raises: a clip
-    whose audio can't be levelled keeps the audio it had."""
+    whose audio can't be leveled keeps the audio it had."""
     path = Path(path)
     try:
         stats = _loudness(path)
@@ -142,7 +142,7 @@ def level_audio(path: str | Path) -> bool:
             str(tmp),
         ])
         tmp.replace(path)
-        log.info("Levelled %s from %.1f to %.0f LUFS", path.name, measured, TARGET_LUFS)
+        log.info("Leveled %s from %.1f to %.0f LUFS", path.name, measured, TARGET_LUFS)
         return True
     except Exception as exc:
         log.warning("Couldn't level the audio of %s (%s); keeping it as it was", path.name, exc)

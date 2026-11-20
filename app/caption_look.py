@@ -1,7 +1,7 @@
-"""How the burned-in captions look: the font and the highlight box's colour.
+"""How the burned-in captions look: the font and the highlight box's color.
 
-Each account picks from nine fonts and nine colours, or any Google font and
-any colour of its own (Settings → Subtitles). The choice lives in the shared
+Each account picks from nine fonts and nine colors, or any Google font and
+any color of its own (Settings → Subtitles). The choice lives in the shared
 database (``AppToken`` ``caption_look:<workspace>``) so every machine that
 renders captions agrees; with no choice saved, settings.yaml's ``subtitles``
 section stands, exactly as before.
@@ -52,7 +52,7 @@ FONTS = (
 FONT_WEIGHT_SPEC = {"Funnel Display": ":wght@600", "Anton": "", "Bebas Neue": "", "Archivo Black": ""}
 DEFAULT_WEIGHT_SPEC = ":wght@700"
 
-# Nine highlight colours: brand-neutral, each readable behind its auto text colour.
+# Nine highlight colors: brand-neutral, each readable behind its auto text color.
 COLORS = (
     ("#FFFFFF", "White"),
     ("#111111", "Black"),
@@ -110,7 +110,7 @@ def clean_color(value: str) -> str:
     if value and not value.startswith("#"):
         value = "#" + value
     if not _HEX.fullmatch(value):
-        raise ValueError(f"“{value}” isn't a colour like #1A4A7D")
+        raise ValueError(f"“{value}” isn't a color like #1A4A7D")
     return value.upper()
 
 
@@ -211,7 +211,7 @@ def _contrast_text(box_hex: str) -> str:
 
 
 def resolve(settings) -> dict:
-    """The font file and colours to render with: the account's choice where it
+    """The font file and colors to render with: the account's choice where it
     made one, settings.yaml's ``subtitles`` section for the rest. A saved
     font that can't be had right now falls back to the configured one rather
     than failing the render."""

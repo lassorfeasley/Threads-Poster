@@ -6,7 +6,7 @@ carries at most ONE slug: the LLM recommends one (monitor pass or the
 ``backfill-categories`` command) and the operator can override it by hand.
 
 The vocabulary has two halves. CONFIGURED categories are the genres a brand
-programmes around — climate runs news / nature / culture — and live in
+programs around — climate runs news / nature / culture — and live in
 settings ``categories.options`` because a different brand needs a different
 set. RESERVED categories are built into the app because every brand has them
 whatever it covers; they are appended after the configured ones.
@@ -35,7 +35,7 @@ from .models import Candidate, Channel
 
 # Built-in categories, appended after whatever settings.yaml defines. A
 # configured entry reusing one of these slugs is dropped so the definition
-# here stays authoritative — these have behaviour attached, not just a label.
+# here stays authoritative — these have behavior attached, not just a label.
 RESERVED_OPTIONS: list[dict] = [
     {
         "slug": "promos",

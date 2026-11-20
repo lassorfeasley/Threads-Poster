@@ -1,0 +1,40 @@
+{#
+  Before an account's first videos arrive (app/first_run.py): what's happening
+  instead of "no matches". ``fr`` is first_run.status(); ``admin`` adds the
+  monitor's run-now button; ``where`` names the page clips land on.
+#}
+{% macro first_run(fr, admin=false, where="here") %}
+<div class="fr">
+  <div class="fr-head">
+    <span class="fr-spark" aria-hidden="true">✨</span>
+    <div>
+      <strong>Your first clips are on the way</strong>
+      <p>Here's what happens next. Nothing posts without you.</p>
+    </div>
+  </div>
+  <ol class="fr-steps">
+    <li class="{{ 'is-done' if fr.channels else 'is-todo' }}">
+      <span class="fr-mark">{{ '✓' if fr.channels else '1' }}</span>
+      <div>{% if fr.channels %}<strong>Watching {{ fr.channels }} YouTube channel{{ '' if fr.channels == 1 else 's' }}</strong> for videos that carry your throughline.
+        {% else %}<strong>Pick your video sources.</strong> <a href="{{ '/channels' if admin else '/welcome/sources' }}">Choose channels to watch →</a>{% endif %}</div>
+    </li>
+    <li class="{{ 'is-now' if fr.channels else '' }}">
+      <span class="fr-mark">{% if fr.monitor_running %}<span class="fr-spin"></span>{% else %}2{% endif %}</span>
+      <div><strong>{% if fr.monitor_running %}Checking your channels now…{% elif fr.monitor_ran %}Checked your channels: nothing that fits yet.{% else %}The first check runs within {{ fr.poll_hours }} hours.{% endif %}</strong>
+        New uploads that mention your keywords get a closer look, and the best ones are clipped.
+        {% if admin and not fr.monitor_running %}
+        <form method="post" action="/monitor/run" class="fr-inline"><button type="submit" class="btn sm">Check now</button></form>
+        {% endif %}</div>
+    </li>
+    <li>
+      <span class="fr-mark">3</span>
+      <div><strong>Clips land {{ where }} for you to approve.</strong> Each one is cut, subtitled and captioned, ready to post.</div>
+    </li>
+  </ol>
+  <a class="fr-upload" href="/welcome/launch">
+    <span aria-hidden="true">🎬</span>
+    <span><strong>Don't want to wait?</strong> Upload a video of your own and get clips from it right away.</span>
+    <span aria-hidden="true">→</span>
+  </a>
+</div>
+{% endmacro %}

@@ -83,8 +83,8 @@ _FASTSTART = ["-movflags", "+faststart"]
 # the (seeked) input, so a first frame landing a few ms after the seek point
 # doesn't shift the whole segment a frame late. Renders round DOWN: each
 # segment comes out within a frame of its length, so joins don't drift. Stills
-# round UP: the frame labelled t shows what is on screen AT t (rounding to
-# nearest would show up to half an interval later — a mislabelled opening).
+# round UP: the frame labeled t shows what is on screen AT t (rounding to
+# nearest would show up to half an interval later — a mislabeled opening).
 _RENDER_FPS = "fps=25:start_time=0:round=down"
 
 
@@ -496,7 +496,7 @@ def _rms_windows(src: Path, timeout: float) -> list[tuple[float, float]]:
     """``[(t, dB)]`` RMS level of each 50 ms window of the first audio stream.
 
     Mixed to mono by the resampler rather than ``pan=…c0+c1``: a 5.1 source
-    keeps its dialogue (centre channel) and a mono one needs no special case.
+    keeps its dialogue (center channel) and a mono one needs no special case.
     The pause threshold is relative to the median, so the mix gain is moot.
     """
     proc = _ffmpeg(["-i", str(src), "-vn", "-map", "0:a:0", "-af",
@@ -688,7 +688,7 @@ def sample_frames(path, *, start: float, end: float, interval: float,
     duration = probe_duration(src)
     if duration:
         hi = min(hi, duration)
-    # The fps filter takes an exact rational rate; frame k is labelled
+    # The fps filter takes an exact rational rate; frame k is labeled
     # start + k * period with the same rational, so labels never drift.
     period_q = Fraction(step).limit_denominator(1000)
     if period_q <= 0:

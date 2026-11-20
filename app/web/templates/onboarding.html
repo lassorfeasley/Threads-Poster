@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome · {{ brand_name() }}</title>
+{#
+  Onboarding (/welcome): app/web/onboarding.py. One question per screen, big
+  and friendly; its own page rather than base.html, since until the account is
+  set up there is nothing else in the app to go to. Always light: it's a
+  first impression.
+  Helper drafts arrive as "Suggested" answers (the first screen's website read
+  fills the rest in the background; this page polls /welcome/status), and the
+  helper chat is a drawer a tap away.
+#}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300..800;1,400&display=swap">
+<link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
+</head>
+<body class="ob">
+
+<header class="ob-top">
+  <div class="ob-top-brand">{{ brand_name() }}</div>
+  {% if spec %}
+  <div class="ob-progress" role="progressbar" aria-valuemin="0" aria-valuemax="{{ steps|length }}" aria-valuenow="{{ step_number - 1 }}">
+    {% for s in steps %}<span class="{{ 'is-done' if loop.index < step_number }}{{ ' is-on' if loop.index == step_number }}"></span>{% endfor %}
+  </div>
+  <div class="ob-top-count">{{ step_number }} of {{ steps|length }}</div>
+  {% else %}<div></div><div></div>{% endif %}
+</header>
+
+{% if spec %}
+<main class="ob-stage">
+  <form method="post" action="/welcome/{{ spec.key }}" id="ob-form" class="ob-card"
+        {% if spec.upload %}enctype="multipart/form-data"{% endif %} autocomplete="off">
+    <h1 class="ob-q">{{ question }}</h1>
+    <p class="ob-sub">{{ spec.sub }}</p>
+
+    {% if spec.teach %}
+    <details class="ob-teach">
+      <summary>Why a throughline matters</summary>
+      <ul>
+        <li><strong>People follow an idea, not a feed.</strong> When every clip lands on the same point, people start to see the world your way.</li>
+        <li><strong>It lets you post anything.</strong> Breaking news, old film, a celebrity moment, a stranger's phone video: if it carries your throughline, it's on-brand.</li>
+        <li><strong>That's thought leadership.</strong> Anyone can share a clip. Saying what it means, the same way every time, makes you the voice people turn to.</li>
+        <li><strong>A topic isn't enough.</strong> “Conflict” is a topic. “Every conflict has a moment where it could have gone differently” is a throughline.</li>
+      </ul>
+    </details>
+    {% endif %}
+
+    {% if spec.illustration == 'subtitles' %}
+    <div class="ob-illo" aria-hidden="true">
+      <div class="ob-phone ob-phone-lg">
+        <div class="ob-scene"><span class="ob-scene-sun"></span><span class="ob-scene-hill"></span><span class="ob-scene-person"></span></div>
+        <div class="ob-phone-sub" id="ob-sub-preview"><span class="ob-w">Every</span> <span class="ob-w">move</span> <span class="ob-w">has</span> <span class="ob-w">a</span> <span class="ob-w">why</span></div>
+      </div>
+      <ul class="ob-callouts">
+        <li><span class="ob-callout-dot">1</span><div><strong>Subtitles</strong> appear in your font as people speak, a few words at a time.</div></li>
+        <li><span class="ob-callout-dot">2</span><div><strong>The word being said</strong> lights up in your highlight color, like karaoke.</div></li>
+        <li><span class="ob-callout-dot">3</span><div>Every clip gets them, so it works with the sound off.</div></li>
+      </ul>
+    </div>
+    {% elif spec.illustration == 'endcard' %}
+    <div class="ob-illo" aria-hidden="true">
+      <div>
+        <div class="ob-timeline">
+          <div class="ob-tl-clip"><span>Your clip</span></div>
+          <div class="ob-tl-end" id="ob-tl-end"><span>End card</span></div>
+        </div>
+        <div class="ob-tl-labels"><span>the moment you picked</span><span>last 3.5 sec</span></div>
+        <div class="ob-phone ob-phone-lg ob-endcard" id="ob-end-preview">
+          <div class="ob-end-lines" id="ob-end-lines"></div>
+          <div class="ob-end-site">{{ values.cta_url or 'yourwebsite.com' }}</div>
+        </div>
+      </div>
+      <ul class="ob-callouts">
+        <li><span class="ob-callout-dot">1</span><div><strong>Your lines</strong>: up to three short ones. Say who you are and what to do next.</div></li>
+        <li><span class="ob-callout-dot">2</span><div><strong>Your website</strong> is added at the bottom automatically{% if values.cta_url %} ({{ values.cta_url }}){% endif %}.</div></li>
+        <li><span class="ob-callout-dot">3</span><div>The text turns black or white to stay readable on your color.</div></li>
+      </ul>
+    </div>
+    {% endif %}
+
+    <div class="ob-reading" id="ob-reading"{% if busy not in ('reading', 'refreshing') %} hidden{% endif %}>
+      <span class="ob-sparkle" aria-hidden="true">✨</span>
+      <span>{% if busy == 'refreshing' %}Matching your keywords to your throughline… they'll appear here in a moment.{% else %}Reading up on {{ values.name or 'your brand' }}… your answers will appear here in a moment.{% endif %}</span>
+    </div>
+
+    {% for f in spec.fields %}
+    <div class="ob-field{{ ' is-drafted' if f.name in drafted }}" data-field="{{ f.name }}">
+      {% if f.label and f.kind != 'brief' %}<label class="ob-label" for="f-{{ f.name }}">{{ f.label }}</label>{% endif %}
+      {% if f.kind == 'line' %}
+      <input class="ob-input" type="text" id="f-{{ f.name }}" name="{{ f.name }}" value="{{ values[f.name] }}"
+             placeholder="{{ f.placeholder }}"{% if f.required %} required{% endif %}{% if loop.first %} autofocus{% endif %}>
+      {% elif f.kind == 'text' %}
+      <textarea class="ob-input" id="f-{{ f.name }}" name="{{ f.name }}" rows="{{ f.rows }}"
+                placeholder="{{ f.placeholder }}"{% if f.required %} required{% endif %}{% if loop.first %} autofocus{% endif %}>{{ values[f.name] }}</textarea>
+      {% elif f.kind == 'throughline' %}
+      <textarea class="ob-input ob-throughline" id="f-{{ f.name }}" name="{{ f.name }}" rows="{{ f.rows }}"
+                placeholder="{{ f.placeholder }}"{% if f.required %} required{% endif %}>{{ values[f.name] }}</textarea>
+      {% elif f.kind == 'brief' %}
+      <details class="ob-brief"{% if values[f.name] %} open{% endif %}>
+        <summary>＋ {{ f.label }} <span class="set-optional">optional</span></summary>
+        <p class="ob-brief-help">Paste anything that shapes your take: your method, how your product would respond to what a clip shows, sample captions you love. Every caption draws on it.</p>
+        <textarea class="ob-input" id="f-{{ f.name }}" name="{{ f.name }}" rows="{{ f.rows }}" placeholder="{{ f.placeholder }}">{{ values[f.name] }}</textarea>
+      </details>
+      {% elif f.kind == 'lenses' %}
+      <textarea name="{{ f.name }}" id="f-{{ f.name }}" hidden>{{ values[f.name] }}</textarea>
+      <div class="ob-lenses" id="ob-lenses" data-for="f-{{ f.name }}" role="group" aria-label="Concept ideas">
+        {% for c in format_cards %}
+        <button type="button" class="ob-lens{{ ' is-on' if c.on }}" aria-pressed="{{ 'true' if c.on else 'false' }}"
+                data-line="{{ c.line }}" data-title="{{ c.title|lower }}"{% if c.example %} title="{{ c.example }}"{% endif %}>
+          <span class="ob-lens-emoji" aria-hidden="true">{{ c.emoji or '✳️' }}</span>
+          <span class="ob-lens-title">{{ c.title }}</span>
+          {% if c.example %}<span class="ob-lens-ex">{{ c.example }}</span>{% endif %}
+          <span class="ob-lens-check" aria-hidden="true">✓</span>
+        </button>
+        {% endfor %}
+        <div class="ob-lens ob-lens-add">
+          <span class="ob-lens-emoji" aria-hidden="true">＋</span>
+          <input type="text" placeholder="{{ f.placeholder }}" aria-label="{{ f.placeholder }}">
+        </div>
+      </div>
+      {% elif f.kind == 'fonts' %}
+      <link rel="stylesheet" href="{{ font_css }}">
+      {% set cur = values.font or fonts[0] %}
+      <div class="ob-fonts" role="radiogroup" aria-label="{{ f.label }}">
+        {% for font in fonts %}
+        <label class="ob-font"><input type="radio" name="font" value="{{ font }}"{% if cur == font %} checked{% endif %}>
+          <span style="font-family: '{{ font }}', sans-serif">{{ font }}</span></label>
+        {% endfor %}
+      </div>
+      {% elif f.kind == 'colors' %}
+      {% set cur = (values[f.name] or (values.color if f.name == 'end_color' else '') or colors[3][0])|upper %}
+      <input type="hidden" name="{{ f.name }}" id="f-{{ f.name }}" value="{{ cur }}" class="ob-color-value">
+      <div class="ob-colors" role="radiogroup" aria-label="{{ f.label }}" data-for="f-{{ f.name }}">
+        {% for hex, cname in colors %}
+        <button type="button" class="ob-swatch{{ ' is-on' if cur == hex|upper }}" data-hex="{{ hex|upper }}" title="{{ cname }}" aria-label="{{ cname }}" style="--sw: {{ hex }}"></button>
+        {% endfor %}
+        <label class="ob-swatch-own" title="Your own color">
+          <input type="color" class="ob-own-color" value="{{ cur }}"> <span>Your own</span>
+        </label>
+      </div>
+      {% elif f.kind == 'timezone' %}
+      <select class="ob-input ob-select" name="tz" id="f-tz" data-current="{{ values.tz }}" required></select>
+      {% elif f.kind == 'rhythm' %}
+      {% set cur = values.rhythm or 'waking' %}
+      <div class="ob-rhythm" role="radiogroup">
+        <label class="ob-choice"><input type="radio" name="rhythm" value="waking"{% if cur == 'waking' %} checked{% endif %}>
+          <span class="ob-choice-title">☀️ During waking hours</span>
+          <span class="ob-choice-ex">Posts go out between morning and late evening in your time zone. Best for most accounts.</span></label>
+        <label class="ob-choice"><input type="radio" name="rhythm" value="always"{% if cur == 'always' %} checked{% endif %}>
+          <span class="ob-choice-title">🌍 Around the clock</span>
+          <span class="ob-choice-ex">Posts are spread across all 24 hours, for audiences all over the world.</span></label>
+      </div>
+      {% elif f.kind == 'sources' %}
+      <div class="ob-src" id="ob-src" data-status="{{ src.status }}">
+        <div class="ob-src-progress" id="ob-src-progress"{% if src.status != 'running' %} hidden{% endif %}>
+          <span class="ob-sparkle" aria-hidden="true">✨</span>
+          <span id="ob-src-progress-text">Finding channels that carry your throughline…</span>
+          <div class="ob-src-bar"><span id="ob-src-bar" style="width: {{ (100 * src.checked / src.total)|round if src.total else 4 }}%"></span></div>
+        </div>
+        <div class="ob-src-error" id="ob-src-error"{% if src.status != 'error' %} hidden{% endif %}>{{ src.error }}</div>
+        <div class="ob-src-count" id="ob-src-count">{% if src.channels %}<strong>{{ src_chosen }}</strong> channels so far{% endif %}</div>
+        <div class="ob-src-grid" id="ob-src-grid"></div>
+        <button type="button" class="ob-link ob-src-all" id="ob-src-all" hidden>See all channels</button>
+        <div class="ob-src-list" id="ob-src-list" hidden></div>
+
+        <div class="ob-src-tools">
+          <div class="ob-src-tool">
+            <label class="ob-label" for="ob-src-url">Add a channel you love</label>
+            <div class="ob-inline">
+              <input class="ob-input" id="ob-src-url" type="text" placeholder="youtube.com/@channel">
+              <button type="button" class="ob-send" id="ob-src-add">Add</button>
+            </div>
+          </div>
+          <div class="ob-src-tool">
+            <label class="ob-label" for="ob-src-feedback">Not quite right? Tell us what to find more or less of</label>
+            <div class="ob-inline">
+              <input class="ob-input" id="ob-src-feedback" type="text" placeholder="e.g. more archival footage, fewer workout channels">
+              <button type="button" class="ob-send" id="ob-src-again">Find again</button>
+            </div>
+          </div>
+        </div>
+        <p class="ob-teach-note">🔁 Your sources keep getting better on their own. Channels whose videos you never approve are retired and replaced with better ones, so you never have to manage this list.</p>
+      </div>
+      {% elif f.kind == 'connect' %}
+      <div class="ob-connect">
+        {% for c in connections %}
+        <div class="ob-conn{{ ' is-on' if c.connected }}">
+          <div class="ob-conn-head">
+            <span class="ob-conn-name">{{ c.name }}</span>
+            {% if c.connected %}<span class="ob-conn-ok">✓ Connected</span>{% endif %}
+          </div>
+          {% if not c.connected %}
+          {% if c.auth_url %}
+          <ol class="ob-conn-steps">
+            <li><a class="ob-send" href="{{ c.auth_url }}" target="_blank" rel="noopener">Sign in to {{ c.name }} ↗</a></li>
+            <li>After you approve, copy the code from the page you land on and paste it here:</li>
+          </ol>
+          <div class="ob-inline">
+            <input class="ob-input" type="text" form="ob-conn-{{ loop.index }}" name="code" placeholder="Paste the code" aria-label="{{ c.name }} code">
+            <button class="ob-send" type="submit" form="ob-conn-{{ loop.index }}">Connect</button>
+          </div>
+          {% else %}
+          <p class="ob-conn-note">We'll set up {{ c.name }} with you. Carry on for now.</p>
+          {% endif %}
+          {% endif %}
+        </div>
+        {% endfor %}
+        <p class="ob-teach-note">You can connect LinkedIn, X and Facebook later in Settings.</p>
+      </div>
+      {% elif f.kind == 'upload' %}
+      {% if uploads_here %}
+      <label class="ob-drop ob-drop-video" id="ob-vdrop">
+        <input type="file" id="ob-video" accept=".mp4,.mov,.m4v,.mkv,.webm,video/*" multiple hidden>
+        <span class="ob-drop-ic" aria-hidden="true">🎬</span>
+        <span><strong>Drop a video here</strong> or click to choose one. MP4, MOV or WebM.</span>
+      </label>
+      {% else %}
+      <p class="ob-teach-note">Uploading your own videos is coming to this page soon. For now, send them to us and we'll clip them for you.</p>
+      {% endif %}
+      <div class="ob-uploads" id="ob-uploads"></div>
+      {% elif f.kind == 'avatar' %}
+      {% set logo = brand_logo() %}
+      <div class="ob-avatar-row">
+        <label class="ob-avatar{{ ' has-logo' if logo }}" id="ob-avatar" title="Add your icon">
+          <input type="file" id="ob-avatar-file" accept=".png,.jpg,.jpeg,.svg,.webp,.gif" hidden>
+          {% if logo %}<img src="{{ logo }}" alt="">{% else %}<span class="ob-avatar-plus" aria-hidden="true">＋</span>{% endif %}
+        </label>
+        <div class="ob-avatar-help"><strong>{{ f.label }}</strong> <span class="set-optional">optional</span><br>
+          The square logo or profile picture you use on social. It shows in your app.</div>
+      </div>
+      {% elif f.kind == 'chips' %}
+      <textarea name="{{ f.name }}" id="f-{{ f.name }}" hidden>{{ values[f.name] }}</textarea>
+      <div class="ob-chips" id="ob-chips" data-for="f-{{ f.name }}">
+        {% for k in keywords %}<button type="button" class="ob-chip" data-kw="{{ k }}">{{ k }}<span aria-hidden="true">×</span></button>{% endfor %}
+        <input class="ob-chip-add" type="text" placeholder="+ {{ f.placeholder }}" aria-label="{{ f.placeholder }}">
+      </div>
+      {% endif %}
+      {% if f.name in option_fields %}
+      {% set opts = options.get(f.name) or [] %}
+      <div class="ob-opts" data-field="{{ f.name }}"{% if not opts %} hidden{% endif %}>
+        <div class="ob-opts-head">{{ 'From wide net to niche. Pick one to start from' if f.name == 'throughline' else 'Three options. Pick one to start from' }}</div>
+        <div class="ob-opts-list">
+          {% for o in opts %}
+          <button type="button" class="ob-opt{{ ' is-on' if o.text == values[f.name] }}" data-text="{{ o.text }}">
+            {% if o.label %}<span class="ob-opt-label">{{ o.label }}</span>{% endif %}
+            <span class="ob-opt-text">{{ o.text }}</span>
+            {% if o.note %}<span class="ob-opt-note">{{ o.note }}</span>{% endif %}
+          </button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      <span class="ob-suggested">✨ Suggested. Change anything you like</span>
+    </div>
+    {% endfor %}
+
+    {% if spec.upload %}
+    <label class="ob-drop" id="ob-drop">
+      <input type="file" name="files" id="ob-upload" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md" hidden>
+      <span class="ob-drop-ic" aria-hidden="true">📎</span>
+      <span id="ob-drop-text">Got a brand deck or brief? <u>Add it</u> and we'll read that too.</span>
+    </label>
+    {% endif %}
+
+    <div class="ob-nav">
+      {% if prev_key %}<a class="ob-back" href="/welcome/{{ prev_key }}">← Back</a>{% else %}<span></span>{% endif %}
+      <button class="ob-go" type="submit">{{ 'Continue' if next_key else 'Finish' }} <span aria-hidden="true">→</span></button>
+    </div>
+    {% if sample %}
+    <div class="ob-testbar" aria-label="Testing (admins only)">
+      <span>Testing</span>
+      <button type="button" class="ob-link" id="ob-sample">Fill sample</button> ·
+      <button type="submit" class="ob-link" formaction="/welcome/{{ spec.key }}/skip" formnovalidate>Skip →</button>
+    </div>
+    {% endif %}
+  </form>
+</main>
+
+{% if spec.key == 'connect' %}
+{% for c in connections %}{% if not c.connected and c.auth_url %}
+<form id="ob-conn-{{ loop.index }}" method="post" action="{{ c.action }}" hidden>
+  <input type="hidden" name="next" value="/welcome/connect">
+</form>
+{% endif %}{% endfor %}
+{% endif %}
+
+{# ---- The helper, a tap away ---- #}
+<button class="ob-help-btn" type="button" id="ob-help-btn" aria-expanded="false" aria-controls="ob-drawer">✨ Ask the helper</button>
+<aside class="ob-drawer" id="ob-drawer" hidden aria-label="Helper">
+  <div class="ob-drawer-head">
+    <div><strong>Your helper</strong><small>Tell me about your brand and I'll fill things in.</small></div>
+    <button type="button" class="ob-x" id="ob-close" aria-label="Close">×</button>
+  </div>
+  <div class="ob-chat" id="ob-chat" aria-live="polite">
+    {% for m in transcript %}
+    <div class="ob-msg {{ 'is-user' if m.role == 'user' else 'is-helper' }}{{ ' is-error' if m.error }}">{{ m.text }}</div>
+    {% else %}
+    <div class="ob-msg is-helper">Hi! Stuck on this one? Tell me about your brand in your own words, paste a link, or attach a file. I'll take it from there.</div>
+    {% endfor %}
+  </div>
+  <form class="ob-compose" id="ob-compose">
+    <div class="ob-files" id="ob-files" hidden></div>
+    <textarea id="ob-text" rows="2" placeholder="Type a message…"></textarea>
+    <div class="ob-compose-row">
+      <label class="ob-attach" title="Attach a file">📎<input type="file" id="ob-file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md" hidden></label>
+      <button class="ob-send" type="submit" id="ob-send">Send</button>
+    </div>
+  </form>
+</aside>
+
+{% else %}
+{# ---- The end ---- #}
+<main class="ob-stage">
+  <div class="ob-card ob-end" id="ob-end" data-busy="{{ busy or '' }}">
+    {% if busy == 'finishing' and state.status != 'done' %}
+    <div class="ob-spinner" aria-hidden="true"></div>
+    <h1 class="ob-q">Putting it all together…</h1>
+    <p class="ob-sub">Teaching the app what's right for {{ name or 'you' }}. This takes a few seconds.</p>
+    {% else %}
+    <div class="ob-party" aria-hidden="true">🎉</div>
+    <h1 class="ob-q">You're all set{% if name %}, {{ name }}{% endif %}!</h1>
+    <p class="ob-sub">We'll start watching your channels now. Your first clips will show up in Today's posts for you to approve. Nothing posts without you.</p>
+    <div class="ob-nav"><span></span><a class="ob-go" href="/">Take me to the app <span aria-hidden="true">→</span></a></div>
+    {% endif %}
+  </div>
+</main>
+{% endif %}
+
+<footer class="ob-foot">
+  {% if is_admin %}
+  <span>Admin:</span>
+  <form method="post" action="/welcome/skip"><button class="ob-link" type="submit">Mark as onboarded</button></form> ·
+  <form method="post" action="/welcome/reset" onsubmit="return confirm('Start onboarding over? Saved answers stay; the helper forgets the conversation.')"><button class="ob-link" type="submit">Start over</button></form> ·
+  <a class="ob-link" href="/">Back to the app</a>
+  {% endif %}
+  {% if request.state.user %}<form method="post" action="/logout"><button type="submit" class="ob-link">Sign out</button></form>{% endif %}
+</footer>
+
+{% if msg %}<div class="ob-toast" role="status">{{ msg }}</div>{% endif %}
+
+<script>
+(function () {
+  var STEP = {{ (spec.key if spec else '')|tojson }};
+  var form = document.getElementById('ob-form');
+
+  // ---- Keyword chips: the hidden textarea is the real field. ----
+  var chips = document.getElementById('ob-chips');
+  function chipsToField() {
+    if (!chips) return;
+    var words = Array.prototype.map.call(chips.querySelectorAll('.ob-chip'), function (c) { return c.dataset.kw; });
+    document.getElementById(chips.dataset.for).value = words.join('\n');
+  }
+  function addChip(word, drafted) {
+    word = word.trim().toLowerCase();
+    if (!word || chips.querySelector('.ob-chip[data-kw="' + CSS.escape(word) + '"]')) return;
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'ob-chip' + (drafted ? ' is-new' : ''); b.dataset.kw = word;
+    b.innerHTML = '<span></span><span aria-hidden="true">×</span>';
+    b.firstChild.textContent = word;
+    chips.insertBefore(b, chips.querySelector('.ob-chip-add'));
+  }
+  function setChips(text, drafted) {
+    chips.querySelectorAll('.ob-chip').forEach(function (c) { c.remove(); });
+    String(text || '').split(/\n|,/).forEach(function (w) { addChip(w, drafted); });
+    chipsToField();
+  }
+  if (chips) {
+    chips.addEventListener('click', function (e) {
+      var chip = e.target.closest('.ob-chip');
+      if (chip) { chip.remove(); chipsToField(); }
+    });
+    var add = chips.querySelector('.ob-chip-add');
+    add.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ',') {
+        e.preventDefault();
+        if (add.value.trim()) { addChip(add.value, false); add.value = ''; chipsToField(); }
+        else if (e.key === 'Enter') form.requestSubmit();
+      }
+    });
+  }
+
+  // ---- Concept cards: the hidden textarea holds the picked lines. ----
+  var lenses = document.getElementById('ob-lenses');
+  function lensesToField() {
+    if (!lenses) return;
+    var lines = Array.prototype.map.call(lenses.querySelectorAll('.ob-lens.is-on'), function (b) { return b.dataset.line; });
+    document.getElementById(lenses.dataset.for).value = lines.join('\n');
+  }
+  function lensCard(c) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'ob-lens is-new' + (c.on ? ' is-on' : '');
+    b.setAttribute('aria-pressed', c.on ? 'true' : 'false');
+    b.dataset.line = c.line; b.dataset.title = (c.title || '').toLowerCase();
+    if (c.example) b.title = c.example;
+    [['ob-lens-emoji', c.emoji || '✳️'], ['ob-lens-title', c.title], ['ob-lens-ex', c.example || ''], ['ob-lens-check', '✓']]
+      .forEach(function (p) { if (!p[1]) return; var s = document.createElement('span'); s.className = p[0]; s.textContent = p[1]; b.appendChild(s); });
+    return b;
+  }
+  function renderLenses(cards) {
+    if (!lenses || !cards) return;
+    var picked = {};
+    lenses.querySelectorAll('.ob-lens.is-on').forEach(function (b) { picked[b.dataset.title] = true; });
+    var addBox = lenses.querySelector('.ob-lens-add');
+    lenses.querySelectorAll('.ob-lens:not(.ob-lens-add)').forEach(function (b) { b.remove(); });
+    cards.forEach(function (c) {
+      if (lenses.dataset.touched) c.on = !!picked[(c.title || '').toLowerCase()];  // their picks win
+      lenses.insertBefore(lensCard(c), addBox);
+    });
+    lensesToField();
+  }
+  function pickLenses(text) {
+    if (!lenses || lenses.dataset.touched) return;
+    var want = {};
+    String(text || '').split('\n').forEach(function (l) {
+      var head = l.split(' — ')[0].trim(); var sp = head.indexOf(' ');
+      var title = (sp > 0 && !/^[\x00-\x7F]+$/.test(head.slice(0, sp)) ? head.slice(sp + 1) : head).toLowerCase();
+      if (title) want[title] = l;
+    });
+    lenses.querySelectorAll('.ob-lens:not(.ob-lens-add)').forEach(function (b) {
+      var on = !!want[b.dataset.title]; b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', on);
+      delete want[b.dataset.title];
+    });
+    Object.keys(want).forEach(function (t) {
+      var parts = want[t].split(' — ');
+      lenses.insertBefore(lensCard({ title: t.replace(/^./, function (x) { return x.toUpperCase(); }), example: parts[1] || '', line: want[t], on: true }),
+                          lenses.querySelector('.ob-lens-add'));
+    });
+    lensesToField();
+  }
+  if (lenses) {
+    lenses.addEventListener('click', function (e) {
+      var b = e.target.closest('.ob-lens');
+      if (!b || b.classList.contains('ob-lens-add')) return;
+      lenses.dataset.touched = '1';
+      var on = !b.classList.contains('is-on');
+      b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', on);
+      lensesToField();
+    });
+    var own = lenses.querySelector('.ob-lens-add input');
+    own.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      var t = own.value.trim(); if (!t) return;
+      lenses.dataset.touched = '1';
+      lenses.insertBefore(lensCard({ emoji: '✏️', title: t, example: '', line: '✏️ ' + t, on: true }), own.parentNode);
+      own.value = ''; lensesToField();
+    });
+  }
+
+  // ---- Three options under each written answer: picking one fills it. ----
+  function markOptions() {
+    if (!form) return;
+    document.querySelectorAll('.ob-opts').forEach(function (box) {
+      var el = form.elements[box.dataset.field]; if (!el) return;
+      box.querySelectorAll('.ob-opt').forEach(function (b) { b.classList.toggle('is-on', b.dataset.text === el.value.trim()); });
+    });
+  }
+  function renderOptions(all) {
+    if (!all) return;
+    document.querySelectorAll('.ob-opts').forEach(function (box) {
+      var opts = all[box.dataset.field]; if (!opts || !opts.length) return;
+      var list = box.querySelector('.ob-opts-list'); list.innerHTML = '';
+      opts.forEach(function (o) {
+        var b = document.createElement('button'); b.type = 'button'; b.className = 'ob-opt is-new'; b.dataset.text = o.text;
+        [['ob-opt-label', o.label], ['ob-opt-text', o.text], ['ob-opt-note', o.note]].forEach(function (p) {
+          if (!p[1]) return; var sp = document.createElement('span'); sp.className = p[0]; sp.textContent = p[1]; b.appendChild(sp);
+        });
+        list.appendChild(b);
+      });
+      box.hidden = false;
+    });
+    markOptions();
+  }
+  document.querySelectorAll('.ob-opts').forEach(function (box) {
+    var el = form.elements[box.dataset.field];
+    box.addEventListener('click', function (e) {
+      var b = e.target.closest('.ob-opt'); if (!b || !el) return;
+      el.value = b.dataset.text;
+      var wrap = el.closest('.ob-field'); wrap.dataset.touched = '1'; wrap.classList.remove('is-drafted');
+      markOptions(); el.focus();
+    });
+    if (el) el.addEventListener('input', markOptions);
+  });
+
+  // ---- Filling in drafts (from the background read or the chat) ----
+  function fill(drafts) {
+    if (!form) return;
+    Object.keys(drafts || {}).forEach(function (name) {
+      var el = form.elements[name];
+      if (!el) return;
+      var wrap = el.closest('.ob-field');
+      if (wrap && wrap.dataset.touched) return;   // their typing wins
+      if (chips && name === 'keywords') setChips(drafts[name], true);
+      else if (lenses && name === 'format') { pickLenses(drafts[name]); return; }
+      else if (el.classList && el.classList.contains('ob-color-value')) { el.value = String(drafts[name]).toUpperCase(); updateLook(); }
+      else el.value = drafts[name];
+      if (wrap) { wrap.classList.add('is-drafted'); wrap.classList.remove('is-flash'); void wrap.offsetWidth; wrap.classList.add('is-flash'); }
+    });
+  }
+  if (form) {
+    form.addEventListener('input', function (e) {
+      var wrap = e.target.closest && e.target.closest('.ob-field');
+      if (wrap) { wrap.dataset.touched = '1'; wrap.classList.remove('is-drafted'); }
+    });
+    form.addEventListener('submit', function () {
+      chipsToField(); lensesToField();
+      var go = form.querySelector('.ob-go'); if (go) go.classList.add('is-loading');
+    });
+  }
+
+  // ---- Testing: fill this screen with sample answers ----
+  var sampleBtn = document.getElementById('ob-sample');
+  if (sampleBtn) {
+    var SAMPLE = {{ sample|tojson if sample else '{}' }};
+    sampleBtn.addEventListener('click', function () {
+      if (lenses) delete lenses.dataset.touched;
+      Object.keys(SAMPLE).forEach(function (name) {
+        var el = form.elements[name]; if (!el) return;
+        var wrap = el.closest('.ob-field'); if (wrap) delete wrap.dataset.touched;
+      });
+      fill(SAMPLE);
+    });
+  }
+
+  // ---- Subtitles and end card: color swatches and live illustrations ----
+  function contrast(hex) {
+    var n = parseInt((hex || '#000000').slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 160 ? '#111111' : '#FFFFFF';
+  }
+  function updateLook() {
+    if (!form) return;
+    document.querySelectorAll('.ob-colors').forEach(function (box) {
+      var field = document.getElementById(box.dataset.for), hex = (field.value || '').toUpperCase();
+      box.querySelectorAll('.ob-swatch').forEach(function (b) { b.classList.toggle('is-on', b.dataset.hex === hex); });
+      var own = box.querySelector('.ob-own-color'); if (own && /^#[0-9A-F]{6}$/.test(hex)) own.value = hex;
+    });
+    var color = (form.elements['color'] || {}).value;
+    var font = (form.querySelector('input[name="font"]:checked') || {}).value;
+    var sub = document.getElementById('ob-sub-preview');
+    if (sub) {
+      if (font) sub.style.fontFamily = "'" + font + "', sans-serif";
+      sub.style.setProperty('--hl', color || '#2F6FED'); sub.style.setProperty('--hl-text', contrast(color || '#2F6FED'));
+    }
+    var end = document.getElementById('ob-end-preview');
+    if (end) {
+      var ec = (form.elements['end_color'] || {}).value || '#111111';
+      end.style.background = ec; end.style.color = contrast(ec);
+      var tl = document.getElementById('ob-tl-end'); if (tl) { tl.style.background = ec; tl.style.color = contrast(ec); }
+      var linesBox = document.getElementById('ob-end-lines'); linesBox.innerHTML = '';
+      var lines = ((form.elements['outro'] || {}).value || '').split('\n').filter(function (l) { return l.trim(); }).slice(0, 3);
+      (lines.length ? lines : ['Your first line', 'Your second line']).forEach(function (l) { var d = document.createElement('div'); d.textContent = l; linesBox.appendChild(d); });
+    }
+  }
+  document.querySelectorAll('.ob-colors').forEach(function (box) {
+    var field = document.getElementById(box.dataset.for);
+    function pick(hex) { field.value = hex.toUpperCase(); field.closest('.ob-field').dataset.touched = '1'; updateLook(); }
+    box.querySelectorAll('.ob-swatch').forEach(function (b) { b.addEventListener('click', function () { pick(b.dataset.hex); }); });
+    box.querySelector('.ob-own-color').addEventListener('input', function (e) { pick(e.target.value); });
+  });
+  if (form) { form.addEventListener('change', updateLook); form.addEventListener('input', updateLook); updateLook(); }
+  // The word being said moves along, like the real thing.
+  var words = document.querySelectorAll('#ob-sub-preview .ob-w');
+  if (words.length) {
+    var at = 0;
+    setInterval(function () { words.forEach(function (w, i) { w.classList.toggle('is-said', i === at); }); at = (at + 1) % words.length; }, 550);
+  }
+
+  // ---- Schedule: every time zone, the saved or detected one picked ----
+  var tzSel = document.getElementById('f-tz');
+  if (tzSel) {
+    var zones = [];
+    try { zones = Intl.supportedValuesOf('timeZone'); } catch (e) { zones = ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Europe/London', 'UTC']; }
+    var mine = tzSel.dataset.current;
+    if (!mine) { try { mine = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { mine = 'America/New_York'; } }
+    zones.forEach(function (z) {
+      var o = document.createElement('option'); o.value = z; o.textContent = z.replace(/_/g, ' ').replace('/', ' — ');
+      if (z === mine) o.selected = true; tzSel.appendChild(o);
+    });
+  }
+
+  // ---- Video sources: progress, the cross-section, everything else ----
+  var src = document.getElementById('ob-src');
+  if (src) {
+    var grid = document.getElementById('ob-src-grid'), list = document.getElementById('ob-src-list');
+    var allBtn = document.getElementById('ob-src-all'), all = [];
+    function post(url, data) {
+      var body = new FormData(); Object.keys(data).forEach(function (k) { body.append(k, data[k]); });
+      return fetch(url, { method: 'POST', body: body, headers: { 'Accept': 'application/json' } }).then(function (r) { return r.json(); });
+    }
+    function card(c, compact) {
+      var b = document.createElement('button'); b.type = 'button';
+      b.className = (compact ? 'ob-src-row' : 'ob-src-card') + (c.on ? ' is-on' : '');
+      b.dataset.id = c.channel_id;
+      var parts = compact ? [['ob-src-title', c.title], ['ob-src-meta', c.hits + ' of ' + c.total + ' recent videos fit']]
+        : [['ob-src-kind', c.kind], ['ob-src-title', c.title], ['ob-src-meta', c.hits + ' of ' + c.total + ' recent videos fit'], ['ob-src-ex', c.example ? '“' + c.example + '”' : '']];
+      parts.forEach(function (p) { if (!p[1]) return; var sp = document.createElement('span'); sp.className = p[0]; sp.textContent = p[1]; b.appendChild(sp); });
+      var x = document.createElement('span'); x.className = 'ob-src-x'; x.textContent = c.on ? '✓' : '+'; b.appendChild(x);
+      b.title = c.on ? 'Click to drop this channel' : 'Click to keep this channel';
+      return b;
+    }
+    function render(st) {
+      all = st.channels || [];
+      grid.innerHTML = ''; (st.sample || []).forEach(function (c) { grid.appendChild(card(c, false)); });
+      if (!list.hidden) { list.innerHTML = ''; all.forEach(function (c) { list.appendChild(card(c, true)); }); }
+      var on = all.filter(function (c) { return c.on; }).length;
+      document.getElementById('ob-src-count').innerHTML = all.length
+        ? '<strong>' + on + '</strong> channel' + (on === 1 ? '' : 's') + (st.status === 'running' ? ' so far' : ' ready to watch') : '';
+      allBtn.hidden = all.length <= (st.sample || []).length;
+      allBtn.textContent = list.hidden ? 'See all ' + all.length + ' channels' : 'Show fewer';
+      var prog = document.getElementById('ob-src-progress');
+      prog.hidden = st.status !== 'running';
+      if (st.total) {
+        document.getElementById('ob-src-bar').style.width = Math.max(4, Math.round(100 * st.checked / st.total)) + '%';
+        document.getElementById('ob-src-progress-text').textContent = 'Checking channels against your keywords… ' + st.checked + ' of ' + st.total;
+      }
+      var err = document.getElementById('ob-src-error'); err.hidden = st.status !== 'error'; err.textContent = st.error || '';
+    }
+    function refresh() {
+      fetch('/welcome/sources/status', { headers: { 'Accept': 'application/json' } }).then(function (r) { return r.json(); })
+        .then(function (st) { render(st); if (st.status === 'running') setTimeout(refresh, 2000); })
+        .catch(function () { setTimeout(refresh, 4000); });
+    }
+    function onClick(e) {
+      var b = e.target.closest('[data-id]'); if (!b) return;
+      var on = !b.classList.contains('is-on');
+      all.forEach(function (c) { if (c.channel_id === b.dataset.id) c.on = on; });
+      post('/welcome/sources/toggle', { channel_id: b.dataset.id, on: on ? '1' : '' }).then(refresh);
+      document.querySelectorAll('[data-id="' + b.dataset.id + '"]').forEach(function (el) { el.classList.toggle('is-on', on); el.querySelector('.ob-src-x').textContent = on ? '✓' : '+'; });
+    }
+    grid.addEventListener('click', onClick); list.addEventListener('click', onClick);
+    allBtn.addEventListener('click', function () { list.hidden = !list.hidden; refresh(); });
+    document.getElementById('ob-src-add').addEventListener('click', function () {
+      var input = document.getElementById('ob-src-url'), btn = this; if (!input.value.trim()) return;
+      btn.disabled = true; btn.textContent = 'Checking…';
+      post('/welcome/sources/add', { url: input.value.trim() }).then(function (j) {
+        if (j.error) alert(j.error); else { input.value = ''; if (!j.channel.hits) alert('Added. None of its recent videos matched your keywords yet, so it may not produce much.'); }
+        refresh();
+      }).finally(function () { btn.disabled = false; btn.textContent = 'Add'; });
+    });
+    document.getElementById('ob-src-again').addEventListener('click', function () {
+      var fb = document.getElementById('ob-src-feedback');
+      post('/welcome/sources/find', { feedback: fb.value.trim() }).then(function () { fb.value = ''; setTimeout(refresh, 600); });
+    });
+    refresh();
+  }
+
+  // ---- Launch: upload a video of your own and watch it become clips ----
+  var vdrop = document.getElementById('ob-vdrop');
+  var upList = document.getElementById('ob-uploads');
+  function upRow(id) {
+    var row = document.createElement('div'); row.className = 'ob-up'; if (id) row.dataset.id = id;
+    row.innerHTML = '<div class="ob-up-title"></div><div class="ob-up-stage"></div><div class="ob-src-bar"><span></span></div>';
+    upList.appendChild(row); return row;
+  }
+  function pollUploads() {
+    fetch('/welcome/upload/status', { headers: { 'Accept': 'application/json' } }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        var busy = false;
+        (j.uploads || []).forEach(function (u) {
+          var row = upList.querySelector('.ob-up[data-id="' + u.id + '"]') || upRow(u.id);
+          row.querySelector('.ob-up-title').textContent = u.title;
+          row.querySelector('.ob-up-stage').textContent = (u.stage === 'done' ? '✓ ' : '') + u.label;
+          row.className = 'ob-up is-' + u.stage;
+          var pct = { transcribing: 30, finding: 60, making: 85, done: 100, failed: 100 }[u.stage] || 15;
+          row.querySelector('.ob-src-bar span').style.width = pct + '%';
+          if (u.stage !== 'done' && u.stage !== 'failed') busy = true;
+        });
+        if (busy) setTimeout(pollUploads, 3000);
+      }).catch(function () { setTimeout(pollUploads, 5000); });
+  }
+  if (upList) pollUploads();
+  function sendVideo(file) {
+    var row = upRow(null);
+    row.querySelector('.ob-up-title').textContent = file.name;
+    row.querySelector('.ob-up-stage').textContent = 'Uploading… 0%';
+    var bar = row.querySelector('.ob-src-bar span');
+    var body = new FormData(); body.append('file', file, file.name);
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/welcome/upload');
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      var p = Math.round(100 * e.loaded / e.total);
+      row.querySelector('.ob-up-stage').textContent = 'Uploading… ' + p + '%'; bar.style.width = Math.round(p * 0.15) + '%';
+    };
+    xhr.onload = function () {
+      var j = {}; try { j = JSON.parse(xhr.responseText); } catch (e) {}
+      if (xhr.status >= 400 || j.error) { row.className = 'ob-up is-failed'; row.querySelector('.ob-up-stage').textContent = j.error || 'Upload failed'; return; }
+      row.dataset.id = j.id; pollUploads();
+    };
+    xhr.onerror = function () { row.className = 'ob-up is-failed'; row.querySelector('.ob-up-stage').textContent = 'Upload failed. Try again.'; };
+    xhr.send(body);
+  }
+  if (vdrop) {
+    var vin = document.getElementById('ob-video');
+    vin.addEventListener('change', function () { Array.prototype.forEach.call(vin.files, sendVideo); vin.value = ''; });
+    ['dragover', 'dragenter'].forEach(function (ev) { vdrop.addEventListener(ev, function (e) { e.preventDefault(); vdrop.classList.add('has-file'); }); });
+    vdrop.addEventListener('dragleave', function () { vdrop.classList.remove('has-file'); });
+    vdrop.addEventListener('drop', function (e) { e.preventDefault(); vdrop.classList.remove('has-file'); Array.prototype.forEach.call(e.dataTransfer.files, sendVideo); });
+  }
+
+  // ---- The icon: saved as soon as it's picked ----
+  var avatarIn = document.getElementById('ob-avatar-file');
+  if (avatarIn) avatarIn.addEventListener('change', function () {
+    var f = avatarIn.files[0]; if (!f) return;
+    var box = document.getElementById('ob-avatar');
+    var body = new FormData(); body.append('file', f, f.name);
+    box.classList.add('is-busy');
+    fetch('/welcome/logo', { method: 'POST', body: body, headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.error) { alert(j.error); return; }
+        box.querySelectorAll('img, .ob-avatar-plus').forEach(function (n) { n.remove(); });
+        var img = document.createElement('img'); img.src = j.url; img.alt = ''; box.appendChild(img);
+        box.classList.add('has-logo');
+      })
+      .finally(function () { box.classList.remove('is-busy'); avatarIn.value = ''; });
+  });
+
+  // ---- Upload on the first screen ----
+  var upload = document.getElementById('ob-upload');
+  if (upload) upload.addEventListener('change', function () {
+    var names = Array.prototype.map.call(upload.files, function (f) { return f.name; });
+    document.getElementById('ob-drop-text').textContent = names.length ? '📄 ' + names.join(', ') : '';
+    document.getElementById('ob-drop').classList.toggle('has-file', names.length > 0);
+  });
+
+  // ---- Waiting on background work ----
+  var reading = document.getElementById('ob-reading');
+  var end = document.getElementById('ob-end');
+  function poll() {
+    fetch('/welcome/status', { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (end) { if (s.status === 'done') location.reload(); else setTimeout(poll, 1500); return; }
+        renderLenses(s.format_cards);
+        renderOptions(s.options);
+        fill(s.drafts); markOptions();
+        if (s.busy === 'reading' || s.busy === 'refreshing') { setTimeout(poll, 1500); return; }
+        if (reading) reading.hidden = true;
+      })
+      .catch(function () { setTimeout(poll, 4000); });
+  }
+  if ((reading && !reading.hidden) || (end && end.dataset.busy === 'finishing')) setTimeout(poll, 1200);
+
+  // ---- The helper drawer ----
+  var drawer = document.getElementById('ob-drawer');
+  if (!drawer) return;
+  var btn = document.getElementById('ob-help-btn');
+  var chat = document.getElementById('ob-chat');
+  var compose = document.getElementById('ob-compose');
+  var text = document.getElementById('ob-text');
+  var fileInput = document.getElementById('ob-file');
+  var filesBox = document.getElementById('ob-files');
+  var send = document.getElementById('ob-send');
+  var pending = [];
+
+  function open(on) {
+    drawer.hidden = !on; btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+    btn.hidden = on;
+    if (on) { chat.scrollTop = chat.scrollHeight; text.focus(); }
+  }
+  btn.onclick = function () { open(true); };
+  document.getElementById('ob-close').onclick = function () { open(false); };
+
+  function bubble(cls, t) {
+    var d = document.createElement('div'); d.className = 'ob-msg ' + cls; d.textContent = t;
+    chat.appendChild(d); chat.scrollTop = chat.scrollHeight; return d;
+  }
+  function showFiles() {
+    filesBox.innerHTML = ''; filesBox.hidden = !pending.length;
+    pending.forEach(function (f, i) {
+      var c = document.createElement('button'); c.type = 'button'; c.className = 'ob-chip';
+      c.textContent = f.name + ' ×'; c.onclick = function () { pending.splice(i, 1); showFiles(); };
+      filesBox.appendChild(c);
+    });
+  }
+  fileInput.addEventListener('change', function () {
+    Array.prototype.forEach.call(fileInput.files, function (f) { pending.push(f); });
+    fileInput.value = ''; showFiles();
+  });
+  text.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); compose.requestSubmit(); }
+  });
+  compose.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var said = text.value.trim();
+    if (!said && !pending.length) return;
+    bubble('is-user', (pending.length ? '📎 ' + pending.map(function (f) { return f.name; }).join(', ') + '\n' : '') + said);
+    var body = new FormData();
+    body.append('step', STEP); body.append('text', said);
+    if (form) { chipsToField(); lensesToField(); var vals = {}; new FormData(form).forEach(function (v, k) { if (typeof v === 'string') vals[k] = v; }); body.append('form_json', JSON.stringify(vals)); }
+    pending.forEach(function (f) { body.append('files', f, f.name); });
+    text.value = ''; pending = []; showFiles(); send.disabled = true;
+    var wait = bubble('is-helper is-thinking', '…');
+    fetch('/welcome/chat', { method: 'POST', body: body, headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        wait.remove();
+        if (j.error) { bubble('is-helper is-error', j.error); return; }
+        if (j.reply) bubble('is-helper', j.reply);
+        if (j.format_options || (j.options && Object.keys(j.options).length)) {
+          fetch('/welcome/status').then(function (r) { return r.json(); })
+            .then(function (s) { renderLenses(s.format_cards); renderOptions(s.options); fill(j.fills); markOptions(); });
+        } else { fill(j.fills); markOptions(); }
+      })
+      .catch(function () { wait.remove(); bubble('is-helper is-error', 'Couldn’t reach the helper. Try again.'); })
+      .finally(function () { send.disabled = false; text.focus(); });
+  });
+})();
+</script>
+</body>
+</html>

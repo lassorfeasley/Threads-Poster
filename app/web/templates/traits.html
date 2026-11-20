@@ -11,7 +11,7 @@
   <form class="inline" method="post" action="/traits/annotate-posts">
     <button class="btn" {{ 'disabled' if backfill_running or not unannotated }}
             title="Label the clips of published posts that don't have labels yet">
-      {{ 'Labelling…' if backfill_running else 'Label older posts (' ~ unannotated ~ ')' }}
+      {{ 'Labeling…' if backfill_running else 'Label older posts (' ~ unannotated ~ ')' }}
     </button>
   </form>
   <form class="inline" method="post" action="/traits/relearn">
@@ -42,7 +42,7 @@
     <div>
       <h2 class="set-section-title">Where learning stands</h2>
       <p class="set-section-desc">
-        {{ annotated_posts }} of your {{ published_total }} published posts are labelled.
+        {{ annotated_posts }} of your {{ published_total }} published posts are labeled.
         {% if published_total < min_total_posts %}Results start to count once you've published {{ min_total_posts }} posts ({{ min_total_posts - published_total }} to go) and a label has appeared on {{ min_trait_posts }} of them.
         {% else %}A label's result counts once it has appeared on {{ min_trait_posts }} posts; until then it's an early signal and doesn't affect anything.{% endif %}
         {% if baseline is not none %}Your typical post gets <strong>{{ "{:,.0f}".format(baseline) }}</strong> views in its first {{ metric_age_hours }} hours.{% endif %}
@@ -136,7 +136,7 @@
               <button class="set-link-btn">{{ "Pause" if t.enabled else "Resume" }}</button>
             </form>
             <form class="inline" method="post" action="/traits/{{ t.id }}/delete"
-                  data-confirm="Delete the label “{{ human(t.name) }}”? Posts already labelled keep it."
+                  data-confirm="Delete the label “{{ human(t.name) }}”? Posts already labeled keep it."
                   data-confirm-ok="Delete" data-confirm-variant="danger">
               <button class="set-link-btn is-danger">Delete</button>
             </form>

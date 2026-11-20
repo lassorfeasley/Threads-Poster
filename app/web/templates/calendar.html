@@ -518,7 +518,7 @@
     // `ev.target` can resolve to the dragged element itself, because the queue
     // list reflowed it under the cursor during dragover. Only trust `drop` when
     // it's a *different* post/slot; otherwise fall back to the window we last
-    // hovered, then to the dragged element's new neighbour.
+    // hovered, then to the dragged element's new neighbor.
     let drop = ev.target.closest('.cal-drop');
     let windowKey = null;
     if (drop && drop !== dragEl

@@ -1,12 +1,12 @@
 """The account's own outro card: three lines and its website on a background
-colour (Settings > Outro).
+color (Settings > Outro).
 
 Stored in the shared database (``AppToken`` ``outro_card:<workspace>``) so
 every machine that renders agrees. ``apply`` lays it over the outro design
 (app/outro.py): the workspace's config/outro.yaml when it has one, else the
 bundled app/outro_template.yaml. The lines replace the design's three text
 lines, the website is the line typed out at the end and the tab on the
-footage, and every piece of text turns black or white to read on the colour. With nothing saved, the design file stands.
+footage, and every piece of text turns black or white to read on the color. With nothing saved, the design file stands.
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def clean(*, enabled: bool, lines: list[str], website: str, color: str) -> dict:
     if color and not color.startswith("#"):
         color = "#" + color
     if not _HEX.fullmatch(color):
-        raise ValueError(f"“{color}” isn't a colour like #1A4A7D")
+        raise ValueError(f"“{color}” isn't a color like #1A4A7D")
     return {"enabled": bool(enabled), "lines": lines + [""] * (3 - len(lines)),
             "website": website, "color": color.upper()}
 

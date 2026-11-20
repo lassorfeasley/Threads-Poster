@@ -1483,7 +1483,7 @@ function drawWave() {
   }
 
   // Stepped bars (same approach as the segment waves) — denser peak arrays
-  // used to paint one hairline per sample and read as grey mush; sampling by
+  // used to paint one hairline per sample and read as gray mush; sampling by
   // pixel step keeps each bar readable against the dark track.
   const n = wf.peaks.length, total = duration(), step = Math.max(2, Math.round(2 * dpr));
   for (let x = 0; x < W; x += step) {
@@ -1497,7 +1497,7 @@ function drawWave() {
   }
 
   // The grid thins out as you zoom in, so it stays about a dozen marks at any
-  // scale instead of collapsing into a grey band on a long video.
+  // scale instead of collapsing into a gray band on a long video.
   wctx.fillStyle = gridColor;
   wctx.font = `${10 * dpr}px sans-serif`;
   const gridStep = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900]
@@ -3948,7 +3948,7 @@ async function retryExport() {
       // ---- Post now: pick the platforms ----
       // Both is the usual ship, but either platform can go out on its own —
       // the reel-only path publishes the vertical composite with no Threads
-      // post at all. Order follows the Instagram toggle so the emphasised
+      // post at all. Order follows the Instagram toggle so the emphasized
       // (green) option is the one the page is already set up for.
       const instagramConnected = {{ 'true' if instagram_ok else 'false' }};
       function targetChoices() {

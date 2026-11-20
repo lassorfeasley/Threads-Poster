@@ -2,11 +2,11 @@
 {% block settings_content %}
 {% import "components/toolbar.html" as ui %}
 {#
-  Subtitles — the burned-in captions' font and highlight colour
+  Subtitles — the burned-in captions' font and highlight color
   (app/caption_look.py; POST /subtitle-style). Nine of each, or any Google
-  font and any colour. Saved choices apply to clips made from now on.
+  font and any color. Saved choices apply to clips made from now on.
 #}
-{{ ui.pagebar("Subtitles", sub="The words that appear on your videos as people speak. Pick a font and the colour behind the word being said.") }}
+{{ ui.pagebar("Subtitles", sub="The words that appear on your videos as people speak. Pick a font and the color behind the word being said.") }}
 
 {# One stylesheet per family: a weight one family lacks would get a combined
    request refused, and every sample would fall back. #}
@@ -96,12 +96,12 @@
   <section class="set-section">
     <div class="set-section-head">
       <div>
-        <h2 class="set-section-title">Highlight colour</h2>
+        <h2 class="set-section-title">Highlight color</h2>
         <p class="set-section-desc">The box behind the word being said. Its text turns black or white, whichever reads best.</p>
       </div>
     </div>
     <div class="set-section-body">
-      <div class="ss-swatches" role="radiogroup" aria-label="Highlight colour">
+      <div class="ss-swatches" role="radiogroup" aria-label="Highlight color">
         {% for hex, name in colors %}
         <label class="ss-swatch">
           <input type="radio" name="box" value="{{ hex }}" {% if box == hex %}checked{% endif %}>
@@ -113,11 +113,11 @@
       <div class="ss-own">
         <label class="ss-font" style="padding: 8px 12px; flex-direction: row; align-items: center; gap: 8px;">
           <input type="radio" name="box" value="__custom" {% if not box_is_preset %}checked{% endif %}>
-          <span>Your own colour:</span>
+          <span>Your own color:</span>
         </label>
-        <input type="color" id="custom-box-picker" value="{{ box }}" aria-label="Pick a colour">
+        <input type="color" id="custom-box-picker" value="{{ box }}" aria-label="Pick a color">
         <input type="text" name="custom_box" id="custom-box" value="{{ box }}" maxlength="7"
-               style="max-width: 110px;" aria-label="Colour code">
+               style="max-width: 110px;" aria-label="Color code">
       </div>
     </div>
     <div class="set-section-foot set-savebar">

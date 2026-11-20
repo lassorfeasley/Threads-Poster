@@ -16,7 +16,7 @@ The engine does what an editor does:
 2. **Draft about ten clips.** They come from different angles: a person, a picture, a line, a sound. They are also shaped by this account's archetypes (The Voice, The Scene, The Revelation, The Clash, The Pop Moment, The Witness). Each archetype has its own opening rule. Cold opens (a later moment first) are allowed.
 3. **Snap every cut.** Each start and end lands on a word edge, a shot change or a pause, so no clip starts mid-word or flashes a frame of the next shot.
 4. **Render every draft and watch it cold.** A critic sees each 360p render with no context, muted and with sound, and gets an extra close look at the first three seconds. It answers: does it stop the scroll, does it make sense on its own, where does it get slow, and is it on topic.
-5. **Rank the best drafts head to head.** The ranking runs twice in opposite orders, against a few of this account's own hits and clips you labelled "not gripping".
+5. **Rank the best drafts head to head.** The ranking runs twice in opposite orders, against a few of this account's own hits and clips you labeled "not gripping".
 6. **Revise the winner once.** The revision is kept only if a blind comparison prefers it in both presentation orders.
 
 How this maps to the three complaints:
@@ -183,7 +183,7 @@ What a test run does:
 
 - **Picks the videos.** It samples archived videos you exported at least one clip from, skipping every video in `touched.json`. It stratifies by source length (long sources oversampled) and by source kind.
 - **Freezes the sample** in `videos.json`.
-- **Replays each video as of its archive day.** The account context is the context of that day. Your later claims and dismissals are hidden, and the playbook's example titles are stripped. The critic's taste examples are frozen per video when the run is created, and a flop counts only if you labelled it "not gripping" before the video was archived.
+- **Replays each video as of its archive day.** The account context is the context of that day. Your later claims and dismissals are hidden, and the playbook's example titles are stripped. The critic's taste examples are frozen per video when the run is created, and a flop counts only if you labeled it "not gripping" before the video was archived.
 - **Is resumable.** Rerun `clipbench run --name test-1` to continue: it keeps the run's own videos, arms and cap. `--arms` runs just those arms (adding any the run doesn't have yet), and `--max-usd` replaces the cap. Errored results are retried, finished ones are kept. One `clipbench run` of a run goes at a time; a second one refuses.
 - **Stops after the video whose results pass `--max-usd`.** The default is 40, and spend is counted at ledger prices. A gemini+transcript run costs very roughly $0.80 per video at those prices, so the default cap may stop a 60-video run early; raise `--max-usd` if you want all of it. The report flags a run that was stopped.
 - **Refuses to resume after prompts, settings or the playbook change.** Its fingerprint no longer matches. `--new-version` starts over under new arm labels instead of mixing versions, and it prints the spend so far and an estimate before it starts:
@@ -202,7 +202,7 @@ What a test run does:
 
   `taste_lookback_days` can't vary per arm. `job_timeout_seconds` sets the arm's own time limit per video.
 - Perception settings need a shot log of their own. They are `perception_fps`, `long_video_fps`, `media_resolution`, `perceiver_thinking` and `perception_window_seconds`, and for a Claude perceiver `frame_interval`, `frame_width`, `max_total_frames`, `max_frames_per_call` and `perceiver_effort`. Shot logs are cached per those settings, so an arm that changes one logs the video again with it (and pays for that) rather than reusing its baseline's log. The bench checks this when it reads the arm, and refuses the arm if a setting ever stopped being part of the cache key. A different `perceiver_model` always gets its own log.
-- `transcript` means today's transcript suggester (labelled `transcript-v3`), not the one behind past suggestions.
+- `transcript` means today's transcript suggester (labeled `transcript-v3`), not the one behind past suggestions.
 
 **Other flags:**
 
@@ -214,7 +214,7 @@ What a test run does:
 Open **Analytics → Clip bench** and pick the run. It shows you items one at a time, in an order that mixes arms and spaces out each video. There are three kinds; you aren't told which one you're looking at:
 
 - **Arms pairs:** the engine's top pick against the transcript suggester's on the same video. Neither clip is yours, so this is the truly blind, **primary** test.
-- **Ceiling pairs:** the engine's top pick against your own exported cut. You'll often recognise yours. Tick "I recognised one of these as mine" (key **M**) when you do, so the report can set those aside.
+- **Ceiling pairs:** the engine's top pick against your own exported cut. You'll often recognize yours. Tick "I recognized one of these as mine" (key **M**) when you do, so the report can set those aside.
 - **Solo clips** (with `--negatives`): would you post it?
 
 All clips are rendered the same way (540p, no captions, no outro), and which side each one is on is random.
@@ -239,7 +239,7 @@ Results stay hidden until you reveal them, so they can't steer your judging. **R
 How to read the report:
 
 - **The decision is the arms test.** It gives the engine's win rate against the transcript suggester among non-tied judgments, with a 95% confidence interval and a sign-test p-value. The engine is better when the whole interval sits above 50% (p < 0.05). An interval straddling 50% means no detectable difference yet.
-- **The ceiling test is secondary.** It asks how often the engine's top pick wins or ties against your own cut. Videos where the engine proposed nothing count as losses, and "Neither" counts as not-a-win. It **passes** when the one-sided 95% lower bound (the "1-sided low" column) is at least 40%, **fails** when the whole printed 95% interval is below 40%, and is **inconclusive** in between. Read the line with recognised items excluded too.
+- **The ceiling test is secondary.** It asks how often the engine's top pick wins or ties against your own cut. Videos where the engine proposed nothing count as losses, and "Neither" counts as not-a-win. It **passes** when the one-sided 95% lower bound (the "1-sided low" column) is at least 40%, **fails** when the whole printed 95% interval is below 40%, and is **inconclusive** in between. Read the line with recognized items excluded too.
 - **Loss reasons per arm** show which complaint is still open.
 - **Hit rates** compare each arm's picks with the clips you actually exported:
   - any-hit@1 and @3;
