@@ -69,15 +69,46 @@ def _merge(base, over):
     return over
 
 
+def _design(config_path: Path = CONFIG_FILE) -> tuple[dict, str, str]:
+    """``(design, base dir for its image paths, what else it depends on)``.
+
+    The workspace's own outro.yaml, with the account's card from Settings >
+    Outro laid over it (app/outro_card.py); an account without a design file
+    starts from the bundled template once it has saved a card. Only the
+    workspace's design takes the card — the lab renders the file it's given."""
+    card = None
+    if config_path == CONFIG_FILE:
+        from .outro_card import load as load_card
+
+        card = load_card()
+    path = config_path if config_path.exists() else None
+    if path is None and card:
+        from .outro_card import TEMPLATE
+
+        path = TEMPLATE
+    if path is None:
+        return {"enabled": False}, str(config_path.parent), ""
+    raw = yaml.safe_load(path.read_text()) or {}
+    if not card:
+        return raw, str(path.parent), ""
+    from .outro_card import apply, fingerprint
+
+    return apply(raw, card), str(path.parent), fingerprint(card)
+
+
 def enabled(config_path: Path = CONFIG_FILE) -> bool:
-    if not config_path.exists():
-        return False
-    raw = yaml.safe_load(config_path.read_text()) or {}
+    raw, _, _ = _design(config_path)
     return bool(raw.get("enabled", True))
 
 
 def load_config(orientation: str, config_path: Path = CONFIG_FILE) -> dict:
-    raw = yaml.safe_load(config_path.read_text()) or {}
+    raw, base, _ = _design(config_path)
+    return config_from(raw, base, orientation)
+
+
+def config_from(raw: dict, base: str, orientation: str) -> dict:
+    """A design (as read from YAML) made ready to render in one orientation."""
+    raw = copy.deepcopy(raw)
     overrides = (raw.pop("overrides", None) or {}).get(orientation) or {}
     cfg = _merge(raw, copy.deepcopy(overrides))
     duration = float(cfg.get("duration", 3.5))
@@ -86,7 +117,7 @@ def load_config(orientation: str, config_path: Path = CONFIG_FILE) -> dict:
         raise ValueError(f"duration {duration}s is over the {MAX_DURATION}s cap")
     if not 0 < dissolve < duration:
         raise ValueError("dissolve must be > 0 and shorter than duration")
-    cfg["_base"] = str(config_path.parent)  # image paths in the config resolve from here
+    cfg["_base"] = base  # image paths in the config resolve from here
     return cfg
 
 
@@ -508,7 +539,12 @@ def render(clip: Path, dest: Path, *, lead_in: float | None = None,
 def _cache_key(clip: Path, config_path: Path) -> str:
     st = clip.stat()
     digest = hashlib.sha1()
-    for part in (str(ENGINE_VERSION), config_path.read_text(), str(clip.resolve()),
+    raw, _, extra = _design(config_path)
+    # No card: the design file's text, exactly as before, so copies already
+    # rendered stay valid. With a card, the design as laid out plus its inputs.
+    design = (config_path.read_text() if not extra and config_path.exists()
+              else json.dumps(raw, sort_keys=True, default=str) + extra)
+    for part in (str(ENGINE_VERSION), design, str(clip.resolve()),
                  str(st.st_size), str(st.st_mtime_ns)):
         digest.update(part.encode())
         digest.update(b"\0")

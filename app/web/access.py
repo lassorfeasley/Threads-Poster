@@ -31,6 +31,7 @@ _CUSTOMER_SECTIONS = (
     "/brand",
     "/style-guide",
     "/subtitle-style",
+    "/outro-card",
     "/connections",
     "/appearance",
     "/account",

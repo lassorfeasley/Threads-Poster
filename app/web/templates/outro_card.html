@@ -1,0 +1,174 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+{% import "components/toolbar.html" as ui %}
+{#
+  Outro — the card every posted clip ends on (app/outro_card.py; POST
+  /outro-card). Three lines, the website (typed out at the end, and on a tab
+  over the footage) and a colour. The
+  preview images come from the renderer itself (/outro-card/preview.png).
+#}
+{{ ui.pagebar("Outro", sub="The card your clips end on: three short lines and your website. Your website also rides on a tab at the top of the video.") }}
+
+<style>
+  .oc-previews { display: grid; grid-template-columns: 2fr 0.62fr; gap: 14px; align-items: start; max-width: 760px; }
+  .oc-previews figure { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  .oc-previews img { width: 100%; height: auto; display: block; border-radius: 12px; border: 1px solid var(--border); background: #0b1a2a;
+    transition: opacity .15s; }
+  .oc-previews img.is-loading { opacity: .55; }
+  .oc-previews figcaption { font-size: 12.5px; color: var(--muted); }
+  .oc-lines { display: flex; flex-direction: column; gap: 8px; }
+  .oc-line { display: flex; gap: 10px; align-items: center; }
+  .oc-line span { width: 18px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .oc-line input { flex: 1; }
+  .ss-swatches { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 8px; }
+  @media (max-width: 900px) { .ss-swatches { grid-template-columns: repeat(5, minmax(0, 1fr)); } .oc-previews { grid-template-columns: 1fr; } }
+  .ss-swatch { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    padding: 10px 6px; border-radius: 12px; border: 1px solid var(--border-strong); cursor: pointer; }
+  .ss-swatch input { position: absolute; opacity: 0; pointer-events: none; }
+  .ss-swatch:has(input:checked) { outline: 2px solid var(--text); outline-offset: 1px; }
+  .ss-chip { width: 38px; height: 38px; border-radius: 10px; border: 1px solid rgba(0,0,0,.15); }
+  .ss-swatch span:last-child { font-size: 12.5px; color: var(--text-dim); }
+  .ss-own { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  .ss-own input[type=color] { width: 44px; height: 38px; padding: 2px; border-radius: 8px; }
+</style>
+
+{% set preset_colors = colors|map('first')|list %}
+<div class="set-page">
+<form method="post" action="/outro-card" data-savebar id="oc-form">
+  <section class="set-section">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Preview</h2>
+        <p class="set-section-desc">The card's last frame, as it's drawn on your clips. The website types itself out as the card appears.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div class="oc-previews">
+        <figure><img id="oc-land" alt="Outro on a landscape clip" width="1280" height="720"><figcaption>Landscape clips</figcaption></figure>
+        <figure><img id="oc-vert" alt="Outro on a vertical clip" width="720" height="1280"><figcaption>Vertical clips</figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="set-section">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Your card</h2>
+        <p class="set-section-desc">Short lines read best — a few words each. Leave a line empty to use fewer.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <label class="set-toggle">
+        <span class="set-item-text">
+          <span class="set-item-label" style="display: block;">End clips with an outro</span>
+          <span class="set-item-help" style="display: block;">Adds about three seconds to each clip.</span>
+        </span>
+        <span class="switch">
+          <input type="checkbox" name="enabled" value="1" {% if card.enabled %}checked{% endif %}>
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </span>
+      </label>
+
+      <div class="set-field">
+        <label class="set-label">Three lines</label>
+        <div class="oc-lines">
+          {% for n in range(3) %}
+          <label class="oc-line"><span>{{ n + 1 }}</span>
+            <input type="text" name="line{{ n + 1 }}" maxlength="{{ max_line }}" value="{{ card.lines[n] }}"
+                   placeholder="{{ ['e.g. Fund solar where it matters', 'e.g. Create more impact', 'e.g. Get repaid'][n] }}"
+                   aria-label="Line {{ n + 1 }}"></label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="set-field">
+        <label class="set-label" for="oc-website">Your website</label>
+        <p class="set-help">Typed out big at the end of the card, and shown on a tab at the top of the video.</p>
+        <input type="text" id="oc-website" name="website" value="{{ card.website }}" placeholder="example.org"
+               style="max-width: 320px;" autocomplete="url">
+      </div>
+
+    </div>
+  </section>
+
+  <section class="set-section">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Colour</h2>
+        <p class="set-section-desc">The card's background and the tab on the video. The text turns black or white, whichever reads best.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div class="ss-swatches" role="radiogroup" aria-label="Colour">
+        {% for hex, name in colors %}
+        <label class="ss-swatch">
+          <input type="radio" name="color" value="{{ hex }}" {% if card.color == hex %}checked{% endif %}>
+          <span class="ss-chip" style="background: {{ hex }};"></span>
+          <span>{{ name }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="ss-own">
+        <label class="ss-swatch" style="flex-direction: row; padding: 8px 12px;">
+          <input type="radio" name="color" value="__custom" {% if card.color not in preset_colors %}checked{% endif %}>
+          <span>Your own colour:</span>
+        </label>
+        <input type="color" id="oc-picker" value="{{ card.color }}" aria-label="Pick a colour">
+        <input type="text" name="custom_color" id="oc-custom" value="{{ card.color }}" maxlength="7"
+               style="max-width: 110px;" aria-label="Colour code">
+      </div>
+    </div>
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Applies to clips posted from now on.</span>
+      <button class="btn-primary" type="submit">Save</button>
+    </div>
+  </section>
+</form>
+</div>
+
+<script>
+(function () {
+  const form = document.getElementById('oc-form');
+  const land = document.getElementById('oc-land');
+  const vert = document.getElementById('oc-vert');
+  const picker = document.getElementById('oc-picker');
+  const custom = document.getElementById('oc-custom');
+
+  function color() {
+    const r = form.querySelector('input[name="color"]:checked');
+    const v = r && r.value === '__custom' ? custom.value.trim() : (r ? r.value : '');
+    return /^#?[0-9a-fA-F]{6}$/.test(v) ? (v.startsWith('#') ? v : '#' + v) : '';
+  }
+
+  function refresh() {
+    const q = new URLSearchParams({
+      line1: form.line1.value, line2: form.line2.value, line3: form.line3.value,
+      website: form.website.value, color: color(),
+    });
+    for (const [img, o] of [[land, 'landscape'], [vert, 'vertical']]) {
+      img.classList.add('is-loading');
+      const next = new Image();
+      next.onload = () => { img.src = next.src; img.classList.remove('is-loading'); };
+      next.onerror = () => img.classList.remove('is-loading');
+      next.src = '/outro-card/preview.png?orientation=' + o + '&' + q.toString();
+    }
+  }
+
+  let timer;
+  const soon = () => { clearTimeout(timer); timer = setTimeout(refresh, 400); };
+  form.addEventListener('input', soon);
+  form.addEventListener('change', soon);
+  picker.addEventListener('input', () => {
+    custom.value = picker.value.toUpperCase();
+    form.querySelector('input[name="color"][value="__custom"]').checked = true;
+    soon();
+    if (window.markSettingsDirty) window.markSettingsDirty(form);
+  });
+  custom.addEventListener('input', () => {
+    form.querySelector('input[name="color"][value="__custom"]').checked = true;
+    if (/^#[0-9a-fA-F]{6}$/.test(custom.value)) picker.value = custom.value;
+  });
+  refresh();
+})();
+</script>
+{% endblock %}
