@@ -510,17 +510,20 @@ def _paced_published_since(session, start: dt.datetime) -> int:
     ).scalar_one()
 
 
-def pace_per_day(cfg: dict, backlog: int, windows: int = 0) -> float:
+def pace_per_day(cfg: dict, backlog: int, windows: int = 0, organic: int | None = None) -> float:
     """New clips per day: the backlog spread over ``spread_days``.
 
     Planned from what's actually queued, never from what might be cut — so a
     small queue drips out at ``min_per_day``, only a deep one runs faster, and
-    everything else falls to reruns. ``windows`` (the day's organic windows)
-    applies the ``max_share`` ceiling. Rounded to quarters so one clip airing
-    or arriving doesn't reshuffle the day.
+    everything else falls to reruns. ``windows`` (all the day's windows,
+    rerun slots included) applies the ``max_share`` ceiling, never above the
+    ``organic`` windows new clips may use. Rounded to quarters so one clip
+    airing or arriving doesn't reshuffle the day.
     """
-    caps = [c for c in (cfg.get("max_per_day") or 0,
-                        math.floor((cfg.get("max_share") or 0) * windows)) if c > 0]
+    share = math.floor((cfg.get("max_share") or 0) * windows)
+    if share and organic is not None:
+        share = min(share, organic)
+    caps = [c for c in (cfg.get("max_per_day") or 0, share) if c > 0]
     cap = min(caps) if caps else 0
     if cfg["fixed"] is not None:
         return min(cfg["fixed"], cap) if cap else cfg["fixed"]
@@ -722,6 +725,7 @@ def build_placement_context(session, posts: list[ThreadsPost],
     trail = [resolve_facets(p, p.candidate, facet_mode) for p in reversed(recent)]
 
     pace_windows: dict[dt.date, tuple[int, ...]] = {}
+    pace_day_windows: dict[dt.date, int] = {}
     pace_done: dict[dt.date, int] = {}
     pace_cfg = _pace_config(settings)
     if pace_cfg is not None:
@@ -734,9 +738,11 @@ def build_placement_context(session, posts: list[ThreadsPost],
                       and probe.facts_for(p.id).paced and not probe.expired(p.id, today))
         aired_today = _paced_published_since(session, dt.datetime.combine(today, dt.time(), tz))
         pace_windows = _pace_windows(today, PIN_HORIZON_DAYS + 1)
+        pace_day_windows = {d: len(windows_for_date(d)) for d in pace_windows}
         # Counted as of this morning — today's airings put back — so the rate
         # holds still while the day's windows go out.
         ps = replace(ps, pace_per_day=pace_per_day(pace_cfg, backlog + aired_today,
+                                                   pace_day_windows.get(today, 0),
                                                    len(pace_windows.get(today, ()))),
                      pace_min_per_day=int(pace_cfg["min_per_day"]),
                      pace_max_per_day=int(pace_cfg["max_per_day"]),
@@ -750,6 +756,7 @@ def build_placement_context(session, posts: list[ThreadsPost],
         channel_air_dates=channel_air,
         facet_trail=trail,
         pace_windows=pace_windows,
+        pace_day_windows=pace_day_windows,
         pace_done=pace_done,
     )
 
