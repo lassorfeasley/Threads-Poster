@@ -3457,6 +3457,9 @@ def run_tick() -> None:
     from .heartbeat import beat
 
     beat("scheduler")
+    from .clip_emails import maybe_send as send_clip_emails
+
+    send_clip_emails()
     try:
         with session_scope() as session:
             n = recover_stuck_publishing(session, only_inactive=True)

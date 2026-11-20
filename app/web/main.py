@@ -7235,6 +7235,54 @@ def retry_first_reply(post_id: int, next: str = Form("")):
         return _flash(dest, err)
 
 
+# --- Email updates (app/clip_emails.py) ---------------------------------------
+
+@app.get("/account/emails", response_class=HTMLResponse)
+def email_updates_page(request: Request, msg: str = ""):
+    """How often each login hears about clips waiting. A signed-in person sees
+    their own choice; the operator's local dashboard (no sign-in) sees every
+    login on the account."""
+    from .. import clip_emails
+
+    me = getattr(request.state, "user", None)
+    prefs = clip_emails.preferences()
+    people = []
+    try:
+        emails = [me] if me else clip_emails.recipients()
+    except Exception:
+        log.exception("Logins unavailable for email updates")
+        emails = [me] if me else []
+    for e in emails:
+        pref = prefs.get(e.lower()) or {}
+        people.append({"email": e, "frequency": clip_emails.frequency_for(e, prefs),
+                       "last_sent": pref.get("last_sent")})
+    return templates.TemplateResponse(request, "email_updates.html", {
+        "people": people, "options": clip_emails.FREQUENCY_LABELS, "me": me,
+        "problem": clip_emails.ready(), "msg": msg, "active": "emails"})
+
+
+@app.post("/account/emails")
+async def email_updates_save(request: Request):
+    from .. import clip_emails
+
+    form = await request.form()
+    me = getattr(request.state, "user", None)
+    changed = 0
+    for key, value in form.items():
+        if not key.startswith("freq:"):
+            continue
+        email = key[5:]
+        # A signed-in person may only change their own.
+        if me and email.lower() != me.lower():
+            continue
+        try:
+            clip_emails.set_frequency(email, str(value))
+            changed += 1
+        except ValueError:
+            return _flash("/account/emails", quote("Pick how often from the list"))
+    return _flash("/account/emails", quote("Saved" if changed else "Nothing to save"))
+
+
 # --- Settings ----------------------------------------------------------------
 
 @app.get("/settings")

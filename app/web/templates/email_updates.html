@@ -1,0 +1,40 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+{% import "components/toolbar.html" as ui %}
+{#
+  Email updates (app/clip_emails.py): how often each login is told that clips
+  are waiting in Today's posts. Customer-facing.
+#}
+{{ ui.pagebar("Email updates", sub="We'll email you when clips are waiting for your approval. Nothing is sent when your inbox is empty.") }}
+
+<div class="set-page">
+<form method="post" action="/account/emails" data-savebar>
+  <section class="set-section">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Clips ready to approve</h2>
+        <p class="set-section-desc">A short email at 9 AM your time listing the clips waiting for you, with a button straight to Today's posts. Clips wait until you approve or reject them, so a weekly or monthly email will have more in it.</p>
+      </div>
+    </div>
+    <div class="set-section-body">
+      {% for p in people %}
+      <div class="set-field">
+        <label class="set-label" for="freq-{{ loop.index }}">{% if me %}How often{% else %}{{ p.email }}{% endif %}</label>
+        <select id="freq-{{ loop.index }}" name="freq:{{ p.email }}" style="max-width: 320px;">
+          {% for key, label in options.items() %}<option value="{{ key }}"{% if p.frequency == key %} selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+        {% if p.last_sent %}<p class="set-help">Last sent {{ p.last_sent[:10] }}.</p>{% endif %}
+      </div>
+      {% else %}
+      <p class="set-help">No logins on this account yet.</p>
+      {% endfor %}
+      {% if problem and not me %}<p class="set-help">On this machine emails are off ({{ problem }}); the hosted scheduler sends them.</p>{% endif %}
+    </div>
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Every day unless you choose otherwise.</span>
+      <button class="btn-primary" type="submit">Save</button>
+    </div>
+  </section>
+</form>
+</div>
+{% endblock %}
