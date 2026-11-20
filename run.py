@@ -174,6 +174,11 @@ def cmd_user(args) -> None:
             user = auth.invite(args.email, WORKSPACE, args.url.rstrip("/") + "/auth/callback",
                                args.role)
             print(f"Invitation emailed to {user.email} for the {WORKSPACE!r} dashboard.")
+        elif args.user_command == "role":
+            user = auth.grant(args.email, WORKSPACE, args.role)
+            print(f"{user.email} is now {user.role!r}"
+                  + (" — the whole app, on every account." if user.role == "admin"
+                     else " — the streamlined customer app."))
         elif args.user_command == "remove":
             user = auth.revoke(args.email, WORKSPACE)
             print(f"{user.email} can no longer use the {WORKSPACE!r} dashboard "
@@ -2459,12 +2464,17 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("email")
     up.add_argument("--password", default="", help="(else prompted)")
     up.add_argument("--generate", action="store_true", help="make up a strong password and print it")
-    up.add_argument("--role", default="member", choices=["owner", "member"])
+    up.add_argument("--role", default="member", choices=["admin", "owner", "member"],
+                    help="admin: the company's own staff, the whole app on every account; owner/member: a customer's people, the streamlined app (app/web/access.py)")
     up = usub.add_parser("invite", parents=[common], help="email an invitation (they choose a password)")
     up.add_argument("email")
     up.add_argument("--url", default="https://app.continuity.marketing",
                     help="the dashboard's public address (where the email link lands)")
-    up.add_argument("--role", default="member", choices=["owner", "member"])
+    up.add_argument("--role", default="member", choices=["admin", "owner", "member"],
+                    help="admin: the company's own staff, the whole app on every account; owner/member: a customer's people, the streamlined app (app/web/access.py)")
+    up = usub.add_parser("role", parents=[common], help="change what a login sees: admin, owner or member")
+    up.add_argument("email")
+    up.add_argument("role", choices=["admin", "owner", "member"])
     up = usub.add_parser("remove", parents=[common], help="take away access to this workspace")
     up.add_argument("email")
     p.set_defaults(func=cmd_user)

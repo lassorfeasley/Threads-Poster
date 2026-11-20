@@ -236,6 +236,60 @@ class InboxRoutesTest(unittest.TestCase):
         r = self.client.post(f"/inbox/{item_id}/reject", headers={"Accept": "application/json"})
         self.assertEqual(r.status_code, 409)
 
+    def test_reasons_after_a_one_click_reject(self):
+        item_id, _ = self.make_ready()
+        with mock.patch.object(self.main, "_save_clip_note") as note, \
+                mock.patch.object(self.main, "_delete_if_unreferenced"):
+            # Too early: it isn't rejected yet.
+            r = self.client.post(f"/inbox/{item_id}/reasons", data={"tags": "boring"},
+                                 headers={"Accept": "application/json"})
+            self.assertEqual(r.status_code, 409)
+            r = self.client.post(f"/inbox/{item_id}/reject", headers={"Accept": "application/json"})
+            self.assertEqual(r.status_code, 200, r.text)
+            note.assert_not_called()          # one click, no reasons: nothing to note yet
+            r = self.client.post(f"/inbox/{item_id}/reasons", data={"tags": "boring", "note": "slow start"},
+                                 headers={"Accept": "application/json"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(note.call_args.kwargs["tags"], "boring")
+            self.assertEqual(note.call_args.kwargs["text"], "slow start")
+            # The same chip again adds nothing new.
+            self.client.post(f"/inbox/{item_id}/reasons", data={"tags": "boring"},
+                             headers={"Accept": "application/json"})
+            self.assertEqual(note.call_count, 1)
+        with self.Session() as s:
+            item = s.get(InboxItem, item_id)
+            self.assertEqual((item.reject_tags, item.reject_note), ("boring", "slow start"))
+            self.assertNotEqual(s.get(ClipProposal, self.proposal_pk).dismiss_reason, "other")
+
+    def test_the_customer_sees_only_the_clip_and_three_actions(self):
+        self.make_ready()
+        admin = self.client.get("/inbox")
+        self.assertIn(f'href="/video/{self.candidate_pk}"', admin.text)
+        self.client.cookies.set("view_as", "customer")
+        page = self.client.get("/inbox")
+        self.assertEqual(page.status_code, 200)
+        for action in ('data-act="approve"', 'data-act="edit"', 'data-act="reject"'):
+            self.assertIn(action, page.text)
+        self.assertIn("second draft", page.text)
+        self.assertNotIn("/video/", page.text)
+        self.assertNotIn("Recently decided", page.text)
+
+    def test_the_inbox_plays_the_clip_as_it_will_post(self):
+        item_id, cut_id = self.make_ready()
+        finished = self.tmp / "with_tab_and_card.mp4"
+        finished.write_bytes(b"finished")
+        page = self.client.get("/inbox")
+        self.assertIn(f'src="/inbox/{item_id}/media"', page.text)
+        with mock.patch("app.outro.with_outro", return_value=finished) as outro:
+            r = self.client.get(f"/inbox/{item_id}/media")
+        self.assertEqual((r.status_code, r.content), (200, b"finished"))
+        self.assertTrue(outro.call_args.args[0].endswith("_subs.mp4"))   # the render that posts
+        # No finished copy to be had: the plain clip, rather than nothing.
+        with mock.patch("app.web.inbox.finished_clip", return_value=None):
+            r = self.client.get(f"/inbox/{item_id}/media")
+        self.assertEqual((r.status_code, r.content), (200, b"subs"))
+        self.assertEqual(self.client.get("/inbox/999/media").status_code, 404)
+
     def test_sharing_a_jobs_files_never_blocks_the_job(self):
         import threading
 

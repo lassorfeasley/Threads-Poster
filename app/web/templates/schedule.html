@@ -18,7 +18,7 @@
   </div>
 {%- endmacro %}
 {% macro admin_notes() -%}
-  {% if notes %}
+  {% if notes and is_admin(request) %}
   <details class="set-more">
     <summary>Schedule notes for admins ({{ notes|length }})</summary>
     <div class="set-more-body">
@@ -161,9 +161,11 @@
           <div class="set-item-help">{{ u.windows|length }} a day at
             {% for w in u.windows %}{{ clock(w) }}{% if w in u.reruns %} (rerun){% endif %}{{ ", " if not loop.last }}{% endfor %}</div>
         </div>
+        {% if is_admin(request) %}
         <div class="set-item-control">
           <button class="btn sm" type="submit" form="cancel-{{ loop.index }}">Cancel this change</button>
         </div>
+        {% endif %}
       </div>
       {% endfor %}
     </div>

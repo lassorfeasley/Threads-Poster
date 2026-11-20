@@ -2,12 +2,14 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {% set an_actions %}
+  {% if is_admin(request) %}
   <a class="btn ghost" href="/labels"
      title="One tap per posted clip — is it visually gripping? Builds the set future video models get tested against.">Label clips</a>
   <a class="btn ghost" href="/clip-bench"
      title="Judge clip-engine benchmark runs blind: two clips from the same past video, pick the one you'd rather post.">Clip bench</a>
   <a class="btn ghost" href="/clip-handbook"
      title="What your past edits have in common, as rules the clip engine could follow — and how they did on held-out videos.">Clip handbook</a>
+  {% endif %}
   <form class="inline" method="post" action="/analytics/snapshot">
     <button class="primary">Pull latest metrics</button>
   </form>

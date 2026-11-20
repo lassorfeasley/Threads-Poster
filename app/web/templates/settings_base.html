@@ -12,12 +12,14 @@
 
 {# Two groups on purpose. "Your account" is everything a customer needs and
    understands; "Behind the scenes" is the machinery an admin tunes. When
-   customers get their own login, hiding the second group is the whole split. #}
+   customers get their own login, hiding the second group is the whole split
+   (done: app/web/access.py; the server refuses those pages to customers too). #}
 {% set SETTINGS_GROUPS = [
   ('Your account', '', [
     ('brand', 'Brand & audience', '/brand'),
     ('style_guide', 'Caption style', '/style-guide'),
     ('schedule', 'Posting schedule', '/schedule'),
+    ('first_reply', 'First reply', '/engagement/first-reply'),
     ('connections', 'Connected accounts', '/connections'),
     ('appearance', 'Appearance', '/appearance'),
   ]),
@@ -34,7 +36,7 @@
 {% block content %}
 <div class="settings-shell">
   <nav class="settings-rail" aria-label="Settings sections">
-    {% for group, note, items in SETTINGS_GROUPS %}
+    {% for group, note, items in SETTINGS_GROUPS if note != 'For admins' or is_admin(request) %}
     {% if not loop.first %}<div class="settings-rail-divider" aria-hidden="true"></div>{% endif %}
     <div class="settings-group">{{ group }}{% if note %}<span class="settings-group-note">{{ note }}</span>{% endif %}</div>
     {% for key, label, href in items %}

@@ -312,6 +312,8 @@ def grant(email: str, workspace: str, role: str = "member") -> User:
         "app_metadata": _with_workspace(u.get("app_metadata") or {}, workspace, role)})
     if r.status_code != 200:
         raise AuthError(_message(r, f"Supabase refused ({r.status_code})"))
+    with _cache_lock:  # a new role applies on the next request, not when a cache expires
+        _cache.clear()
     return _user_from(r.json())
 
 

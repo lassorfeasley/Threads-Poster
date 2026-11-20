@@ -6853,3 +6853,14 @@ details.set-section > summary:hover .set-section-desc { color: var(--text-dim); 
    window as soon as its section's top scrolls in, and reads as part of the
    section above. Only a page-wide save bar (one long form) sticks. */
 .set-section-foot.set-savebar { position: static; }
+
+/* An admin looking through a customer's eyes (app/web/access.py): a pill
+   pinned to the bottom of the screen, out of the page's way, with the way back. */
+.view-as-bar {
+  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 90;
+  display: flex; gap: 12px; align-items: center; white-space: nowrap;
+  padding: 10px 18px; border-radius: 999px; font-size: 13.5px; font-weight: 550;
+  background: var(--text); color: var(--bg); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+.view-as-bar a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+main:has(> .view-as-bar) { padding-bottom: 84px; }

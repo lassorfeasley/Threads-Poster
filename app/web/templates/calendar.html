@@ -1,5 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
+{#- Where a post's card leads: an admin to the post page; a customer (who
+    doesn't get post pages, app/web/access.py) to the live post on Threads
+    once it's out, else nowhere — an <a> without href isn't a link. -#}
+{% macro post_link(e) -%}
+  {%- if is_admin(request) %}href="/post/{{ e.post_id }}"
+  {%- elif e.permalink %}href="{{ e.permalink }}" target="_blank" rel="noopener"
+  {%- endif -%}
+{%- endmacro %}
 {% macro ev_card(e, label) %}
   <span class="cal-ev-body">
     <span class="cal-ev-title">{{ (label or '(post)')[:64] }}</span>
@@ -38,7 +46,7 @@
       {% if e.get('overflow') %}<span class="cal-ev-relax" title="Extra window — opened to run this timely post before its shelf life expires">⚡ extra</span>{% endif %}
       {% if e.kind == 'rerun' %}<span class="cal-ev-rerun" title="Projected rerun — displaced automatically by any fresh content">↻ rerun</span>{% endif %}
       {% if e.get('relax_step') %}<span class="cal-ev-relax" title="Placed with relaxed gates (step {{ e.get('relax_step') }})">⚠</span>{% endif %}
-      {% if e.get('score_parts') %}
+      {% if e.get('score_parts') and is_admin(request) %}
       <span class="cal-score-chip" role="button" tabindex="0"
             title="Why is this post here? Click for the placement score breakdown"
             data-post="{{ e.post_id }}" data-window="{{ e.window_key }}"
@@ -88,7 +96,7 @@
               <div class="cal-event cal-wk-card {{ cls }} card cal-drop"
                    data-window-key="{{ e.window_key }}"
                    title="{{ e.date_label }} {{ e.time }} · projected rerun — nothing fresh is queued for this window, so the scheduler plans to re-air this proven evergreen post. Queue new content or drop a card here and it takes the slot instead. · {{ label }}">
-                <a href="/post/{{ e.post_id }}" class="cal-wk-link">{{ wk_media(e, label) }}</a>
+                <a {{ post_link(e) }} class="cal-wk-link">{{ wk_media(e, label) }}</a>
               </div>
             {% elif e.kind == 'queued' and e.post_id %}
               {% set relax = e.get('relax_step') %}
@@ -98,13 +106,13 @@
                    data-post-id="{{ e.post_id }}"
                    data-window-key="{{ e.window_key }}"
                    title="{{ e.date_label }} {{ e.time }} · queued{% if e.pinned %} (pinned){% endif %}{% if relax %} · placed with relaxed gates (step {{ relax }}) — the queue is too shallow or concentrated to satisfy every spacing rule here{% endif %}{% if detail %} · {{ detail }}{% endif %} · drag to another window · {{ label }}">
-                <a href="/post/{{ e.post_id }}" class="cal-wk-link"
+                <a {{ post_link(e) }} class="cal-wk-link"
                    onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
                   {{ wk_media(e, label) }}
                 </a>
               </div>
             {% elif e.post_id %}
-              <a class="cal-event cal-wk-card {{ cls }} card" href="/post/{{ e.post_id }}"
+              <a class="cal-event cal-wk-card {{ cls }} card" {{ post_link(e) }}
                  title="{{ e.date_label }} {{ e.time }} · {{ e.status }} · {{ label }}">
                 {{ wk_media(e, label) }}</a>
             {% elif e.permalink %}
@@ -135,8 +143,8 @@
 
     {% if not queue_count and drafts_count %}
     <div class="cal-legend">
-      <span class="meta">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }} —
-        <a href="/library?section=posts">queue from Library</a></span>
+      <span class="meta">{{ drafts_count }} draft{{ 's' if drafts_count != 1 }}{% if is_admin(request) %} —
+        <a href="/library?section=posts">queue from Library</a>{% endif %}</span>
     </div>
     {% endif %}
 
@@ -190,7 +198,7 @@
                     <div class="cal-event cal-slot {{ cls }} card cal-drop"
                          data-window-key="{{ e.window_key }}"
                          title="{{ e.date_label }} {{ e.time }} · projected rerun — nothing fresh is queued for this window, so the scheduler plans to re-air this proven evergreen post. Queue new content or drop a card here and it takes the slot instead. · {{ label }}">
-                      <a href="/post/{{ e.post_id }}" class="cal-ev">
+                      <a {{ post_link(e) }} class="cal-ev">
                         {{ ev_card(e, label) }}
                         <span class="cal-ev-rerun" title="Rerun — displaced automatically by any fresh content">↻</span>
                       </a>
@@ -203,11 +211,11 @@
                          data-post-id="{{ e.post_id }}"
                          data-window-key="{{ e.window_key }}"
                          title="{{ e.date_label }} {{ e.time }} · queued{% if e.pinned %} (pinned){% endif %}{% if relax %} · placed with relaxed gates (step {{ relax }}) — the queue is too shallow or concentrated to satisfy every spacing rule here{% endif %}{% if detail %} · {{ detail }}{% endif %} · drag to another window · {{ label }}">
-                      <a href="/post/{{ e.post_id }}" class="cal-ev"
+                      <a {{ post_link(e) }} class="cal-ev"
                          onclick="if(window._calDidDrag){event.preventDefault(); window._calDidDrag=false;}">
                         {{ ev_card(e, label) }}
                         {% if relax %}<span class="cal-ev-relax" title="Placed with relaxed gates (step {{ relax }})">⚠</span>{% endif %}
-                        {% if e.get('score_parts') %}
+                        {% if e.get('score_parts') and is_admin(request) %}
                         <span class="cal-score-chip" role="button" tabindex="0"
                               title="Why is this post here? Click for the placement score breakdown"
                               data-post="{{ e.post_id }}" data-window="{{ e.window_key }}"
@@ -222,7 +230,7 @@
                       </a>
                     </div>
                   {% elif e.post_id %}
-                    <a class="cal-event cal-slot {{ cls }} card" href="/post/{{ e.post_id }}"
+                    <a class="cal-event cal-slot {{ cls }} card" {{ post_link(e) }}
                        title="{{ e.date_label }} {{ e.time }} · {{ e.status }} · {{ label }}">
                       <span class="cal-ev">{{ ev_card(e, label) }}</span></a>
                   {% elif e.permalink %}
@@ -278,7 +286,7 @@
             <div class="queue-open">Open window</div>
             <div class="meta">Drop a queued post here to pin it.</div>
           {% else %}
-            <a class="queue-caption" href="/post/{{ e.post_id }}">{{ e.caption[:110] or '(untitled)' }}</a>
+            <a class="queue-caption" {{ post_link(e) }}>{{ e.caption[:110] or '(untitled)' }}</a>
             <div class="meta">
               {% if e.channel %}{{ e.channel }} · {% endif %}
               {% if e.has_reel %}+ Instagram Reel · {% endif %}
@@ -286,7 +294,7 @@
               {% if e.get('overflow') %}<span title="Extra window — opened to run this timely post before its shelf life expires">⚡ extra window ·</span> {% endif %}
               {% if e.kind == 'rerun' %}<span title="Nothing fresh is queued for this window, so the scheduler plans to re-air this proven evergreen post. Any new content displaces it automatically.">↻ rerun (projected) ·</span> {% endif %}
               {% if e.get('relax_step') %}<span title="Placed with relaxed gates (step {{ e.get('relax_step') }}) — the queue is too shallow or concentrated to satisfy every spacing rule here">⚠ relaxed ·</span> {% endif %}
-              {% if e.get('score_parts') %}
+              {% if e.get('score_parts') and is_admin(request) %}
               <span class="cal-score-chip" role="button" tabindex="0"
                     title="Why is this post here? Click for the placement score breakdown"
                     data-post="{{ e.post_id }}" data-window="{{ e.window_key }}"
@@ -302,9 +310,9 @@
             </div>
           {% endif %}
         </div>
-        {% if e.post_id and not e.empty %}
+        {% if e.post_id and not e.empty and is_admin(request) %}
         <div class="queue-actions">
-          <a class="sm" href="/post/{{ e.post_id }}">Open</a>
+          <a class="sm" {{ post_link(e) }}>Open</a>
         </div>
         {% endif %}
       </li>
@@ -584,9 +592,11 @@
       html += '<div class="score-pop-note warn">⚠ Placed with relaxed gates (step ' + relax
         + ') — the queue was too shallow or concentrated to satisfy every spacing rule here.</div>';
     }
-    html += '<div class="score-pop-note">Recomputed on every plan build — nothing is stored.</div>'
-      + '<a class="score-pop-link" href="/post/' + chip.dataset.post
+    html += '<div class="score-pop-note">Recomputed on every plan build — nothing is stored.</div>';
+    {% if is_admin(request) %}
+    html += '<a class="score-pop-link" href="/post/' + chip.dataset.post
       + '">Adjust shelf life &amp; tags on the post page →</a>';
+    {% endif %}
     pop.innerHTML = html;
     document.body.appendChild(pop);
 

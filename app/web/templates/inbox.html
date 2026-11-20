@@ -2,124 +2,297 @@
 {% block content %}
 {% import "components/toolbar.html" as ui %}
 {#
-  The inbox (app/web/inbox.py): finished clips the system made, one click
-  each. The screen a customer gets, so nothing but the clips and the three
-  actions — the settings are on the admin Automatic triage page.
+  Today's posts (app/web/inbox.py): where a customer lands after signing in.
+  Each finished clip gets three actions — Approve (one click), Reject (one
+  click, a few seconds to undo, then optional reasons) and Edit caption (then
+  Save & approve). Admins also see where each clip came from and what was
+  decided lately (app/web/access.py).
   Model-written text (captions, critic lines) is escaped; never mark it safe.
 #}
-{% set ib_sub %}Finished clips, made for you and waiting for one click. Approve queues a clip for the next open posting slot with the caption as you leave it.{% endset %}
-{{ ui.pagebar("Inbox", count=cards|length, sub=ib_sub) }}
+{% set ib_title = "Today's posts" %}
+{% set ib_sub %}{{ day_label }} · Approve the ones you want posted. They go out at your next open posting times.{% endset %}
+{{ ui.pagebar(ib_title, count=cards|length, sub=ib_sub) }}
 
 <style>
-  .ib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 22px; }
-  .ib-card { display: flex; flex-direction: column; gap: 10px; }
-  .ib-card video { width: 100%; max-height: 520px; background: #000; border-radius: 10px; }
-  .ib-card textarea { width: 100%; min-height: 96px; resize: vertical; field-sizing: content; max-height: 260px; }
-  .ib-why { font-size: 13px; }
-  .ib-warn { color: var(--danger); font-size: 13px; }
-  .ib-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .ib-reject { display: none; flex-direction: column; gap: 8px; }
-  .ib-reject.is-open { display: flex; }
+  .ib-feed { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+  .ib-card { display: flex; flex-direction: column; gap: 14px; padding: 18px; border-radius: 16px;
+    background: var(--panel); border: 1px solid var(--border); }
+  .ib-media { position: relative; border-radius: 12px; overflow: hidden; background: #000; }
+  .ib-media video { display: block; width: 100%; max-height: 70vh; background: #000; }
+  .ib-media-note { display: none; padding: 48px 20px; text-align: center; color: #ddd; font-size: 14px; }
+  .ib-media.is-missing video { display: none; }
+  .ib-media.is-missing .ib-media-note { display: block; }
+  .ib-title { font-size: 17px; font-weight: 650; color: var(--text); line-height: 1.35; }
+  .ib-source { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .ib-caption { white-space: pre-wrap; font-size: 15px; line-height: 1.55; color: var(--text); }
+  .ib-editor { display: none; flex-direction: column; gap: 6px; }
+  .ib-card.is-editing .ib-caption { display: none; }
+  .ib-card.is-editing .ib-editor { display: flex; }
+  .ib-editor textarea { width: 100%; min-height: 120px; resize: vertical; field-sizing: content; max-height: 360px;
+    font-size: 15px; line-height: 1.5; }
+  .ib-count { font-size: 12.5px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .ib-flag { font-size: 13.5px; padding: 9px 12px; border-radius: 10px; color: var(--text);
+    background: var(--warn-soft); border: 1px solid var(--warn-border); }
+  .ib-why { font-size: 13px; color: var(--muted); }
+  .ib-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .ib-actions .btn, .ib-editor-actions .btn { min-height: 44px; font-size: 15px; justify-content: center; }
+  .ib-editor-actions { display: none; grid-template-columns: 2fr 1fr; gap: 10px; }
+  .ib-card.is-editing .ib-actions { display: none; }
+  .ib-card.is-editing .ib-editor-actions { display: grid; }
+  .ib-done { display: none; flex-direction: column; gap: 10px; }
+  .ib-card.is-done > :not(.ib-done) { display: none; }
+  .ib-card.is-done .ib-done { display: flex; }
+  .ib-done-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 15px; }
+  .ib-done-line strong { font-weight: 650; }
+  .ib-reasons { display: none; flex-direction: column; gap: 8px; }
+  .ib-card.is-rejected .ib-reasons { display: flex; }
   .ib-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .ib-chip { cursor: pointer; }
-  .ib-chip input { margin-right: 4px; }
-  .ib-card.is-done { opacity: 0.45; pointer-events: none; }
-  .ib-count { font-variant-numeric: tabular-nums; }
+  .ib-chip { font-size: 13px; padding: 6px 11px; border-radius: 999px; border: 1px solid var(--border-strong);
+    background: transparent; color: var(--text); cursor: pointer; min-height: 0; }
+  .ib-chip[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .ib-reason-note { display: flex; gap: 8px; }
+  .ib-reason-note input { flex: 1; }
+  .ib-caught-up { max-width: 640px; margin: 40px auto; text-align: center; padding: 48px 24px;
+    border-radius: 16px; border: 1px dashed var(--border-strong); }
+  .ib-caught-up strong { display: block; font-size: 19px; margin-bottom: 6px; }
+  .ib-decided { max-width: 640px; margin: 36px auto 0; }
+  @media (max-width: 520px) {
+    .ib-card { padding: 14px; border-radius: 14px; }
+    .ib-actions { gap: 8px; }
+  }
 </style>
 
-<div class="canvas canvas-wide">
+<div class="canvas">
 {% if not cards %}
-  <div class="empty">
-    <strong>Nothing waiting</strong>
+  <div class="ib-caught-up">
+    <strong>You're all caught up</strong>
     {% if policy.enabled %}
-      New clips appear here as they're made — up to {{ policy.per_day }} a day.
+      New posts are prepared through the day — up to {{ policy.per_day }} a day — and appear here as they're ready.
+    {% elif admin %}
+      The inbox is switched off. Turn it on under Settings › Automation.
     {% else %}
-      The inbox is switched off. An admin turns it on under Settings › Automatic triage.
+      New posts will appear here as they're ready.
     {% endif %}
   </div>
 {% else %}
-<div class="ib-grid">
+<div class="ib-feed">
   {% for card in cards %}
   {% set it = card.item %}
-  <div class="card ib-card" id="ib-{{ it.id }}">
-    <video src="{{ card.src }}" controls playsinline preload="metadata"></video>
+  <article class="ib-card" id="ib-{{ it.id }}" data-id="{{ it.id }}">
+    <div class="ib-media">
+      <video src="{{ card.src }}" controls playsinline preload="metadata"
+             onerror="this.parentElement.classList.add('is-missing')"></video>
+      <div class="ib-media-note">This clip is still uploading. Check back in a few minutes.</div>
+    </div>
     <div>
-      <strong>{{ card.cut.clip_title or it.story or card.video_title }}</strong>
-      <div class="meta">{{ card.channel }}{% if card.video_title %} · from <a href="/video/{{ card.candidate_id }}">{{ card.video_title }}</a>{% endif %}</div>
+      <div class="ib-title">{{ card.cut.clip_title or it.story or card.video_title }}</div>
+      {% if admin %}
+      <div class="ib-source">{{ card.channel }}{% if card.video_title %} · from <a href="/video/{{ card.candidate_id }}">{{ card.video_title }}</a>{% endif %}</div>
+      {% endif %}
     </div>
-    {% if it.critic_line %}<div class="meta ib-why">{{ it.critic_line }}</div>{% endif %}
-    <label class="meta" for="cap-{{ it.id }}">Caption <span class="ib-count" id="cnt-{{ it.id }}">{{ it.caption|length }}</span>/500</label>
-    <textarea id="cap-{{ it.id }}" maxlength="500" oninput="document.getElementById('cnt-{{ it.id }}').textContent = this.value.length">{{ it.caption }}</textarea>
-    {% if it.caption_ok == false %}<div class="ib-warn">Caption check: {{ it.caption_note or "flagged" }} — edit before approving, or approve as is.</div>{% endif %}
+    {% if admin and it.critic_line %}<div class="ib-why">{{ it.critic_line }}</div>{% endif %}
+    {% if it.caption_ok == false %}
+    <div class="ib-flag">Worth a second look at the caption: {{ it.caption_note or "our check flagged it" }}.</div>
+    {% endif %}
+    <div class="ib-caption" id="cap-text-{{ it.id }}">{{ it.caption }}</div>
+    <div class="ib-editor">
+      <label class="meta" for="cap-{{ it.id }}">Caption</label>
+      <textarea id="cap-{{ it.id }}" maxlength="500">{{ it.caption }}</textarea>
+      <div class="ib-count"><span id="cnt-{{ it.id }}">{{ it.caption|length }}</span>/500</div>
+    </div>
     <div class="ib-actions">
-      <button class="btn approve" onclick="approveClip({{ it.id }}, this)">Approve</button>
-      <button class="btn" onclick="toggleReject({{ it.id }})">Reject…</button>
+      <button class="btn approve" type="button" data-act="approve">Approve</button>
+      <button class="btn" type="button" data-act="edit">Edit caption</button>
+      <button class="btn" type="button" data-act="reject">Reject</button>
     </div>
-    <div class="ib-reject" id="rej-{{ it.id }}">
-      <div class="meta">What's wrong? (optional — it teaches the house rules)</div>
-      <div class="ib-chips">
-        {% for slug, label in clip_note_tags() %}
-        <label class="badge ib-chip"><input type="checkbox" value="{{ slug }}">{{ label }}</label>
-        {% endfor %}
+    <div class="ib-editor-actions">
+      <button class="btn approve" type="button" data-act="save">Save &amp; approve</button>
+      <button class="btn" type="button" data-act="cancel">Cancel</button>
+    </div>
+    <div class="ib-done">
+      <div class="ib-done-line"><span class="ib-done-msg"></span>
+        <button class="btn sm ib-undo" type="button" data-act="undo" hidden>Undo</button></div>
+      <div class="ib-reasons">
+        <div class="meta">What was wrong? Optional — it teaches the next ones.</div>
+        <div class="ib-chips">
+          {% for slug, label in clip_note_tags() %}
+          <button class="ib-chip" type="button" aria-pressed="false" data-tag="{{ slug }}">{{ label }}</button>
+          {% endfor %}
+        </div>
+        <div class="ib-reason-note">
+          <input type="text" placeholder="Anything else, in your own words" aria-label="Anything else">
+          <button class="btn sm" type="button" data-act="send-note">Send</button>
+        </div>
       </div>
-      <input type="text" placeholder="Anything else, in your own words" id="note-{{ it.id }}">
-      <div class="ib-actions"><button class="btn danger sm" onclick="rejectClip({{ it.id }}, this)">Reject this clip</button></div>
     </div>
-  </div>
+  </article>
   {% endfor %}
+</div>
+{% endif %}
+
+{% if admin and decided %}
+<div class="ib-decided">
+  <details class="set-more">
+    <summary>Recently decided ({{ decided|length }}) — for admins</summary>
+    <div class="set-more-body">
+      <table class="set-table">
+        <thead><tr><th>Clip</th><th>Decision</th><th>Why</th><th>When</th></tr></thead>
+        <tbody>
+        {% for d in decided %}
+          <tr>
+            <td>{% if d.candidate_id %}<a href="/video/{{ d.candidate_id }}">{{ d.title or "Untitled" }}</a>{% else %}{{ d.title or "Untitled" }}{% endif %}</td>
+            <td>{{ d.item.state|capitalize }}</td>
+            <td>{{ d.reasons }}{% if d.reasons and d.item.reject_note %} — {% endif %}{{ d.item.reject_note }}{% if d.item.state == 'failed' %}{{ d.item.error }}{% endif %}</td>
+            <td class="meta">{{ d.item.decided_at.strftime("%b %-d, %-I:%M %p") if d.item.decided_at else "" }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
 </div>
 {% endif %}
 </div>
 
 <script>
-async function postForm(url, fields) {
-  const body = new URLSearchParams(fields);
-  const r = await fetch(url, { method: 'POST', body, headers: { 'Accept': 'application/json' } });
-  let out = {};
-  try { out = await r.json(); } catch (e) { /* not JSON */ }
-  if (!r.ok) throw new Error(out.error || ('HTTP ' + r.status));
-  return out;
-}
+(function () {
+  const UNDO_SECONDS = 6;
+  const pending = new Map();   // id -> {timer, card}: rejections still inside their undo window
 
-function settle(id, label) {
-  const card = document.getElementById('ib-' + id);
-  if (!card) return;
-  card.classList.add('is-done');
-  const note = document.createElement('div');
-  note.className = 'meta';
-  note.textContent = label;
-  card.appendChild(note);
-}
-
-async function approveClip(id, btn) {
-  const caption = document.getElementById('cap-' + id).value.trim();
-  if (!caption) { alert('The caption is empty'); return; }
-  btn.disabled = true;
-  try {
-    const out = await postForm(`/inbox/${id}/approve`, { caption });
-    settle(id, out.msg || 'Approved');
-  } catch (e) {
-    btn.disabled = false;
-    alert('Could not approve: ' + e.message);
+  function post(url, fields, keepalive) {
+    const body = new URLSearchParams(fields);
+    return fetch(url, { method: 'POST', body, keepalive: !!keepalive,
+                        headers: { 'Accept': 'application/json' } })
+      .then(async (r) => {
+        let out = {};
+        try { out = await r.json(); } catch (e) { /* not JSON */ }
+        if (!r.ok) throw new Error(out.error || ('HTTP ' + r.status));
+        return out;
+      });
   }
-}
 
-function toggleReject(id) {
-  document.getElementById('rej-' + id).classList.toggle('is-open');
-}
-
-async function rejectClip(id, btn) {
-  const box = document.getElementById('rej-' + id);
-  const tags = Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(i => i.value).join(',');
-  const note = document.getElementById('note-' + id).value;
-  btn.disabled = true;
-  try {
-    const out = await postForm(`/inbox/${id}/reject`, { tags, note });
-    settle(id, out.msg || 'Rejected');
-  } catch (e) {
-    btn.disabled = false;
-    alert('Could not reject: ' + e.message);
+  function done(card, message, opts) {
+    opts = opts || {};
+    card.classList.add('is-done');
+    card.classList.toggle('is-rejected', !!opts.rejected);
+    const msg = card.querySelector('.ib-done-msg');
+    msg.textContent = '';
+    const strong = document.createElement('strong');
+    strong.textContent = message;
+    msg.appendChild(strong);
+    card.querySelector('.ib-undo').hidden = !opts.undo;
+    const video = card.querySelector('video');
+    if (video) video.pause();
   }
-}
+
+  function undone(card) {
+    card.classList.remove('is-done', 'is-rejected');
+  }
+
+  function busy(card, on) {
+    card.querySelectorAll('.ib-actions .btn, .ib-editor-actions .btn').forEach((b) => { b.disabled = on; });
+  }
+
+  async function approve(card, caption) {
+    const id = card.dataset.id;
+    caption = (caption || '').trim();
+    if (!caption) { alert('The caption is empty'); return; }
+    busy(card, true);
+    try {
+      await post(`/inbox/${id}/approve`, { caption });
+      document.getElementById('cap-text-' + id).textContent = caption;
+      done(card, 'Approved — it goes out at your next open posting time.');
+    } catch (e) {
+      alert('Could not approve: ' + e.message);
+    } finally {
+      busy(card, false);
+    }
+  }
+
+  function chosenTags(card) {
+    return Array.from(card.querySelectorAll('.ib-chip[aria-pressed="true"]')).map((c) => c.dataset.tag);
+  }
+
+  function sendReject(id, keepalive) {
+    const p = pending.get(id);
+    if (!p) return Promise.resolve();
+    pending.delete(id);
+    clearTimeout(p.timer);
+    const tags = chosenTags(p.card);
+    p.card.dataset.sentTags = tags.join(',');
+    p.card.dataset.rejected = '1';
+    p.card.querySelector('.ib-undo').hidden = true;
+    return post(`/inbox/${id}/reject`, { tags: tags.join(',') }, keepalive)
+      .catch((e) => { undone(p.card); alert('Could not reject: ' + e.message); });
+  }
+
+  function reject(card) {
+    const id = card.dataset.id;
+    done(card, 'Rejected', { rejected: true, undo: true });
+    pending.set(id, { card, timer: setTimeout(() => sendReject(id), UNDO_SECONDS * 1000) });
+  }
+
+  // Leaving the page doesn't cancel a rejection already made.
+  window.addEventListener('pagehide', () => {
+    Array.from(pending.keys()).forEach((id) => sendReject(id, true));
+  });
+
+  function sendReasons(card, extraNote) {
+    const id = card.dataset.id;
+    const sent = (card.dataset.sentTags || '').split(',').filter(Boolean);
+    const fresh = chosenTags(card).filter((t) => !sent.includes(t));
+    if (!fresh.length && !extraNote) return;
+    card.dataset.sentTags = sent.concat(fresh).join(',');
+    post(`/inbox/${id}/reasons`, { tags: fresh.join(','), note: extraNote || '' })
+      .catch((e) => alert('Could not save that: ' + e.message));
+  }
+
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-act], .ib-chip');
+    const card = btn && btn.closest('.ib-card');
+    if (!card) return;
+    const id = card.dataset.id;
+    if (btn.classList.contains('ib-chip')) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+      // Inside the undo window the chips ride along with the rejection.
+      if (!pending.has(id) && card.dataset.rejected) sendReasons(card, '');
+      return;
+    }
+    const act = btn.dataset.act;
+    if (act === 'approve') approve(card, document.getElementById('cap-' + id).value);
+    else if (act === 'edit') {
+      card.classList.add('is-editing');
+      const ta = document.getElementById('cap-' + id);
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    } else if (act === 'cancel') {
+      document.getElementById('cap-' + id).value = document.getElementById('cap-text-' + id).textContent;
+      card.classList.remove('is-editing');
+    } else if (act === 'save') {
+      card.classList.remove('is-editing');
+      approve(card, document.getElementById('cap-' + id).value);
+    } else if (act === 'reject') reject(card);
+    else if (act === 'undo') {
+      const p = pending.get(id);
+      if (p) { clearTimeout(p.timer); pending.delete(id); }
+      card.querySelectorAll('.ib-chip').forEach((c) => c.setAttribute('aria-pressed', 'false'));
+      undone(card);
+    } else if (act === 'send-note') {
+      const input = card.querySelector('.ib-reason-note input');
+      const note = input.value.trim();
+      if (pending.has(id)) sendReject(id).then(() => sendReasons(card, note));
+      else sendReasons(card, note);
+      input.value = '';
+      btn.textContent = 'Sent';
+    }
+  });
+
+  document.addEventListener('input', (ev) => {
+    const ta = ev.target.closest('.ib-editor textarea');
+    if (!ta) return;
+    const id = ta.closest('.ib-card').dataset.id;
+    document.getElementById('cnt-' + id).textContent = ta.value.length;
+  });
+})();
 </script>
 {% endblock %}

@@ -247,7 +247,7 @@ class GateTests(AuthTestBase):
         cookie = r.headers["set-cookie"].lower()
         self.assertIn("httponly", cookie)
         self.assertIn("samesite=lax", cookie)
-        self.assertEqual(self.client.get("/no-such-page").status_code, 404)  # past the gate
+        self.assertEqual(self.client.get("/inbox/no-such-page").status_code, 404)  # past the gate
 
         r = self.client.post("/logout")
         self.assertEqual(r.headers["location"], "/login?msg=signed_out")
@@ -259,7 +259,7 @@ class GateTests(AuthTestBase):
         session = auth.read_cookie(self.client.cookies.get(auth.COOKIE_NAME))
         self.fake.expire(session.access_token)
         auth._cache.clear()
-        r = self.client.get("/no-such-page")
+        r = self.client.get("/inbox/no-such-page")
         self.assertEqual(r.status_code, 404)
         self.assertIn(auth.COOKIE_NAME, r.headers.get("set-cookie", ""))
 
@@ -304,6 +304,90 @@ class GateTests(AuthTestBase):
                                                         "confirm": "a brand new one"})
         self.assertTrue(r.headers["location"].startswith("/?msg="))
         self.assertEqual(self.fake.passwords["me@example.org"], "a brand new one")
+
+    def use_db(self):
+        """A throwaway database for the pages that read one (the inbox, brand)."""
+        import contextlib
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from app.models import Base
+        from app.web import inbox as inbox_page
+
+        engine = create_engine("sqlite://", future=True, poolclass=StaticPool,
+                               connect_args={"check_same_thread": False})
+        Base.metadata.create_all(engine)
+        self.addCleanup(engine.dispose)
+        Session = sessionmaker(engine, future=True, expire_on_commit=False)
+
+        @contextlib.contextmanager
+        def scope(read_only: bool = False):
+            session = Session()
+            try:
+                yield session
+                if not read_only:
+                    session.commit()
+            finally:
+                session.close()
+
+        for target in (self.main, inbox_page):
+            patcher = mock.patch.object(target, "session_scope", scope)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch("app.db.session_scope", scope)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_customers_get_the_streamlined_app(self):
+        self.use_db()
+        self.sign_in()   # a "member": a customer's login
+        html = {"accept": "text/html"}
+        r = self.client.get("/", headers=html)
+        self.assertEqual((r.status_code, r.headers["location"]), (303, "/inbox"))
+        self.assertEqual(self.client.get("/?msg=hi", headers=html).headers["location"], "/inbox?msg=hi")
+        for admin_page in ("/library", "/post/1", "/channels", "/auto-triage", "/video/1"):
+            r = self.client.get(admin_page, headers=html)
+            self.assertEqual((r.status_code, r.headers.get("location")), (303, "/inbox"), admin_page)
+        for write in ("/monitor/run", "/inbox/settings", "/schedule", "/schedule/cancel"):
+            self.assertEqual(self.client.post(write).status_code, 403, write)
+        page = self.client.get("/inbox", headers=html)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Today&#39;s posts", page.text)
+        self.assertIn('href="/calendar"', page.text)
+        for hidden in ('href="/library"', "See the customer view", "Recently decided"):
+            self.assertNotIn(hidden, page.text)
+        brand = self.client.get("/brand", headers=html)
+        self.assertEqual(brand.status_code, 200)
+        self.assertNotIn("Behind the scenes", brand.text)
+        # Only a real admin can switch to the customer view; nothing to switch to here.
+        r = self.client.get("/view-as?mode=customer&next=/inbox")
+        self.assertNotIn("view_as=customer", r.headers.get("set-cookie", ""))
+
+    def test_admins_see_everything_and_can_look_as_a_customer(self):
+        self.use_db()
+        self.fake.add("boss@example.org", "correct horse battery", workspaces=("climate",), role="admin")
+        self.sign_in("boss@example.org")
+        html = {"accept": "text/html"}
+        page = self.client.get("/inbox", headers=html)
+        self.assertIn('href="/library"', page.text)
+        self.assertIn("See the customer view", page.text)
+        self.assertNotEqual(self.client.get("/library", headers=html).headers.get("location"), "/inbox")
+        self.assertIn("Behind the scenes", self.client.get("/brand", headers=html).text)
+
+        r = self.client.get("/view-as?mode=customer&next=/inbox")
+        self.assertEqual(r.headers["location"], "/inbox")
+        self.assertIn("view_as=customer", r.headers["set-cookie"])
+        self.assertEqual(self.client.get("/library", headers=html).headers.get("location"), "/inbox")
+        page = self.client.get("/inbox", headers=html)
+        self.assertIn("Back to the admin view", page.text)
+        self.assertNotIn('href="/library"', page.text)
+
+        r = self.client.get("/view-as?mode=admin&next=/library")
+        self.assertEqual(r.headers["location"], "/library")
+        self.client.cookies.delete("view_as")
+        self.assertNotEqual(self.client.get("/library", headers=html).headers.get("location"), "/inbox")
 
     def test_bad_email_link(self):
         r = self.client.post("/auth/session", data={"access_token": "bogus", "refresh_token": ""})

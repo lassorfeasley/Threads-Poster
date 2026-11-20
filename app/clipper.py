@@ -2,10 +2,12 @@
 video and join them into a single social-ready mp4 using ffmpeg.
 
 Each segment is re-encoded (frame-accurate cuts, uniform params), then joined
-with the concat demuxer. Output goes to data/clips/.
+with the concat demuxer, and the result's audio is levelled to one loudness
+(``level_audio``). Output goes to data/clips/.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -29,6 +31,16 @@ ENCODE_ARGS = [
 
 class ClipExportError(RuntimeError):
     pass
+
+
+# Every exported clip is levelled to one loudness, so a quiet interview and a
+# loud protest play at the same volume in the feed. -14 LUFS is where the big
+# feeds normalise to; -1.5 dBTP keeps peaks clear of clipping after AAC.
+TARGET_LUFS = -14.0
+TARGET_PEAK_DBTP = -1.5
+TARGET_LRA = 11.0
+# Quieter than this is silence (or room tone): leave it alone, don't pump it up.
+_SILENCE_LUFS = -50.0
 
 
 def _run_ffmpeg(args: list[str]) -> None:
@@ -85,6 +97,58 @@ def compress_to_fit(source_path: str | Path, max_bytes: int, *, audio_kbps: int 
     return dest
 
 
+def _loudness(path: Path) -> dict | None:
+    """EBU R128 measurements of ``path``'s audio (loudnorm's first pass), or
+    None when it has no audio to measure."""
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-map", "0:a:0?", "-vn",
+         "-af", f"loudnorm=I={TARGET_LUFS}:TP={TARGET_PEAK_DBTP}:LRA={TARGET_LRA}:print_format=json",
+         "-f", "null", "-"],
+        capture_output=True, text=True, timeout=600)
+    text = proc.stderr
+    start, end = text.rfind("{"), text.rfind("}")
+    if proc.returncode != 0 or start < 0 or end < start:
+        return None
+    try:
+        stats = json.loads(text[start:end + 1])
+        float(stats["input_i"])
+    except (ValueError, KeyError):
+        return None
+    return stats
+
+
+def level_audio(path: str | Path) -> bool:
+    """Bring ``path``'s audio to TARGET_LUFS in place (two-pass loudnorm: one
+    measured, even gain, so the dynamics are kept). The video is copied, not
+    re-encoded. Returns whether it changed anything. Never raises: a clip
+    whose audio can't be levelled keeps the audio it had."""
+    path = Path(path)
+    try:
+        stats = _loudness(path)
+        if stats is None:
+            return False
+        measured = float(stats["input_i"])
+        if measured < _SILENCE_LUFS or abs(measured - TARGET_LUFS) < 0.5:
+            return False
+        tmp = path.with_name(f".{path.stem}.level{path.suffix}")
+        _run_ffmpeg([
+            "-i", str(path), "-map", "0:v:0?", "-map", "0:a:0",
+            "-c:v", "copy",
+            "-af", (f"loudnorm=I={TARGET_LUFS}:TP={TARGET_PEAK_DBTP}:LRA={TARGET_LRA}"
+                    f":measured_I={stats['input_i']}:measured_TP={stats['input_tp']}"
+                    f":measured_LRA={stats['input_lra']}:measured_thresh={stats['input_thresh']}"
+                    f":offset={stats['target_offset']}:linear=true"),
+            "-ar", "48000", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+            str(tmp),
+        ])
+        tmp.replace(path)
+        log.info("Levelled %s from %.1f to %.0f LUFS", path.name, measured, TARGET_LUFS)
+        return True
+    except Exception as exc:
+        log.warning("Couldn't level the audio of %s (%s); keeping it as it was", path.name, exc)
+        return False
+
+
 def export_supercut(source_path: str | Path, segments: list[dict], output_name: str) -> Path:
     """Cut `segments` ([{start, end}, ...] seconds, in order) from source and
     export one joined mp4. Returns the output path."""
@@ -106,6 +170,7 @@ def export_supercut(source_path: str | Path, segments: list[dict], output_name: 
     if len(cleaned) == 1:
         start, end = cleaned[0]
         _run_ffmpeg(["-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(source), *ENCODE_ARGS, str(output)])
+        level_audio(output)
         log.info("Exported single-segment clip %s", output.name)
         return output
 
@@ -120,6 +185,7 @@ def export_supercut(source_path: str | Path, segments: list[dict], output_name: 
         concat_list.write_text("".join(f"file '{p}'\n" for p in part_paths))
         _run_ffmpeg(["-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(output)])
 
+    level_audio(output)   # the whole clip at once, so its segments sit at one level
     log.info("Exported %d-segment supercut %s", len(cleaned), output.name)
     return output
 

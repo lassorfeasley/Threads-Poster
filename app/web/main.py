@@ -153,7 +153,7 @@ from ..vision import (
 )
 from ..voice import voice_context
 from ..youtube import YouTubeAPIError, parse_video_url
-from . import auth, pagecache
+from . import access, auth, pagecache
 
 log = logging.getLogger("web")
 
@@ -390,6 +390,7 @@ def _clip_note_tags() -> list[list[str]]:
 
 
 templates.env.globals["clip_note_tags"] = _clip_note_tags
+templates.env.globals["is_admin"] = access.is_admin
 
 init_db()
 with session_scope() as _s:
@@ -611,9 +612,32 @@ async def _restore_archived_clips(request: Request, call_next):
 
 # Registered last, so it runs first: nothing above (cache invalidation, clip
 # restores from storage) happens for a request that isn't signed in.
+def _role_gate(request: Request, *, real: bool):
+    """Settle whose app this request gets (access.py) and keep a customer to
+    theirs. Returns a response to send instead, or None to carry on."""
+    request.state.real_admin = real
+    request.state.is_admin = access.sees_admin(
+        real=real, view=request.cookies.get(access.VIEW_COOKIE))
+    if request.state.is_admin:
+        return None
+    path = request.url.path
+    if path == "/":  # keeps ?msg= from a password change and the like
+        query = request.url.query
+        return RedirectResponse(access.CUSTOMER_HOME + (f"?{query}" if query else ""),
+                                status_code=303)
+    if access.customer_may(path, request.method):
+        return None
+    if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(access.CUSTOMER_HOME, status_code=303)
+    return JSONResponse({"error": "not available on this account"}, status_code=403)
+
+
 @app.middleware("http")
 async def _require_login(request: Request, call_next):
-    if not auth.enabled() or auth.is_public(request.url.path):
+    if not auth.enabled():
+        blocked = _role_gate(request, real=True)
+        return blocked or await call_next(request)
+    if auth.is_public(request.url.path):
         return await call_next(request)
     try:
         user, renewed = await run_in_threadpool(
@@ -628,7 +652,8 @@ async def _require_login(request: Request, call_next):
             return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=303)
         return JSONResponse({"error": "not signed in"}, status_code=401)
     request.state.user = user.email
-    response = await call_next(request)
+    blocked = _role_gate(request, real=access.real_admin(sign_in_on=True, role=user.role))
+    response = blocked or await call_next(request)
     if renewed is not None:
         _set_session_cookie(response, request, renewed)
     return response
@@ -661,6 +686,21 @@ def _public_origin(request: Request) -> str:
 
 def _auth_page(request: Request, name: str, **ctx):
     return templates.TemplateResponse(request, name, ctx)
+
+
+@app.get("/view-as")
+def view_as(request: Request, mode: str = "", next: str = "/"):
+    """An admin looks through a customer's eyes (mode=customer) or comes back
+    (mode=admin). Only a real admin can switch to the customer view; anyone
+    may clear it."""
+    target = auth.safe_next(next)
+    response = RedirectResponse(target, status_code=303)
+    if mode == "customer" and getattr(request.state, "real_admin", False):
+        response.set_cookie(access.VIEW_COOKIE, "customer", max_age=60 * 60 * 24 * 30,
+                            httponly=True, samesite="lax", secure=_is_https(request), path="/")
+    else:
+        response.delete_cookie(access.VIEW_COOKIE, path="/")
+    return response
 
 
 @app.get("/healthz")
@@ -1151,6 +1191,17 @@ def _inbox_draft_item(item_id: int) -> None:
             item.ready_at = utcnow()
             item.error = ""
         log.info("Inbox clip %s ready (cut %s)", item_id, cut_id)
+        # 4. The copy as it will post (label tab, closing card), so the inbox
+        #    opens it at once; publishing reuses the same cached file.
+        try:
+            from .inbox import finished_clip
+
+            with session_scope(read_only=True) as session:
+                cut = session.get(Cut, cut_id)
+                plain = (cut.subtitled_clip_path if use_subs else cut.trimmed_clip_path) or ""
+            finished_clip(plain)
+        except Exception:
+            log.exception("Couldn't pre-render the finished copy of inbox clip %s", item_id)
     except (_InboxSkip, CaptionDraftError) as exc:
         _inbox_fail(item_id, str(exc), retry=False)
     except Exception as exc:
@@ -7370,20 +7421,24 @@ def first_reply_page(request: Request, msg: str = ""):
     cfg = load_first_reply()
     return templates.TemplateResponse(
         request, "first_reply.html",
-        {**cfg, "placeholder": WATCH_URL_PLACEHOLDER,
-         "msg": msg, "active": "engagement"},
+        {**cfg, "placeholder": WATCH_URL_PLACEHOLDER, "admin": access.is_admin(request),
+         "msg": msg, "active": "first_reply"},
     )
 
 
 @app.post("/engagement/first-reply")
-def first_reply_save(enabled: str = Form(""), watch_text: str = Form(""),
+def first_reply_save(request: Request, enabled: str = Form(""), watch_text: str = Form(""),
                      fallback_text: str = Form("")):
+    # The watch-page reply (Renewables.org's style) is admin-only: a customer's
+    # form doesn't carry it, so their save keeps it as it was.
+    if not access.is_admin(request):
+        watch_text = load_first_reply().get("watch_text", "")
     watch_text = (watch_text or "").strip()
     fallback_text = (fallback_text or "").strip()
     on = str(enabled).lower() in ("1", "true", "on", "yes")
     back = "/engagement/first-reply"
-    if on and not (watch_text and fallback_text):
-        return _flash(back, "Fill in both replies before switching first replies on")
+    if on and not fallback_text:
+        return _flash(back, "Write the reply before switching first replies on")
     if watch_text and WATCH_URL_PLACEHOLDER not in watch_text:
         return _flash(back, f"The video page reply needs {WATCH_URL_PLACEHOLDER} where the link goes")
     # The link renders as renewables.org/watch/<slug>, up to ~70 characters.
