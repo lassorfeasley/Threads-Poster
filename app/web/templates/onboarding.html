@@ -53,12 +53,14 @@
     <div class="ob-illo" aria-hidden="true">
       <div class="ob-phone ob-phone-lg">
         <div class="ob-scene"><span class="ob-scene-sun"></span><span class="ob-scene-hill"></span><span class="ob-scene-person"></span></div>
+        <span class="ob-phone-tab" id="ob-tab-preview">{{ values.tab_text or values.cta_url or 'yourwebsite.com' }}</span>
         <div class="ob-phone-sub" id="ob-sub-preview"><span class="ob-w">Every</span> <span class="ob-w">move</span> <span class="ob-w">has</span> <span class="ob-w">a</span> <span class="ob-w">why</span></div>
       </div>
       <ul class="ob-callouts">
         <li><span class="ob-callout-dot">1</span><div><strong>Subtitles</strong> appear in your font as people speak, a few words at a time.</div></li>
         <li><span class="ob-callout-dot">2</span><div><strong>The word being said</strong> lights up in your highlight color, like karaoke.</div></li>
         <li><span class="ob-callout-dot">3</span><div>Every clip gets them, so it works with the sound off.</div></li>
+        <li><span class="ob-callout-dot">4</span><div><strong>The corner tab</strong> hangs from the top left: your website, handle or a few words.</div></li>
       </ul>
     </div>
     {% elif spec.illustration == 'endcard' %}
@@ -142,6 +144,13 @@
           <input type="color" class="ob-own-color" value="{{ cur }}"> <span>Your own</span>
         </label>
       </div>
+      {% elif f.kind == 'tab' %}
+      <div class="ob-tab-row">
+        <input class="ob-input" type="text" id="f-{{ f.name }}" name="{{ f.name }}" maxlength="40"
+               value="{{ values[f.name] }}" placeholder="{{ values.cta_url or f.placeholder }}">
+        <label class="ob-tab-on"><input type="checkbox" name="tab_on" value="1"{% if values.tab_on %} checked{% endif %}> Show it</label>
+      </div>
+      <p class="ob-field-help">The little label in the top-left corner of every clip. Your website, your handle or a few words.</p>
       {% elif f.kind == 'timezone' %}
       <select class="ob-input ob-select" name="tz" id="f-tz" data-current="{{ values.tz }}" required></select>
       {% elif f.kind == 'rhythm' %}
@@ -540,6 +549,13 @@
     });
     var color = (form.elements['color'] || {}).value;
     var font = (form.querySelector('input[name="font"]:checked') || {}).value;
+    var tabPrev = document.getElementById('ob-tab-preview');
+    if (tabPrev) {
+      var tabIn = form.elements['tab_text'], onIn = form.elements['tab_on'];
+      tabPrev.textContent = (tabIn && tabIn.value.trim()) || (tabIn && tabIn.placeholder.replace(/^e\.g\. /, '')) || 'yourwebsite.com';
+      tabPrev.style.background = color || '#2F6FED'; tabPrev.style.color = contrast(color || '#2F6FED');
+      tabPrev.style.opacity = onIn && onIn.checked ? 1 : 0.2;
+    }
     var sub = document.getElementById('ob-sub-preview');
     if (sub) {
       if (font) sub.style.fontFamily = "'" + font + "', sans-serif";

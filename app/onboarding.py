@@ -95,7 +95,8 @@ STEPS: list[dict[str, Any]] = [
             "lights up in your color.",
      "illustration": "subtitles",
      "fields": [_f("font", "fonts", "Font"),
-                _f("color", "colors", "Highlight color")]},
+                _f("color", "colors", "Highlight color"),
+                _f("tab_text", "tab", "Corner tab", "e.g. yourwebsite.com or @yourhandle")]},
     {"key": "endcard", "title": "End card",
      "question": "Write your end card",
      "sub": "Every clip ends on a short card with your message and your website, "
@@ -146,7 +147,7 @@ DERIVED_FIELDS = ("topic", "positioning", "source_kind", "relevance_rules", "fal
 # becomes part of the positioning and the off-topic notes.
 STATE_ONLY_FIELDS = ("off_limits",)
 # Answers that save to their own settings rather than the brand.
-LOOK_FIELDS = ("color", "outro", "end_color")
+LOOK_FIELDS = ("color", "outro", "end_color", "tab_text")
 BRAND_FIELDS = tuple(f for f in ASKED_FIELDS
                      if f != "keywords" and f not in STATE_ONLY_FIELDS + LOOK_FIELDS) + DERIVED_FIELDS
 ALL_FIELDS = ASKED_FIELDS
@@ -184,6 +185,7 @@ SAMPLE_ANSWERS = {
     "throughline": "Strength is something you learn, not something you're born with.",
     "color": "#7B5CD6",
     "end_color": "#3D2B78",
+    "tab_text": "coreandflow.example",
     "outro": "Learn the why behind every move\nClasses for every body\nTry a class free",
     "caption_brief": "We teach the why behind every move: name the muscle that's working, "
                      "the cue that makes it click, and one way to try it at home.",
@@ -282,7 +284,8 @@ def saved_values() -> dict[str, str]:
 def _settings_values() -> dict[str, str]:
     """What the later screens show: the account's saved look, time zone and
     posting rhythm. Never raises; an unreadable setting just shows blank."""
-    out = {"font": "", "color": "", "outro": "", "end_color": "", "tz": "", "rhythm": ""}
+    out = {"font": "", "color": "", "outro": "", "end_color": "", "tab_text": "", "tab_on": "1",
+           "tz": "", "rhythm": ""}
     try:
         from . import caption_look, outro_card
 
@@ -291,6 +294,10 @@ def _settings_values() -> dict[str, str]:
         card = outro_card.load() or {}
         out["outro"] = "\n".join(l for l in card.get("lines") or [] if l)
         out["end_color"] = card.get("color") or ""
+        if card:
+            tab = outro_card.tab_settings(card)
+            out["tab_text"] = tab["text"] if tab["custom_text"] else ""
+            out["tab_on"] = "1" if tab["on"] else ""
     except Exception:
         log.exception("Couldn't read the look")
     try:
@@ -313,9 +320,13 @@ def _settings_values() -> dict[str, str]:
 def _save_settings_step(key: str, values: dict[str, str]) -> None:
     """The screens that save to their own settings rather than the brand."""
     if key == "subtitles":
-        from . import caption_look
+        from . import caption_look, outro_card
 
-        caption_look.save(font=values.get("font", "").strip(), box=values.get("color", "").strip())
+        color = values.get("color", "").strip()
+        caption_look.save(font=values.get("font", "").strip(), box=color)
+        outro_card.save_tab(on=values.get("tab_on") == "1",
+                            text=values.get("tab_text", "").strip() or load_brand().get("cta_url", ""),
+                            color=color or outro_card.DEFAULT_COLOR)
     elif key == "endcard":
         from . import caption_look, outro_card
 
@@ -440,6 +451,8 @@ never invent it.
 - color: the brand's main color as a hex code like #1A4A7D, from its website or \
 logo: a real brand color, not a neutral gray. Highlights the word being said in \
 subtitles.
+- tab_text: the small label in the top-left corner of every clip: the website, \
+a handle, or two to five words (under 40 characters).
 - end_color: the end card's background color as a hex code; usually the same \
 brand color, or a darker partner to it.
 - outro: the end card on every clip: up to three short lines (one per line, each \

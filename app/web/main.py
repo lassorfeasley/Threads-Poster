@@ -7580,7 +7580,7 @@ def first_reply_redirect():
 
 @app.get("/subtitle-style", response_class=HTMLResponse)
 def subtitle_style_page(request: Request, msg: str = ""):
-    from .. import caption_look
+    from .. import caption_look, outro_card
 
     settings = load_settings()
     look = caption_look.load()
@@ -7593,7 +7593,20 @@ def subtitle_style_page(request: Request, msg: str = ""):
          "font": font, "box": box, "font_is_preset": font in caption_look.FONTS,
          "box_is_preset": box in {c for c, _ in caption_look.COLORS},
          "uppercase": bool(settings.get("subtitles.uppercase", False)),
+         "tab": outro_card.tab_settings(),
          "msg": msg, "active": "subtitle_style"})
+
+
+@app.post("/subtitle-style/tab")
+def subtitle_tab_save(on: str = Form(""), text: str = Form(""), color: str = Form("")):
+    """The label tab in the top-left corner of every clip (app/outro_card.py)."""
+    from .. import outro_card
+
+    try:
+        outro_card.save_tab(on=on in ("1", "on", "true"), text=text, color=color)
+    except ValueError as exc:
+        return _flash("/subtitle-style", str(exc))
+    return _flash("/subtitle-style", "Corner tab saved. Clips made from now on show it.")
 
 
 @app.post("/subtitle-style")

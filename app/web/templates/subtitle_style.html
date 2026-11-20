@@ -126,6 +126,77 @@
     </div>
   </section>
 </form>
+
+{# ---- The corner tab: a label hanging from the top-left edge of every clip ---- #}
+<form method="post" action="/subtitle-style/tab" data-savebar id="tab-form">
+  <section class="set-section">
+    <div class="set-section-head">
+      <div>
+        <h2 class="set-section-title">Corner tab</h2>
+        <p class="set-section-desc">A small label hanging from the top-left edge of every clip until the end card. Your website, your handle or a few words.</p>
+      </div>
+      <div class="set-section-aside">
+        <label class="set-switch"><input type="checkbox" name="on" value="1" id="tab-on"{% if tab.on %} checked{% endif %}> <span>Show it</span></label>
+      </div>
+    </div>
+    <div class="set-section-body">
+      <div class="tab-preview" aria-hidden="true">
+        <div class="tab-frame"><span class="tab-label" id="tab-label">{{ tab.text or 'yourwebsite.com' }}</span></div>
+      </div>
+      <div class="set-field">
+        <label class="set-label" for="tab-text">Words on the tab</label>
+        <p class="set-help">Up to 40 characters. Leave it as your website, or write anything: “@yourhandle”, “Watch the full talk”.</p>
+        <input type="text" id="tab-text" name="text" maxlength="40" value="{{ tab.text }}" placeholder="yourwebsite.com">
+      </div>
+      <div class="set-field">
+        <label class="set-label">Tab color</label>
+        <div class="ss-swatches" role="radiogroup" aria-label="Tab color">
+          {% for hex, name in colors %}
+          <label class="ss-swatch">
+            <input type="radio" name="color" value="{{ hex }}" {% if tab.color|upper == hex|upper %}checked{% endif %}>
+            <span class="ss-chip" style="background: {{ hex }};"></span>
+            <span>{{ name }}</span>
+          </label>
+          {% endfor %}
+          {% if tab.color|upper not in colors|map('first')|map('upper')|list %}
+          <label class="ss-swatch">
+            <input type="radio" name="color" value="{{ tab.color }}" checked>
+            <span class="ss-chip" style="background: {{ tab.color }};"></span>
+            <span>Current</span>
+          </label>
+          {% endif %}
+        </div>
+      </div>
+      <p class="set-help">The tab is shown while the end card is switched on (Settings › Outro).</p>
+    </div>
+    <div class="set-section-foot set-savebar">
+      <span class="set-savebar-note">Applies to clips made from now on.</span>
+      <button class="btn-primary" type="submit">Save tab</button>
+    </div>
+  </section>
+</form>
+<style>
+  .tab-preview { margin-bottom: 16px; }
+  .tab-frame { position: relative; width: 320px; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden;
+    background: linear-gradient(180deg, #f6b67a, #6d5a7a 70%, #2b2f3d); }
+  .tab-label { position: absolute; top: 0; left: 7%; padding: 4px 10px 5px; border-radius: 0 0 7px 7px;
+    font-weight: 700; font-size: 12px; white-space: nowrap; max-width: 80%; overflow: hidden; text-overflow: ellipsis; }
+  .set-switch { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; cursor: pointer; }
+</style>
+<script>
+(function () {
+  var form = document.getElementById('tab-form'), label = document.getElementById('tab-label'),
+      text = document.getElementById('tab-text'), on = document.getElementById('tab-on');
+  function ink(hex) { var n = parseInt(hex.slice(1), 16); return (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) > 160 ? '#111' : '#fff'; }
+  function draw() {
+    var picked = (form.querySelector('input[name="color"]:checked') || {}).value || '#1A4A7D';
+    label.textContent = text.value.trim() || 'yourwebsite.com';
+    label.style.background = picked; label.style.color = ink(picked);
+    label.style.opacity = on.checked ? 1 : 0.25;
+  }
+  form.addEventListener('input', draw); form.addEventListener('change', draw); draw();
+})();
+</script>
 </div>
 
 <script>

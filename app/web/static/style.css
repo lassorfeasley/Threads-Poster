@@ -7281,3 +7281,11 @@ body.ob .ob-src-row { flex-direction: row; justify-content: space-between; align
 .fr-upload:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .fr-upload span:nth-child(2) { flex: 1; }
 .fr-upload strong { color: var(--text); }
+
+/* Onboarding: the corner tab, on the phone and as a field. */
+.ob-phone-tab { position: absolute; top: 0; left: 7%; z-index: 2; padding: 3px 8px 4px; border-radius: 0 0 6px 6px; font-size: 10px; font-weight: 700; max-width: 80%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: opacity .2s; }
+.ob-tab-row { display: flex; gap: 12px; align-items: center; }
+.ob-tab-row .ob-input { flex: 1; min-width: 0; }
+.ob-tab-on { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; white-space: nowrap; cursor: pointer; }
+.ob-tab-on input { accent-color: var(--accent); width: 18px; height: 18px; }
+.ob-field-help { margin: 6px 0 0; font-size: 13px; color: var(--muted); }

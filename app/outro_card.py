@@ -28,6 +28,10 @@ if len(TOKEN) > 40:  # AppToken.name is String(40)
 TEMPLATE = Path(__file__).with_name("outro_template.yaml")
 MAX_LINE = 40
 MAX_WEBSITE = 40
+MAX_TAB = 40
+# The label tab on the footage (top left). Optional on a card: without them
+# the tab shows the website in the card's color, as it always has.
+TAB_KEYS = ("tab_on", "tab_text", "tab_color")
 DEFAULT_COLOR = "#1A4A7D"
 
 _HEX = re.compile(r"#[0-9a-fA-F]{6}")
@@ -60,7 +64,26 @@ def load() -> dict | None:
     return copy.deepcopy(card)
 
 
-def clean(*, enabled: bool, lines: list[str], website: str, color: str) -> dict:
+def _clean_tab(tab_on=None, tab_text=None, tab_color=None) -> dict:
+    out: dict = {}
+    if tab_on is not None:
+        out["tab_on"] = bool(tab_on)
+    if tab_text is not None:
+        text = " ".join(str(tab_text).split())
+        if len(text) > MAX_TAB:
+            raise ValueError(f"Keep the tab to {MAX_TAB} characters")
+        out["tab_text"] = text
+    if tab_color:
+        color = str(tab_color).strip()
+        color = color if color.startswith("#") else "#" + color
+        if not _HEX.fullmatch(color):
+            raise ValueError(f"“{color}” isn't a color like #1A4A7D")
+        out["tab_color"] = color.upper()
+    return out
+
+
+def clean(*, enabled: bool, lines: list[str], website: str, color: str,
+          tab_on=None, tab_text=None, tab_color=None) -> dict:
     """Check and tidy a card. Raises ValueError with a message for the page."""
     lines = [" ".join((line or "").split()) for line in (lines or [])][:3]
     if any(len(line) > MAX_LINE for line in lines):
@@ -80,7 +103,8 @@ def clean(*, enabled: bool, lines: list[str], website: str, color: str) -> dict:
     if not _HEX.fullmatch(color):
         raise ValueError(f"“{color}” isn't a color like #1A4A7D")
     return {"enabled": bool(enabled), "lines": lines + [""] * (3 - len(lines)),
-            "website": website, "color": color.upper()}
+            "website": website, "color": color.upper(),
+            **_clean_tab(tab_on, tab_text, tab_color)}
 
 
 def save(**fields) -> dict:
@@ -88,6 +112,11 @@ def save(**fields) -> dict:
     from .db import session_scope
     from .models import AppToken, utcnow
 
+    # A save from the Outro page doesn't carry the tab; keep what's saved.
+    saved = load() or {}
+    for k in TAB_KEYS:
+        if k not in fields and k in saved:
+            fields[k] = saved[k]
     card = clean(**fields)
     with session_scope() as session:
         row = session.get(AppToken, TOKEN)
@@ -161,9 +190,32 @@ def apply(raw: dict, card: dict) -> dict:
                                 if int(k) in index_map}
 
     tab = raw.get("tab") or {}
-    raw["tab"] = {**tab, "text": card.get("website", ""), "box_color": color, "color": ink,
-                  "enabled": bool(card.get("website")) and tab.get("enabled", True)}
+    text = card.get("tab_text") or card.get("website", "")
+    box = card.get("tab_color") or color
+    on = card["tab_on"] if card.get("tab_on") is not None else tab.get("enabled", True)
+    raw["tab"] = {**tab, "text": text, "box_color": box, "color": _contrast(box),
+                  "enabled": bool(text) and bool(on)}
     return raw
+
+
+def tab_settings(card: dict | None = None) -> dict:
+    """The tab as the Subtitles page shows it: on/off, its words (the website
+    unless changed) and its color (the card's unless changed)."""
+    card = card if card is not None else current()
+    return {"on": card.get("tab_on", True) is not False,
+            "text": card.get("tab_text") or card.get("website", ""),
+            "color": card.get("tab_color") or card.get("color") or DEFAULT_COLOR,
+            "custom_text": bool(card.get("tab_text"))}
+
+
+def save_tab(*, on: bool, text: str, color: str) -> dict:
+    """Save the tab, keeping the rest of the card as it is (the design file's
+    own card when none was saved yet)."""
+    base = current()
+    website = base.get("website", "")
+    return save(enabled=base["enabled"], lines=base["lines"], website=website,
+                color=base["color"], tab_on=on,
+                tab_text="" if text.strip() == website else text, tab_color=color)
 
 
 def fingerprint(card: dict | None) -> str:
@@ -171,7 +223,9 @@ def fingerprint(card: dict | None) -> str:
     render cache: a new card renders fresh copies."""
     if not card:
         return ""
-    return json.dumps({k: card.get(k) for k in ("enabled", "lines", "website", "color")}, sort_keys=True)
+    keys = ("enabled", "lines", "website", "color") + TAB_KEYS
+    return json.dumps({k: card.get(k) for k in keys if k in card or k not in TAB_KEYS},
+                      sort_keys=True)
 
 
 # --- For the settings page ------------------------------------------------------------------
@@ -187,7 +241,8 @@ def current() -> dict:
     design file says today (so climate opens on its existing outro)."""
     card = load()
     if card:
-        return clean(**{k: card.get(k) for k in ("enabled", "lines", "website", "color")})
+        return clean(**{k: card.get(k) for k in ("enabled", "lines", "website", "color")},
+                     **{k: card[k] for k in TAB_KEYS if k in card})
     import yaml
 
     raw = yaml.safe_load(_design_file().read_text()) or {}
