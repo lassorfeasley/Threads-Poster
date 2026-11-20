@@ -4,32 +4,48 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>{% block title %}Sign in{% endblock %} · {{ brand_name() }}</title>
-<script>
-  try { document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark'); }
-  catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
-</script>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap">
-<link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
+<title>{% block title %}Sign in{% endblock %} · Continuity Throughline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap">
 <style>
-  body.login { min-height: 100vh; display: grid; place-items: center; margin: 0; background: var(--bg); }
-  .login-card { width: min(380px, calc(100vw - 40px)); padding: 32px; border-radius: 16px;
-    background: var(--panel); border: 1px solid var(--border); }
-  .login-card h1 { margin: 0 0 4px; font-size: 22px; color: var(--text); }
-  .login-card p.sub { margin: 0 0 24px; color: var(--muted); font-size: 14px; line-height: 1.5; }
-  .login-card label { display: block; font-size: 13px; color: var(--text-dim); margin: 14px 0 6px; }
-  .login-card input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
-    border: 1px solid var(--border-strong); background: var(--panel2); color: var(--text); font: inherit; }
-  .login-card button { width: 100%; margin-top: 22px; padding: 11px; border: 0; border-radius: 10px;
-    background: var(--accent); color: #0b1f15; font: inherit; font-weight: 700; cursor: pointer; }
-  .login-card .alt { margin-top: 16px; text-align: center; font-size: 13.5px; }
-  .login-card .alt a { color: var(--text-dim); }
-  .login-err, .login-ok { margin: 0 0 8px; padding: 10px 12px; border-radius: 10px; font-size: 14px; line-height: 1.45; }
-  .login-err { background: rgba(220, 80, 60, .12); color: #e57a63; }
-  .login-ok { background: rgba(82, 211, 154, .12); color: var(--accent); }
+  @font-face { font-family: "Funnel Sans"; src: url("https://continuity.marketing/fonts/FunnelSans-Variable.ttf");
+    font-weight: 300 800; font-display: swap; }
+  /* Matches the marketing site (continuity.marketing): these pages are the
+     product's front door, so they carry Continuity's look, not a workspace's. */
+  :root { --paper: #f5f2ea; --card: #fffdf8; --ink: #161512; --ink-2: #3d3a33; --muted: #77715f;
+    --line: #ddd6c5; --accent: #1d5c43; --accent-soft: #dfe9df; }
+  * { box-sizing: border-box; }
+  body.login { min-height: 100vh; margin: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 28px; padding: 32px 20px; background: var(--paper); color: var(--ink);
+    font: 16px/1.55 "Funnel Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wordmark { font: 400 24px "Instrument Serif", Georgia, serif; color: var(--ink); text-decoration: none; }
+  .wordmark em { font-style: italic; }
+  .login-card { width: min(400px, 100%); padding: 32px; border-radius: 22px; background: var(--card);
+    border: 1px solid var(--line); }
+  .login-card .eyebrow { margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent); }
+  .login-card h1 { margin: 0 0 6px; font: 400 34px/1.05 "Instrument Serif", Georgia, serif; color: var(--ink); }
+  .login-card p.sub { margin: 0 0 22px; color: var(--muted); font-size: 15px; }
+  .login-card label { display: block; font-size: 14px; font-weight: 600; color: var(--ink-2); margin: 14px 0 6px; }
+  .login-card input { width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--paper); color: var(--ink); font: inherit; }
+  .login-card input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+  .login-card button { width: 100%; margin-top: 22px; padding: 14px; border: 0; border-radius: 999px;
+    background: var(--ink); color: var(--paper); font: inherit; font-weight: 600; cursor: pointer; }
+  .login-card button:hover { background: #000; }
+  .login-card .alt { margin: 16px 0 0; text-align: center; font-size: 14px; }
+  .login-card .alt a { color: var(--ink-2); }
+  .login-err, .login-ok { margin: 0 0 8px; padding: 10px 12px; border-radius: 12px; font-size: 14px; line-height: 1.45; }
+  .login-err { background: #f6e3dc; color: #8f2f17; }
+  .login-ok { background: var(--accent-soft); color: var(--accent); }
+  .back { font-size: 14px; color: var(--muted); }
+  .back a { color: var(--muted); }
 </style>
 </head>
 <body class="login">
+<a class="wordmark" href="https://continuity.marketing">Continuity <em>Marketing</em></a>
 {% block body %}{% endblock %}
+<p class="back"><a href="https://continuity.marketing">continuity.marketing</a></p>
 </body>
 </html>
