@@ -39,6 +39,8 @@ class VerifyTest(unittest.TestCase):
             inbound_mail.verify(SECRET, old["svix-id"], old["svix-timestamp"], old["svix-signature"], b"{}")
         with self.assertRaises(inbound_mail.BadSignature):
             inbound_mail.verify("", h["svix-id"], h["svix-timestamp"], h["svix-signature"], b"{}")
+        with self.assertRaises(inbound_mail.BadSignature):   # a placeholder left in the secret
+            inbound_mail.verify("whsec_PASTE_HERE", h["svix-id"], h["svix-timestamp"], h["svix-signature"], b"{}")
 
 
 class RouteTest(unittest.TestCase):
