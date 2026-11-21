@@ -413,6 +413,51 @@ def counts(session, since: dt.datetime | None = None) -> dict:
     return dict(session.execute(query).all())
 
 
+def next_ready(session, settings: Settings | None = None, *, now: dt.datetime | None = None,
+               tz=None) -> dict:
+    """When the next inbox clip can be made, for the empty inbox's countdown.
+
+    Mirrors ``claim``: the daily pace unlocks a clip at an hour boundary (in the
+    posting schedule's time zone), and only a draft that qualifies becomes one.
+
+    Returns ``{"state": ...}``, one of:
+      - ``off``: the inbox is switched off;
+      - ``drafting``: a clip is being made right now;
+      - ``soon``: the pace allows one and a draft qualifies — the home machine
+        makes it on its next round (every ten minutes or so);
+      - ``waiting``: the pace allows one but no draft qualifies yet, so there's
+        no time to promise;
+      - ``scheduled``: the pace unlocks the next one at ``at`` (UTC);
+        ``has_material`` says whether a draft qualifies already.
+    """
+    now = now or utcnow()
+    tz = tz or scheduler_timezone()
+    policy = load_policy(session)
+    if not policy.enabled:
+        return {"state": "off"}
+    drafting = session.execute(
+        select(func.count(InboxItem.id)).where(InboxItem.state == InboxItem.STATE_DRAFTING)
+    ).scalar_one()
+    if drafting:
+        return {"state": "drafting"}
+    start, share = auto_select.day_window(now, tz)
+    made = made_since(session, start)
+    material = bool(eligible(session, settings or load_settings(), policy, now))
+    if auto_select.allowed_now(policy, made, share):
+        return {"state": "soon" if material else "waiting"}
+    # The next hour at which the pace allows one more (as day_window counts it).
+    midnight = start.astimezone(tz)
+    hour = round(share * 24)          # hours counted so far, the current one included
+    for h in range(hour, 24):
+        if auto_select.allowed_now(policy, made, min(1.0, (h + 1) / 24)):
+            at = midnight + dt.timedelta(hours=h)
+            break
+    else:
+        # Today's quota is used up: tomorrow's first hour allows one again.
+        at = (midnight + dt.timedelta(days=1, hours=2)).replace(hour=0)
+    return {"state": "scheduled", "at": at.astimezone(dt.timezone.utc), "has_material": material}
+
+
 def recent(session, limit: int = 30) -> list[InboxItem]:
     return session.execute(
         select(InboxItem).where(InboxItem.state != InboxItem.STATE_READY)

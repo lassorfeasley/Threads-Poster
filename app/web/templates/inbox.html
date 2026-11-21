@@ -57,6 +57,11 @@
   .ib-caught-up { max-width: 640px; margin: 40px auto; text-align: center; padding: 48px 24px;
     border-radius: 16px; border: 1px dashed var(--border-strong); }
   .ib-caught-up strong { display: block; font-size: 19px; margin-bottom: 6px; }
+  .ib-caught-up p { margin: 0; color: var(--muted); line-height: 1.5; }
+  .ib-next { display: flex; flex-direction: column; align-items: center; gap: 2px; margin: 18px 0 14px; }
+  .ib-next-label { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .ib-next-clock { font-size: 40px; font-weight: 650; color: var(--text); font-variant-numeric: tabular-nums;
+    letter-spacing: -.01em; }
   .ib-decided { max-width: 640px; margin: 36px auto 0; }
   @media (max-width: 520px) {
     .ib-card { padding: 14px; border-radius: 14px; }
@@ -72,7 +77,23 @@
 {% elif not cards %}
   <div class="ib-caught-up">
     <strong>You're all caught up</strong>
-    {% if policy.enabled %}
+    {% set up = upcoming or {} %}
+    {% if up.state == "scheduled" %}
+      <div class="ib-next" id="ib-next" data-at="{{ up.at.isoformat() }}" data-material="{{ 1 if up.has_material else 0 }}">
+        <span class="ib-next-label">Next post in</span>
+        <span class="ib-next-clock" id="ib-next-clock">—</span>
+      </div>
+      <p id="ib-next-sub">
+        Around {{ up.at_label }}{% if not up.has_material %}, as long as a new video worth clipping has come in by then{% endif %}.
+        New posts are prepared through the day — up to {{ policy.per_day }} a day.
+      </p>
+    {% elif up.state == "drafting" %}
+      <p data-recheck>A new post is being prepared right now. It'll show up here in a few minutes.</p>
+    {% elif up.state == "soon" %}
+      <p data-recheck>Your next post is on its way. It should show up here within about 15 minutes.</p>
+    {% elif up.state == "waiting" %}
+      <p>Your next post is prepared as soon as a new video worth clipping comes in — up to {{ policy.per_day }} a day.</p>
+    {% elif policy.enabled %}
       New posts are prepared through the day — up to {{ policy.per_day }} a day — and appear here as they're ready.
     {% elif admin %}
       The inbox is switched off. Turn it on under Settings › Automation.
@@ -80,6 +101,39 @@
       New posts will appear here as they're ready.
     {% endif %}
   </div>
+  <script>
+  (function () {
+    // Reload when a clip should have arrived; only while the tab is in view.
+    function recheckIn(ms) {
+      setTimeout(function () {
+        if (document.visibilityState === "visible") location.reload();
+        else document.addEventListener("visibilitychange", function () { location.reload(); }, { once: true });
+      }, ms);
+    }
+    if (document.querySelector("[data-recheck]")) recheckIn(3 * 60 * 1000);
+    var box = document.getElementById("ib-next");
+    if (!box) return;
+    var at = Date.parse(box.dataset.at), clock = document.getElementById("ib-next-clock");
+    var pad = function (n) { return String(n).padStart(2, "0"); };
+    function tick() {
+      var left = Math.round((at - Date.now()) / 1000);
+      if (left <= 0) {
+        var ready = box.dataset.material === "1";
+        box.querySelector(".ib-next-label").textContent = "Next post";
+        clock.textContent = ready ? "On its way" : "Any time now";
+        document.getElementById("ib-next-sub").textContent = ready
+          ? "It should show up here within about 15 minutes."
+          : "It's prepared as soon as a new video worth clipping comes in.";
+        recheckIn(10 * 60 * 1000);
+        return;
+      }
+      var h = Math.floor(left / 3600), m = Math.floor(left % 3600 / 60), s = left % 60;
+      clock.textContent = h ? h + "h " + pad(m) + "m " + pad(s) + "s" : m + "m " + pad(s) + "s";
+      setTimeout(tick, 1000 - Date.now() % 1000);
+    }
+    tick();
+  })();
+  </script>
 {% else %}
 <div class="ib-feed">
   {% for card in cards %}

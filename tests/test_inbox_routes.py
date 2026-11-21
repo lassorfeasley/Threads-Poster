@@ -193,6 +193,19 @@ class InboxRoutesTest(unittest.TestCase):
         self.assertIn("second draft", r.text)
         self.assertIn("Approve", r.text)
 
+    def test_an_empty_inbox_counts_down_to_the_next_post(self):
+        import datetime as dt
+        at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2)
+        with mock.patch("app.first_run.status", return_value=None), \
+                mock.patch("app.inbox.load_policy", return_value=inbox.Policy(enabled=True)), \
+                mock.patch("app.inbox.next_ready",
+                           return_value={"state": "scheduled", "at": at, "has_material": True}):
+            r = self.client.get("/inbox")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Next post in", r.text)
+        self.assertIn(f'data-at="{at.isoformat()}"', r.text)
+        self.assertIn("Around ", r.text)
+
     def test_approve_queues_with_the_edited_caption(self):
         item_id, cut_id = self.make_ready()
         made = {}
