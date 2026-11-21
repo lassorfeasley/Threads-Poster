@@ -51,7 +51,10 @@ def verify(secret: str, msg_id: str, timestamp: str, signatures: str, body: byte
         raise BadSignature("bad timestamp") from None
     if abs((now if now is not None else time.time()) - ts) > TOLERANCE_S:
         raise BadSignature("timestamp outside tolerance")
-    key = base64.b64decode(secret.removeprefix("whsec_"))
+    try:
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+    except ValueError:
+        raise BadSignature("RESEND_WEBHOOK_SECRET isn't a valid whsec_ secret") from None
     signed = f"{msg_id}.{timestamp}.".encode() + body
     expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
     for part in signatures.split():
