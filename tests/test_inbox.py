@@ -215,5 +215,50 @@ class DecisionTest(_Base):
                          ("dismissed", "not_clipworthy", None))
 
 
+class NextReadyTest(_Base):
+    def nxt(self, now=NOW):
+        return inbox.next_ready(self.session, _Settings(), now=now, tz=NY)
+
+    def made(self, n, now=NOW):
+        c = self.video()
+        for _ in range(n):
+            self.session.add(InboxItem(candidate_pk=c.id, proposal_pk=self.draft(c).id,
+                                       state=InboxItem.STATE_READY, created_at=now))
+        self.session.flush()
+
+    def test_off(self):
+        self.assertEqual(self.nxt(), {"state": "off"})
+
+    def test_a_draft_in_progress(self):
+        self.on()
+        self.made(0)
+        c = self.video()
+        self.session.add(InboxItem(candidate_pk=c.id, proposal_pk=self.draft(c).id,
+                                   state=InboxItem.STATE_DRAFTING))
+        self.session.flush()
+        self.assertEqual(self.nxt()["state"], "drafting")
+
+    def test_pace_allows_one_now(self):
+        self.on(per_day=5)                       # 3 allowed by 13:30
+        self.made(2)
+        self.assertEqual(self.nxt()["state"], "waiting")
+        self.draft(self.video(), 0.9)
+        self.assertEqual(self.nxt()["state"], "soon")
+
+    def test_the_next_hour_the_pace_unlocks(self):
+        self.on(per_day=5)                       # 4th unlocks at 14:00 (15/24 * 5 = 3.1)
+        self.made(3)
+        got = self.nxt()
+        self.assertEqual(got["state"], "scheduled")
+        self.assertEqual(got["at"], dt.datetime(2026, 11, 19, 14, tzinfo=NY).astimezone(dt.timezone.utc))
+        self.assertFalse(got["has_material"])
+
+    def test_quota_used_up_means_tomorrow_at_midnight(self):
+        self.on(per_day=5)
+        self.made(5)
+        self.assertEqual(self.nxt()["at"],
+                         dt.datetime(2026, 11, 20, 0, tzinfo=NY).astimezone(dt.timezone.utc))
+
+
 if __name__ == "__main__":
     unittest.main()

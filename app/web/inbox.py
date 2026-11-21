@@ -61,6 +61,9 @@ def inbox_page(request: Request, msg: str = ""):
         admin = access.is_admin(request)
         decided = _decided(session) if admin else []
         fresh_account = first_run.status(session) if not items else None
+        upcoming = inbox.next_ready(session) if not items and not fresh_account else None
+    if upcoming and upcoming.get("at"):
+        upcoming["at_label"] = _when_label(upcoming["at"])
     cards = []
     for item in items:
         cut = cuts.get(item.cut_pk)
@@ -78,9 +81,23 @@ def inbox_page(request: Request, msg: str = ""):
     return request.app.state.templates.TemplateResponse(
         request, "inbox.html",
         {"cards": cards, "today": today, "policy": policy, "msg": msg, "active": "inbox",
-         "admin": admin, "decided": decided, "first_run": fresh_account,
+         "admin": admin, "decided": decided, "first_run": fresh_account, "upcoming": upcoming,
          "day_label": f"{utcnow().astimezone(scheduler_timezone()):%A, %B} "
                       f"{utcnow().astimezone(scheduler_timezone()).day}"})
+
+
+def _when_label(at, now=None) -> str:
+    """"3 PM", "midnight" or "tomorrow at 1 AM" in the posting schedule's time zone."""
+    tz = scheduler_timezone()
+    local, today = at.astimezone(tz), (now or utcnow()).astimezone(tz).date()
+    if local.hour == 0 and local.minute == 0:
+        clock = "midnight"
+    else:
+        clock = f"{local.hour % 12 or 12}{'' if local.minute == 0 else f':{local.minute:02d}'} " \
+                f"{'AM' if local.hour < 12 else 'PM'}"
+    if local.date() > today and clock != "midnight":
+        return f"tomorrow at {clock}"
+    return clock
 
 
 def _decided(session, limit: int = 30) -> list[dict]:
