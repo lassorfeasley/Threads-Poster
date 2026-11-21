@@ -24,7 +24,7 @@ from fastapi.templating import Jinja2Templates
 
 from ..web import auth
 from .. import universal_rules
-from . import collect, fly, legal_store, rules_store, sources
+from . import collect, fly, inbound_mail, legal_store, rules_store, sources
 
 log = logging.getLogger("admin")
 
@@ -52,8 +52,10 @@ def is_operator(user) -> bool:
 
 @app.middleware("http")
 async def _gate(request: Request, call_next):
-    # The rules API has its own token (every account's workers call it).
-    if request.url.path in ("/login", "/healthz", "/api/universal-rules") or _local(request):
+    # The rules API has its own token (every account's workers call it); the mail
+    # webhook is signed by Resend.
+    PUBLIC = ("/login", "/healthz", "/api/universal-rules", "/hooks/inbound-email")
+    if request.url.path in PUBLIC or _local(request):
         return await call_next(request)
     try:
         user, renewed = await run_in_threadpool(auth.resolve, request.cookies.get(COOKIE))
@@ -157,6 +159,29 @@ def universal_rules_api(request: Request):
     except Exception:
         log.exception("Universal rules unreadable")
         return JSONResponse({"error": "unavailable"}, status_code=503)
+
+
+# --- Mail forwarding -----------------------------------------------------------------
+
+@app.post("/hooks/inbound-email")
+async def inbound_email(request: Request):
+    """Resend's ``email.received`` webhook: forwards per ``MAIL_FORWARDS``.
+    A non-2xx makes Resend retry; the send's idempotency key stops doubles."""
+    body = await request.body()
+    try:
+        inbound_mail.verify(os.environ.get("RESEND_WEBHOOK_SECRET", ""),
+                            request.headers.get("svix-id", ""),
+                            request.headers.get("svix-timestamp", ""),
+                            request.headers.get("svix-signature", ""), body)
+    except inbound_mail.BadSignature as exc:
+        log.warning("Inbound mail webhook refused: %s", exc)
+        return JSONResponse({"error": "bad signature"}, status_code=401)
+    try:
+        sent = await run_in_threadpool(inbound_mail.handle, json.loads(body))
+    except Exception:
+        log.exception("Forwarding inbound mail failed")
+        return JSONResponse({"error": "forward failed"}, status_code=500)
+    return {"ok": True, "forwarded": len(sent)}
 
 
 @app.get("/rules", response_class=HTMLResponse)
