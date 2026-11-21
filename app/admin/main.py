@@ -24,7 +24,7 @@ from fastapi.templating import Jinja2Templates
 
 from ..web import auth
 from .. import universal_rules
-from . import collect, fly, rules_store, sources
+from . import collect, fly, legal_store, rules_store, sources
 
 log = logging.getLogger("admin")
 
@@ -181,3 +181,102 @@ def rules_save(request: Request, payload: str = Form(...)):
         return RedirectResponse(f"/rules?error={quote('Save failed: ' + str(exc)[:120])}", status_code=303)
     return RedirectResponse("/rules?msg=" + quote("Saved. Every account picks this up within ten minutes."),
                             status_code=303)
+
+
+# --- Privacy policy and terms of use ---------------------------------------------------
+
+def _back(path: str, *, msg: str = "", error: str = "") -> RedirectResponse:
+    q = f"?msg={quote(msg)}" if msg else (f"?error={quote(error)}" if error else "")
+    return RedirectResponse(path + q, status_code=303)
+
+
+@app.get("/legal", response_class=HTMLResponse)
+def legal_page(request: Request, msg: str = "", error: str = ""):
+    docs, problem = [], ""
+    for kind, label in legal_store.KINDS.items():
+        try:
+            rows = legal_store.versions(kind)
+        except Exception as exc:
+            rows, problem = [], f"Couldn't read the legal documents ({str(exc)[:160]})."
+        live = legal_store.current(rows)
+        docs.append({"kind": kind, "label": label, "rows": rows, "current": live,
+                     "draft": next((r for r in rows if r["status"] == "draft"), None),
+                     "public_path": legal_store.PUBLIC_PATHS[kind]})
+    return templates.TemplateResponse(request, "legal.html", {
+        "docs": docs, "msg": msg, "error": error or problem, "today_iso": dt.date.today().isoformat()})
+
+
+@app.post("/legal/{kind}/new")
+def legal_new(kind: str):
+    try:
+        row = legal_store.new_draft(kind)
+    except legal_store.LegalError as exc:
+        return _back("/legal", error=str(exc))
+    except Exception as exc:
+        log.exception("Starting a legal draft failed")
+        return _back("/legal", error="Couldn't start a draft: " + str(exc)[:160])
+    return RedirectResponse(f"/legal/{kind}/{row['version']}", status_code=303)
+
+
+@app.get("/legal/{kind}/{version}", response_class=HTMLResponse)
+def legal_version(request: Request, kind: str, version: int, msg: str = "", error: str = ""):
+    try:
+        row = legal_store.get(kind, version)
+    except legal_store.LegalError:
+        row = None
+    if row is None:
+        return _back("/legal", error="That version doesn't exist.")
+    rows = legal_store.versions(kind)
+    live = legal_store.current(rows)
+    return templates.TemplateResponse(request, "legal_doc.html", {
+        "doc": row, "label": legal_store.KINDS[kind], "msg": msg, "error": error,
+        "is_current": bool(live and live["version"] == row["version"]),
+        "public_path": legal_store.PUBLIC_PATHS[kind], "today": dt.date.today().isoformat()})
+
+
+@app.post("/legal/{kind}/{version}/save")
+def legal_save(kind: str, version: int, title: str = Form(""), summary: str = Form(""),
+               body_md: str = Form("")):
+    here = f"/legal/{kind}/{version}"
+    try:
+        legal_store.save_draft(kind, version, title=title, summary=summary, body_md=body_md)
+    except legal_store.LegalError as exc:
+        return _back(here, error=str(exc))
+    except Exception as exc:
+        log.exception("Saving a legal draft failed")
+        return _back(here, error="Save failed: " + str(exc)[:160])
+    return _back(here, msg="Draft saved.")
+
+
+@app.post("/legal/{kind}/{version}/publish")
+def legal_publish(request: Request, kind: str, version: int, effective_date: str = Form("")):
+    here = f"/legal/{kind}/{version}"
+    try:
+        effective = dt.date.fromisoformat(effective_date) if effective_date else dt.date.today()
+    except ValueError:
+        return _back(here, error="Pick an effective date.")
+    if effective < dt.date.today():
+        return _back(here, error="The effective date can't be in the past.")
+    who = getattr(request.state, "user", None) or "local"
+    try:
+        legal_store.publish(kind, version, effective=effective, by=who)
+    except legal_store.LegalError as exc:
+        return _back(here, error=str(exc))
+    except Exception as exc:
+        log.exception("Publishing a legal document failed")
+        return _back(here, error="Publish failed: " + str(exc)[:160])
+    when = "today" if effective == dt.date.today() else f"on {effective:%B %-d, %Y}"
+    return _back("/legal", msg=f"{legal_store.KINDS[kind]} version {version} published. "
+                               f"It takes effect {when}.")
+
+
+@app.post("/legal/{kind}/{version}/delete")
+def legal_delete(kind: str, version: int):
+    try:
+        legal_store.delete_draft(kind, version)
+    except legal_store.LegalError as exc:
+        return _back(f"/legal/{kind}/{version}", error=str(exc))
+    except Exception as exc:
+        log.exception("Deleting a legal draft failed")
+        return _back(f"/legal/{kind}/{version}", error="Delete failed: " + str(exc)[:160])
+    return _back("/legal", msg="Draft deleted.")

@@ -1,7 +1,10 @@
 {
   "rewrites": [
     { "source": "/", "destination": "/landing.html" },
-    { "source": "/keynote", "destination": "/keynote.html" }
+    { "source": "/keynote", "destination": "/keynote.html" },
+    { "source": "/book", "destination": "/book.html" },
+    { "source": "/privacy", "destination": "/api/legal?kind=privacy" },
+    { "source": "/terms", "destination": "/api/legal?kind=terms" }
   ],
   "redirects": [
     { "source": "/signin", "destination": "https://app.continuity.marketing/login", "permanent": false },
