@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Legal · Throughline Admin{% endblock %}
+{% block content %}
+<h1>Legal</h1>
+<p class="sub">The privacy policy and terms of use on continuity.marketing. Every version is kept. Drafts can be edited; a published version is fixed and takes effect on its date.</p>
+{% if msg %}<p class="ok-text">{{ msg }}</p>{% endif %}
+{% if error %}<p class="bad-text">{{ error }}</p>{% endif %}
+
+<div class="grid2">
+{% for d in docs %}
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:6px">
+      <h2 class="section-title" style="margin:0">{{ d.label }}</h2>
+      <a class="link mono" style="font-size:13px" href="https://continuity.marketing{{ d.public_path }}" target="_blank" rel="noopener">continuity.marketing{{ d.public_path }}</a>
+    </div>
+    <p class="dim" style="margin:0 0 14px; font-size:14px">
+      {% if d.current %}In force: version {{ d.current.version }}, since {{ d.current.effective_date }}.
+      {% else %}<span class="warn-text">Nothing published yet. The public page says so.</span>{% endif %}
+    </p>
+    {% if d.rows %}
+    <table>
+      <thead><tr><th>Version</th><th>Status</th><th>Effective</th><th>What changed</th></tr></thead>
+      <tbody>
+      {% for r in d.rows %}
+        <tr>
+          <td class="mono"><a href="/legal/{{ d.kind }}/{{ r.version }}">v{{ r.version }}</a></td>
+          <td>
+            {% if r.status == 'draft' %}<span class="pill warn">Draft</span>
+            {% elif d.current and d.current.version == r.version %}<span class="pill ok">In force</span>
+            {% elif r.effective_date > today_iso %}<span class="pill">Scheduled</span>
+            {% else %}<span class="pill">Superseded</span>{% endif %}
+          </td>
+          <td class="mono dim">{{ r.effective_date or "—" }}</td>
+          <td class="dim">{{ r.summary or "—" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    <div style="margin-top:14px">
+      {% if d.draft %}
+        <a class="lg-btn" href="/legal/{{ d.kind }}/{{ d.draft.version }}">Edit draft v{{ d.draft.version }}</a>
+      {% else %}
+        <form method="post" action="/legal/{{ d.kind }}/new" style="margin:0">
+          <button class="lg-btn">{% if d.rows %}＋ New version{% else %}＋ Start the first version{% endif %}</button>
+        </form>
+      {% endif %}
+    </div>
+  </div>
+{% endfor %}
+</div>
+
+<style>
+  .lg-btn { display:inline-block; padding:8px 14px; border-radius:99px; border:1px solid var(--border); background:var(--panel2); color:var(--text); font:inherit; font-weight:600; cursor:pointer; text-decoration:none; }
+  .lg-btn:hover { border-color:var(--dim); }
+</style>
+{% endblock %}

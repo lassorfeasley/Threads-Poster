@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ label }} v{{ doc.version }} · Throughline Admin{% endblock %}
+{% block content %}
+<p style="margin:0 0 8px"><a href="/legal" class="link">← Legal</a></p>
+<h1>{{ label }}, version {{ doc.version }}</h1>
+<p class="sub">
+  {% if doc.status == 'draft' %}Draft, last saved {{ doc.updated_at[:16].replace('T', ' ') }} UTC. Nothing here is public until you publish it.
+  {% else %}Published {{ doc.published_at[:10] }}{% if doc.published_by %} by {{ doc.published_by }}{% endif %}, effective {{ doc.effective_date }}.
+    {% if is_current %}<span class="ok-text">In force now</span> at <a href="https://continuity.marketing{{ public_path }}" target="_blank" rel="noopener">continuity.marketing{{ public_path }}</a>.{% endif %}
+    Published versions can't be changed.{% endif %}
+</p>
+{% if msg %}<p class="ok-text">{{ msg }}</p>{% endif %}
+{% if error %}<p class="bad-text">{{ error }}</p>{% endif %}
+
+{% if doc.status == 'draft' %}
+<div class="lg-cols">
+  <form method="post" action="/legal/{{ doc.kind }}/{{ doc.version }}/save" class="card lg-edit">
+    <label>Title<input name="title" value="{{ doc.title }}"></label>
+    <label>What changed in this version <span class="muted">(shown with the version history)</span>
+      <input name="summary" value="{{ doc.summary }}" placeholder="e.g. Added LinkedIn to the services we connect to."></label>
+    <label>Text <span class="muted">(# headings, - lists, **bold**, [links](https://…))</span>
+      <textarea name="body_md" rows="30" spellcheck="true">{{ doc.body_md }}</textarea></label>
+    <div><button class="lg-btn">Save draft</button></div>
+  </form>
+  <div class="card lg-preview">
+    <h2 class="section-title">Preview of the last save</h2>
+    <div class="legal-body">{{ doc.body_html|safe }}</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px; display:flex; flex-wrap:wrap; gap:16px; align-items:end; justify-content:space-between">
+  <form method="post" action="/legal/{{ doc.kind }}/{{ doc.version }}/publish" style="margin:0; display:flex; gap:12px; align-items:end; flex-wrap:wrap"
+        onsubmit="return confirm('Publish version {{ doc.version }}? Once published it can\'t be edited or deleted.')">
+    <label>Takes effect<input type="date" name="effective_date" value="{{ today }}" min="{{ today }}"></label>
+    <button class="lg-btn lg-primary">Publish version {{ doc.version }}</button>
+    <span class="muted" style="font-size:13px">Save first: this publishes the last saved text.</span>
+  </form>
+  <form method="post" action="/legal/{{ doc.kind }}/{{ doc.version }}/delete" style="margin:0"
+        onsubmit="return confirm('Delete this draft?')">
+    <button class="link bad-text">Delete draft</button>
+  </form>
+</div>
+{% else %}
+<div class="card" style="max-width:820px">
+  {% if doc.summary %}<p class="dim" style="margin-top:0"><b>What changed:</b> {{ doc.summary }}</p>{% endif %}
+  <div class="legal-body">{{ doc.body_html|safe }}</div>
+</div>
+{% endif %}
+
+<style>
+  .lg-cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start; }
+  .lg-edit { display:grid; gap:14px; }
+  .lg-edit label, .card label { display:grid; gap:6px; font-size:13.5px; color:var(--dim); }
+  .lg-edit input, .lg-edit textarea, .card input[type=date] { width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit; }
+  .lg-edit textarea { font-family:var(--mono); font-size:13px; line-height:1.55; resize:vertical; }
+  .lg-preview { max-height:80vh; overflow:auto; }
+  .legal-body { color:var(--dim); font-size:14.5px; }
+  .legal-body h2, .legal-body h3, .legal-body h4 { color:var(--text); margin:20px 0 6px; }
+  .legal-body h2 { font-size:19px; } .legal-body h3 { font-size:16px; }
+  .legal-body p, .legal-body ul, .legal-body ol { margin:0 0 10px; }
+  .legal-body a { color:var(--text); }
+  .lg-btn { display:inline-block; padding:8px 14px; border-radius:99px; border:1px solid var(--border); background:var(--panel2); color:var(--text); font:inherit; font-weight:600; cursor:pointer; }
+  .lg-primary { background:var(--text); color:var(--bg); border-color:var(--text); padding:10px 20px; }
+  @media (max-width:900px) { .lg-cols { grid-template-columns:1fr; } }
+</style>
+{% endblock %}

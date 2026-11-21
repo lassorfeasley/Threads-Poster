@@ -75,8 +75,9 @@ def _engine(ws: Workspace) -> Engine:
         if eng is None:
             url = ws.database_url
             if url.startswith("postgres"):
-                url = url.replace("postgres://", "postgresql+psycopg2://", 1) \
-                    if url.startswith("postgres://") else url
+                # Whatever driver the URL names (postgres://, postgresql://,
+                # postgresql+psycopg://), use psycopg2: it's the one installed.
+                url = "postgresql+psycopg2://" + url.split("://", 1)[1]
                 eng = create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=1,
                                     connect_args={"options": "-c default_transaction_read_only=on",
                                                   "connect_timeout": 8})
