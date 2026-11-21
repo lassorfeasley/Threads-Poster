@@ -4,7 +4,7 @@
 The admin site edits drafts and publishes them here, through Supabase's REST
 API with the service key. Published versions are frozen by a database trigger,
 so the table is the record of what was in force when. The public pages on
-continuity.marketing read published versions with the anon key
+continuity.marketing read published versions with the publishable key
 (demo/api/legal.js).
 """
 from __future__ import annotations

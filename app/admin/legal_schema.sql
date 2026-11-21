@@ -9,8 +9,8 @@
 --   * the admin site (admin.continuity.marketing/legal) reads and writes it
 --     through Supabase's REST API with the service key;
 --   * the public pages (continuity.marketing/privacy, /terms) read published
---     rows through the REST API with the anon key, which the policy below
---     limits to published versions.
+--     rows through the REST API with the publishable key (the anon role),
+--     which the policy below limits to published versions.
 --
 -- A version starts as a draft, which can be edited or deleted. Publishing
 -- fixes it: after that the trigger refuses any change, so the history is a

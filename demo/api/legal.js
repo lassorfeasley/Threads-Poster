@@ -1,15 +1,16 @@
 // /privacy and /terms (rewritten here by vercel.json). Reads published versions
 // of the document from the platform Supabase project's legal_documents table,
-// which the admin site (admin.continuity.marketing/legal) writes. The anon key
-// can only see published versions that are already in effect (a row-level
-// security policy in app/admin/legal_schema.sql).
+// which the admin site (admin.continuity.marketing/legal) writes. The
+// publishable key can only see published versions that are already in effect
+// (a row-level security policy in app/admin/legal_schema.sql).
 //
 // Shows the version in force, or ?v=N for an earlier one, with the history
 // underneath.
 //
 // Environment (Vercel project settings, never in the repo):
-//   SUPABASE_URL       the platform project's URL
-//   SUPABASE_ANON_KEY  its anon (publishable) key
+//   SUPABASE_URL              the platform project's URL
+//   SUPABASE_PUBLISHABLE_KEY  its publishable key (sb_publishable_...). Supabase
+//                             retires the legacy anon key by the end of 2026.
 
 const KINDS = { privacy: "Privacy policy", terms: "Terms of use" };
 const PATHS = { privacy: "/privacy", terms: "/terms" };
@@ -27,12 +28,13 @@ function longDate(iso) {
 
 async function published(kind) {
   const base = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!base || !key) throw new Error("SUPABASE_URL / SUPABASE_ANON_KEY not set");
+  const key = process.env.SUPABASE_PUBLISHABLE_KEY;
+  if (!base || !key) throw new Error("SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY not set");
   const url = `${base}/rest/v1/legal_documents?kind=eq.${kind}&status=eq.published`
     + "&select=version,title,summary,body_html,effective_date"
     + "&order=effective_date.desc,version.desc";
-  const r = await fetch(url, { headers: { apikey: key, Authorization: `Bearer ${key}` } });
+  // New-style keys go in the apikey header only; they aren't JWTs.
+  const r = await fetch(url, { headers: { apikey: key } });
   if (!r.ok) throw new Error(`Supabase ${r.status}`);
   return r.json();
 }
@@ -118,7 +120,7 @@ module.exports = async function handler(req, res) {
   let rows;
   try {
     // Before the database is wired up, say the page is being prepared rather than fail.
-    rows = (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) ? await published(kind) : [];
+    rows = (process.env.SUPABASE_URL && process.env.SUPABASE_PUBLISHABLE_KEY) ? await published(kind) : [];
   } catch (err) {
     console.error("legal:", err.message);
     res.setHeader("Cache-Control", "no-store");
